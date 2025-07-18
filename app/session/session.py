@@ -13,6 +13,7 @@ async def mcp_session(server_params: StdioServerParameters):
             await session.initialize()
             yield session
 
+logger = logging.getLogger("uvicorn.error")
 
 class MCPSessionBase(ABC):
     def __init__(self, server_params):
@@ -20,78 +21,77 @@ class MCPSessionBase(ABC):
         self.request_queue = asyncio.Queue()
         self.response_queue = asyncio.Queue()
         self._task = None
-        self.logger = logging.getLogger(self.__class__.__name__)
 
     @abstractmethod
     async def run(self):
         pass
 
     def start(self):
-        self.logger.debug("[{}] Starting session task.".format(self.__class__.__name__))
+        logger.debug("[{}] Starting session task.".format(self.__class__.__name__))
         self._task = asyncio.create_task(self.run())
         async def ping_task():
             while True:
                 await asyncio.sleep(10)
-                self.logger.debug("[{}] Sending periodic ping.".format(self.__class__.__name__))
+                logger.debug("[{}] Sending periodic ping.".format(self.__class__.__name__))
                 await self.request_queue.put("ping")
         asyncio.create_task(ping_task())
 
     async def stop(self):
-        self.logger.info("[{}] Stopping session task.".format(self.__class__.__name__))
+        logger.info("[{}] Stopping session task.".format(self.__class__.__name__))
         await self.request_queue.put("close")
         if self._task:
             await self._task
 
     async def request(self, req):
-        self.logger.debug(f"[{self.__class__.__name__}] Received request: {req}")
+        logger.debug(f"[{self.__class__.__name__}] Received request: {req}")
         await self.request_queue.put(req)
         response = await self.response_queue.get()
-        self.logger.debug(f"[{self.__class__.__name__}] Response: {response}")
+        logger.debug(f"[{self.__class__.__name__}] Response: {response}")
         return response
 
 class MCPLocalSessionTask(MCPSessionBase):
     async def run(self):
-        self.logger.info("[MCPLocalSessionTask] Session task started.")
+        logger.info("[MCPLocalSessionTask] Session task started.")
         last_trigger = datetime.datetime.now()
         try:
             async with mcp_session(self.server_params) as session:
-                self.logger.info("[MCPLocalSessionTask] MCP session established.")
+                logger.info("[MCPLocalSessionTask] MCP session established.")
                 while True:
                     req = await self.request_queue.get()
-                    self.logger.debug(f"[MCPLocalSessionTask] Processing request: {req}")
+                    logger.debug(f"[MCPLocalSessionTask] Processing request: {req}")
                     if req == "ping":
                         if last_trigger and (datetime.datetime.now() - last_trigger).total_seconds() > 60:
-                            self.logger.info("[MCPLocalSessionTask] Session inactive for too long, closing.")
+                            logger.info("[MCPLocalSessionTask] Session inactive for too long, closing.")
                             await self.response_queue.put("session_closed")
                             break
                         last_trigger = datetime.datetime.now()
                         await self.response_queue.put("pong")
                         continue
                     if req == "close":
-                        self.logger.debug("[MCPLocalSessionTask] Received close request. Shutting down session.")
+                        logger.debug("[MCPLocalSessionTask] Received close request. Shutting down session.")
                         break
                     if req == "list_tools":
-                        self.logger.debug("[MCPLocalSessionTask] Listing available tools.")
+                        logger.debug("[MCPLocalSessionTask] Listing available tools.")
                         try:
                             result = await session.list_tools()
                             await self.response_queue.put(result)
                         except Exception as e:
-                            self.logger.error(f"[MCPLocalSessionTask] Failed to list tools: {e}")
+                            logger.error(f"[MCPLocalSessionTask] Failed to list tools: {e}")
                             await self.response_queue.put({"error": str(e)})
                     elif isinstance(req, dict) and req.get("action") == "run_tool":
                         tool_name = req["tool_name"]
                         args = req.get("args", {})
-                        self.logger.info(f"[MCPLocalSessionTask] Running tool: {tool_name} with args: {args}")
+                        logger.info(f"[MCPLocalSessionTask] Running tool: {tool_name} with args: {args}")
                         try:
                             result = await session.call_tool(tool_name, **args)
                             await self.response_queue.put(result)
                         except Exception as e:
-                            self.logger.error(f"[MCPLocalSessionTask] Error running tool '{tool_name}': {e}")
+                            logger.error(f"[MCPLocalSessionTask] Error running tool '{tool_name}': {e}")
                             await self.response_queue.put({"error": str(e)})
                     else:
-                        self.logger.warning(f"[MCPLocalSessionTask] Unknown request: {req}")
+                        logger.warning(f"[MCPLocalSessionTask] Unknown request: {req}")
                         await self.response_queue.put({"error": "Unknown request"})
         except Exception as e:
-            self.logger.error(f"[MCPLocalSessionTask] Unhandled exception in session task: {e}", exc_info=True)
+            logger.error(f"[MCPLocalSessionTask] Unhandled exception in session task: {e}", exc_info=True)
         finally:
-            self.logger.info("[MCPLocalSessionTask] Session task stopped.")
+            logger.info("[MCPLocalSessionTask] Session task stopped.")

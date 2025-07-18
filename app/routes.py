@@ -14,11 +14,7 @@ import sys
 router = APIRouter()
 sessions = session_manager()
 
-logger = logging.getLogger("mcp.routes")
-
-logger.propagate = True
-logger.setLevel(logging.INFO)
-logging.getLogger().setLevel(logging.INFO)
+logger = logging.getLogger("uvicorn.error")
 
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 
