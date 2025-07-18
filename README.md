@@ -119,13 +119,19 @@ volumes:
 #### Kubernetes/Helm
 
 - The image exposes `/data` and `/config` as volumes for persistent storage and configuration.
-- You can mount volumes and override the MCP server command in your deployment YAML or Helm chart.
+- You can mount volumes and override the in your deployment YAML or Helm chart.
+- You can use the `MCP_SERVER_COMMAND` environment variable to specify the MCP server command.
+- And you can use the `MCP_BASE_PATH` environment variable to set a custom base path for the API to match your ingress configuration.
 - Example (Kubernetes):
   ```yaml
   containers:
     - name: mcp-rest-server
-      image: <your-repo>/mcp-rest-server:latest
-      args: ["--", "npx", "@modelcontextprotocol/server-sqlite", "/data/database.db"]
+      image: inxm-ai/mcp-rest-server:latest
+      env:
+        - name: MCP_SERVER_COMMAND
+          value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"
+        - name: MCP_BASE_PATH
+          value: "/api/mcp-memory-server"
       volumeMounts:
         - name: data
           mountPath: /data

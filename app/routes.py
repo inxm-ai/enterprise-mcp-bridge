@@ -20,6 +20,7 @@ logger.propagate = True
 logger.setLevel(logging.INFO)
 logging.getLogger().setLevel(logging.INFO)
 
+MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 
 # Enhanced: Support MCP_SERVER_COMMAND env variable (takes precedence), else sys.argv, else default
 def get_server_params():
@@ -60,12 +61,17 @@ def try_get_session_id(x_inxm_mcp_session_header: Optional[str], x_inxm_mcp_sess
     return None
 
 def map_tools(tools):
+    logger.debug(f"[map_tools] Mapping tools: {tools}")
     return [
         {
-            "name": tool.name, 
+            "name": tool.name,
+            "title": tool.title,
             "description": tool.description,
-            "parameters": tool.inputSchema,
-            "url": f"/api/mcp-EXAMPLE-server/tools/{tool.name}"
+            "inputSchema": tool.inputSchema,
+            "outputSchema": tool.outputSchema,
+            "annotations": tool.annotations,
+            "meta": tool.meta,
+            "url": f"{MCP_BASE_PATH}/tools/{tool.name}"
         }
         for tool in tools.tools
     ]
