@@ -8,6 +8,11 @@ RUN apk add --no-cache gcc musl-dev linux-headers nodejs npm
 WORKDIR /mcp
 COPY mcp /mcp
 RUN if [ -f install.sh ]; then chmod +x install.sh && ./install.sh; fi
+RUN if [ -f requirements.txt ]; then pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt; \
+    elif [ -f pyproject.toml ]; then pip install --upgrade pip && pip install --no-cache-dir .; \
+    fi
+# Install Node.js dependencies if package.json exists
+RUN if [ -f package.json ]; then npm install; fi
 
 # --- MCP REST wrapper ---
 WORKDIR /app
