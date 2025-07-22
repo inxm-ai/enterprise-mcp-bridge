@@ -50,9 +50,9 @@ def get_server_params():
 server_params = get_server_params()
 
 def try_get_session_id(
-    x_inxm_mcp_session_header: Optional[str],
+    x_inxm_mcp_session_header: Optional[str], 
     x_inxm_mcp_session_cookie: Optional[str],
-    x_inxm_mcp_session_args: Optional[str]
+    x_inxm_mcp_session_args: Optional[str] = None
 ) -> Optional[str]:
     if x_inxm_mcp_session_header:
         return x_inxm_mcp_session_header
