@@ -49,11 +49,17 @@ def get_server_params():
 
 server_params = get_server_params()
 
-def try_get_session_id(x_inxm_mcp_session_header: Optional[str], x_inxm_mcp_session_cookie: Optional[str]) -> Optional[str]:
+def try_get_session_id(
+    x_inxm_mcp_session_header: Optional[str],
+    x_inxm_mcp_session_cookie: Optional[str],
+    x_inxm_mcp_session_args: Optional[str]
+) -> Optional[str]:
     if x_inxm_mcp_session_header:
         return x_inxm_mcp_session_header
     if x_inxm_mcp_session_cookie:
         return x_inxm_mcp_session_cookie
+    if x_inxm_mcp_session_args:
+        return x_inxm_mcp_session_args
     return None
 
 def map_tools(tools):
@@ -99,7 +105,7 @@ async def run_tool(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
     args: Optional[Dict] = None):
-    x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie)
+    x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None)
     logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
     if x_inxm_mcp_session is None:
         async with mcp_session(server_params) as session:
