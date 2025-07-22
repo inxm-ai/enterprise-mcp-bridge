@@ -106,6 +106,9 @@ async def run_tool(
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
     args: Optional[Dict] = None):
     x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None)
+    if args and 'inxm-session' in args:
+        args = dict(args)
+        args.pop('inxm-session')
     logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
     if x_inxm_mcp_session is None:
         async with mcp_session(server_params) as session:
