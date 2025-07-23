@@ -23,7 +23,7 @@ def error_finder(result):
         return result.isError
     if hasattr(result, 'error') and result.error:
         return True
-    if hasattr(result, 'content') and isinstance(result.content, list) and any(item.isError for item in result.content):
+    if hasattr(result, 'content') and isinstance(result.content, list) and any(getattr(item, 'isError', False) for item in result.content):
         return True
     return False
 

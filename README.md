@@ -22,31 +22,7 @@ This project provides a FastAPI-based REST server that acts as a bridge to an ex
 
 ---
 
-## Install from GitHub
-
-You can install the package directly from GitHub (replace `<user>` and `<repo>` with your repository details):
-
-```bash
-pip install 'git+https://github.com/inxm-ai/mcp-rest-server.git@main#subdirectory=app'
-```
-
-## Build a pip-installable package
-
-To build a wheel and source distribution:
-
-```bash
-cd app
-python -m pip install build
-python -m build
-```
-
-The generated `.whl` and `.tar.gz` files will be in the `dist/` directory. You can install them with:
-
-```bash
-pip install dist/mcp_rest_server-*.whl
-```
-
-## Running the App
+## Running your own MCP App
 
 ### 1. Start the REST API Server
 
@@ -59,24 +35,23 @@ uvicorn server:app --reload
 - The API will be available at: `http://localhost:8000`
 - The OpenAPI docs are at: `http://localhost:8000/docs`
 
+and will serve the default mcp app in the /mcp folder.
+
+#### Custom MCP Server (in mcp folder)
+
+If you are developing or testing with a custom MCP server, you can easily mount it in the `mcp` folder and run the REST server with docker ie like this:
+
+```bash
+docker run -it -e ENV=dev -v $(pwd)/mcp:/mcp -p 8000:8000 inxm-ai/mcp-rest-server python /mcp/subfoldered_mcp_server/server.py
+```
+
+Setting the `ENV` variable to `dev` will check if there is a requirements.txt or pyproject.toml file in the mounted directory and install the dependencies in the docker container.
 
 #### Custom MCP Server (Parameter Forwarding & Environment Variable)
 
 You can start the REST server with a custom MCP server command in two ways:
 
-**1. Using the `--` separator (Python or Docker):**
-
-```bash
-uvicorn server:app --reload -- <command> <arg1> <arg2> ...
-```
-
-For example, to use a custom Python MCP server:
-
-```bash
-uvicorn server:app --reload -- python3 /path/to/your/mcp_server.py
-```
-
-Or with Docker:
+**1. Using the command forwarding (with Docker):**
 
 ```bash
 docker build -t inxm-ai/mcp-rest-server .
