@@ -99,11 +99,22 @@ async def list_tools(
     logger.debug(f"[Tools] Tools listed for session {x_inxm_mcp_session}.")
     return map_tools(result)
 
+async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oauth_token: Optional[str]) -> Dict:
+    tools = await session.list_tools()
+    tool_info = next((tool for tool in tools if tool.name == tool_name), None)
+
+    if args is None:
+        args = {}
+    if oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
+        args['oauth_token'] = oauth_token
+    return args
+
 @router.post("/tools/{tool_name}")
 async def run_tool(
     tool_name: str,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
+    oauth_token: Optional[str] = Cookie(None, alias="oauth2_proxy"),
     args: Optional[Dict] = None):
     x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None)
     if args and 'inxm-session' in args:
@@ -112,7 +123,7 @@ async def run_tool(
     logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
     if x_inxm_mcp_session is None:
         async with mcp_session(server_params) as session:
-            result = await session.call_tool(tool_name, args or {})
+            result = await session.call_tool(tool_name, decorate_with_oauth_token(session, tool_name, args, oauth_token))
             result = RunToolsResult(result)
     else:
         session_id = x_inxm_mcp_session
@@ -121,7 +132,7 @@ async def run_tool(
             logger.warning(f"[Tool-Call] Session not found: {session_id}")
             raise HTTPException(status_code=404, detail="Session not found. It might have expired, please start a new.")
         else:
-            result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": args or {}}))
+            result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": decorate_with_oauth_token(session, tool_name, args, oauth_token)}))
 
     logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
     if result.isError:
