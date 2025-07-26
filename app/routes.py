@@ -123,7 +123,8 @@ async def run_tool(
     logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
     if x_inxm_mcp_session is None:
         async with mcp_session(server_params) as session:
-            result = await session.call_tool(tool_name, decorate_with_oauth_token(session, tool_name, args, oauth_token))
+            decorated_args = await decorate_with_oauth_token(session, tool_name, args, oauth_token)
+            result = await session.call_tool(tool_name, decorated_args)
             result = RunToolsResult(result)
     else:
         session_id = x_inxm_mcp_session
@@ -132,7 +133,8 @@ async def run_tool(
             logger.warning(f"[Tool-Call] Session not found: {session_id}")
             raise HTTPException(status_code=404, detail="Session not found. It might have expired, please start a new.")
         else:
-            result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": decorate_with_oauth_token(session, tool_name, args, oauth_token)}))
+            decorated_args = await decorate_with_oauth_token(session, tool_name, args, oauth_token)
+            result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": decorated_args}))
 
     logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
     if result.isError:
