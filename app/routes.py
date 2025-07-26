@@ -63,7 +63,7 @@ def try_get_session_id(
     return None
 
 def map_tools(tools):
-    logger.debug(f"[map_tools] Mapping tools: {tools}")
+    logger.info(f"[map_tools] Mapping tools: {tools}")
     return [
         {
             "name": tool.name,
@@ -101,7 +101,7 @@ async def list_tools(
 
 async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oauth_token: Optional[str]) -> Dict:
     tools = await session.list_tools()
-    tool_info = next((tool for tool in tools if tool.name == tool_name), None)
+    tool_info = next((tool for tool in tools.tools if tool.name == tool_name), None)
 
     if args is None:
         args = {}
