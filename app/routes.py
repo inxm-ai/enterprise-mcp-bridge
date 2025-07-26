@@ -21,6 +21,7 @@ MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 # Enhanced: Support MCP_SERVER_COMMAND env variable (takes precedence), else sys.argv, else default
 def get_server_params():
     env_command = os.environ.get("MCP_SERVER_COMMAND")
+    env = os.environ.copy()
     if env_command:
         # Split the env variable into command and args (simple shell-like split)
         import shlex
@@ -28,7 +29,7 @@ def get_server_params():
         command = parts[0]
         cmd_args = parts[1:]
         logger.info(f"Server-Params from MCP_SERVER_COMMAND: command={command}, args={cmd_args}")
-        return StdioServerParameters(command=command, args=cmd_args)
+        return StdioServerParameters(command=command, args=cmd_args, env=env)
 
     # Fallback: parse sys.argv for --
     args = {}
@@ -39,13 +40,13 @@ def get_server_params():
         command = args["command"] or "python"
         cmd_args = args["args"] or [os.path.join(os.path.dirname(__file__), "..", "mcp", "server.py")]
         logger.info(f"Server-Params from sys.argv: command={command}, args={cmd_args}")
-        return StdioServerParameters(command=command, args=cmd_args)
+        return StdioServerParameters(command=command, args=cmd_args, env=env)
 
     # Default
     command = "python"
     cmd_args = [os.path.join(os.path.dirname(__file__), "..", "mcp", "server.py")]
     logger.info(f"Server-Params default: command={command}, args={cmd_args}")
-    return StdioServerParameters(command=command, args=cmd_args)
+    return StdioServerParameters(command=command, args=cmd_args, env=env)
 
 server_params = get_server_params()
 

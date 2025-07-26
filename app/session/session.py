@@ -9,8 +9,7 @@ from abc import ABC, abstractmethod
 
 @asynccontextmanager
 async def mcp_session(server_params: StdioServerParameters):
-    env = os.environ.copy()
-    async with stdio_client(server_params, env=env) as (read, write):
+    async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
