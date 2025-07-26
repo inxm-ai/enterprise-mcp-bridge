@@ -2,13 +2,15 @@ import asyncio
 import datetime
 import logging
 from contextlib import asynccontextmanager
+import os
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from abc import ABC, abstractmethod
 
 @asynccontextmanager
 async def mcp_session(server_params: StdioServerParameters):
-    async with stdio_client(server_params) as (read, write):
+    env = os.environ.copy()
+    async with stdio_client(server_params, env=env) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
