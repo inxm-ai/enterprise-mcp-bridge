@@ -112,6 +112,8 @@ async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oa
     elif not oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
         logger.warning(f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided.")
         raise HTTPException(status_code=401, detail="Tool requires oauth_token but none provided.")
+    else:
+        logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token.")
     return args
 
 @router.post("/tools/{tool_name}")
@@ -121,7 +123,7 @@ async def run_tool(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
     oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
-    args: Optional[Dict] = None,
+    args: Optional[Dict] = None, 
     ):
     x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None)
     if not oauth_token:
