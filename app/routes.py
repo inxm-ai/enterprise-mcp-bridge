@@ -113,7 +113,7 @@ async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oa
         logger.warning(f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided.")
         raise HTTPException(status_code=401, detail="Tool requires oauth_token but none provided.")
     else:
-        logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token.")
+        logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token {tool_info}.")
     return args
 
 @router.post("/tools/{tool_name}")
