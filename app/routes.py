@@ -107,14 +107,24 @@ async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oa
     if args is None:
         args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
-    if oauth_token and tool_info and tool_info.inputSchema and "oauth_token" in tool_info.inputSchema.properties:
-        args['oauth_token'] = oauth_token
-        logger.info(f"[Tool-Call] Tool {tool_name} will be called with oauth_token.")
-    elif not oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
-        logger.warning(f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided.")
-        raise HTTPException(status_code=401, detail="Tool requires oauth_token but none provided.")
+    if tool_info and hasattr(tool_info, "inputSchema") and tool_info.inputSchema:
+        input_schema_props = getattr(tool_info.inputSchema, "get", None)
+        # inputSchema might be a dict or an object with 'properties'
+        if isinstance(tool_info.inputSchema, dict):
+            properties = tool_info.inputSchema.get("properties", {})
+        else:
+            properties = getattr(tool_info.inputSchema, "properties", {})
+        if "oauth_token" in properties:
+            if oauth_token:
+                args["oauth_token"] = oauth_token
+                logger.info(f"[Tool-Call] Tool {tool_name} will be called with oauth_token.")
+            else:
+                logger.warning(f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided.")
+                raise HTTPException(status_code=401, detail="Tool requires oauth_token but none provided.")
+        else:
+            logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token.")
     else:
-        logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token {tool_info}.")
+        logger.info(f"[Tool-Call] Tool {tool_name} has no inputSchema or tool_info.")
     return args
 
 @router.post("/tools/{tool_name}")
