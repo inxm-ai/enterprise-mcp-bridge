@@ -106,7 +106,8 @@ async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oa
 
     if args is None:
         args = {}
-    if oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
+    # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
+    if oauth_token and tool_info and tool_info.inputSchema and "oauth_token" in tool_info.inputSchema.properties:
         args['oauth_token'] = oauth_token
         logger.info(f"[Tool-Call] Tool {tool_name} will be called with oauth_token.")
     elif not oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
