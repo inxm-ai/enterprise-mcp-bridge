@@ -108,6 +108,9 @@ async def decorate_with_oauth_token(session, tool_name, args: Optional[Dict], oa
         args = {}
     if oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
         args['oauth_token'] = oauth_token
+    elif not oauth_token and tool_info and "oauth_token" in tool_info.inputSchema:
+        logger.warning(f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided.")
+        raise HTTPException(status_code=401, detail="Tool requires oauth_token but none provided.")
     return args
 
 @router.post("/tools/{tool_name}")
