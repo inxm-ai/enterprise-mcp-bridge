@@ -118,7 +118,7 @@ async def run_tool(
     tool_name: str,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
-    oauth_token: Optional[str] = Cookie(None, alias="oauth2_proxy"),
+    oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
     args: Optional[Dict] = None):
     x_inxm_mcp_session = try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None)
     if args and 'inxm-session' in args:
