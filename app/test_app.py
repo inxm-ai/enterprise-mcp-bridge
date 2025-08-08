@@ -26,9 +26,11 @@ def wait_for_port(port, host="127.0.0.1", timeout=60.0):
 @pytest.fixture(scope="session")
 def fastapi_app():
     # Start the FastAPI app as a subprocess
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.dirname(__file__) + "/.."
     proc = subprocess.Popen([
         "uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8000"
-    ], cwd=os.path.dirname(__file__) + "/..", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    ], cwd=os.path.dirname(__file__) + "/..", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # Print the subprocess stdout in a separate thread
     def print_stdout(pipe):
         for line in iter(pipe.readline, b''):
@@ -71,6 +73,7 @@ def test_parallel_calls(client):
         a = random.randint(1, 100)
         b = random.randint(1, 100)
         r = requests.post(f"{client}/tools/add", json={"a": a, "b": b})
+        assert r.status_code == 200
         assert r.json()["structuredContent"]["result"] == a + b
     threads = [threading.Thread(target=call_add) for _ in range(5)]
     for t in threads:

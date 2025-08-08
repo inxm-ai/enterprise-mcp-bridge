@@ -13,6 +13,17 @@ logger = logging.getLogger("uvicorn.error")
 class TokenRetriever:
     def retrieve_token(self, token: str) -> Dict[str, Any]:
         pass
+    
+class TokenRetrieverFactory:
+    def get(self) -> TokenRetriever:
+        """
+        Factory method to retrieve the appropriate token retriever based on environment variables.
+        """
+        provider: str = os.getenv("AUTH_PROVIDER", "keycloak").lower()
+        if provider == "keycloak":
+            return KeyCloakTokenRetriever()
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
 
 class KeyCloakTokenRetriever(TokenRetriever):
     def __init__(self):

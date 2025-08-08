@@ -9,6 +9,7 @@ from mcp import StdioServerParameters
 from .session import MCPLocalSessionTask, mcp_session, try_get_session_id, session_id
 from .session_manager import session_manager
 from .models import RunToolRequest, RunToolsResult
+from .mcp_server import get_server_params
 from .oauth.decorator import decorate_args_with_oauth_token
 import sys
 
@@ -18,38 +19,6 @@ sessions = session_manager()
 logger = logging.getLogger("uvicorn.error")
 
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
-
-# Enhanced: Support MCP_SERVER_COMMAND env variable (takes precedence), else sys.argv, else default
-def get_server_params():
-    env_command = os.environ.get("MCP_SERVER_COMMAND")
-    env = os.environ.copy()
-    if env_command:
-        # Split the env variable into command and args (simple shell-like split)
-        import shlex
-        parts = shlex.split(env_command)
-        command = parts[0]
-        cmd_args = parts[1:]
-        logger.info(f"Server-Params from MCP_SERVER_COMMAND: command={command}, args={cmd_args}")
-        return StdioServerParameters(command=command, args=cmd_args, env=env)
-
-    # Fallback: parse sys.argv for --
-    args = {}
-    if "--" in sys.argv:
-        idx = sys.argv.index("--")
-        args["command"] = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else None
-        args["args"] = sys.argv[idx + 2:] if len(sys.argv) > idx + 2 else []
-        command = args["command"] or "python"
-        cmd_args = args["args"] or [os.path.join(os.path.dirname(__file__), "..", "mcp", "server.py")]
-        logger.info(f"Server-Params from sys.argv: command={command}, args={cmd_args}")
-        return StdioServerParameters(command=command, args=cmd_args, env=env)
-
-    # Default
-    command = "python"
-    cmd_args = [os.path.join(os.path.dirname(__file__), "..", "mcp", "server.py")]
-    logger.info(f"Server-Params default: command={command}, args={cmd_args}")
-    return StdioServerParameters(command=command, args=cmd_args, env=env)
-
-server_params = get_server_params()
 
 def map_tools(tools):
     logger.info(f"[map_tools] Mapping tools: {tools}")
@@ -79,7 +48,7 @@ async def list_tools(
     )
     logger.info(f"[Tools] Listing tools. Session: {x_inxm_mcp_session}")
     if x_inxm_mcp_session is None:
-        async with mcp_session(server_params) as session:
+        async with mcp_session(get_server_params(oauth_token)) as session:
             result = await session.list_tools()
             logger.debug("[Tools] Tools listed without session.")
             return map_tools(result)
@@ -112,7 +81,7 @@ async def run_tool(
         args.pop('inxm-session')
     logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
     if x_inxm_mcp_session is None:
-        async with mcp_session(server_params) as session:
+        async with mcp_session(get_server_params(oauth_token)) as session:
             tools = await session.list_tools()
             decorated_args = await decorate_args_with_oauth_token(tools, tool_name, args, oauth_token)
             result = await session.call_tool(tool_name, decorated_args)
@@ -145,7 +114,7 @@ async def start_session(
     oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
 ):
     x_inxm_mcp_session = session_id(str(uuid.uuid4()), oauth_token)
-    mcp_task = MCPLocalSessionTask(server_params)
+    mcp_task = MCPLocalSessionTask(get_server_params(oauth_token))
     mcp_task.start()
     sessions.set(x_inxm_mcp_session, mcp_task)
     logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import os
 
-from ..session import MCPSessionBase
+from app.session import MCPSessionBase
 
 class SessionManagerBase(ABC):
     @abstractmethod

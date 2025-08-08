@@ -2,7 +2,7 @@ import os
 import sys
 import types
 import pytest
-from mcp_server import server_params
+from app.mcp_server import server_params
 from mcp import StdioServerParameters
 
 class DummyStdioServerParameters:
@@ -15,6 +15,40 @@ def patch_module(monkeypatch, env=None, argv=None):
     monkeypatch.setattr(server_params, "StdioServerParameters", DummyStdioServerParameters)
     monkeypatch.setattr(os, "environ", env or {})
     monkeypatch.setattr(sys, "argv", argv or ["main.py"])
+
+class DummyTokenRetriever:
+    def __init__(self, token_value):
+        self.token_value = token_value
+    def retrieve_token(self, token):
+        return {"access_token": self.token_value}
+
+class DummyTokenRetrieverFactory:
+    def __init__(self, token_value):
+        self.token_value = token_value
+    def get(self, *args, **kwargs):
+        return DummyTokenRetriever(self.token_value)
+
+def test_oauth_env_set_with_token(monkeypatch):
+    env = {"OAUTH_ENV": "OAUTH_TOKEN_VAR"}
+    patch_module(monkeypatch, env=env)
+    dummy_token = "dummy-oauth-token-value"
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", lambda: DummyTokenRetrieverFactory(dummy_token))
+    params = server_params.get_server_params(oauth_token="mytoken")
+    assert params.env["OAUTH_TOKEN_VAR"] == dummy_token
+
+def test_oauth_env_set_missing_token(monkeypatch):
+    env = {"OAUTH_ENV": "OAUTH_TOKEN_VAR"}
+    patch_module(monkeypatch, env=env)
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", lambda: DummyTokenRetrieverFactory("dummy"))
+    with pytest.raises(ValueError):
+        server_params.get_server_params()
+
+def test_oauth_env_not_set(monkeypatch):
+    env = {}
+    patch_module(monkeypatch, env=env)
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", lambda: DummyTokenRetrieverFactory("dummy"))
+    params = server_params.get_server_params()
+    assert "OAUTH_TOKEN_VAR" not in params.env
 
 def test_env_command(monkeypatch):
     env = {"MCP_SERVER_COMMAND": "python myserver.py --foo bar"}

@@ -3,7 +3,7 @@ import pytest
 import jwt
 import types
 from unittest.mock import patch, MagicMock
-from oauth.token_exchange import KeyCloakTokenRetriever
+from app.oauth.token_exchange import KeyCloakTokenRetriever
 
 @pytest.fixture
 def retriever(monkeypatch):

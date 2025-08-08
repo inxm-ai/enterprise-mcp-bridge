@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 from types import SimpleNamespace
-from oauth.decorator import decorate_args_with_oauth_token
+from app.oauth.decorator import decorate_args_with_oauth_token
 
 class DummyTool:
     def __init__(self, name, input_schema):
