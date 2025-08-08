@@ -157,3 +157,54 @@ curl -X POST http://localhost:8000/tools/<tool_name> -H 'Content-Type: applicati
 ---
 
 For more details, see the source code and comments in the `template/app` directory.
+
+---
+
+## OAuth Token Integration
+
+### Getting a Microsoft Token from Keycloak
+
+To inject a Microsoft token obtained via your Keycloak provider into the MCP server environment, set the `OAUTH_ENV` environment variable to the desired environment variable name (e.g., `MS_TOKEN`). When starting the REST server, provide your Keycloak-issued OAuth token as a parameter. The server will use the `TokenRetrieverFactory` to exchange the Keycloak token for a Microsoft token and inject it into the MCP subprocess environment.
+
+**Example:**
+
+```bash
+export OAUTH_ENV=MS_TOKEN
+uvicorn server:app --reload -- <your_keycloak_token>
+```
+
+This will set `MS_TOKEN` in the MCP server environment with the retrieved Microsoft token.
+
+### General Approach
+
+- The REST server supports dynamic token retrieval and injection using the `TokenRetrieverFactory`.
+- When `OAUTH_ENV` is set, the server expects an OAuth token as input.
+- The token retriever exchanges the provided token for the required provider token (e.g., Microsoft).
+- The resulting token is injected into the MCP server environment for use by downstream tools.
+
+### Implementing Custom Token Providers
+
+To add your own token provider:
+1. Create a new class in `oauth/token_exchange.py` that implements a `retrieve_token` method.
+2. Register your provider in the `TokenRetrieverFactory`.
+3. The factory will select the appropriate retriever based on configuration or environment.
+
+**Example Skeleton:**
+
+```python
+# oauth/token_exchange.py
+
+class MyCustomTokenRetriever:
+    def retrieve_token(self, input_token):
+        # Exchange input_token for your provider's token
+        return {"access_token": "<your_provider_token>"}
+
+class TokenRetrieverFactory:
+    def get(self):
+        # Return the appropriate retriever based on config/env
+        return MyCustomTokenRetriever()
+```
+
+**Usage:**
+- Set `OAUTH_ENV` and provide the input token when starting the server.
+- The custom retriever will handle token exchange and injection.
