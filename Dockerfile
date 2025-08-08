@@ -5,8 +5,9 @@ FROM python:3.11-slim-bullseye
 RUN apt-get update && apt-get install -y \
     gcc \
     musl-dev \
-    nodejs \
-    npm \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- MCP Python server (optional) ---
