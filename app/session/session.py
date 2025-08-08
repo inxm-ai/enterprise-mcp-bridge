@@ -21,7 +21,7 @@ def try_get_session_id(
     return None
 
 def session_id(base_id: str, oauth_token: Optional[str] = None) -> str:
-    if oauth_token:
+    if base_id and oauth_token:
         return f"{base_id}:{oauth_token}"
     return base_id
 
