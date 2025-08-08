@@ -6,6 +6,25 @@ import os
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from abc import ABC, abstractmethod
+from typing import Optional
+
+def try_get_session_id(
+    x_inxm_mcp_session_header: Optional[str],
+    x_inxm_mcp_session_cookie: Optional[str],
+    x_inxm_mcp_session_args: Optional[str] = None
+) -> Optional[str]:
+    if x_inxm_mcp_session_header:
+        return x_inxm_mcp_session_header
+    if x_inxm_mcp_session_cookie:
+        return x_inxm_mcp_session_cookie
+    if x_inxm_mcp_session_args:
+        return x_inxm_mcp_session_args
+    return None
+
+def session_id(base_id: str, oauth_token: Optional[str] = None) -> str:
+    if oauth_token:
+        return f"{base_id}:{oauth_token}"
+    return base_id
 
 @asynccontextmanager
 async def mcp_session(server_params: StdioServerParameters):
