@@ -25,11 +25,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# Include the top-level package and all subpackages under app/ as part of the distribution
 packages = [
-    "app",
-    "app.session",
-    "app.session_manager",
-    "app.oauth",
-    "app.mcp_server",
+    "session",
+    "session_manager",
+    "oauth",
+    "mcp_server",
 ]
