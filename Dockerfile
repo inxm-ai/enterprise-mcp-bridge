@@ -19,9 +19,9 @@ RUN if [ -f pyproject.toml ]; then pip install --upgrade pip && pip install --no
 RUN if [ -f package.json ]; then npm install; fi
 
 # --- MCP REST wrapper ---
-WORKDIR /app
+WORKDIR /
 COPY app /app
-RUN pip install --upgrade pip && pip install --no-cache-dir .
+RUN pip install --upgrade pip && pip install --no-cache-dir /app
 
 # --- Entrypoint and runtime flexibility ---
 EXPOSE 8000
