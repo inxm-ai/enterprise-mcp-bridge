@@ -36,6 +36,9 @@ def map_tools(tools):
         for tool in tools.tools
     ]
 
+if MCP_BASE_PATH:
+    router.prefix = MCP_BASE_PATH
+
 @router.get("/tools")
 async def list_tools(
     oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
