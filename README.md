@@ -2,38 +2,43 @@
 
 FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over plain HTTP/JSON.
 
-## Why this project? (Key Capabilities & Differences)
+## Why this project?
 
-Most MCP examples today are:
-- Single-user CLI processes (stdio pipes) driven by an LLM client
-- One-session-per-process (state lost when process ends)
-- Lack built-in multi-session & multi-user orchestration
-- Assume direct access instead of sandboxed / remote / browser environments
-- Provide no integrated OAuth token exchange for downstream resource access
+Most existing MCP examples are designed for local development or simple demos and fall short for real-world applications. They are typically:
 
-This server bridges those gaps:
+* Single-user CLI processes driven by a local client.
+* Ephemeral, with state being lost as soon as the process ends.
+* Lacking multi-tenancy, with no built-in orchestration for concurrent users or sessions.
+* Unsuitable for sandboxed environments like browsers or secure remote servers.
+* Missing a consistent security model for handling delegated permissions (e.g., OAuth) for downstream resources.
 
-| Capability | What it means here | Why it matters |
-|------------|--------------------|----------------|
-| REST-first | All MCP tool discovery & invocation via standard HTTP endpoints | Works with any platform (browser, mobile, gateway, curl, automation) |
-| Multi-user | Session keys are namespaced by (optional) user OAuth token | A single deployment can safely serve many authenticated users |
-| Multi-session per user | Start/close multiple concurrent sessions (`/session/start`) | Parallel tool chains, isolation, long-running conversational state |
-| Stateless default calls | You can invoke tools without starting a session | Low-latency fire-and-forget usage / health checks |
-| Session lifecycle mgmt | Explicit start/close endpoints & inactivity timeout pings | Prevent resource leaks & enable autoscaling-friendly behavior |
-| Pluggable session manager | Environment-switchable (default in-memory) | Future: Redis / DB backed horizontal scale |
-| OAuth token exchange built-in | Keycloak→downstream provider token retrieval & injection | Securely pass resource provider tokens into MCP tools without exposing them to clients |
-| Automatic token arg injection | If a tool declares `oauth_token` in its input schema it is auto-satisfied | Cleaner client payloads; security gating |
-| Command routing & precedence | `MCP_SERVER_COMMAND` / CLI `--` / default Python server | Flexible deployment (Docker, K8s, local dev) |
-| Runtime base path | `MCP_BASE_PATH` environment variable | Clean ingress integration / versioned APIs |
-| Tool URL mapping | Each tool gets a canonical REST endpoint | Easier discovery & linking |
-| Structured error handling | HTTP 400 / 404 / 500 mapping from MCP responses | Predictable integration DX |
-| Token refresh logic | Keycloak broker + refresh token reuse | Long-lived sessions without manual refresh |
+This project directly addresses these gaps.
 
-And one more thing:
-- Future extension hook: swap `SessionManagerBase` for distributed stores.
-- Ping-based inactivity detection (auto-closes idle sessions >60s inactivity inside task loop) — helps resource hygiene.
-- Minimal surface area: only a few focused endpoints; easy to audit.
-- Works with any stdio MCP server (Python, Node, etc.) launched as a subprocess.
+## Key Capabilities
+
+### Robust Session & User Management
+* **Multi-User & Multi-Session:** A single server instance can securely manage multiple, isolated user contexts, namespaced by OAuth tokens. Each user can run multiple concurrent sessions (`/session/start`), enabling parallel tool execution and long-running conversational state.
+* **Stateful & Stateless Modes:** Supports both **stateless** ("fire-and-forget") tool calls for low-latency tasks and **stateful** sessions for complex, multi-step interactions.
+* **Lifecycle & Resource Hygiene:** Provides explicit endpoints to start and close sessions, coupled with automatic cleanup of idle sessions via inactivity pings. This prevents resource leaks and supports autoscaling.
+* **Pluggable for Scalability:** Features a swappable session manager (`SessionManagerBase`). While it defaults to a simple in-memory store, it can be replaced with a distributed backend (like Redis or a database) for horizontal scaling.
+
+### Integrated Security & Authentication
+* **Built-in OAuth2 Token Exchange:** Natively handles the OAuth2 token exchange flow (e.g., with Keycloak as a broker) to securely acquire tokens for downstream resource providers.
+* **Automatic Token Injection:** If a tool's input schema includes an `oauth_token` argument, the server automatically and securely injects the correct token. This simplifies client-side logic and prevents tokens from being exposed.
+* **Automated Token Refresh:** Manages token refresh logic transparently, allowing for long-lived, secure sessions without requiring clients to handle re-authentication.
+
+### Developer Experience & API Design
+* **REST-first Interface:** All tool discovery and invocation happens over standard HTTP/JSON endpoints, ensuring maximum compatibility with any client, platform, or automation tool (`curl`, browsers, etc.).
+* **Automatic Tool Endpoints:** Each tool exposed by the MCP server is automatically mapped to a canonical REST endpoint (e.g., `/tools/{tool_name}`), making the API discoverable and easy to integrate with.
+* **Structured Error Handling:** Maps MCP-level errors to standard HTTP status codes (`400`, `404`, `500`), providing a predictable and developer-friendly integration experience.
+* **Auto-Generated API Docs:** Because it's built on FastAPI, it automatically generates interactive OpenAPI (Swagger) and ReDoc documentation, making the API easy to explore and test.
+* **Containerized Deployment:** Supports running the MCP server as a containerized application (e.g., Docker), simplifying deployment and scaling.
+* **Observability:** Structured logging and monitoring capabilities are built-in, allowing for easy tracking of requests, errors, and performance metrics.
+
+### Flexible Deployment & Integration
+* **Protocol Agnostic:** Works with any MCP server that communicates over `stdio`, regardless of the language it's written in (Python, Node.js, Go, etc.).
+* **Configurable Routing & Base Path:** Deployment is simplified through environment variables like `MCP_SERVER_COMMAND` (to define the tool process) and `MCP_BASE_PATH` (for clean ingress integration and API versioning).
+
 
 ---
 
@@ -56,144 +61,80 @@ pip install app
 uvicorn app.server:app --reload
 ```
 
-Open: http://localhost:8000/docs
+Open: [http://localhost:8000/docs](http://localhost:8000/docs)
 
----
+## Core Concepts
+
+1. **Ad-hoc (stateless) tool calls**: POST to `/tools/{tool_name}` with arguments. A temporary MCP connection is created and torn down.
+2. **Managed sessions**: Start with `/session/start`, receive a session ID cookie (`x-inxm-mcp-session`). Subsequent tool calls reuse a persistent MCP process context.
+3. **Multi-user separation**: OAuth token (cookie `_oauth2_proxy`) namespaces sessions to enforce per-user isolation.
+4. **Automatic OAuth token propagation**: Tools with `oauth_token` in their schema automatically receive a validated token.
+5. **Token exchange**: Keycloak token can be exchanged for a provider token using `TokenRetrieverFactory`.
 
 ## Session vs Stateless Calls
 
-| Mode | How | When to use |
-|------|-----|-------------|
-| Stateless | `POST /tools/{tool}` (no session header) | Simple one-off tool execution |
-| Stateful | `POST /session/start` then include header/cookie | Conversations, multi-step pipelines |
+| Mode      | How                                      | When to use                     |
+|-----------|-----------------------------------------|----------------------------------|
+| Stateless | `POST /tools/{tool}` (no session header)| Simple one-off tool execution   |
+| Stateful  | `POST /session/start` then include header/cookie | Conversations, multi-step pipelines |
 
-### Start a Session
+### Session Management
 
-```bash
-curl -X POST http://localhost:8000/session/start -c cookies.txt
-```
+- **Start a Session**:
+  ```bash
+  curl -X POST http://localhost:8000/session/start -c cookies.txt
+  ```
+  The response sets `x-inxm-mcp-session` cookie.
 
-The response sets `x-inxm-mcp-session` cookie.
+- **Use the Session**:
+  ```bash
+  curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'
+  ```
 
-### Use the Session
-
-```bash
-curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'
-```
-
-### Close the Session
-
-```bash
-curl -b cookies.txt -X POST http://localhost:8000/session/close
-```
-
-If you prefer headers:
-
-```bash
-SESSION_ID=$(curl -s -X POST http://localhost:8000/session/start | jq -r '."x-inxm-mcp-session"')
-curl -H "x-inxm-mcp-session: $SESSION_ID" -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":1,"b":4}'
-```
-
----
-
-## Multi-User Handling
-
-If your ingress / auth proxy (e.g., oauth2-proxy) sets a user token cookie `_oauth2_proxy`, the server internally namespaces sessions by that token. Two users can both have a logical session ID `abc123` but their tokens create distinct internal keys (`abc123:<token-hash>`). You do not need to manage this manually.
-
----
+- **Close the Session**:
+  ```bash
+  curl -b cookies.txt -X POST http://localhost:8000/session/close
+  ```
 
 ## OAuth Token Exchange & Injection
 
-1. Set `OAUTH_ENV=MS_TOKEN` (example) when starting the REST server.
-2. Provide a Keycloak user token (via cookie `_oauth2_proxy` or CLI argument when launching underlying MCP server if applicable).
-3. The `TokenRetrieverFactory` chooses the retriever (currently Keycloak) and exchanges the Keycloak token for the provider token.
+1. Set `OAUTH_ENV=MS_TOKEN` when starting the REST server.
+2. Provide a Keycloak user token (via cookie `_oauth2_proxy` or CLI argument).
+3. The `TokenRetrieverFactory` exchanges the Keycloak token for the provider token.
 4. The resulting provider token is exported into the MCP subprocess environment (`MS_TOKEN`).
-5. If a tool input schema contains `oauth_token`, the call decorator injects the raw user Keycloak token (or accessible token) unless customized.
+5. Tools with `oauth_token` in their schema automatically receive the token.
 
-Example (local dev with environment variable):
-
+**Example**:
 ```bash
 export OAUTH_ENV=MS_TOKEN
 uvicorn app.server:app --reload
 ```
 
 ### Adding a Custom Provider
-Implement a new retriever in `oauth/token_exchange.py` and register it in `TokenRetrieverFactory.get()`.
 
----
+1. Implement a new retriever in `oauth/token_exchange.py`.
+2. Register it in `TokenRetrieverFactory.get()`.
 
 ## Environment Variables
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `MCP_SERVER_COMMAND` | Full command to launch MCP server (overrides all) | (unset) |
-| `MCP_BASE_PATH` | Prefix all routes (e.g., `/api/mcp`) | "" |
-| `OAUTH_ENV` | Name of env var injected into MCP subprocess with provider token | (unset) |
-| `AUTH_PROVIDER` | Token exchange provider selector (`keycloak`) | keycloak |
-| `AUTH_BASE_URL` | Keycloak base URL for broker/token endpoints | (required for exchange) |
-| `KEYCLOAK_REALM` | Keycloak realm | inxm |
-| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path | (required) |
-| `MCP_SESSION_MANAGER` | Implementation name (e.g., future Redis) | InMemorySessionManager |
-
----
-
-## Command Precedence & Launching MCP Server
-
-Launch order logic:
-1. If `MCP_SERVER_COMMAND` is set → split & exec.
-2. Else run the default demo `../mcp/server.py`.
-
-Docker override example:
-
-```bash
-docker run -it -p 8000:8000 -e MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/memory.json" inxm-ai/mcp-rest-server
-```
-
----
-
-## Base Path / Ingress Integration
-
-Set `MCP_BASE_PATH=/api/mcp` to serve endpoints like `/api/mcp/tools`. Helpful when sitting behind a shared gateway or versioned path.
-
----
-
-## Tool Discovery & Invocation
-
-List tools:
-
-```bash
-curl http://localhost:8000/tools
-```
-
-Each listed tool returns a JSON object including a direct URL. Invoke by POSTing JSON arguments.
-
-Unknown tools → HTTP 404. Validation errors → HTTP 400. Internal tool errors → HTTP 500.
-
----
-
-## Inactivity & Resource Hygiene
-
-Each persistent session schedules a lightweight ping every 10s. If no non-ping request is seen for >60s, the underlying MCP stdio session is closed, returning `session_closed` internally. Clients should recreate sessions as needed for very long idle periods.
-
----
+| Variable               | Purpose                                              | Default       |
+|------------------------|------------------------------------------------------|---------------|
+| `MCP_SERVER_COMMAND`   | Full command to launch MCP server                   | (unset)       |
+| `MCP_BASE_PATH`        | Prefix all routes (e.g., `/api/mcp`)                | ""            |
+| `OAUTH_ENV`            | Name of env var injected into MCP subprocess        | (unset)       |
+| `AUTH_PROVIDER`        | Token exchange provider selector (`keycloak`)       | keycloak      |
+| `AUTH_BASE_URL`        | Keycloak base URL for broker/token endpoints        | (required)    |
+| `KEYCLOAK_REALM`       | Keycloak realm                                      | inxm          |
+| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path            | (required)    |
+| `MCP_SESSION_MANAGER`  | Implementation name (e.g., future Redis)            | InMemorySessionManager |
 
 ## Extending Session Management
 
-`session_manager()` factory reads `MCP_SESSION_MANAGER`. To add a backend:
+To add a backend:
 
 1. Implement a subclass of `SessionManagerBase`.
 2. Expose it in `session_manager/session_manager.py` globals.
 3. Set `MCP_SESSION_MANAGER=<YourClassName>`.
-
-Future direction: Redis-backed manager for horizontal scaling.
-
----
-
-## Kubernetes / Helm Notes
-
-Same as before, plus optionally set `MCP_BASE_PATH` for ingress-friendly routing. Mount volumes for `/data` or `/config` as needed. Supply `MCP_SERVER_COMMAND` for non-Python servers.
-
----
 
 ## Security Considerations
 
@@ -202,21 +143,14 @@ Same as before, plus optionally set `MCP_BASE_PATH` for ingress-friendly routing
 - Carefully scope Keycloak broker roles (needs `broker.read-token`).
 - Consider rotating `MCP_SERVER_COMMAND` secrets outside image (ConfigMap / Secret).
 
----
+## Roadmap
 
-## Roadmap Ideas
-
-- Celery / Redis / Postgres session manager
+- Celery/Redis/Postgres session manager
+- Other Auth providers
 - Metrics endpoint (Prometheus) for session counts & tool latency
 - Rate limiting / quota per user
 - Pluggable auth providers in `TokenRetrieverFactory`
 - WebSocket streaming for long-running tools
-
----
-
-## Original Usage (Reference)
-
-Below retains original quick examples for continuity.
 
 ---
 
@@ -373,10 +307,6 @@ curl -X POST http://localhost:8000/tools/<tool_name> -H 'Content-Type: applicati
 ## Notes
 - The REST server launches the MCP server as a subprocess. You can customize the command and arguments as needed.
 - For advanced usage, see the code and comments in `routes.py`.
-
----
-
-For more details, see the source code and comments in the `template/app` directory.
 
 ---
 
