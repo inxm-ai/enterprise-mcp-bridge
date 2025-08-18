@@ -1,8 +1,9 @@
 [project]
 name = "mcp-rest-server"
 version = "0.1.0"
-description = "Wrapper for MCP Clients to be called via REST on a plaform"
-authors = [{ name = "Matthias Kainer", email = "mail@matthias-kainer.de" }]
+description = "Wrapper for MCP Clients to be called via REST on a platform"
+license = "GPL-3.0"
+authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]
 requires-python = ">=3.10"
 dependencies = ["httpx", "fastapi", "uvicorn", "mcp[cli]", "celery", "jwt", "requests"]
 classifiers = [
@@ -16,8 +17,7 @@ classifiers = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "pyjwt",
-    "requests"
+    "pyjwt"
 ]
 
 [build-system]

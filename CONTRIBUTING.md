@@ -31,7 +31,7 @@ app/
   routes.py          # REST endpoints & request/session orchestration
   models.py          # Pydantic-style data models (if added later)
   session/           # Session abstraction & lifecycle mgmt
-  session_manager/   # In-memory session registry
+  session_manager/   # Session registry
   oauth/             # Token exchange + decorators
   mcp_server/        # Server parameter helpers
   test_*.py          # Tests (pytest)
