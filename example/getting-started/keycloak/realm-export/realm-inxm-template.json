@@ -1,0 +1,97 @@
+{
+  "realm": "inxm",
+  "enabled": true,
+  "registrationAllowed": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "bruteForceProtected": false,
+  "roles": { "realm": [] },
+  "identityProviders": [
+    {
+      "alias": "ms365",
+      "displayName": "Microsoft Entra ID",
+      "providerId": "oidc",
+      "enabled": true,
+      "storeToken": true,
+      "addReadTokenRoleOnCreate": true,
+      "trustEmail": true,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "linkOnly": false,
+      "config": {
+        "clientId": "${AZURE_CLIENT_ID}",
+        "clientSecret": "${AZURE_CLIENT_SECRET}",
+        "authorizationUrl": "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/authorize",
+        "tokenUrl": "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token",
+        "jwksUrl": "https://login.microsoftonline.com/${AZURE_TENANT_ID}/discovery/v2.0/keys",
+        "issuer": "https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0",
+        "useJwksUrl": "true",
+        "defaultScope": "openid email profile offline_access https://graph.microsoft.com/.default"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "frontend-client",
+      "enabled": true,
+      "redirectUris": ["https://inxm.local/oauth2/callback"],
+      "publicClient": false,
+      "secret": "this-is-not-a-secret",
+      "protocolMappers": [
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "email",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "email",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "preferred_username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "username",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "frontend-client",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "email-verified-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "email_verified",
+            "claim.value": "true",
+            "jsonType.label": "boolean",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

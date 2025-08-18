@@ -1,0 +1,65 @@
+# Standalone Getting Started Example
+
+This is a complete demo including authentication with m365
+
+## Login Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant ApplicationIngress as Application-Ingress
+    participant Keycloak as Keycloak (auth.inxm.local)
+    participant OAuth2Proxy as OAuth2-Proxy (inxm.local)
+    participant AppNginx as App-Nginx
+    participant AppFrontend as App-Frontend
+    participant AppMCPRest as App-MCP-Rest
+
+    User ->> ApplicationIngress: Access Application
+    ApplicationIngress ->> Keycloak: Authenticate (auth.inxm.local)
+    ApplicationIngress ->> OAuth2Proxy: Authenticate (inxm.local)
+    OAuth2Proxy ->> AppNginx: Forward Request
+    AppNginx ->> AppFrontend: Serve Frontend
+    AppNginx ->> AppMCPRest: Forward API Request
+```
+
+## Request Graph API flow
+
+```mermaid 
+sequenceDiagram
+    participant OAuth2Proxy as OAuth2-Proxy
+    participant AppMCPRest as App-MCP-Rest
+    participant Keycloak as Keycloak
+    participant Entra as Microsoft Entra
+    participant GraphAPI as Microsoft Graph API
+
+    OAuth2Proxy ->> AppMCPRest: Provide Auth Token
+    AppMCPRest ->> Keycloak: Request Microsoft Token with Auth Token
+    Keycloak ->> Entra: Exchange for Entra Token
+    Keycloak -->> AppMCPRest: Return Entra Token
+    AppMCPRest ->> GraphAPI: Access Microsoft Graph API with Entra Token
+```
+
+
+## What it Provides
+* Keycloak with token-exchange feature and ingress
+* Automated Entra (Azure AD) app registration
+* MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
+* Minimal frontend
+
+## Prerequisites
+* Docker & Docker Compose
+* Azure CLI (`az`) logged in with rights to create an app registration
+
+## Run
+
+```bash
+./start.sh
+```
+
+Then open https://inxm.local
+
+## Cleanup
+
+```bash
+./stop.sh
+```

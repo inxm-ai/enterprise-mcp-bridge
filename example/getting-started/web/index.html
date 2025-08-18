@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>MCP REST Demo</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style id="pfusch-style">
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 0;
+            background: #101418;
+            color: #f5f7fa;
+        }
+
+        header {
+            padding: 1rem 1.5rem;
+            background: #182028;
+            border-bottom: 1px solid #24303c;
+            height: 5vh;
+        }
+
+        .chat-with-mcp {
+            display: flex;
+            flex-direction: column;
+            height: calc(90vh);
+            max-width: 860px;
+            margin: 0 auto;
+        }
+
+        .chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: .75rem;
+        }
+
+        .chat-message {
+            padding: .75rem 1rem;
+            border-radius: 8px;
+            line-height: 1.35;
+            white-space: pre-wrap;
+        }
+
+        .chat-message.user {
+            background: #29527a;
+            align-self: flex-end;
+        }
+
+        .chat-message.assistant {
+            background: #1f2a33;
+        }
+
+        .chat-message.tool {
+            background: #262f39;
+            font-family: monospace;
+            font-size: .85rem;
+        }
+
+        form.chat-input-form {
+            display: flex;
+            gap: .5rem;
+            padding: 1rem;
+            background: #182028;
+            border-top: 1px solid #24303c;
+        }
+
+        .chat-input-field {
+            flex: 1;
+            padding: .6rem .75rem;
+            border: 1px solid #314152;
+            border-radius: 6px;
+            background: #10161c;
+            color: #fff;
+        }
+
+        select,
+        button {
+            padding: .6rem .75rem;
+            border-radius: 6px;
+            border: 1px solid #314152;
+            background: #203040;
+            color: #fff;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h2>MCP REST + Keycloak + Entra Demo</h2>
+    </header>
+    <chat-with-mcp></chat-with-mcp>
+    <script type="module">
+        import { TGI } from "./chat.js";
+        import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';
+        pfusch("chat-with-mcp", { messages: [], availableTools: [], loading: false }, (state, trigger) => [
+            script(async () => {
+                state.availableTools = await fetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
+            }),
+            html.div({ class: 'chat-with-mcp' },
+                html.div({ class: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
+                html.form({
+                    class: 'chat-input-form', submit: async e => {
+                        e.preventDefault();
+                        const formData = new FormData(e.target);
+                        const input = formData.get('chat-input')?.trim() || "";
+                        const toolChoice = formData.get('tool-choice') || 'auto';
+                        if (!input) return;
+                        state.loading = true;
+                        state.streaming = "";
+                        // Add user message
+                        state.messages = [...state.messages, { role: 'user', content: input }];
+                        // Send to TGI
+                        try {
+                            tgiInstance = new TGI(state.availableTools, state.tool.url);
+                            const response = await tgiInstance.send(
+                                input,
+                                toolChoice,
+                                chunk => {
+                                    state.streaming += chunk;
+                                },
+                                message => {
+                                    state.messages = [...state.messages, message];
+                                }
+                            );
+                            // Remove streaming preview, add final assistant message
+                            state.messages = [...state.messages, { role: 'assistant', content: response }];
+                            state.streaming = "";
+                        } catch (err) {
+                            state.messages = [...state.messages, { role: 'assistant', content: `Error: ${err.message}` }];
+                            state.streaming = "";
+                        }
+                        state.loading = false;
+                    }
+                },
+                    html.input({ name: 'chat-input', class: 'chat-input-field', type: 'text', placeholder: 'Type message...' }),
+                    html.select({ name: 'tool-choice' },
+                        html.option({ value: 'none' }, 'Select tool'),
+                        ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
+                    ),
+                    html.button({ type: 'submit' }, 'Send')
+                )
+            )
+        ]);
+    </script>
+</body>
+
+</html>
