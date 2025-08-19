@@ -13,7 +13,7 @@ Most existing MCP examples are designed for local development or simple demos an
 * No simple way for integrating MCP components into REST-based microservice architectures.
 * Missing a consistent security model for handling delegated permissions (e.g., OAuth) for downstream resources.
 
-This project directly addresses these gaps.
+This project directly addresses these gaps. It's designed for enterprise production use, with a focus on security, scalability, and ease of integration. For small private deployments it's probably not the right fit.
 
 ## Key Capabilities
 
@@ -48,7 +48,7 @@ This project directly addresses these gaps.
 
 1. **Ad-hoc (stateless) tool calls**: POST to `/tools/{tool_name}` with arguments. A temporary MCP connection is created and torn down.
 2. **Managed sessions**: Start with `/session/start`, receive a session ID cookie (`x-inxm-mcp-session`). Subsequent tool calls reuse a persistent MCP process context.
-3. **Multi-user separation**: If an OAuth token is present (cookie `_oauth2_proxy`) it is appended internally to the session identifier to avoid collisions and enforce per-user isolation.
+3. **Multi-user separation**: If an OAuth token is present (default cookie `_oauth2_proxy`) it is appended internally to the session identifier to avoid collisions and enforce per-user isolation.
 4. **Automatic OAuth token propagation**: When a tool declares an `oauth_token` property in its JSON schema, the server injects a validated token value; clients need not send it explicitly.
 5. **Token exchange**: Incoming Keycloak token can be exchanged for a provider (e.g., Microsoft) token using `TokenRetrieverFactory` and exported into the MCP subprocess environment variable defined by `OAUTH_ENV`.
 
@@ -121,6 +121,9 @@ uvicorn app.server:app --reload
 | `KEYCLOAK_REALM`       | Keycloak realm                                      | inxm          |
 | `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path            | (required)    |
 | `MCP_SESSION_MANAGER`  | Implementation name (e.g., future Redis)            | InMemorySessionManager |
+| `TOKEN_NAME`           | Name of the cookie containing the OAuth token       | _oauth2_proxy |
+| `INCLUDE_TOOLS`        | Comma-separated list of tool name patterns to include | ""            |
+| `EXCLUDE_TOOLS`        | Comma-separated list of tool name patterns to exclude | ""            |
 
 ## Extending Session Management
 

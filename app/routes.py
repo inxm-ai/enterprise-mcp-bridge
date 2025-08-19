@@ -1,29 +1,45 @@
-
 import logging
 from fastapi import APIRouter, HTTPException, Header, Cookie, Request
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict
 import uuid
 import os
-from mcp import StdioServerParameters
 from .session import MCPLocalSessionTask, mcp_session, try_get_session_id, session_id
 from .session_manager import session_manager
-from .models import RunToolRequest, RunToolsResult
+from .models import RunToolsResult
 from .mcp_server import get_server_params
 from .oauth.decorator import decorate_args_with_oauth_token
-import sys
+from fnmatch import fnmatch
 
 router = APIRouter()
 sessions = session_manager()
 
 logger = logging.getLogger("uvicorn.error")
 
+TOKEN_NAME = os.environ.get("TOKEN_NAME", "_oauth2_proxy")
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
+INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
+EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
+
+def matches_pattern(value, pattern):
+    """Check if a value matches a glob-like pattern."""
+    return fnmatch(value, pattern)
 
 def map_tools(tools):
+    """Map tools with INCLUDE_TOOLS and EXCLUDE_TOOLS filters applied."""
     logger.info(f"[map_tools] Mapping tools: {tools}")
-    return [
-        {
+
+    filtered_tools = []
+    for tool in tools.tools:
+        include_match = any(matches_pattern(tool.name, pattern) for pattern in INCLUDE_TOOLS if pattern)
+        exclude_match = any(matches_pattern(tool.name, pattern) for pattern in EXCLUDE_TOOLS if pattern)
+        print(f"Tool: {tool.name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}")
+        if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
+            continue
+        if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
+            continue
+
+        filtered_tools.append({
             "name": tool.name,
             "title": tool.title,
             "description": tool.description,
@@ -32,16 +48,16 @@ def map_tools(tools):
             "annotations": tool.annotations,
             "meta": tool.meta,
             "url": f"{MCP_BASE_PATH}/tools/{tool.name}"
-        }
-        for tool in tools.tools
-    ]
+        })
+
+    return filtered_tools
 
 if MCP_BASE_PATH:
     router.prefix = MCP_BASE_PATH
 
 @router.get("/tools")
 async def list_tools(
-    oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
+    oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session")
 ):
@@ -70,7 +86,7 @@ async def run_tool(
     request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
-    oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
+    oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None, 
     ):
     x_inxm_mcp_session = session_id(
@@ -78,7 +94,7 @@ async def run_tool(
         oauth_token
     )
     if not oauth_token:
-        oauth_token = request.cookies.get("_oauth2_proxy", "")
+        oauth_token = request.cookies.get(TOKEN_NAME, "")
     if args and 'inxm-session' in args:
         args = dict(args)
         args.pop('inxm-session')
@@ -114,7 +130,7 @@ async def run_tool(
 
 @router.post("/session/start")
 async def start_session(
-    oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
+    oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
 ):
     x_inxm_mcp_session = session_id(str(uuid.uuid4()), oauth_token)
     mcp_task = MCPLocalSessionTask(get_server_params(oauth_token))
@@ -127,7 +143,7 @@ async def start_session(
 
 @router.post("/session/close")
 async def close_session(
-    oauth_token: Optional[str] = Cookie(None, alias="_oauth2_proxy"),
+    oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session")
 ):
