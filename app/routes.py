@@ -17,6 +17,7 @@ sessions = session_manager()
 logger = logging.getLogger("uvicorn.error")
 
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "_oauth2_proxy")
+SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
@@ -58,8 +59,8 @@ if MCP_BASE_PATH:
 @router.get("/tools")
 async def list_tools(
     oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
-    x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
-    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session")
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME)
 ):
     x_inxm_mcp_session = session_id(
         try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
@@ -84,8 +85,8 @@ async def list_tools(
 async def run_tool(
     tool_name: str,
     request: Request,
-    x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
-    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session"),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None, 
     ):
@@ -137,15 +138,15 @@ async def start_session(
     mcp_task.start()
     sessions.set(x_inxm_mcp_session, mcp_task)
     logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")
-    response = JSONResponse(content={"x-inxm-mcp-session": x_inxm_mcp_session})
-    response.set_cookie(key="x-inxm-mcp-session", value=x_inxm_mcp_session, httponly=True, samesite="lax")
+    response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
+    response.set_cookie(key=SESSION_FIELD_NAME, value=x_inxm_mcp_session, httponly=True, samesite="lax")
     return response
 
 @router.post("/session/close")
 async def close_session(
     oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
-    x_inxm_mcp_session_header: Optional[str] = Header(None, alias="x-inxm-mcp-session"),
-    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias="x-inxm-mcp-session")
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME)
 ):
     x_inxm_mcp_session = session_id(
         try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),

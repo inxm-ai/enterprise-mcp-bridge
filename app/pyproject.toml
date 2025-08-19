@@ -5,7 +5,7 @@ description = "Wrapper for MCP Clients to be called via REST on a platform"
 license = "GPL-3.0"
 authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]
 requires-python = ">=3.10"
-dependencies = ["httpx", "fastapi", "uvicorn", "mcp[cli]", "celery", "jwt", "requests"]
+dependencies = ["httpx", "fastapi", "uvicorn", "mcp[cli]", "celery", "jwt", "requests", "prometheus-fastapi-instrumentator"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

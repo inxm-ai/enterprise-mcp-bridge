@@ -111,19 +111,20 @@ uvicorn app.server:app --reload
 
 ## Environment Variables
 
-| Variable               | Purpose                                              | Default       |
-|------------------------|------------------------------------------------------|---------------|
-| `MCP_SERVER_COMMAND`   | Full command to launch MCP server                   | (unset)       |
-| `MCP_BASE_PATH`        | Prefix all routes (e.g., `/api/mcp`)                | ""            |
-| `OAUTH_ENV`            | Name of env var injected into MCP subprocess        | (unset)       |
-| `AUTH_PROVIDER`        | Token exchange provider selector (`keycloak`)       | keycloak      |
-| `AUTH_BASE_URL`        | Keycloak base URL for broker/token endpoints        | (required)    |
-| `KEYCLOAK_REALM`       | Keycloak realm                                      | inxm          |
-| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path            | (required)    |
-| `MCP_SESSION_MANAGER`  | Implementation name (e.g., future Redis)            | InMemorySessionManager |
-| `TOKEN_NAME`           | Name of the cookie containing the OAuth token       | _oauth2_proxy |
-| `INCLUDE_TOOLS`        | Comma-separated list of tool name patterns to include | ""            |
-| `EXCLUDE_TOOLS`        | Comma-separated list of tool name patterns to exclude | ""            |
+| Variable                  | Purpose                                               | Default                |
+| ------------------------- | ----------------------------------------------------- | ---------------------- |
+| `MCP_SERVER_COMMAND`      | Full command to launch MCP server                     | (unset)                |
+| `MCP_BASE_PATH`           | Prefix all routes (e.g., `/api/mcp`)                  | ""                     |
+| `OAUTH_ENV`               | Name of env var injected into MCP subprocess          | (unset)                |
+| `AUTH_PROVIDER`           | Token exchange provider selector (`keycloak`)         | keycloak               |
+| `AUTH_BASE_URL`           | Keycloak base URL for broker/token endpoints          | (required)             |
+| `KEYCLOAK_REALM`          | Keycloak realm                                        | inxm                   |
+| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path                | (required)             |
+| `MCP_SESSION_MANAGER`     | Implementation name (e.g., future Redis)              | InMemorySessionManager |
+| `SESSION_FIELD_NAME`      | Name of the header/cookie containing the session ID   | x-inxm-mcp-session    |
+| `TOKEN_NAME`              | Name of the cookie containing the OAuth token         | _oauth2_proxy          |
+| `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include | ""                     |
+| `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude | ""                     |
 
 ## Extending Session Management
 
