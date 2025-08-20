@@ -4,6 +4,7 @@ import types
 import pytest
 from app.mcp_server import server_params
 from mcp import StdioServerParameters
+from app.utils_tests.token_retriever_mock import mock_token_retriever_factory
 
 
 class DummyStdioServerParameters:
@@ -37,17 +38,14 @@ class DummyTokenRetrieverFactory:
         return DummyTokenRetriever(self.token_value)
 
 
-def test_oauth_env_set_with_token(monkeypatch):
+def test_oauth_env_set_with_token(monkeypatch, mock_token_retriever_factory):
     env = {"OAUTH_ENV": "OAUTH_TOKEN_VAR"}
     patch_module(monkeypatch, env=env)
-    dummy_token = "dummy-oauth-token-value"
-    monkeypatch.setattr(
-        server_params,
-        "TokenRetrieverFactory",
-        lambda: DummyTokenRetrieverFactory(dummy_token),
-    )
-    params = server_params.get_server_params(oauth_token="mytoken")
-    assert params.env["OAUTH_TOKEN_VAR"] == dummy_token
+
+    # Call get_server_params with access_token instead of oauth_token
+    params = server_params.get_server_params(access_token="test_access_token")
+    assert "OAUTH_TOKEN_VAR" in params.env
+    assert params.env["OAUTH_TOKEN_VAR"] == "test_access_token"
 
 
 def test_oauth_env_set_missing_token(monkeypatch):

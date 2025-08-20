@@ -25,6 +25,8 @@ def try_get_session_id(
 def session_id(base_id: str, oauth_token: Optional[str] = None) -> str:
     if base_id and oauth_token:
         return f"{base_id}:{oauth_token}"
+    if not base_id:
+        return None
     return base_id
 
 
@@ -45,29 +47,37 @@ class MCPSessionBase(ABC):
         self.request_queue = asyncio.Queue()
         self.response_queue = asyncio.Queue()
         self._task = None
+        self._ping_task = None  # Reference to the ping task
+        self._stop_event = asyncio.Event()  # Added stop event
 
     @abstractmethod
     async def run(self):
-        pass
+        pass  # pragma: no cover
 
     def start(self):
         logger.debug("[{}] Starting session task.".format(self.__class__.__name__))
         self._task = asyncio.create_task(self.run())
 
         async def ping_task():
-            while True:
-                await asyncio.sleep(10)
+            while self._stop_event.is_set():
+                await asyncio.sleep(1)
                 logger.debug(
                     "[{}] Sending periodic ping.".format(self.__class__.__name__)
                 )
                 await self.request_queue.put("ping")
 
-        asyncio.create_task(ping_task())
+        self._ping_task = asyncio.create_task(ping_task())  # Store the ping task
 
     async def stop(self):
-        logger.info("[{}] Stopping session task.".format(self.__class__.__name__))
+        logger.debug("[{}] Stopping session task.".format(self.__class__.__name__))
+        self._stop_event.set()
         await self.request_queue.put("close")
         if self._task:
+            logger.debug(
+                "[{}] Waiting for session task to finish.".format(
+                    self.__class__.__name__
+                )
+            )
             await self._task
 
     async def request(self, req):

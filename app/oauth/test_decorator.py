@@ -2,6 +2,7 @@ import pytest
 from fastapi import HTTPException
 from types import SimpleNamespace
 from app.oauth.decorator import decorate_args_with_oauth_token
+from app.utils_tests.token_retriever_mock import mock_token_retriever_factory
 
 
 class DummyTool:
@@ -16,7 +17,7 @@ class DummyTools:
 
 
 @pytest.mark.asyncio
-async def test_adds_oauth_token_when_required():
+async def test_adds_oauth_token_when_required(mock_token_retriever_factory):
     input_schema = {"properties": {"oauth_token": {"type": "string"}}}
     tool = DummyTool("test_tool", input_schema)
     tools = DummyTools([tool])
@@ -69,7 +70,7 @@ async def test_tool_not_found():
 
 
 @pytest.mark.asyncio
-async def test_args_none_initializes_dict():
+async def test_args_none_initializes_dict(mock_token_retriever_factory):
     input_schema = {"properties": {"oauth_token": {"type": "string"}}}
     tool = DummyTool("test_tool", input_schema)
     tools = DummyTools([tool])

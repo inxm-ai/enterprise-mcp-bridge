@@ -7,15 +7,15 @@ from app.session import MCPSessionBase
 class SessionManagerBase(ABC):
     @abstractmethod
     def get(self, session_id: str) -> MCPSessionBase | None:
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def set(self, session_id: str, session: MCPSessionBase):
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def pop(self, session_id: str, default=None) -> MCPSessionBase | None:
-        pass
+        pass  # pragma: no cover
 
 
 def session_manager(
