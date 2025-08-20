@@ -111,6 +111,7 @@
                         let toolChoice = formData.get('tool-choice') || 'auto';
                         if (toolChoice === 'none') toolChoice = 'auto';
                         if (!input) return;
+                        e.target.querySelector('input[name="chat-input"]').value = "";
                         state.loading = true;
                         state.streaming = "";
                         // Add user message
