@@ -10,6 +10,7 @@ from .models import RunToolsResult
 from .mcp_server import get_server_params
 from .oauth.decorator import decorate_args_with_oauth_token
 from fnmatch import fnmatch
+from opentelemetry import trace
 
 router = APIRouter()
 sessions = session_manager()
@@ -21,6 +22,8 @@ SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
+
+tracer = trace.get_tracer(__name__)
 
 def matches_pattern(value, pattern):
     """Check if a value matches a glob-like pattern."""
@@ -62,24 +65,26 @@ async def list_tools(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME)
 ):
-    x_inxm_mcp_session = session_id(
-        try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
-        oauth_token
-    )
-    logger.info(f"[Tools] Listing tools. Session: {x_inxm_mcp_session}")
-    if x_inxm_mcp_session is None:
-        async with mcp_session(get_server_params(oauth_token)) as session:
-            result = await session.list_tools()
-            logger.debug("[Tools] Tools listed without session.")
-            return map_tools(result)
+    with tracer.start_as_current_span("list_tools") as span:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            oauth_token
+        )
+        span.set_attribute("session.id", x_inxm_mcp_session)
+        logger.info(f"[Tools] Listing tools. Session: {x_inxm_mcp_session}")
+        if x_inxm_mcp_session is None:
+            async with mcp_session(get_server_params(oauth_token)) as session:
+                result = await session.list_tools()
+                logger.debug("[Tools] Tools listed without session.")
+                return map_tools(result)
 
-    mcp_task = sessions.get(x_inxm_mcp_session)
-    if not mcp_task:
-        logger.warning(f"[Tools] Session not found: {x_inxm_mcp_session}")
-        raise HTTPException(status_code=404, detail="Session not found")
-    result = await mcp_task.request("list_tools")
-    logger.debug(f"[Tools] Tools listed for session {x_inxm_mcp_session}.")
-    return map_tools(result)
+        mcp_task = sessions.get(x_inxm_mcp_session)
+        if not mcp_task:
+            logger.warning(f"[Tools] Session not found: {x_inxm_mcp_session}")
+            raise HTTPException(status_code=404, detail="Session not found")
+        result = await mcp_task.request("list_tools")
+        logger.debug(f"[Tools] Tools listed for session {x_inxm_mcp_session}.")
+        return map_tools(result)
 
 @router.post("/tools/{tool_name}")
 async def run_tool(
@@ -90,57 +95,61 @@ async def run_tool(
     oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None, 
     ):
-    x_inxm_mcp_session = session_id(
-        try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None),
-        oauth_token
-    )
-    if not oauth_token:
-        oauth_token = request.cookies.get(TOKEN_NAME, "")
-    if args and 'inxm-session' in args:
-        args = dict(args)
-        args.pop('inxm-session')
-    logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
-    if x_inxm_mcp_session is None:
-        async with mcp_session(get_server_params(oauth_token)) as session:
-            tools = await session.list_tools()
-            decorated_args = await decorate_args_with_oauth_token(tools, tool_name, args, oauth_token)
-            result = await session.call_tool(tool_name, decorated_args)
-            result = RunToolsResult(result)
-    else:
-        mcp_task = sessions.get(x_inxm_mcp_session)
-        if not mcp_task:
-            logger.warning(f"[Tool-Call] Session not found: {x_inxm_mcp_session}")
-            raise HTTPException(status_code=404, detail="Session not found. It might have expired, please start a new.")
+    with tracer.start_as_current_span("run_tool", attributes={"tool.name": tool_name}) as span:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie, args.get('inxm-session', None) if args else None),
+            oauth_token
+        )
+        span.set_attribute("session.id", x_inxm_mcp_session)
+        if not oauth_token:
+            oauth_token = request.cookies.get(TOKEN_NAME, "")
+        if args and 'inxm-session' in args:
+            args = dict(args)
+            args.pop('inxm-session')
+        logger.info(f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}")
+        if x_inxm_mcp_session is None:
+            async with mcp_session(get_server_params(oauth_token)) as session:
+                tools = await session.list_tools()
+                decorated_args = await decorate_args_with_oauth_token(tools, tool_name, args, oauth_token)
+                result = await session.call_tool(tool_name, decorated_args)
+                result = RunToolsResult(result)
         else:
-            tools = await mcp_task.request("list_tools")
-            decorated_args = await decorate_args_with_oauth_token(tools, tool_name, args, oauth_token)
-            result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": decorated_args}))
+            mcp_task = sessions.get(x_inxm_mcp_session)
+            if not mcp_task:
+                logger.warning(f"[Tool-Call] Session not found: {x_inxm_mcp_session}")
+                raise HTTPException(status_code=404, detail="Session not found. It might have expired, please start a new.")
+            else:
+                tools = await mcp_task.request("list_tools")
+                decorated_args = await decorate_args_with_oauth_token(tools, tool_name, args, oauth_token)
+                result = RunToolsResult(await mcp_task.request({"action": "run_tool", "tool_name": tool_name, "args": decorated_args}))
 
-    logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
-    if result.isError:
-        if "Unknown tool" in result.content[0].text:
-            logger.info(f"[Tool-Call] Tool not found: {tool_name}")
-            raise HTTPException(status_code=404, detail=str(result))
-        if "validation error" in result.content[0].text:
-            logger.info(f"[Tool-Call] Tool called with invalid parameters: {tool_name}. Result: {result}")
-            raise HTTPException(status_code=400, detail=str(result))
+        logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
+        if result.isError:
+            if "Unknown tool" in result.content[0].text:
+                logger.info(f"[Tool-Call] Tool not found: {tool_name}")
+                raise HTTPException(status_code=404, detail=str(result))
+            if "validation error" in result.content[0].text:
+                logger.info(f"[Tool-Call] Tool called with invalid parameters: {tool_name}. Result: {result}")
+                raise HTTPException(status_code=400, detail=str(result))
 
-        logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
-        raise HTTPException(status_code=500, detail=str(result))
-    return result
+            logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
+            raise HTTPException(status_code=500, detail=str(result))
+        return result
 
 @router.post("/session/start")
 async def start_session(
     oauth_token: Optional[str] = Cookie(None, alias=TOKEN_NAME),
 ):
-    x_inxm_mcp_session = session_id(str(uuid.uuid4()), oauth_token)
-    mcp_task = MCPLocalSessionTask(get_server_params(oauth_token))
-    mcp_task.start()
-    sessions.set(x_inxm_mcp_session, mcp_task)
-    logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")
-    response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
-    response.set_cookie(key=SESSION_FIELD_NAME, value=x_inxm_mcp_session, httponly=True, samesite="lax")
-    return response
+    with tracer.start_as_current_span("start_session") as span:
+        x_inxm_mcp_session = session_id(str(uuid.uuid4()), oauth_token)
+        span.set_attribute("session.id", x_inxm_mcp_session)
+        mcp_task = MCPLocalSessionTask(get_server_params(oauth_token))
+        mcp_task.start()
+        sessions.set(x_inxm_mcp_session, mcp_task)
+        logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")
+        response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
+        response.set_cookie(key=SESSION_FIELD_NAME, value=x_inxm_mcp_session, httponly=True, samesite="lax")
+        return response
 
 @router.post("/session/close")
 async def close_session(
@@ -148,17 +157,19 @@ async def close_session(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME)
 ):
-    x_inxm_mcp_session = session_id(
-        try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
-        oauth_token
-    )
-    if x_inxm_mcp_session is None:
-        logger.warning("[Session] Session header missing on close.")
-        raise HTTPException(status_code=400, detail="Session header missing")
-    mcp_task = sessions.pop(x_inxm_mcp_session, None)
-    if not mcp_task:
-        logger.warning(f"[Session] Session not found on close: {x_inxm_mcp_session}")
-        raise HTTPException(status_code=404, detail="Session not found")
-    await mcp_task.stop()
-    logger.debug(f"[Session] Session closed: {x_inxm_mcp_session}")
-    return {"status": "closed"}
+    with tracer.start_as_current_span("close_session") as span:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            oauth_token
+        )
+        span.set_attribute("session.id", x_inxm_mcp_session)
+        if x_inxm_mcp_session is None:
+            logger.warning("[Session] Session header missing on close.")
+            raise HTTPException(status_code=400, detail="Session header missing")
+        mcp_task = sessions.pop(x_inxm_mcp_session, None)
+        if not mcp_task:
+            logger.warning(f"[Session] Session not found on close: {x_inxm_mcp_session}")
+            raise HTTPException(status_code=404, detail="Session not found")
+        await mcp_task.stop()
+        logger.debug(f"[Session] Session closed: {x_inxm_mcp_session}")
+        return {"status": "closed"}
