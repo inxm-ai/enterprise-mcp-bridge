@@ -9,11 +9,11 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 import os
 
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Info
 
 app = FastAPI()
 instrumentator = Instrumentator()
 
-# Configure Prometheus
 instrumentator.instrument(app).expose(app)
 
 # Configure the tracer provider for OTLP
@@ -30,5 +30,9 @@ if otlp_endpoint:
     span_processor = BatchSpanProcessor(otlp_exporter)
     tracer_provider.add_span_processor(span_processor)
 FastAPIInstrumentor.instrument_app(app)
+
+# Add app_name to the metrics
+app_info = Info('fastapi_app_info', 'Application Info')
+app_info.info({'app_name': SERVICE_NAME})
 
 app.include_router(router)

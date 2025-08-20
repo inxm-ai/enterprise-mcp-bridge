@@ -2,12 +2,22 @@ from fastapi import HTTPException
 import logging
 from typing import Dict, Optional
 
+from app.oauth.token_exchange import TokenRetrieverFactory
+
 
 logger = logging.getLogger("uvicorn.error")
 
-async def decorate_args_with_oauth_token(tools, tool_name, args: Optional[Dict], oauth_token: Optional[str]) -> Dict:
+async def decorate_args_with_oauth_token(tools, tool_name, args: Optional[Dict], access_token: Optional[str]) -> Dict:
     tool_info = next((tool for tool in tools.tools if tool.name == tool_name), None)
 
+    oauth_token = None
+    if access_token:
+        retriever = TokenRetrieverFactory().get()
+        token_result = retriever.retrieve_token(access_token)
+        if not token_result or "access_token" not in token_result:
+            raise ValueError(f"Token retrieval failed with access_token: {access_token}")
+        oauth_token = token_result["access_token"]
+    
     if args is None:
         args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}

@@ -30,6 +30,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
         self.keycloak_base_url = os.getenv("AUTH_BASE_URL")
         self.realm = os.getenv("KEYCLOAK_REALM", "inxm")
         self.provider_alias = os.getenv("KEYCLOAK_PROVIDER_ALIAS")
+        self.allow_unsafe_cert = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
         self.logger = logger
 
     def retrieve_token(self, keycloak_token: str) -> Dict[str, Any]:
@@ -82,7 +83,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             "Authorization": f"Bearer {keycloak_token}",
             "Accept": "application/json"
         }
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, verify=not self.allow_unsafe_cert)
         self.logger.info(f"Requesting {self.provider_alias} token from Keycloak: {response.status_code}")
         if response.status_code == 200:
             return response.json()
@@ -99,16 +100,15 @@ class KeyCloakTokenRetriever(TokenRetriever):
         if not access_token:
             return True
         try:
-            payload = jwt.decode(access_token, options={"verify_signature": False})
+            payload = jwt.decode(access_token, options={"verify_signature": False}, algorithms=["HS256"])
             exp_timestamp = payload.get("exp")
             if exp_timestamp:
                 exp_time = datetime.fromtimestamp(exp_timestamp)
                 return exp_time <= datetime.now() + timedelta(seconds=60)
             else:
                 return True
-        except jwt.InvalidTokenError:
-            return True
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"Failed to decode access token: {str(e)}")
             return True
 
     def _refresh_provider_token(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -125,7 +125,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
-        response = requests.post(url, data=payload, headers=headers)
+        response = requests.post(url, data=payload, headers=headers, verify=not self.allow_unsafe_cert)
         self.logger.info(f"Refreshing {self.provider_alias} token: {response.status_code}")
         if response.status_code == 200:
             refreshed_tokens = response.json()
@@ -168,7 +168,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             "Accept": "application/json",
             "Cache-Control": "no-cache"
         }
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, verify=not self.allow_unsafe_cert)
         self.logger.info(f"Force refreshing {self.provider_alias} token from Keycloak: {response.status_code}")
         if response.status_code == 200:
             return response.json()

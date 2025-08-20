@@ -6,9 +6,27 @@ from mcp import StdioServerParameters
 from app.oauth.token_exchange import TokenRetrieverFactory
 
 logger = logging.getLogger("uvicorn.error")
-def get_server_params(oauth_token: Optional[str] = None) -> StdioServerParameters:
+
+def defined_env(env: dict[str, str], access_token: Optional[str] = None) -> dict[str, str]:
+    oauth_env_var = env.get("OAUTH_ENV")
+    if oauth_env_var:
+        if not access_token:
+            raise ValueError("access_token required when OAUTH_ENV is set")
+        logger.info(f"Using OAUTH_ENV: {oauth_env_var} for token retrieval")
+        retriever = TokenRetrieverFactory().get()
+        logger.info(f"Retrieving token for {oauth_env_var} using TokenRetriever")
+        token_result = retriever.retrieve_token(access_token)
+        if not token_result or "access_token" not in token_result:
+            raise ValueError(f"Token retrieval failed for {oauth_env_var} with access_token: {access_token}")
+        logger.info(f"Server-Params from OAUTH_ENV: {oauth_env_var}={token_result['access_token']}")
+        env[oauth_env_var] = token_result["access_token"]
+    else:
+        logger.info("No OAUTH_ENV set, using default environment variables")
+    return env
+
+def get_server_params(access_token: Optional[str] = None) -> StdioServerParameters:
     env_command = os.environ.get("MCP_SERVER_COMMAND")
-    env = os.environ.copy()
+    env = defined_env(os.environ.copy(), access_token)
     if env_command:
         import shlex
         parts = shlex.split(env_command)
@@ -16,15 +34,6 @@ def get_server_params(oauth_token: Optional[str] = None) -> StdioServerParameter
         cmd_args = parts[1:]
         logger.info(f"Server-Params from MCP_SERVER_COMMAND: command={command}, args={cmd_args}")
         return StdioServerParameters(command=command, args=cmd_args, env=env)
-
-    # OAUTH_ENV logic
-    oauth_env_var = env.get("OAUTH_ENV")
-    if oauth_env_var:
-        if not oauth_token:
-            raise ValueError("oauth_token required when OAUTH_ENV is set")
-        retriever = TokenRetrieverFactory().get()
-        token_result = retriever.retrieve_token(oauth_token)
-        env[oauth_env_var] = token_result["access_token"]
 
     # Fallback: parse sys.argv for --
     args = {}

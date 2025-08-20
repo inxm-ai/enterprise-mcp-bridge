@@ -11,7 +11,7 @@ dependencies = [
     "uvicorn",
     "mcp[cli]",
     "celery",
-    "jwt",
+    "PyJWT",
     "requests",
     "prometheus-fastapi-instrumentator",
     "opentelemetry-api",
@@ -30,7 +30,8 @@ classifiers = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "pyjwt"
+    "pyjwt",
+    "httpx"
 ]
 
 [build-system]
