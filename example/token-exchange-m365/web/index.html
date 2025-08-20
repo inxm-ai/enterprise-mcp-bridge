@@ -94,11 +94,12 @@
     </header>
     <chat-with-mcp></chat-with-mcp>
     <script type="module">
+        import { otelFetch } from "./otelFetch.js";
         import { TGI } from "./chat.js";
         import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';
         pfusch("chat-with-mcp", { messages: [], availableTools: [], loading: false }, (state, trigger) => [
             script(async () => {
-                state.availableTools = await fetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
+                state.availableTools = await otelFetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
             }),
             html.div({ class: 'chat-with-mcp' },
                 html.div({ class: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
@@ -107,7 +108,8 @@
                         e.preventDefault();
                         const formData = new FormData(e.target);
                         const input = formData.get('chat-input')?.trim() || "";
-                        const toolChoice = formData.get('tool-choice') || 'auto';
+                        let toolChoice = formData.get('tool-choice') || 'auto';
+                        if (toolChoice === 'none') toolChoice = 'auto';
                         if (!input) return;
                         state.loading = true;
                         state.streaming = "";
@@ -115,7 +117,7 @@
                         state.messages = [...state.messages, { role: 'user', content: input }];
                         // Send to TGI
                         try {
-                            tgiInstance = new TGI(state.availableTools, state.tool.url);
+                            const tgiInstance = new TGI(state.availableTools, "https://inxm.local/api/mcp/m365/tools");
                             const response = await tgiInstance.send(
                                 input,
                                 toolChoice,

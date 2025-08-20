@@ -1,3 +1,6 @@
+import { otelFetch, trace, context } from "./otelFetch.js";
+
+
 function inlineSchema(schema, topLevelSchema, seen = new Set()) {
   // If the schema is not an object or is null, return it as is.
   if (typeof schema !== 'object' || schema === null) {
@@ -78,7 +81,7 @@ function mapTools(tools) {
   });
 }
 const onExecuteTool = (mcpServer) => async (toolName, toolArgs) => {
-    const res = await fetch(`${mcpServer}/${toolName}`, {
+    const res = await otelFetch(`${mcpServer}/${toolName}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -93,11 +96,12 @@ const onExecuteTool = (mcpServer) => async (toolName, toolArgs) => {
 
 export class TGI {
     
-    constructor(toolDetails, mcpServer, tgiUrl = '/api/tgi/model/v1/chat/completions') {
+    constructor(toolDetails, mcpServer, tgiUrl = '/api/tgi/chat/completions') {
         this.tools = mapTools(toolDetails);
         this.url = tgiUrl;
         this.onExecuteTool = onExecuteTool(mcpServer);
         this.messages = []; // Stores the conversation history for a session
+        this.tracer = trace.getTracer('chat-tracer');
     }
 
     /**
@@ -115,79 +119,101 @@ export class TGI {
      * @returns {Promise<string>} A promise that resolves with the final text response from the assistant.
      */
     async send(prompt, toolChoice = 'auto', onStream = () => {}, newMessage = () => {}) {
-        // Add the user's new prompt to the history
+        // Start a parent span for the entire chat session
+        const parentSpan = this.tracer.startSpan('chat-session', {
+            attributes: {
+                'chat.prompt': prompt,
+                'otel.scope.name': 'chat-tracer',
+                'otel.scope.version': '1.0.0',
+            },
+        });
+
+        // Set the parent span as the active context
+        const parentContext = trace.setSpan(context.active(), parentSpan);
+
         this.messages.push({ role: 'user', content: prompt });
 
-        // The main loop to handle the conversation, including multiple tool calls if needed.
-        while (true) {
-            toolChoice = toolChoice !== 'auto'
-                ? { type: "function", function: { name: toolChoice } }
-                : "auto";
+        try {
+            while (true) {
+                toolChoice = toolChoice !== 'auto'
+                    ? { type: "function", function: { name: toolChoice } }
+                    : "auto";
 
-            // Get the assistant's response (which could be text or a tool call)
-            const assistantMessage = await this._chat(this.messages, {
-                toolChoice,
-                onStream,
-            });
+                // Get the response (text or a tool call)
+                const assistantMessage = await context.with(parentContext, async () => {
+                    return this._chat(this.messages, {
+                        toolChoice,
+                        onStream,
+                    });
+                });
 
-            // Add the assistant's response to the history
-            if (assistantMessage) {
-                 this.messages.push(assistantMessage);
-            }
+                console.log("Assistant message:", assistantMessage);
 
-            // If the response was a tool call, handle it
-            if (assistantMessage && assistantMessage.tool_calls) {
-                if (!this.onExecuteTool) {
-                    throw new Error("Model requested a tool call, but no 'onExecuteTool' callback was provided in the TGI constructor.");
+                if (assistantMessage) {
+                    this.messages.push(assistantMessage);
                 }
 
-                const toolResults = await Promise.all(
-                    assistantMessage.tool_calls.map(async (toolCall) => {
-                        const toolName = toolCall.function.name;
-                        const toolArgs = JSON.parse(toolCall.function.arguments);
+                // If the response was a tool call, handle it
+                if (assistantMessage && assistantMessage.tool_calls) {
+                    if (!this.onExecuteTool) {
+                        throw new Error("Model requested a tool call, but no 'onExecuteTool' callback was provided in the TGI constructor.");
+                    }
 
-                        let messages = (this.messages.length > 5) ? [this.messages[0], ...this.messages.slice(-4)] : this.messages;
-                        const userMessage = `${messages.map(m => m.content ?? m.tool_calls.map(tc => `${tc.function.name}(${Object.entries(JSON.parse(tc.function.arguments)).map(([k, v]) => `${k}:${v}`).join(', ')})`)).join('\n\n')}`;
-                        console.log(`getting more information for tool call: ${toolName} with args:`, toolArgs, "from user message:", userMessage);
-                        const reason = await this._chat([
-                            { role: 'system', content: `You're an expert explaining why a tool will be called! Take the user information on the current history and come back with a super short 1 sentences 10 words max explainer on why the last tool chosen was based on previous data. If there are no results yet then this is the first tool call. Explain why to start with that.` },
-                            { role: 'user', content: userMessage }
-                        ]);
-                        newMessage({
-                            role: "thinking",
-                            content: reason.content,
-                        });
-                        
-                        // Execute the tool using the provided callback
-                        const result = await this.onExecuteTool(toolName, toolArgs);
+                    const toolResults = await Promise.all(
+                        assistantMessage.tool_calls.map(async (toolCall) => {
+                            const toolName = toolCall.function.name;
+                            const toolArgs = JSON.parse(toolCall.function.arguments);
 
-                        const jsonResult = typeof result === 'string' ? JSON.parse(result) : result;
+                            // Start a child span for the tool call
+                            const toolSpan = this.tracer.startSpan(`tool-call:${toolName}`, {
+                                attributes: {
+                                    'tool.name': toolName,
+                                    'tool.args': JSON.stringify(toolArgs),
+                                },
+                                parent: parentSpan,
+                            });
 
-                        return {
-                            role: 'tool',
-                            tool_call_id: toolCall.id,
-                            name: toolName,
-                            content: JSON.stringify(jsonResult.structuredContent || jsonResult.content || result),
-                        };
-                    })
-                );
-                
-                // Add all tool results to the message history and continue the loop
-                this.messages.push(...toolResults);
-                // Continue to the next iteration to get the final text response
-                
-            } else {
-                // If there were no tool calls, the conversation is done for this turn.
-                // Return the final text content.
-                return assistantMessage ? assistantMessage.content : "";
+                            try {
+                                // Execute the tool using the provided callback
+                                const result = await context.with(trace.setSpan(parentContext, toolSpan), async () => {
+                                    return this.onExecuteTool(toolName, toolArgs);
+                                });
+                                const jsonResult = typeof result === 'string' ? JSON.parse(result) : result;
+
+                                return {
+                                    role: 'tool',
+                                    tool_call_id: toolCall.id,
+                                    name: toolName,
+                                    content: JSON.stringify(jsonResult.structuredContent || jsonResult.content || result),
+                                };
+                            } finally {
+                                toolSpan.end();
+                            }
+                        })
+                    );
+
+                    // Add all tool results to the message history and continue the loop
+                    this.messages.push(...toolResults);
+                    // Continue to the next iteration to get the final text response
+
+                } else {
+                    // If there were no tool calls, the conversation is done for this turn.
+                    // Return the final text content.
+                    return assistantMessage ? assistantMessage.content : "";
+                }
             }
+        } catch (error) {
+            parentSpan.setAttribute('error', true);
+            parentSpan.setStatus({
+                code: 2, // SpanStatusCode.ERROR
+                message: error.message,
+            });
+            throw error;
+        } finally {
+            parentSpan.end();
         }
     }
 
-    /**
-     * Private method to make a single fetch request and process the streaming response.
-     * @private
-     */
     async _chat(messages, options) {
         const { toolChoice, onStream = () => {} } = options || { toolChoice: 'none', onStream: () => {} };
 
@@ -200,10 +226,12 @@ export class TGI {
             messages,
             tools: this.tools,
             tool_choice: toolChoice,
+            model: "Qwen/Qwen3-Coder-480B-A35B-Instruct:fireworks-ai",
+            max_tokens: 16384,
             stream: true,
         };
 
-        const response = await fetch(this.url, {
+        const response = await otelFetch(this.url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
             credentials: 'include',
@@ -218,7 +246,7 @@ export class TGI {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        
+
         let fullContent = '';
         let toolCalls = [];
 
@@ -234,13 +262,14 @@ export class TGI {
                 if (line.startsWith('data: ')) {
                     const data = line.substring(6);
                     if (data.trim() === '[DONE]') break;
-                    
+
                     try {
+                        console.log("Streaming data:", data);
                         const chunk = JSON.parse(data);
                         if (chunk.error) {
-                            onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`);
-                            fullContent += `[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`;
-                            break;
+                          onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`);
+                          fullContent += `[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`;
+                          break;
                         }
 
                         const delta = chunk.choices[0].delta;
@@ -251,15 +280,15 @@ export class TGI {
                         }
 
                         if (delta.tool_calls) {
-                            delta.tool_calls.forEach(tcDelta => {
-                                if (toolCalls.length <= tcDelta.index) {
-                                    toolCalls.push({ id: '', type: 'function', function: { name: '', arguments: '' } });
-                                }
-                                const currentTool = toolCalls[tcDelta.index];
-                                if (tcDelta.id) currentTool.id = tcDelta.id;
-                                if (tcDelta.function.name) currentTool.function.name = tcDelta.function.name;
-                                if (tcDelta.function.arguments) currentTool.function.arguments += tcDelta.function.arguments;
-                            });
+                          delta.tool_calls.forEach(tcDelta => {
+                            if (toolCalls.length <= tcDelta.index) {
+                              toolCalls.push({ id: '', type: 'function', function: { name: '', arguments: '' } });
+                            }
+                            const currentTool = toolCalls[tcDelta.index];
+                            if (tcDelta.id) currentTool.id = tcDelta.id;
+                            if (tcDelta.function.name) currentTool.function.name = tcDelta.function.name;
+                            if (tcDelta.function.arguments) currentTool.function.arguments += tcDelta.function.arguments;
+                          });
                         }
                     } catch (error) {
                         console.error('Error parsing stream data chunk:', error, 'Chunk:', data);
@@ -267,12 +296,12 @@ export class TGI {
                 }
             }
         }
-        
+
         const finalMessage = { role: 'assistant', content: fullContent || null };
         if (toolCalls.length > 0) {
             finalMessage.tool_calls = toolCalls;
         }
-        
+
         return finalMessage.content === null && toolCalls.length === 0 ? null : finalMessage;
     }
 }

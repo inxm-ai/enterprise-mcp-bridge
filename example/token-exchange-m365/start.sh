@@ -26,7 +26,7 @@ KEYCLOAK_DOMAIN=auth.inxm.local
 ENV_FILE=.env
 
 retry_command() {
-  local retries=5
+  local retries=10
   local wait_time=2
   local attempt=1
 
@@ -73,6 +73,7 @@ EOF
   source "$ENV_FILE"
 
   echo -e "${INFO}🔍 Checking for existing Service Principal...${RESET}"
+  GRAPH_API_ID="00000003-0000-0000-c000-000000000000"
   SERVICE_PRINCIPAL_ID=$(az ad sp show --id "$APP_ID" --query "id" -o tsv 2>/dev/null || echo "")
 
   if [ -z "$SERVICE_PRINCIPAL_ID" ]; then
@@ -82,16 +83,86 @@ EOF
   else
       echo -e "${GREEN}✔${RESET} Service Principal already exists"
   fi
+  permission_scopes=(
+      "User.Read"
+      "MailboxSettings.Read"
+      "Mail.Read"
+  )
+  get_permission_id() {
+    local permission_name="$1"
+    az ad sp show \
+      --id "$GRAPH_API_ID" \
+      --query "oauth2PermissionScopes[?value=='$permission_name'].id" \
+      -o tsv
+  }
+
+  echo -e "For this demo, the following permissions will be granted: ${permission_scopes[*]}"
   echo -e "${INFO}🔧${RESET} Adding API permissions to the app..."
-  az ad app permission add --id "$APP_ID" --api 00000003-0000-0000-c000-000000000000 --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope
+  for scope in "${permission_scopes[@]}"; do
+    PERMISSION_ID=$(get_permission_id "$scope")
+    if [ -n "$PERMISSION_ID" ]; then
+        echo "Adding delegated permission: $scope (ID: $PERMISSION_ID)"
+        az ad app permission add \
+          --id "$APP_ID" \
+          --api "$GRAPH_API_ID" \
+          --api-permissions "$PERMISSION_ID"=Scope
+    else
+        echo "Warning: Could not find a GUID for permission: $scope"
+    fi
+  done
+
   echo -e "${GREEN}✔${RESET} Granting API permissions"
-  az ad app permission grant --id "$SERVICE_PRINCIPAL_ID" --api 00000003-0000-0000-c000-000000000000 --scope "openid profile email offline_access User.Read" 
-  echo -e "${INFO}🔑${RESET} Add admin consent"
+  az ad app permission grant --id "$SERVICE_PRINCIPAL_ID" --api "$GRAPH_API_ID" --scope "openid profile email offline_access ${permission_scopes[*]}" 
+  echo -e "${INFO}🔑${RESET} Add admin consent - Note, this may fail on the first tries as the other things are still applied. It will retry automatically"
   retry_command az ad app permission admin-consent --id "$APP_ID"
   if [ $? -ne 0 ]; then
     exit 1
   fi
+
+  echo -e "${INFO}🔧 Enabling access and ID tokens for the app...${RESET}"
+  az rest --method PATCH --uri "https://graph.microsoft.com/v1.0/applications/$(az ad app show --id $APP_ID --query id -o tsv)" \
+  --headers "Content-Type=application/json" \
+  --body '{
+    "web": {
+      "implicitGrantSettings": {
+        "enableAccessTokenIssuance": true,
+        "enableIdTokenIssuance": true
+      }
+    }
+  }'
+  echo -e "${GREEN}✔${RESET} Access and ID tokens enabled"
 fi
+
+if ! grep -q API_TOKEN "$ENV_FILE" 2>/dev/null; then
+  echo "⚠️ This demo needs an openai api compatible llm provider with api token"
+  echo "    It is shipped with a dummy-llm that will just select one tool as fallback"
+
+  read -p "Enter the base url for your OpenAI-compatible service (leave empty for fallback): " BASE_URL
+  echo >> "$ENV_FILE"
+  if [ -z "$BASE_URL" ]; then
+    BASE_URL="http://dummy-llm:5000/v1"
+    
+    echo "OAI_BASE_URL=$BASE_URL" >> "$ENV_FILE"
+    echo "OAI_HOST=dummy-llm" >> "$ENV_FILE"
+    echo "OAI_API_TOKEN=none" >> "$ENV_FILE"
+    echo "OAI_MODEL_NAME=none" >> "$ENV_FILE"
+    echo -e "${GREEN}✔${RESET} Dummy-LLM added to .env"
+  else
+    echo "OAI_BASE_URL=$BASE_URL" >> "$ENV_FILE"
+
+    read -p "Enter the API token for OpenAI-compatible services: " API_TOKEN
+    echo "OAI_API_TOKEN=$API_TOKEN" >> "$ENV_FILE"
+
+    OAI_HOST=$(echo "$BASE_URL" | awk -F[/:] '{print $4}')
+    echo "OAI_HOST=$OAI_HOST" >> "$ENV_FILE"
+
+    read -p "Model Name for OpenAI-compatible service: " MODEL_NAME
+    echo "OAI_MODEL_NAME=$MODEL_NAME" >> "$ENV_FILE"
+
+    echo -e "${GREEN}✔${RESET} BASEURL & API token added to .env"
+  fi
+fi
+source "$ENV_FILE"
 
 echo -e "${INFO}🔄 Rendering Keycloak realm export...${RESET}"
 mkdir -p keycloak/realm-export
@@ -207,4 +278,5 @@ echo -e "${INFO}===========================================${RESET}"
 echo
 echo -e "Open the page via:  ${INFO}https://$FRONTEND_DOMAIN${RESET}"
 echo -e "See all MCP Tools:  ${INFO}https://$FRONTEND_DOMAIN/api/mcp/m365/tools${RESET}"
+echo -e "See what you did:   ${INFO}https://$FRONTEND_DOMAIN/ops/jaeger${RESET}"
 echo -e "Login via Keycloak -> Entra provider (ms365), then invoke tools."

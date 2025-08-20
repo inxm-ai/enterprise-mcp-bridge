@@ -26,7 +26,7 @@ source "$ENV_FILE"
 
 # Stop and remove Docker containers
 echo -e "${INFO}🔄 Stopping and removing Docker containers...${RESET}"
-docker compose down || { echo -e "${RED}❌ Failed to stop Docker containers.${RESET}"; exit 1; }
+docker compose down -t 0 || { echo -e "${RED}❌ Failed to stop Docker containers.${RESET}"; exit 1; }
 
 # Clean up /etc/hosts
 echo -e "${INFO}🔄 Cleaning up /etc/hosts...${RESET}"

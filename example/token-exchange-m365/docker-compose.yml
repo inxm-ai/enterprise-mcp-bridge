@@ -1,6 +1,23 @@
 services:
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:latest
+    container_name: ops.jaeger
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_HTTP_ENABLED=true
+    networks:
+      - private
+    command: "--set extensions.jaeger_query.base_path=/ops/jaeger"
+
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.2
+    container_name: auth.keycloak
     command: >
       start-dev --import-realm --hostname="auth.inxm.local" --https-port=443 --proxy=edge --hostname-strict=false --hostname-strict-https=false --hostname-strict-backchannel=false
     environment:
@@ -22,8 +39,10 @@ services:
       - private
 
   oauth2-proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.4.0
+    container_name: auth.oauth2-proxy
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
     environment:
+      OAUTH2_PROXY_LOG_LEVEL: debug
       OAUTH2_PROXY_PROVIDER: "keycloak-oidc"
       OAUTH2_PROXY_CLIENT_ID: "frontend-client"
       OAUTH2_PROXY_CLIENT_SECRET: "this-is-not-a-secret"
@@ -34,27 +53,40 @@ services:
       OAUTH2_PROXY_EMAIL_DOMAINS: "*"
       OAUTH2_PROXY_OIDC_ISSUER_URL: "https://auth.inxm.local/realms/inxm"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: "redis://redis:6379"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_PASS_BASIC_AUTH: "false"
+      OAUTH2_PROXY_COOKIE_REFRESH: "5m"
+      OAUTH2_PROXY_COOKIE_EXPIRE: "60m"
+      OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY: "true"
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:3098"
+      OAUTH2_PROXY_UPSTREAM_TIMEOUT: "30s"
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true"
+      OAUTH2_PROXY_SET_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_SESSION_STORE_TYPE: "redis"
+      OAUTH2_PROXY_OIDC_EXTRA_PARAMS: "kc_idp_hint=ms365"
     ports:
-      - "3000:3000"
+      - "3098:3098"
     depends_on:
       keycloak:
         condition: service_healthy
       app-nginx:
         condition: service_healthy
-      application-ingress:
+      ingress:
         condition: service_healthy
-    command:
-      - "--http-address=0.0.0.0:3000"
-      - "--cookie-secure=false"
-      - "--upstream-timeout=30s"
-      - "--ssl-insecure-skip-verify"
+      redis:
+        condition: service_started
+
     networks:
       - private
 
   app-nginx:
-    image: nginx:latest
-    volumes:
-      - ./nginx/app-nginx.conf:/etc/nginx/nginx.conf:ro
+    container_name: app.ingress
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile.nginx-with-otel
     ports:
       - "3099:3099"
     healthcheck:
@@ -66,10 +98,15 @@ services:
     depends_on:
       - app-frontend
       - app-mcp-rest
+    environment:
+      - OAI_HOST=${OAI_HOST}
+      - OAI_BASE_URL=${OAI_BASE_URL}
+      - OAI_API_TOKEN=${OAI_API_TOKEN}
     networks:
       - private
 
   app-frontend:
+    container_name: app.frontend
     image: node:22-alpine
     working_dir: /usr/src/app
     command: sh -c "npx --yes http-server -p 3001 ."
@@ -85,26 +122,35 @@ services:
       - private
   
   app-mcp-rest:
+    container_name: app.mcp-m365-rest-server
     image: inxm-ai/mcp-rest-server:latest
     environment:
+      SERVICE_NAME: mcp-m365-rest-server
       MCP_SERVER_COMMAND: npx -y @softeria/ms-365-mcp-server --org-mode
       OAUTH_ENV: MS365_MCP_OAUTH_TOKEN
       AUTH_PROVIDER: keycloak
-      AUTH_BASE_URL: http://keycloak:8080
+      AUTH_ALLOW_UNSAFE_CERT: true
+      AUTH_BASE_URL: https://auth.inxm.local
       KEYCLOAK_REALM: inxm
       KEYCLOAK_PROVIDER_ALIAS: ms365
       MCP_BASE_PATH: /api/mcp/m365
+      EXCLUDE_TOOLS: login,logout,verify-login
+      INCLUDE_TOOLS: "*mail*"
+      OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       keycloak:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     ports:
-      - "3002:8000"
+      - "8000:8000"
     labels:
       - "oauth2-proxy.enable=true"
     networks:
       - private
 
-  application-ingress:
+  ingress:
+    container_name: ingress
     image: nginx:latest
     volumes:
       - ./nginx/ingress-nginx.conf:/etc/nginx/nginx.conf:ro
@@ -130,8 +176,60 @@ services:
           - inxm.local
           - auth.inxm.local
 
+  redis:
+    container_name: auth.redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - private
+
+  dummy-llm:
+    container_name: dummy.llm
+    build:
+      context: ./dummy-llm
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    networks:
+      - private
+
+  grafana:
+    container_name: ops.grafana
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SERVER_ROOT_URL=https://inxm.local/ops/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - private
+
+  prometheus:
+    container_name: ops.prometheus
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command: --config.file=/etc/prometheus/prometheus.yml
+    networks:
+      - private
+
 networks:
   default:
     name: mcp-rest-demo-net
   private:
     name: mcp-rest-private-net
+
+volumes:
+  grafana-data:
+    driver: local

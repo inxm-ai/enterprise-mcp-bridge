@@ -45,10 +45,14 @@ sequenceDiagram
 * Automated Entra (Azure AD) app registration
 * MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
 * Minimal frontend
+* Tracing via Jaeger
+* Monitoring via Prometheus
 
 ## Prerequisites
 * Docker & Docker Compose
-* Azure CLI (`az`) logged in with rights to create an app registration
+* Azure CLI (`az`)
+* A free Entra test account (create it [here](https://learn.microsoft.com/sk-sk/entra/verified-id/how-to-create-a-free-developer-account))
+* A valid api token for an openai compatible service
 
 ## Run
 

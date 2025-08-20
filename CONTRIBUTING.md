@@ -175,12 +175,8 @@ Contributors welcome to add a lightweight GitHub Actions workflow.
 ## 📜 License
 See `LICENSE.md`. By contributing, you agree that your contributions will be licensed under the same license.
 
----
-## 🤝 Code of Conduct
-(Recommended) Add a `CODE_OF_CONDUCT.md` based on Contributor Covenant. Until then: be respectful; harassment or discrimination will not be tolerated.
 
 ---
-## 🧭 Roadmap Ideas (Open for PRs)
 ## 🤖 AI-Assisted Contributions
 You may use AI tools (code assistants, generation, refactor, documentation, test suggestion) while contributing, under these conditions:
 
