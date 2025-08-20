@@ -1,8 +1,9 @@
 import random
 import threading
 
+
 class FastAPIWrapper:
-    def __init__(self, client, base_url = ""):
+    def __init__(self, client, base_url=""):
         self.client = client
         self.base_url = base_url
 
@@ -16,7 +17,9 @@ class FastAPIWrapper:
         assert "error" in tool_names
 
     def test_call_tool(self):
-        r = self.client.post(f"{self.base_url}/tools/add", json={"a": 2, "b": 3}, timeout=10)
+        r = self.client.post(
+            f"{self.base_url}/tools/add", json={"a": 2, "b": 3}, timeout=10
+        )
         print(f"Response: {r.text}")
         assert r.status_code == 200
         assert r.json()["structuredContent"]["result"] == 5
@@ -26,17 +29,21 @@ class FastAPIWrapper:
         assert r.status_code >= 400 and r.status_code < 500
 
     def test_tool_error(self):
-        r = self.client.post(f"{self.base_url}/tools/error", json={"message": "fail!"}, timeout=10)
+        r = self.client.post(
+            f"{self.base_url}/tools/error", json={"message": "fail!"}, timeout=10
+        )
         assert r.status_code >= 500
-        
-    
+
     def test_parallel_calls(self):
         def call_add():
             a = random.randint(1, 100)
             b = random.randint(1, 100)
-            r = self.client.post(f"{self.base_url}/tools/add", json={"a": a, "b": b}, timeout=10)
+            r = self.client.post(
+                f"{self.base_url}/tools/add", json={"a": a, "b": b}, timeout=10
+            )
             assert r.status_code == 200
             assert r.json()["structuredContent"]["result"] == a + b
+
         threads = [threading.Thread(target=call_add) for _ in range(5)]
         for t in threads:
             t.start()
@@ -57,14 +64,24 @@ class FastAPIWrapper:
             cookie = r.cookies.get_dict()
         else:
             cookie = dict(r.cookies)
-            
+
         assert "x-inxm-mcp-session" in cookie
-        r = self.client.post(f"{self.base_url}/tools/call_counter", headers={"x-inxm-mcp-session": session_id}, json={}, timeout=10)
+        r = self.client.post(
+            f"{self.base_url}/tools/call_counter",
+            headers={"x-inxm-mcp-session": session_id},
+            json={},
+            timeout=10,
+        )
         assert r.status_code == 200
         assert r.json()["structuredContent"]["result"] == 1
-        
+
         # session via header
-        r = self.client.post(f"{self.base_url}/tools/call_counter", headers={"x-inxm-mcp-session": session_id}, json={}, timeout=10)
+        r = self.client.post(
+            f"{self.base_url}/tools/call_counter",
+            headers={"x-inxm-mcp-session": session_id},
+            json={},
+            timeout=10,
+        )
         assert r.status_code == 200
         assert r.json()["structuredContent"]["result"] == 2
 
@@ -72,7 +89,7 @@ class FastAPIWrapper:
         r = self.client.post(f"{self.base_url}/tools/call_counter", json={}, timeout=10)
         assert r.status_code == 200
         assert r.json()["structuredContent"]["result"] == 1
-        
+
         self.client.cookies.update(cookie)
         r = self.client.post(f"{self.base_url}/tools/call_counter", json={}, timeout=10)
         assert r.status_code == 200

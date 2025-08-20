@@ -18,13 +18,19 @@ instrumentator.instrument(app).expose(app)
 
 # Configure the tracer provider for OTLP
 SERVICE_NAME = os.getenv("SERVICE_NAME", "mcp-rest-server")
-trace.set_tracer_provider(TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME})))
+trace.set_tracer_provider(
+    TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
+)
 tracer_provider = trace.get_tracer_provider()
 otlp_endpoint = os.getenv("OTLP_ENDPOINT")
 if otlp_endpoint:
     otlp_exporter = OTLPSpanExporter(
         endpoint=otlp_endpoint,
-        headers=(os.getenv("OTLP_HEADERS", "")).split(",") if os.getenv("OTLP_HEADERS") else None,
+        headers=(
+            (os.getenv("OTLP_HEADERS", "")).split(",")
+            if os.getenv("OTLP_HEADERS")
+            else None
+        ),
     )
 
     span_processor = BatchSpanProcessor(otlp_exporter)
@@ -32,7 +38,7 @@ if otlp_endpoint:
 FastAPIInstrumentor.instrument_app(app)
 
 # Add app_name to the metrics
-app_info = Info('fastapi_app_info', 'Application Info')
-app_info.info({'app_name': SERVICE_NAME})
+app_info = Info("fastapi_app_info", "Application Info")
+app_info.info({"app_name": SERVICE_NAME})
 
 app.include_router(router)

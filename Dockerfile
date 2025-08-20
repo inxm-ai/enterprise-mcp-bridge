@@ -24,6 +24,7 @@ RUN if [ -f package.json ]; then npm install; fi
 WORKDIR /app
 COPY app /app
 RUN pip install --upgrade pip && pip install --no-cache-dir .
+RUN pip install black && black --check .
 
 # --- Entrypoint and runtime flexibility ---
 EXPOSE 8000

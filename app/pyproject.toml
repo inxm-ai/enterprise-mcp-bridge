@@ -30,7 +30,6 @@ classifiers = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "pyjwt",
     "httpx"
 ]
 
