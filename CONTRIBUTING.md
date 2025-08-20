@@ -175,6 +175,17 @@ Contributors welcome to add a lightweight GitHub Actions workflow.
 ## 📜 License
 See `LICENSE.md`. By contributing, you agree that your contributions will be licensed under the same license.
 
+---
+## 📝 Contributor License Agreement (CLA)
+
+By contributing to this project, you agree that your contributions will be licensed under the same license as the project. Additionally, you affirm that:
+
+1. You have the right to submit the contribution.
+2. Your contribution does not violate any third-party rights.
+3. You grant the project maintainers the right to use, modify, and distribute your contribution as part of the project.
+4. You grant the project maintainers the right to relicense your contribution under additional licenses, including dual licensing or closed-source licenses, at their discretion, provided it remains consistent with the original license terms.
+
+If you are contributing on behalf of an organization, you confirm that you have the necessary permissions to make the contribution on behalf of your organization.
 
 ---
 ## 🤖 AI-Assisted Contributions

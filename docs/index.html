@@ -3,229 +3,423 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>INXM MCP Store: Your Internal AI App Store</title>
-    <!-- Use Tailwind CSS for a modern, responsive design -->
+    <title>MCP REST Server Documentation</title>
+    <!--
+      Load Tailwind CSS via CDN. All styling is done with Tailwind classes.
+      This simplifies the CSS and makes it more maintainable.
+    -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        /* Define a custom color palette and font using Tailwind's theme extension */
+        :root {
+            --bg-color: #0d1117;
+            --card-bg-color: #161b22;
+            --text-color: #c9d1d9;
+            --link-color: #58a6ff;
+            --heading-color: #e6edf3;
+            --border-color: #30363d;
+            --code-bg-color: #6a737d1a;
+            --code-text-color: #e6edf3;
+        }
+
+        /* Set the base font and background for the body */
         body {
             font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        
+        .nav-button.active {
+            background-color: #30363d;
+            border-color: #58a6ff;
+             color: #58a6ff;
+        }
+        .nav-button:hover {
+             background-color: #30363d;
+        }
+
+        /* Manually style mermaid diagrams to fit the dark theme */
+        .mermaid {
+            background-color: var(--card-bg-color);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            text-align: center;
+        }
+
+        .mermaid .cluster rect {
+            fill: var(--card-bg-color) !important;
+            stroke: var(--border-color) !important;
+        }
+
+        .mermaid .label text {
+            fill: var(--text-color) !important;
+        }
+
+        .mermaid .node rect, .mermaid .node circle {
+            fill: var(--bg-color) !important;
+            stroke: var(--border-color) !important;
+        }
+
+        .mermaid .edgePaths .path {
+            stroke: var(--text-color) !important;
+        }
+
+        .mermaid .arrowheadPath {
+            fill: var(--text-color) !important;
+        }
+
+        .mermaid .actor {
+            fill: var(--bg-color) !important;
+            stroke: var(--border-color) !important;
+            color: var(--text-color) !important;
+        }
+
+        .mermaid .messageText {
+            fill: var(--text-color) !important;
         }
     </style>
 </head>
-<body class="bg-gray-50 text-gray-800">
-
-    <!-- Hero Section -->
-    <header class="bg-white py-16 md:py-24 shadow-sm">
-        <div class="max-w-4xl mx-auto px-6 text-center">
-            <h1 class="text-4xl md:text-6xl font-bold text-blue-800 leading-tight mb-4">INXM MCP Store: Your Internal AI App Store</h1>
-            <p class="text-lg md:text-xl text-gray-600 mb-8 max-w-2xl mx-auto">
-                The INXM MCP Store, powered by the MCP REST Server, lets you securely deploy and manage AI tools for your entire company, giving your team the power of AI without the complexity.
-            </p>
-            <a href="#value-prop" class="bg-blue-600 text-white font-semibold py-3 px-8 rounded-full shadow-lg hover:bg-blue-700 transition-all duration-300">
-                See the Value
-            </a>
-        </div>
-    </header>
-
-    <!-- Value Proposition Section -->
-    <section id="value-prop" class="py-16 md:py-24">
-        <div class="max-w-5xl mx-auto px-6">
-            <h2 class="text-3xl md:text-4xl font-bold text-center text-blue-800 mb-12">Why it's a game-changer for your business</h2>
-            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-
-                <!-- Card 1: Company-Wide Enablement -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">🚀</span>
-                        <h3 class="text-xl font-semibold text-gray-900">Company-Wide Access</h3>
-                    </div>
-                    <p class="text-gray-600">Deploy AI tools once and make them instantly available to every employee. No individual setup, no extra hassle.</p>
-                </div>
-
-                <!-- Card 2: Secure & Compliant -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">🔒</span>
-                        <h3 class="text-xl font-semibold text-gray-900">Centralized Control</h3>
-                    </div>
-                    <p class="text-gray-600">Centralized security and access control ensure only authorized users can access sensitive tools and data, keeping you compliant.</p>
-                </div>
-
-                <!-- Card 3: Secure Token Management -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">🔑</span>
-                        <h3 class="text-xl font-semibold text-gray-900">Secure Token Management</h3>
-                    </div>
-                    <p class="text-gray-600">Our integrated token provider securely manages user authentication, creating a bridge for tools without exposing any sensitive secrets.</p>
-                </div>
-
-                <!-- Card 4: Easy Integration -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">🔗</span>
-                        <h3 class="text-xl font-semibold text-gray-900">Easy Integration</h3>
-                    </div>
-                    <p class="text-gray-600">Quickly connect to existing company systems and third-party APIs with minimal effort, building on your current infrastructure.</p>
-                </div>
-
-                <!-- Card 5: Internal App Store -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">📱</span>
-                        <h3 class="text-xl font-semibold text-gray-900">An Internal App Store</h3>
-                    </div>
-                    <p class="text-gray-600">Your IT team can curate and manage a secure "app store" for AI tools, providing a seamless and familiar experience for your team.</p>
-                </div>
-
-                <!-- Card 6: Scalable & Future-Proof -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-l-4 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-4xl mr-4">📈</span>
-                        <h3 class="text-xl font-semibold text-gray-900">Scalable & Future-Proof</h3>
-                    </div>
-                    <p class="text-gray-600">Built for the cloud, this solution grows with you. Easily add new tools, integrations, or authentication providers as your needs evolve.</p>
-                </div>
+<body class="p-4 sm:p-8">
+    <div class="container mx-auto max-w-7xl">
+        <!-- Navigation bar with dynamic buttons -->
+        <nav class="bg-gray-800/50 backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <h1 class="text-2xl font-bold text-white tracking-tight">mcp-rest-server</h1>
+            <div class="flex flex-wrap gap-2 sm:gap-4">
+                <button onclick="showPage('intro')" class="nav-button active px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Why This Project?</button>
+                <button onclick="showPage('quickstart')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Quick Start</button>
+                <button onclick="showPage('deployment')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Deployment Example</button>
+                <button onclick="showPage('contributing')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Contributing</button>
             </div>
-        </div>
-    </section>
+        </nav>
 
-    <!-- Architecture Visualization Section -->
-    <section class="py-16 md:py-24 bg-gray-100">
-        <div class="max-w-4xl mx-auto px-6 text-center">
-            <h2 class="text-3xl md:text-4xl font-bold text-blue-800 mb-12">How it works, simply put</h2>
-            <p class="text-gray-600 text-lg mb-12 max-w-2xl mx-auto">The INXM MCP Store connects your team to powerful AI tools with a clear chain of command and security.</p>
-            
-            <!-- New Diagram -->
-            <div class="flex flex-col items-center justify-center space-y-8 md:space-y-0 md:flex-row md:space-x-8">
-
-                <!-- Column 1: IT Team -->
-                <div class="flex flex-col items-center flex-1">
-                    <div class="bg-white p-6 rounded-full shadow-lg border-2 border-green-500 w-24 h-24 flex items-center justify-center">
-                        <span class="text-5xl">🛠️</span>
+        <!-- Main content area -->
+        <main class="mt-8">
+            <!-- Why This Project? - The "WOW" page -->
+            <section id="intro" class="page active grid gap-8">
+                <!-- Hero Section -->
+                <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-8 rounded-2xl shadow-xl flex flex-col lg:flex-row items-center justify-between gap-8">
+                    <div class="lg:w-1/2">
+                        <h2 class="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight leading-tight text-white mb-4">The Production-Grade Wrapper for MCP</h2>
+                        <p class="text-lg text-gray-400 mb-6">
+                            A robust FastAPI-based wrapper that exposes any <a href="https://github.com/modelcontextprotocol" class="text-blue-400 hover:text-blue-300 transition-colors duration-200">Model Context Protocol (MCP)</a> server over plain HTTP/JSON. This project is engineered for enterprise production use, focusing on security, scalability, and ease of integration.
+                        </p>
+                        <a href="#quickstart" onclick="showPage('quickstart')" class="inline-block bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-8 rounded-full shadow-lg transition-transform duration-300 transform hover:scale-105">Get Started</a>
                     </div>
-                    <p class="mt-4 font-semibold text-sm md:text-base">IT/Platform Team</p>
-                    <p class="mt-2 text-xs text-gray-500">Manages the store.</p>
-                </div>
-
-                <!-- Arrow 1 -->
-                <svg class="w-12 h-12 text-green-500 -rotate-90 md:rotate-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
-                </svg>
-
-                <!-- Column 2: INXM MCP Store -->
-                <div class="flex flex-col items-center flex-1">
-                    <div class="bg-white p-8 rounded-xl shadow-lg border-4 border-blue-700 max-w-xs text-center">
-                        <span class="text-4xl">🛒</span>
-                        <h3 class="mt-4 font-bold text-lg text-blue-800">The INXM MCP Store</h3>
-                        <p class="text-sm text-gray-600 mt-2">The central hub for all approved tools.</p>
+                    <!-- Placeholder for a more professional-looking diagram/image -->
+                    <div class="lg:w-1/2">
+                        <img src="example-application.png" alt="Screenshot of the MCP REST Server example deployment with application, jaeger, grafana and keycloak" class="w-full rounded-xl shadow-2xl border border-gray-700">
                     </div>
                 </div>
 
-                <!-- Arrow 2 -->
-                <svg class="w-12 h-12 text-blue-500 rotate-90 md:rotate-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
-                </svg>
-
-                <!-- Column 3: Your Team -->
-                <div class="flex flex-col items-center flex-1">
-                    <div class="bg-white p-6 rounded-full shadow-lg border-2 border-blue-500 w-24 h-24 flex items-center justify-center">
-                        <span class="text-5xl">👨‍💼</span>
+                <!-- Key Capabilities Section -->
+                <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Card: Session & User Management -->
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                        <h3 class="text-xl font-bold text-white mb-2">Robust Session & User Management</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                            <li><strong>Multi-User & Multi-Session:</strong> Securely manage multiple isolated user contexts and concurrent sessions.</li>
+                            <li><strong>Stateful & Stateless Modes:</strong> Supports both stateless "fire-and-forget" calls and stateful sessions.</li>
+                            <li><strong>Lifecycle & Resource Hygiene:</strong> Explicit endpoints for session management and automatic cleanup of idle sessions.</li>
+                            <li><strong>Pluggable for Scalability:</strong> Session manager is swappable for distributed backends like Redis.</li>
+                        </ul>
                     </div>
-                    <p class="mt-4 font-semibold text-sm md:text-base">Your Team</p>
-                    <p class="mt-2 text-xs text-gray-500">Chooses tools from the store.</p>
-                </div>
-            </div>
-
-            <div class="flex flex-col items-center justify-center mt-12 md:mt-16">
-                <!-- Vertical Arrows connecting Store to Hosting -->
-                <svg class="w-12 h-12 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
-                </svg>
-                <p class="text-gray-600 text-sm italic mt-2">Connects to</p>
-
-                <!-- MCP Hosting -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-4 border-gray-400 mt-8 max-w-sm text-center">
-                    <span class="text-4xl">🏢</span>
-                    <h3 class="mt-4 font-bold text-lg text-gray-900">MCP Hosting Layer</h3>
-                    <p class="text-sm text-gray-600 mt-2">This is where the actual MCPs live, either as a managed service or in your own data center.</p>
-                </div>
-            </div>
-
-            <div class="flex flex-col items-center justify-center mt-12 md:mt-16">
-                <!-- Vertical Arrows connecting Hosting to External Tools -->
-                <svg class="w-12 h-12 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
-                </svg>
-                <p class="text-gray-600 text-sm italic mt-2">Accesses data from</p>
-                
-                <!-- External AI Tools & Data -->
-                <div class="bg-white p-8 rounded-xl shadow-lg border-2 border-blue-500 text-center mt-8">
-                    <div class="flex flex-col space-y-4">
-                        <div class="flex items-center space-x-2">
-                            <span class="text-2xl">🤖</span>
-                            <p class="text-sm font-semibold">External AI Tools (OpenAI)</p>
-                        </div>
-                        <div class="flex items-center space-x-2">
-                            <span class="text-2xl">☁️</span>
-                            <p class="text-sm font-semibold">Your Company Data</p>
-                        </div>
-                        <div class="flex items-center space-x-2">
-                            <span class="text-2xl">🌐</span>
-                            <p class="text-sm font-semibold">Third-Party APIs</p>
-                        </div>
+                    <!-- Card: Security & Auth -->
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                        <h3 class="text-xl font-bold text-white mb-2">Integrated Security & Authentication</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                            <li><strong>Built-in OAuth2:</strong> Natively handles OAuth2 token exchange with brokers like Keycloak.</li>
+                            <li><strong>Automatic Token Injection:</strong> Securely injects tokens into tool calls, simplifying client logic.</li>
+                            <li><strong>Automated Token Refresh:</strong> Manages token refresh transparently for long-lived, secure sessions.</li>
+                        </ul>
+                    </div>
+                    <!-- Card: Developer Experience -->
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                        <h3 class="text-xl font-bold text-white mb-2">Developer Experience & API Design</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                            <li><strong>REST-first Interface:</strong> All tool discovery and invocation happen over standard HTTP/JSON.</li>
+                            <li><strong>Automatic Tool Endpoints:</strong> Each MCP tool is automatically mapped to a canonical REST endpoint.</li>
+                            <li><strong>Structured Error Handling:</strong> Maps MCP errors to standard HTTP status codes.</li>
+                            <li><strong>Auto-Generated API Docs:</strong> Built on FastAPI, providing interactive OpenAPI (Swagger) and ReDoc documentation.</li>
+                            <li><strong>Containerized Deployment:</strong> Designed for Docker and Kubernetes with structured logging and monitoring.</li>
+                        </ul>
                     </div>
                 </div>
-            </div>
-        </div>
-    </section>
+            </section>
+
+            <!-- Quick Start -->
+            <section id="quickstart" class="page hidden grid gap-8">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Quick Start</h2>
+                    <p class="text-gray-400 mb-4">Run the local demo with a default MCP server.</p>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">git clone https://github.com/inxm-ai/mcp-rest-server.git
+cd mcp-rest-server
+pip install "app[all]"
+uvicorn app.server:app --reload</code></pre>
+                    <p class="text-gray-400 mt-4 mb-2">Open the API docs: <a href="http://localhost:8000/docs" class="text-blue-400 hover:underline">http://localhost:8000/docs</a></p>
+                    <p class="text-gray-400">You can test it with the following command:</p>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -X 'POST' \
+'http://127.0.0.1:8000/tools/add' \
+-H 'accept: application/json' \
+-H 'Content-Type: application/json' \
+-d '{
+"a": 2,
+"b": 1
+}'</code></pre>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Session vs. Stateless Calls</h2>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left rounded-lg overflow-hidden">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-4 text-sm font-semibold text-white">Mode</th>
+                                    <th class="p-4 text-sm font-semibold text-white">How</th>
+                                    <th class="p-4 text-sm font-semibold text-white">When to use</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-gray-400">
+                                <tr class="bg-gray-900 hover:bg-gray-700 transition-colors">
+                                    <td class="p-4">Stateless</td>
+                                    <td class="p-4"><code>POST /tools/{tool}</code> (no session header)</td>
+                                    <td class="p-4">Simple one-off tool execution</td>
+                                </tr>
+                                <tr class="bg-gray-900 hover:bg-gray-700 transition-colors">
+                                    <td class="p-4">Stateful</td>
+                                    <td class="p-4"><code>POST /session/start</code> then include header/cookie</td>
+                                    <td class="p-4">Conversations, multi-step pipelines</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-2 mt-6">Session Management CLI Examples</h3>
+                    <p class="text-gray-400 mb-2"><strong>Start a Session:</strong></p>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -X POST http://localhost:8000/session/start -c cookies.txt</code></pre>
+                    <p class="text-gray-400 mt-4 mb-2"><strong>Use the Session:</strong></p>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'</code></pre>
+                    <p class="text-gray-400 mt-4 mb-2"><strong>Close the Session:</strong></p>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/session/close</code></pre>
+                </div>
+            </section>
+
+            <!-- Deployment Example -->
+            <section id="deployment" class="page hidden grid gap-8">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Full-Stack Docker Compose Deployment</h2>
+                    <img src="architecture.png" alt="Architecture Diagram" class="mb-4">
+                    <p class="text-gray-400 mb-6">The following `docker-compose.yaml` provides a complete example of a production-ready, full-stack deployment. It includes everything from authentication and observability to the REST server itself. This aligns with the project's focus on enterprise-grade use cases.</p>
+                    <p class="text-gray-400 mb-4">Here is the specific configuration for the core `app-mcp-rest` service:</p>
+
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-yaml">services:
+    app-mcp-rest:
+        container_name: app.mcp-m365-rest-server
+        image: inxm-ai/mcp-rest-server:latest
+        environment:
+            # A human-readable name for the service, useful for logging and observability.
+            SERVICE_NAME: mcp-m365-rest-server
+            # The command to launch the specific MCP server that this REST wrapper will connect to.
+            MCP_SERVER_COMMAND: npx -y @softeria/ms-365-mcp-server --org-mode
+            # The name of the environment variable that the MCP server will use to receive the OAuth token.
+            OAUTH_ENV: MS365_MCP_OAUTH_TOKEN
+            # Specifies the authentication provider to use for token exchange.
+            AUTH_PROVIDER: keycloak
+            # Allows the REST server to trust self-signed certificates from the auth provider, useful for local development.
+            AUTH_ALLOW_UNSAFE_CERT: true
+            # The base URL of the Keycloak instance.
+            AUTH_BASE_URL: https://auth.inxm.local
+            # The Keycloak realm where the authentication is configured.
+            KEYCLOAK_REALM: inxm
+            # The alias for the external identity provider (in this case, Microsoft 365) within Keycloak.
+            KEYCLOAK_PROVIDER_ALIAS: ms365
+            # Sets a URL prefix for all the REST endpoints to prevent conflicts with other services.
+            MCP_BASE_PATH: /api/mcp/m365
+            # A comma-separated list of tool names to exclude from the REST endpoints.
+            EXCLUDE_TOOLS: login,logout,verify-login
+            # A comma-separated list of tool name patterns to include.
+            INCLUDE_TOOLS: "*mail*"
+            # The endpoint for OpenTelemetry Protocol (OTLP) to send trace data to Jaeger for monitoring.
+            OTLP_ENDPOINT: http://jaeger:4317
+        depends_on:
+            keycloak:
+                condition: service_healthy
+            jaeger:
+                condition: service_started
+        ports:
+            - "8000:8000"
+        labels:
+            - "oauth2-proxy.enable=true"
+        networks:
+            - private
+</code></pre>
+
+                    <h3 class="text-xl font-bold text-white mb-2 mt-6">OAuth Token Integration</h3>
+                    
+                    <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
+
+                    <div class="card p-6 rounded-xl border border-gray-700 bg-gray-900 mt-6">
+                        <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Login</h4>
+                        <pre class="mermaid">
+sequenceDiagram
+    participant User
+    participant AppIngress as App-Ingress (NGINX)
+    participant OAuth2Proxy as OAuth2-Proxy
+    participant Keycloak as Keycloak (auth.inxm.local)
+    participant AppFrontend as App-Frontend (UI)
     
-    <!-- New Section: What's different about this server? -->
-    <section class="py-16 md:py-24 bg-white">
-        <div class="max-w-4xl mx-auto px-6 text-center">
-            <h2 class="text-3xl md:text-4xl font-bold text-blue-800 mb-12">Beyond Traditional MCP: Why it's a different approach</h2>
-            <div class="flex flex-col md:flex-row md:justify-center md:space-x-8 text-left">
+    User ->> AppIngress: Access https://inxm.local
+    AppIngress ->> OAuth2Proxy: Route Request
+    OAuth2Proxy ->> Keycloak: Authenticate (redirect)
+    Keycloak -->> User: Redirect for Login
+    User ->> Keycloak: Log in
+    Keycloak -->> OAuth2Proxy: Redirect with Code/Token
+    OAuth2Proxy ->> AppIngress: Set Cookie/Header
+    AppIngress ->> AppFrontend: Serve Frontend
+                        </pre>
+                    </div>
+                    <div class="card p-6 rounded-xl border border-gray-700 bg-gray-900 mt-6">
+                        <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Tool Request with Token Exchange</h4>
+                        <pre class="mermaid">
+sequenceDiagram
+    participant AppFrontend as App-Frontend
+    participant AppIngress as App-Ingress (NGINX)
+    participant OAuth2Proxy as OAuth2-Proxy
+    participant AppMCPRest as App-MCP-Rest
+    participant Keycloak as Keycloak
+    participant DownstreamAPI as Downstream-API
+    
+    AppFrontend ->> AppIngress: Request Tool Execution
+    AppIngress ->> OAuth2Proxy: Route Request
+    OAuth2Proxy ->> AppMCPRest: Forward with Auth Token
+    AppMCPRest ->> Keycloak: Request Downstream Token (Token Exchange)
+    Keycloak -->> AppMCPRest: Return Downstream Token
+    AppMCPRest ->> DownstreamAPI: Access API with Downstream Token
+                        </pre>
+                        
+                    </div>
+                </div>
+            </section>
+
+            <!-- Contributing -->
+            <section id="contributing" class="page hidden grid gap-8">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Contributing to MCP REST Server</h2>
+                    <p class="text-gray-400 mb-6">Thanks for your interest in contributing! This document explains how to propose changes, report issues, add features, improve docs, and release updates.</p>
+                    
+                    <h3 class="text-xl font-bold text-white mb-2 mt-6">📌 Quick Start (TL;DR)</h3>
+                    <ol class="list-decimal list-inside space-y-2 text-gray-400 pl-4">
+                        <li>Fork & clone.</li>
+                        <li>Create a branch: <code>git switch -c feat/my-feature</code>.</li>
+                        <li>Create a virtual env (Python 3.10+).</li>
+                        <li>Install locally (incl. dev deps): <code>pip install -e ./app[dev]</code>.</li>
+                        <li>Run tests: <code>pytest -q</code>.</li>
+                        <li>Make changes + add/adjust tests.</li>
+                        <li>Run lint & format.</li>
+                        <li>Commit using a sensible message.</li>
+                        <li>Open a Pull Request (PR).</li>
+                        <li>Agree to the CLA if you haven't</li>
+                    </ol>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🗂 Project Layout</h3>
+                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">app/
+  server.py          # FastAPI app wiring
+  routes.py          # REST endpoints & request/session orchestration
+  models.py          # Pydantic-style data models
+  session/           # Session abstraction & lifecycle mgmt
+  session_manager/   # Session registry
+  oauth/             # Token exchange + decorators
+  mcp_server/        # Server parameter helpers
+  test_*.py          # Tests (pytest)</code></pre>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🧪 Testing</h3>
+                    <p class="text-gray-400">We use <code>pytest</code>. Write tests for every new feature or bug fix. Favor small, explicit tests.</p>
+                    <p class="text-gray-400 mt-2">Run the full suite: <code>pytest -q</code></p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🧹 Code Style & Quality</h3>
+                    <p class="text-gray-400">Follow standard Python style (PEP 8). Keep functions small, log appropriately, and avoid broad exception catches. Use type hints for new or changed public functions.</p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🔐 Security & Privacy</h3>
+                    <p class="text-gray-400">Never log raw OAuth tokens or secrets. Validate and sanitize user-provided values. Report vulnerabilities privately before opening a public issue.</p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🐞 Reporting Issues</h3>
+                    <p class="text-gray-400">Include your environment, install method, reproduction steps, expected vs. actual behavior, and logs (with sensitive data trimmed).</p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">📝 Commit Messages & Pull Requests</h3>
+                    <p class="text-gray-400">Use <a href="https://www.conventionalcommits.org/en/v1.0.0/" class="text-blue-400 hover:underline">Conventional Commits</a> (e.g., <code>feat: add session timeout config</code>, <code>fix: handle unknown tool error</code>). Ensure your PR checklist is complete before submitting, including passing tests, updated documentation, and a clear commit history.</p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🤖 AI-Assisted Contributions</h3>
+                    <p class="text-gray-400">You may use AI tools, but you are the author of record. Carefully review all generated code, ensure it's well-tested, and avoid pasting secrets. Avoid blind bulk rewrites and instead use AI to draft boilerplate or explore alternative designs. Maintainers may request clarification on AI involvement if needed.</p>
+                </div>
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                    <h3 class="text-xl font-bold text-white mb-2">🧭 Roadmap Ideas</h3>
+                    <p class="text-gray-400">Feel free to open PRs for these ideas:</p>
+                    <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                        <li>Add session timeout / eviction policy</li>
+                        <li>Optional Redis / external session backend</li>
+                        <li>Structured logging config & correlation IDs</li>
+                        <li>Automated release workflow (GitHub Actions)</li>
+                    </ul>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Scripting for dynamic page switching and Mermaid diagrams -->
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/mermaid@11.10.0/dist/mermaid.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialize Mermaid diagrams
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: 'dark',
+                fontFamily: 'Inter, sans-serif',
+                sequence: {
+                    actorStyle: 'stroke-width:2px; fill:#0d1117;',
+                    noteBkgColor: '#161b22',
+                    noteTextColor: '#c9d1d9',
+                    messageTextColor: '#e6edf3',
+                    arrowColor: '#c9d1d9'
+                },
+                themeVariables: {
+                    lineColor: '#30363d',
+                    fontFamily: 'Inter, sans-serif',
+                    fontSize: '14px',
+                    textColor: '#c9d1d9',
+                    mainBkg: '#161b22',
+                    clusterBkg: '#161b22',
+                    clusterBorder: '#30363d'
+                },
+            });
+
+            const pages = document.querySelectorAll('.page');
+            const navButtons = document.querySelectorAll('.nav-button');
+            const introPage = document.getElementById('intro');
+
+            // Function to show a specific page and update nav buttons
+            window.showPage = (id) => {
+                pages.forEach(page => page.classList.add('hidden'));
+                navButtons.forEach(button => button.classList.remove('active'));
                 
-                <!-- Traditional MCP Column -->
-                <div class="flex-1 p-6 rounded-xl shadow-lg border-2 border-gray-200 mb-8 md:mb-0">
-                    <div class="flex items-center mb-4">
-                        <span class="text-5xl mr-4">👤</span>
-                        <h3 class="text-xl font-bold text-gray-800">Traditional MCP</h3>
-                    </div>
-                    <ul class="list-disc list-inside space-y-3 text-gray-600">
-                        <li><strong>Single-user focus:</strong> Designed for an individual user or a local developer.</li>
-                        <li><strong>Manual management:</strong> Requires each person to set up and manage their own server.</li>
-                        <li><strong>Security risks:</strong> Secrets and authentication keys can be exposed during individual setup.</li>
-                    </ul>
-                </div>
+                const targetPage = document.getElementById(id);
+                targetPage.classList.remove('hidden');
+                
+                const targetButton = document.querySelector(`nav button[onclick="showPage('${id}')"]`);
+                targetButton.classList.add('active');
+            };
 
-                <!-- INXM MCP Store Column -->
-                <div class="flex-1 p-6 rounded-xl shadow-lg border-2 border-blue-500">
-                    <div class="flex items-center mb-4">
-                        <span class="text-5xl mr-4">🏢</span>
-                        <h3 class="text-xl font-bold text-blue-800">INXM MCP Store</h3>
-                    </div>
-                    <ul class="list-disc list-inside space-y-3 text-gray-600">
-                        <li><strong>Multi-user platform:</strong> Built for the entire organization.</li>
-                        <li><strong>Centralized control:</strong> IT and platform teams manage tools for everyone.</li>
-                        <li><strong>Secure by design:</strong> Our token provider handles authentication without exposing sensitive secrets.</li>
-                    </ul>
-                </div>
-
-            </div>
-            <p class="mt-12 text-lg text-gray-600 max-w-2xl mx-auto">
-                The <strong>INXM MCP Store</strong>, powered by the <strong>MCP REST Server</strong>, transforms individual MCP tools into a managed, secure, and scalable enterprise platform.
-            </p>
-        </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="bg-gray-800 text-white py-8 mt-16">
-        <div class="max-w-4xl mx-auto px-6 text-center">
-            <p>&copy; 2025 INXM GmbH. All rights reserved. <a href="https://inxm.ai/">Legal Statement</a></p>
-        </div>
-    </footer>
-
+            // Initial state: show the intro page
+            showPage('intro');
+        });
+    </script>
 </body>
 </html>
