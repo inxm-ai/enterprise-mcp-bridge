@@ -49,8 +49,8 @@ sequenceDiagram
 * Monitoring via Prometheus
 
 ## Prerequisites
-* Docker & Docker Compose
-* Azure CLI (`az`)
+* Docker & Docker Compose [link](https://docs.docker.com/engine/install/)
+* Azure CLI (`az`) [link](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli?view=azure-cli-latest)
 * A free Entra test account (create it [here](https://learn.microsoft.com/sk-sk/entra/verified-id/how-to-create-a-free-developer-account))
 * A valid api token for an openai compatible service
 
