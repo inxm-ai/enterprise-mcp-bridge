@@ -20,22 +20,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Build Docker image, this will also run tests
+        uses: docker/build-push-action@v6
         with:
-          python-version: 3.11
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ./app[dev]
-          pip install black ruff
-
-      - name: Run Black (Code Formatter)
-        run: black --check app
-
-      - name: Run Ruff (Linting)
-        run: ruff check app
-
-      - name: Run Pytest
-        run: pytest -q
+          context: .
+          file: ./Dockerfile 
+          push: false 

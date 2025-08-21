@@ -191,6 +191,7 @@ async def run_tool(
         logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @router.post("/session/start")
 async def start_session(
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
@@ -219,7 +220,6 @@ async def start_session(
     except Exception as e:
         logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
-        
 
 
 @router.post("/session/close")
@@ -231,7 +231,9 @@ async def close_session(
     try:
         with tracer.start_as_current_span("close_session") as span:
             x_inxm_mcp_session = session_id(
-                try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+                try_get_session_id(
+                    x_inxm_mcp_session_header, x_inxm_mcp_session_cookie
+                ),
                 access_token,
             )
             span.set_attribute("session.id", x_inxm_mcp_session)

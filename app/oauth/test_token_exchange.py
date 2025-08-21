@@ -75,7 +75,10 @@ def test_retrieve_token_exception(monkeypatch, retriever):
     monkeypatch.setattr(retriever, "_get_stored_provider_token", raise_exc)
     with pytest.raises(UserLoggedOutException) as excinfo:
         retriever.retrieve_token("dummy")
-    assert str(excinfo.value) == "Token retrieval failed, user probably logged out. Please log in again."
+    assert (
+        str(excinfo.value)
+        == "Token retrieval failed, user probably logged out. Please log in again."
+    )
 
 
 def test_token_needs_refresh_expired(monkeypatch, retriever):
