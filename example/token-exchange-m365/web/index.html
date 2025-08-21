@@ -3,29 +3,35 @@
 
 <head>
     <meta charset="UTF-8" />
-    <title>MCP REST Demo</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <style id="pfusch-style">
-        body {
-            font-family: system-ui, sans-serif;
-            margin: 0;
-            background: #101418;
-            color: #f5f7fa;
+    <title>MCP REST Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg-color: #161b22;
+            --text-color: #c9d1d9;
+            --link-color: #58a6ff;
+            --heading-color: #e6edf3;
+            --border-color: #30363d;
         }
 
-        header {
-            padding: 1rem 1.5rem;
-            background: #182028;
-            border-bottom: 1px solid #24303c;
-            height: 5vh;
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
         }
 
         .chat-with-mcp {
-            display: flex;
-            flex-direction: column;
-            height: calc(90vh);
-            max-width: 860px;
-            margin: 0 auto;
+            background-color: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
 
         .chat-history {
@@ -34,57 +40,58 @@
             padding: 1rem;
             display: flex;
             flex-direction: column;
-            gap: .75rem;
+            gap: 0.75rem;
         }
 
         .chat-message {
-            padding: .75rem 1rem;
+            padding: 0.75rem 1rem;
             border-radius: 8px;
             line-height: 1.35;
             white-space: pre-wrap;
         }
 
         .chat-message.user {
-            background: #29527a;
+            background-color: #29527a;
             align-self: flex-end;
         }
 
         .chat-message.assistant {
-            background: #1f2a33;
+            background-color: var(--card-bg-color);
         }
 
         .chat-message.tool {
-            background: #262f39;
+            background-color: #262f39;
             font-family: monospace;
-            font-size: .85rem;
+            font-size: 0.85rem;
         }
 
-        form.chat-input-form {
+        .chat-input-form {
             display: flex;
-            gap: .5rem;
+            gap: 0.5rem;
             padding: 1rem;
-            background: #182028;
-            border-top: 1px solid #24303c;
+            background: var(--card-bg-color);
+            border-top: 1px solid var(--border-color);
         }
 
         .chat-input-field {
             flex: 1;
-            padding: .6rem .75rem;
-            border: 1px solid #314152;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid var(--border-color);
             border-radius: 6px;
-            background: #10161c;
-            color: #fff;
+            background: var(--bg-color);
+            color: var(--text-color);
         }
 
         select,
         button {
-            padding: .6rem .75rem;
+            padding: 0.6rem 0.75rem;
             border-radius: 6px;
-            border: 1px solid #314152;
-            background: #203040;
-            color: #fff;
+            border: 1px solid var(--border-color);
+            background: var(--card-bg-color);
+            color: var(--text-color);
             cursor: pointer;
         }
+
         button:disabled {
             background: #2c3848;
             cursor: not-allowed;
@@ -92,66 +99,87 @@
     </style>
 </head>
 
-<body>
-    <header>
-        <h2>MCP REST + Keycloak + Entra Demo</h2>
-    </header>
-    <chat-with-mcp></chat-with-mcp>
+<body class="p-4 sm:p-8">
+    <div class="container mx-auto max-w-7xl">
+        <header
+            class="bg-gray-800/50 backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border border-gray-700 flex items-center justify-between">
+            <h1 class="text-2xl font-bold text-white tracking-tight">MCP REST + Keycloak + Entra Demo</h1>
+        </header>
+
+        <main class="mt-8">
+                <chat-with-mcp inject-styles="style" class="chat-with-mcp bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700 flex flex-col h-[80vh] mx-auto">
+                    <div id="chat-history" class="chat-history flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+                        <!-- Chat messages will be dynamically inserted here -->
+                    </div>
+                    <form id="chat-form" class="chat-input-form flex rounded-xl gap-4 p-4 bg-gray-900 border-t border-gray-700">
+                        <input id="chat-input" name="chat-input"
+                            class="chat-input-field flex-1 p-2 rounded-lg bg-gray-800 text-white border border-gray-700"
+                            type="text" placeholder="Type message...">
+                        <select id="tool-choice" name="tool-choice"
+                            class="p-2 rounded-lg bg-gray-800 text-white border border-gray-700">
+                            <option value="none">Select tool</option>
+                            <!-- Tools will be dynamically inserted here -->
+                        </select>
+                        <button id="submit" type="submit"
+                            class="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">Send</button>
+                    </form>
+                </chat-with-mcp>
+        </main>
+    </div>
+
     <script type="module">
         import { otelFetch } from "./otelFetch.js";
         import { TGI } from "./chat.js";
-        import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';
+        import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
         pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: false }, (state, trigger) => [
             script(async () => {
                 state.availableTools = await otelFetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
                 state.model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
             }),
-            html.div({ class: 'chat-with-mcp' },
-                html.div({ class: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
-                html.form({
-                    class: 'chat-input-form', submit: async e => {
-                        e.preventDefault();
-                        if (state.loading) return;
-                        const formData = new FormData(e.target);
-                        const input = formData.get('chat-input')?.trim() || "";
-                        let toolChoice = formData.get('tool-choice') || 'auto';
-                        if (toolChoice === 'none') toolChoice = 'auto';
-                        if (!input) return;
-                        e.target.querySelector('input[name="chat-input"]').value = "";
-                        state.loading = true;
+            html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
+            html.form({
+                id: 'chat-form', submit: async e => {
+                    e.preventDefault();
+                    if (state.loading) return;
+                    const formData = new FormData(e.target);
+                    const input = formData.get('chat-input')?.trim() || "";
+                    let toolChoice = formData.get('tool-choice') || 'auto';
+                    if (toolChoice === 'none') toolChoice = 'auto';
+                    if (!input) return;
+                    e.target.querySelector('input[name="chat-input"]').value = "";
+                    state.loading = true;
+                    state.streaming = "";
+                    // Add user message
+                    state.messages = [...state.messages, { role: 'user', content: input }];
+                    // Send to TGI
+                    try {
+                        const tgiInstance = new TGI(state.availableTools, "https://inxm.local/api/mcp/m365/tools", state.model);
+                        const response = await tgiInstance.send(
+                            input,
+                            toolChoice,
+                            chunk => {
+                                state.streaming += chunk;
+                            },
+                            message => {
+                                state.messages = [...state.messages, message];
+                            }
+                        );
+                        // Remove streaming preview, add final assistant message
+                        state.messages = [...state.messages, { role: 'assistant', content: response }];
                         state.streaming = "";
-                        // Add user message
-                        state.messages = [...state.messages, { role: 'user', content: input }];
-                        // Send to TGI
-                        try {
-                            const tgiInstance = new TGI(state.availableTools, "https://inxm.local/api/mcp/m365/tools", state.model);
-                            const response = await tgiInstance.send(
-                                input,
-                                toolChoice,
-                                chunk => {
-                                    state.streaming += chunk;
-                                },
-                                message => {
-                                    state.messages = [...state.messages, message];
-                                }
-                            );
-                            // Remove streaming preview, add final assistant message
-                            state.messages = [...state.messages, { role: 'assistant', content: response }];
-                            state.streaming = "";
-                        } catch (err) {
-                            state.messages = [...state.messages, { role: 'assistant', content: `Error: ${err.message}` }];
-                            state.streaming = "";
-                        }
-                        state.loading = false;
+                    } catch (err) {
+                        state.messages = [...state.messages, { role: 'assistant', content: `Error: ${err.message}` }];
+                        state.streaming = "";
                     }
-                },
-                    html.input({ name: 'chat-input', class: 'chat-input-field', type: 'text', placeholder: 'Type message...' }),
-                    html.select({ name: 'tool-choice' },
-                        html.option({ value: 'none' }, 'Select tool'),
-                        ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
-                    ),
-                    html.button({ type: 'submit', disabled: state.loading }, state.loading ? 'Sending...' : 'Send')
-                )
+                    state.loading = false;
+                }
+            },
+                html.input({ id: 'chat-input', placeholder: 'Type message...' }),
+                html.select({ id: 'tool-choice', name: 'tool-choice' },
+                    html.option({ value: 'none' }, 'Select tool'),
+                    ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
+                ),
+                html.button({ id: 'submit', type: 'submit', disabled: state.loading }, state.loading ? 'Sending...' : 'Send')
             )
         ]);
     </script>

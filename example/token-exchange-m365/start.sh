@@ -140,7 +140,7 @@ if ! grep -q API_TOKEN "$ENV_FILE" 2>/dev/null; then
   read -p "Enter the base url for your OpenAI-compatible service (leave empty for fallback): " BASE_URL
   echo >> "$ENV_FILE"
   if [ -z "$BASE_URL" ]; then
-    BASE_URL="http://dummy-llm:5000/v1"
+    BASE_URL="http://dummy-llm:8765/v1"
     
     echo "OAI_BASE_URL=$BASE_URL" >> "$ENV_FILE"
     echo "OAI_HOST=dummy-llm" >> "$ENV_FILE"

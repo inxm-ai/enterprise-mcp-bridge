@@ -56,22 +56,14 @@ export async function otelFetch(input, init = {}) {
   });
   
   const headers = new Headers(init.headers);
-  console.log("First headers");
-  console.log(init.headers);
-  console.log(headers);
-  // Inject OpenTelemetry context into headers
-  // Debugging: Log the active context and span context
   const activeContext = context.active();
   const spanContext = span.spanContext();
-  console.log('Active Context:', activeContext);
-  console.log('Span Context:', spanContext);
 
   if (activeContext) {
     propagation.inject(trace.setSpan(activeContext, span), headers);
   } else {
     console.warn('No active context found. Headers will not include traceparent.');
   }
-  console.log(headers)
 
   // Convert Headers object to a plain object using Object.fromEntries
   const plainHeaders = Object.entries(headers).reduce((acc, [key, value]) => {
@@ -85,6 +77,15 @@ export async function otelFetch(input, init = {}) {
 
   try {
     const response = await fetch(input, init);
+    if (response.status === 401) {
+      span.setAttribute('error', true);
+      span.setStatus({
+        code: 2, // SpanStatusCode.ERROR
+        message: 'Unauthorized - User may be logged out'
+      });
+      window.location.href = '/oauth2/sign_out';
+    }
+
     span.setAttribute('http.status_code', response.status);
     span.setAttribute('http.status_text', response.statusText);
     span.setStatus({
