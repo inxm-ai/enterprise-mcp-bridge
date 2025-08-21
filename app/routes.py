@@ -1,10 +1,8 @@
 import logging
 from fastapi import APIRouter, HTTPException, Header, Cookie, Request
-from fastapi.responses import JSONResponse
 from typing import Optional, Dict
-import uuid
 import os
-from .session import MCPLocalSessionTask, mcp_session, try_get_session_id, session_id
+from .session import mcp_session, try_get_session_id, session_id
 from .session_manager import session_manager
 from .models import RunToolsResult
 from .mcp_server import get_server_params

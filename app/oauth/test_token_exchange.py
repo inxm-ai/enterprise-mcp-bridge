@@ -1,7 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytest
 import jwt
-import types
 from unittest.mock import patch, MagicMock
 from app.oauth.token_exchange import KeyCloakTokenRetriever
 

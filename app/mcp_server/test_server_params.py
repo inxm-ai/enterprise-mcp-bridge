@@ -1,10 +1,7 @@
 import os
 import sys
-import types
 import pytest
 from app.mcp_server import server_params
-from mcp import StdioServerParameters
-from app.utils_tests.token_retriever_mock import mock_token_retriever_factory
 
 
 class DummyStdioServerParameters:
