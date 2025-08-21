@@ -26,6 +26,7 @@ jobs:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           branch: main
+          path-to-signatures: "mcp-rest-server/signatures/version1/cla.json"
           remote-organization-name: inxm-ai
           remote-repository-name: cla-signatures
           path-to-document: https://github.com/inxm-ai/mcp-rest-server/blob/main/CONTRIBUTING.md#-contributor-license-agreement-cla          
