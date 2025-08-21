@@ -1,0 +1,65 @@
+name: Pull Request Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check_cla:
+    name: Check Contributor License Agreement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Verify CLA
+        id: cla
+        uses: cla-assistant/github-action@v2
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          branch: cla-store
+          path-to-document: https://github.com/inxm-ai/mcp-rest-server/blob/main/CONTRIBUTING.md#-contributor-license-agreement-cla          
+
+  lint_and_test:
+    name: Lint, Format, and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ./app[dev]
+          pip install black ruff
+
+      - name: Run Black (Code Formatter)
+        run: black --check app
+
+      - name: Run Ruff (Linting)
+        run: ruff check app
+
+      - name: Run Pytest
+        run: pytest -q
+
+  check_branch_up_to_date:
+    name: Check Branch is Up-to-Date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Fetch main branch
+        run: git fetch origin main
+
+      - name: Check if branch is up-to-date
+        run: |
+          git diff --quiet origin/main || (echo "Branch is not up-to-date with main. Please rebase." && exit 1)
