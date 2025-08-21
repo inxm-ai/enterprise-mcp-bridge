@@ -154,7 +154,7 @@ To add a backend:
 
 ## Running your own MCP App
 
-### 1. Start the REST API Server
+### Start the REST API Server
 
 By default, the app will use the Demo MCP server at `../mcp/server.py`.
 
@@ -180,6 +180,19 @@ You can call the mcp functions over rest by sending requests to the API endpoint
 }'
 {"isError":false,"content":[{"text":"3","structuredContent":null}],"structuredContent":{"result":3}}
 ```
+
+### Try the fully blown example
+
+Go to [example/token-exchange-m365](https://github.com/inxm-ai/mcp-rest-server/tree/main/example/token-exchange-m365) and try out our full example
+
+#### What it Provides
+
+* Keycloak with token-exchange feature and ingress
+* Automated Entra (Azure AD) app registration
+* MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
+* Minimal chat frontend
+* Tracing via Jaeger
+* Monitoring via Prometheus/Grafana
 
 
 #### Custom MCP Server (in mcp folder)
