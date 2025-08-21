@@ -114,6 +114,8 @@ EOF
   echo -e "${GREEN}✔${RESET} Granting API permissions"
   az ad app permission grant --id "$SERVICE_PRINCIPAL_ID" --api "$GRAPH_API_ID" --scope "openid profile email offline_access ${permission_scopes[*]}" 
   echo -e "${INFO}🔑${RESET} Add admin consent - Note, this may fail on the first tries as the other things are still applied. It will retry automatically"
+  # add a sleep because it might not have stored all permissions yet
+  sleep 10
   retry_command az ad app permission admin-consent --id "$APP_ID"
   if [ $? -ne 0 ]; then
     exit 1
