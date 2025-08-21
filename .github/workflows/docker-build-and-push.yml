@@ -3,6 +3,7 @@ name: Docker Image CI
 on:
   push:
     branches: [ "main" ]
+    tags: [ "*" ] # Trigger on tag pushes
 
 permissions:
   contents: read
@@ -36,6 +37,7 @@ jobs:
           tags: |
             type=sha # Tag with the git commit SHA (short format)
             type=raw,value=latest,enable={{is_default_branch}} # Tag with 'latest' only on default branch (main)
+            type=ref,event=tag # Tag with the Git tag if a tag is pushed
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -48,24 +50,3 @@ jobs:
           cache-from: type=gha # Enable build cache from GitHub Actions
           cache-to: type=gha,mode=max # Save build cache to GitHub Actions 
           outputs: type=docker
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE_TO_ASSUME }}
-          aws-region: eu-central-1
-
-      - name: "Log in to AWS ECR"
-        run: |
-          aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin 876164100382.dkr.ecr.eu-central-1.amazonaws.com/ecr-inxm-ai-main
-          aws ecr describe-repositories --repository-names ecr-inxm-ai-main/mcp-rest-server --region eu-central-1 || \
-          aws ecr create-repository --repository-name ecr-inxm-ai-main/mcp-rest-server --region eu-central-1
-        env:
-          AWS_REGION: eu-central-1
-          AWS_ECR_REGISTRY: 876164100382.dkr.ecr.eu-central-1.amazonaws.com/ecr-inxm-ai-main
-
-      - name: Tag image for ECR
-        run: docker tag ghcr.io/${{ github.repository_owner }}/mcp-rest-server:latest 876164100382.dkr.ecr.eu-central-1.amazonaws.com/ecr-inxm-ai-main/mcp-rest-server:latest
-
-      - name: Push image to ECR
-        run: docker push 876164100382.dkr.ecr.eu-central-1.amazonaws.com/ecr-inxm-ai-main/mcp-rest-server:latest
