@@ -85,6 +85,10 @@
             color: #fff;
             cursor: pointer;
         }
+        button:disabled {
+            background: #2c3848;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 
@@ -107,6 +111,7 @@
                 html.form({
                     class: 'chat-input-form', submit: async e => {
                         e.preventDefault();
+                        if (state.loading) return;
                         const formData = new FormData(e.target);
                         const input = formData.get('chat-input')?.trim() || "";
                         let toolChoice = formData.get('tool-choice') || 'auto';
@@ -145,7 +150,7 @@
                         html.option({ value: 'none' }, 'Select tool'),
                         ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
                     ),
-                    html.button({ type: 'submit' }, 'Send')
+                    html.button({ type: 'submit', disabled: state.loading }, state.loading ? 'Sending...' : 'Send')
                 )
             )
         ]);
