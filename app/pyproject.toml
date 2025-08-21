@@ -1,6 +1,6 @@
 [project]
 name = "mcp-rest-server"
-version = "0.1.4"
+version = "0.1.5"
 description = "Wrapper for MCP Clients to be called via REST on a platform"
 license = "GPL-3.0"
 authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]

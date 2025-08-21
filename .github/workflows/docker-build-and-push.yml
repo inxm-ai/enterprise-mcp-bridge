@@ -80,11 +80,17 @@ jobs:
         run: |
           set -e
           if [ -n "${{ env.PREV_TAG }}" ]; then
+            echo "Getting commits since ${{ env.PREV_TAG }}"
             git log ${{ env.PREV_TAG }}..HEAD --oneline > commits.txt
           else
+            echo "Getting all commits"
             git log --oneline > commits.txt
           fi
           echo "COMMITS=$(jq -R -s -c 'split("\n") | map(select(. != ""))' commits.txt)" >> $GITHUB_ENV
+
+      - name: Debug COMMITS env
+        run: |
+          echo "COMMITS=${{ env.COMMITS }}"
 
       - name: Create Release
         uses: actions/github-script@v6
@@ -94,6 +100,9 @@ jobs:
             const tagName = context.ref.replace('refs/tags/', '');
             const commits = JSON.parse(process.env.COMMITS);
             const dockerImageLink = `ghcr.io/inxm-ai/mcp-rest-server:${tagName}`;
+            console.log('Creating release for tag:', tagName);
+            console.log('Docker image link:', dockerImageLink);
+            console.log('Commits since last tag:', commits);
             const releaseBody = [
               `### Docker image`,
               `[${dockerImageLink}](https://ghcr.io/inxm-ai/mcp-rest-server:${tagName})`,
