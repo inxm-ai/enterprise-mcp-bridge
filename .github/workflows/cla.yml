@@ -8,7 +8,7 @@ on:
 # explicitly configure permissions, in case your GITHUB_TOKEN workflow permissions are set to read-only in repository settings
 permissions:
   actions: write
-  contents: write # this can be 'read' if the signatures are in remote repository
+  contents: read
   pull-requests: write
   statuses: write
 
@@ -24,6 +24,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          branch: cla-store
+          branch: main
+          remote-organization-name: inxm-ai
+          remote-repository-name: cla-signatures
           path-to-document: https://github.com/inxm-ai/mcp-rest-server/blob/main/CONTRIBUTING.md#-contributor-license-agreement-cla          
           allowlist: bot*
