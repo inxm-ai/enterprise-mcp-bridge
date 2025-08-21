@@ -66,13 +66,19 @@ jobs:
       - name: Get the previous tag
         id: prev-tag
         run: |
+          set -e
           git fetch --tags
-          PREV_TAG=$(git describe --tags --abbrev=0 $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          TAGS=$(git tag --sort=-creatordate)
+          PREV_TAG=$(echo "$TAGS" | grep -v "^$CURRENT_TAG$" | head -n 1)
+          echo "Current tag: $CURRENT_TAG"
+          echo "Previous tag: $PREV_TAG"
           echo "PREV_TAG=$PREV_TAG" >> $GITHUB_ENV
 
       - name: Get commits since last tag
         id: commits
         run: |
+          set -e
           if [ -n "${{ env.PREV_TAG }}" ]; then
             git log ${{ env.PREV_TAG }}..HEAD --oneline > commits.txt
           else
