@@ -3,7 +3,7 @@ import pytest
 import jwt
 import types
 from unittest.mock import patch, MagicMock
-from app.oauth.token_exchange import KeyCloakTokenRetriever
+from app.oauth.token_exchange import KeyCloakTokenRetriever, UserLoggedOutException
 
 
 @pytest.fixture
@@ -73,9 +73,9 @@ def test_retrieve_token_exception(monkeypatch, retriever):
         raise Exception("fail")
 
     monkeypatch.setattr(retriever, "_get_stored_provider_token", raise_exc)
-    result = retriever.retrieve_token("dummy")
-    assert result["success"] is False
-    assert "Token retrieval failed" in result["error"]
+    with pytest.raises(UserLoggedOutException) as excinfo:
+        retriever.retrieve_token("dummy")
+    assert str(excinfo.value) == "Token retrieval failed, user probably logged out. Please log in again."
 
 
 def test_token_needs_refresh_expired(monkeypatch, retriever):

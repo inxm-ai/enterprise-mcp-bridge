@@ -182,6 +182,73 @@ async def run_tool(
             logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
             raise HTTPException(status_code=500, detail=str(result))
         return result
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.post("/session/start")
+async def start_session(
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    try:
+        with tracer.start_as_current_span("start_session") as span:
+            x_inxm_mcp_session = session_id(str(uuid.uuid4()), access_token)
+            span.set_attribute("session.id", x_inxm_mcp_session)
+            mcp_task = MCPLocalSessionTask(get_server_params(access_token))
+            mcp_task.start()
+            sessions.set(x_inxm_mcp_session, mcp_task)
+            logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")
+            response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
+            response.set_cookie(
+                key=SESSION_FIELD_NAME,
+                value=x_inxm_mcp_session,
+                httponly=True,
+                samesite="lax",
+            )
+            return response
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+        
+
+
+@router.post("/session/close")
+async def close_session(
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+):
+    try:
+        with tracer.start_as_current_span("close_session") as span:
+            x_inxm_mcp_session = session_id(
+                try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+                access_token,
+            )
+            span.set_attribute("session.id", x_inxm_mcp_session)
+            if x_inxm_mcp_session is None:
+                logger.warning("[Session] Session header missing on close.")
+                raise HTTPException(status_code=400, detail="Session header missing")
+            mcp_task = sessions.pop(x_inxm_mcp_session, None)
+            if not mcp_task:
+                logger.warning(
+                    f"[Session] Session not found on close: {x_inxm_mcp_session}"
+                )
+                raise HTTPException(status_code=404, detail="Session not found")
+            await mcp_task.stop()
+            logger.debug(f"[Session] Session closed: {x_inxm_mcp_session}")
+            return {"status": "closed"}
+    except HTTPException as e:
+        raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
