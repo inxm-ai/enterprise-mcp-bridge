@@ -87,12 +87,20 @@ jobs:
           script: |
             const tagName = context.ref.replace('refs/tags/', '');
             const commits = JSON.parse(process.env.COMMITS);
+            const dockerImageLink = `ghcr.io/inxm-ai/mcp-rest-server:${tagName}`;
+            const releaseBody = [
+              `### Docker image`,
+              `[${dockerImageLink}](https://ghcr.io/inxm-ai/mcp-rest-server:${tagName})`,
+              '',
+              '### Commits since last tag',
+              ...commits
+            ].join('\n');
             await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tagName,
               name: `Release ${tagName}`,
-              body: commits.join('\n'),
+              body: releaseBody,
               draft: false,
               prerelease: false
             });
