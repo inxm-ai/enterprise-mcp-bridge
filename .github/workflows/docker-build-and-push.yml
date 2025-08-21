@@ -91,10 +91,6 @@ jobs:
           fi
           echo "COMMITS=$(jq -R -s -c 'split("\n") | map(select(. != ""))' commits.txt)" >> $GITHUB_ENV
 
-      - name: Debug COMMITS env
-        run: |
-          echo "COMMITS=${{ env.COMMITS }}"
-
       - name: Create Release
         uses: actions/github-script@v6
         with:
