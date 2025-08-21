@@ -28,6 +28,14 @@ class TokenRetrieverFactory:
             raise ValueError(f"Unsupported provider: {provider}")
 
 
+class UserLoggedOutException(Exception):
+    """Exception raised when the user is logged out."""
+
+    def __init__(self, message: str = "User is logged out or unauthorized"):
+        self.message = message
+        super().__init__(message)
+
+
 class KeyCloakTokenRetriever(TokenRetriever):
     def __init__(self):
         self.keycloak_base_url = os.getenv("AUTH_BASE_URL")
@@ -66,7 +74,9 @@ class KeyCloakTokenRetriever(TokenRetriever):
             }
         except Exception as e:
             self.logger.error(f"Token retrieval failed: {str(e)}")
-            return {"success": False, "error": f"Token retrieval failed"}
+            raise UserLoggedOutException(
+                "Token retrieval failed, user probably logged out. Please log in again."
+            )
 
     def _extract_keycloak_token(self, headers: Dict[str, str]) -> str:
         """Extract Keycloak token from request headers"""
@@ -99,7 +109,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             self.logger.warning(
                 "Unauthorized access to Keycloak broker endpoint - User may not have broker.read-token role"
             )
-            raise Exception("Unauthorized: User may not have broker.read-token role")
+            raise UserLoggedOutException("User is logged out or unauthorized")
         else:
             self.logger.error(
                 f"Failed to retrieve token from {url}: {response.status_code} - {response.text}"
@@ -150,10 +160,16 @@ class KeyCloakTokenRetriever(TokenRetriever):
             token_data.update(refreshed_tokens)
             return token_data
         else:
+            if response.status_code == 401:
+                raise UserLoggedOutException("User is logged out or unauthorized")
             self.logger.error(
                 f"Failed to refresh token: {response.status_code} - {response.text}"
             )
-            raise Exception(f"Failed to refresh token")
+            # for now we return the user is logged out exception there too
+            #  might also be an error that keycloak is not configured for token refresh
+            #  so this might be confusing. It should be somewhat clear from the
+            #  error message though.
+            raise UserLoggedOutException(f"Failed to refresh token")
 
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""
