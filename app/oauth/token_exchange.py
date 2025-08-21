@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 import os
 import logging
 from typing import Dict, Any
-from datetime import datetime, timedelta
 
 import jwt
 
@@ -169,7 +168,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             #  might also be an error that keycloak is not configured for token refresh
             #  so this might be confusing. It should be somewhat clear from the
             #  error message though.
-            raise UserLoggedOutException(f"Failed to refresh token")
+            raise UserLoggedOutException("Failed to refresh token")
 
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""
@@ -195,7 +194,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 }
         except Exception as e:
             self.logger.error(f"Force refresh failed: {str(e)}")
-            return {"success": False, "error": f"Force refresh failed"}
+            return {"success": False, "error": "Force refresh failed"}
 
     def _force_broker_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a fresh token retrieval from the broker"""
@@ -215,4 +214,4 @@ class KeyCloakTokenRetriever(TokenRetriever):
             self.logger.error(
                 f"Failed to force broker refresh: {response.status_code} - {response.text}"
             )
-            raise Exception(f"Failed to force broker refresh")
+            raise Exception("Failed to force broker refresh")

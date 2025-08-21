@@ -1,12 +1,11 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from app.session.session import (
     try_get_session_id,
     session_id,
     MCPSessionBase,
     MCPLocalSessionTask,
 )
-import asyncio
 import logging
 
 logging.basicConfig(level=logging.DEBUG)
@@ -25,9 +24,9 @@ def test_try_get_session_id():
 def test_session_id():
     assert session_id("base", "token") == "base:token"
     assert session_id("base", None) == "base"
-    assert session_id("", "token") == None
-    assert session_id("", None) == None
-    assert session_id(None, None) == None
+    assert session_id("", "token") is None
+    assert session_id("", None) is None
+    assert session_id(None, None) is None
 
 
 # Test for MCPSessionBase
