@@ -39,17 +39,3 @@ jobs:
 
       - name: Run Pytest
         run: pytest -q
-
-  check_branch_up_to_date:
-    name: Check Branch is Up-to-Date
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Fetch main branch
-        run: git fetch origin main
-
-      - name: Check if branch is up-to-date
-        run: |
-          git diff --quiet origin/main || (echo "Branch is not up-to-date with main. Please rebase." && exit 1)
