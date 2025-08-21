@@ -8,4 +8,5 @@ RUN echo "load_module /opt/opentelemetry-webserver-sdk/WebServerModule/Nginx/1.2
 COPY opentelemetry_module.conf /etc/nginx/conf.d
 
 COPY app-nginx.conf /etc/nginx/templates/app-nginx.conf.template
-CMD envsubst '${OAI_BASE_URL} ${OAI_API_TOKEN} ${OAI_HOST}' < /etc/nginx/templates/app-nginx.conf.template > /etc/nginx/nginx.conf && nginx -g "daemon off;"
+RUN echo '{ "OAI_MODEL_NAME": "${OAI_MODEL_NAME}" }' > /tmp/settings.json.template
+CMD envsubst < /tmp/settings.json.template > /tmp/settings.json && envsubst '${OAI_BASE_URL} ${OAI_API_TOKEN} ${OAI_HOST}' < /etc/nginx/templates/app-nginx.conf.template > /etc/nginx/nginx.conf && nginx -g "daemon off;"

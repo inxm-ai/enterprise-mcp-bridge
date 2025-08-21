@@ -96,12 +96,13 @@ const onExecuteTool = (mcpServer) => async (toolName, toolArgs) => {
 
 export class TGI {
     
-    constructor(toolDetails, mcpServer, tgiUrl = '/api/tgi/chat/completions') {
+    constructor(toolDetails, mcpServer, modelName = "Qwen/Qwen3-Coder-480B-A35B-Instruct:fireworks-ai", tgiUrl = '/api/tgi/chat/completions') {
         this.tools = mapTools(toolDetails);
         this.url = tgiUrl;
         this.onExecuteTool = onExecuteTool(mcpServer);
         this.messages = []; // Stores the conversation history for a session
         this.tracer = trace.getTracer('chat-tracer');
+        this.modelName = modelName;
     }
 
     /**
@@ -226,7 +227,7 @@ export class TGI {
             messages,
             tools: this.tools,
             tool_choice: toolChoice,
-            model: "Qwen/Qwen3-Coder-480B-A35B-Instruct:fireworks-ai",
+            model: this.modelName,
             max_tokens: 16384,
             stream: true,
         };
