@@ -6,13 +6,6 @@ on:
       - main
 
 jobs:
-  check_cla:
-    name: Check Contributor License Agreement
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
   lint_and_test:
     name: Lint, Format, and Test
     runs-on: ubuntu-latest
