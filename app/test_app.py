@@ -1,17 +1,13 @@
 import pytest
-from fastapi.testclient import TestClient
 import subprocess
 import time
 import os
-import signal
-import sys
 
 import requests
 
 import threading
 
 import socket
-import random
 
 from app.utils_tests.fastapi_wrapper import FastAPIWrapper
 
@@ -61,7 +57,6 @@ def fastapi_app():
 
 @pytest.fixture(scope="session")
 def test_client(fastapi_app):
-    from app.server import app
 
     base_url = f"http://127.0.0.1:{fastapi_app[1]}"
     session = requests.Session()

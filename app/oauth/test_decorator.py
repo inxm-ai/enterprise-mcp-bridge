@@ -1,8 +1,6 @@
 import pytest
 from fastapi import HTTPException
-from types import SimpleNamespace
 from app.oauth.decorator import decorate_args_with_oauth_token
-from app.utils_tests.token_retriever_mock import mock_token_retriever_factory
 
 
 class DummyTool:
