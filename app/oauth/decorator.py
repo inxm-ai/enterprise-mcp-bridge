@@ -27,7 +27,6 @@ async def decorate_args_with_oauth_token(
         args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
     if tool_info and hasattr(tool_info, "inputSchema") and tool_info.inputSchema:
-        input_schema_props = getattr(tool_info.inputSchema, "get", None)
         # inputSchema might be a dict or an object with 'properties'
         if isinstance(tool_info.inputSchema, dict):
             properties = tool_info.inputSchema.get("properties", {})
