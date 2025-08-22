@@ -159,10 +159,11 @@
         import { otelFetch } from "./otelFetch.js";
         import { TGI } from "./chat.js";
         import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
-        pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: false }, (state, trigger) => [
+        pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true }, (state, trigger) => [
             script(async () => {
-                state.availableTools = await otelFetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
                 state.model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
+                state.availableTools = await otelFetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
+                state.loading = false;
             }),
             html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
             html.form({
@@ -207,7 +208,7 @@
                     html.option({ value: 'none' }, 'Select tool'),
                     ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
                 ),
-                html.button({ id: 'submit', type: 'submit', disabled: state.loading }, state.loading ? 'Sending...' : 'Send')
+                html.button({ id: 'submit', type: 'submit', disabled: state.loading }, state.loading ? 'Working...' : 'Send')
             )
         ]);
     </script>
