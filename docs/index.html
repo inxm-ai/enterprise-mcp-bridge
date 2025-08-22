@@ -119,9 +119,9 @@
                 <!-- Key Capabilities Section -->
                 <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                     <!-- Card: Session & User Management -->
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
-                        <h3 class="text-xl font-bold text-white mb-2">Robust Session & User Management</h3>
-                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                        <h3 class="text-xl font-bold text-white mb-4">Robust Session & User Management</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
                             <li><strong>Multi-User & Multi-Session:</strong> Securely manage multiple isolated user contexts and concurrent sessions.</li>
                             <li><strong>Stateful & Stateless Modes:</strong> Supports both stateless "fire-and-forget" calls and stateful sessions.</li>
                             <li><strong>Lifecycle & Resource Hygiene:</strong> Explicit endpoints for session management and automatic cleanup of idle sessions.</li>
@@ -129,8 +129,9 @@
                         </ul>
                     </div>
                     <!-- Card: Security & Auth -->
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
-                        <h3 class="text-xl font-bold text-white mb-2">Integrated Security & Authentication</h3>
+
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                        <h3 class="text-xl font-bold text-white mb-4">Integrated Security & Authentication</h3>
                         <ul class="list-disc list-inside space-y-2 text-gray-400">
                             <li><strong>Centralized hosting of the MCP server:</strong> The server can be hosted in a centralized manner, allowing multiple clients to connect and interact with it concurrently, while your IT manages the underlying infrastructure, permissions and monitors it.</li>
                             <li><strong>Built-in OAuth2:</strong> Natively handles OAuth2 token exchange with brokers like Keycloak.</li>
@@ -139,9 +140,9 @@
                         </ul>
                     </div>
                     <!-- Card: Developer Experience -->
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
-                        <h3 class="text-xl font-bold text-white mb-2">Developer Experience & API Design</h3>
-                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                        <h3 class="text-xl font-bold text-white mb-4">Developer Experience & API Design</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
                             <li><strong>REST-first Interface:</strong> All tool discovery and invocation happen over standard HTTP/JSON.</li>
                             <li><strong>Automatic Tool Endpoints:</strong> Each MCP tool is automatically mapped to a canonical REST endpoint.</li>
                             <li><strong>Structured Error Handling:</strong> Maps MCP errors to standard HTTP status codes.</li>
@@ -172,7 +173,7 @@ uvicorn app.server:app --reload</code></pre>
 "b": 1
 }'</code></pre>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Session vs. Stateless Calls</h2>
                     <div class="overflow-x-auto">
                         <table class="w-full text-left rounded-lg overflow-hidden">
@@ -209,7 +210,7 @@ uvicorn app.server:app --reload</code></pre>
 
             <!-- Deployment Example -->
             <section id="deployment" class="page hidden grid gap-8">
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Full-Stack Docker Compose Deployment</h2>
                     <img src="architecture.png" alt="Architecture Diagram" class="mb-4">
                     <p class="text-gray-400 mb-6">The following `docker-compose.yaml` provides a complete example of a production-ready, full-stack deployment. It includes everything from authentication and observability to the REST server itself. This aligns with the project's focus on enterprise-grade use cases.</p>
@@ -261,7 +262,7 @@ uvicorn app.server:app --reload</code></pre>
                     
                     <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
 
-                    <div class="card p-6 rounded-xl border border-gray-700 bg-gray-900 mt-6">
+                    <div class="card p-6 rounded-xl border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out bg-gray-900 mt-6">
                         <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Login</h4>
                         <pre class="mermaid">
 sequenceDiagram
@@ -281,7 +282,7 @@ sequenceDiagram
     AppIngress ->> AppFrontend: Serve Frontend
                         </pre>
                     </div>
-                    <div class="card p-6 rounded-xl border border-gray-700 bg-gray-900 mt-6">
+                    <div class="card p-6 rounded-xl border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out bg-gray-900 mt-6">
                         <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Tool Request with Token Exchange</h4>
                         <pre class="mermaid">
 sequenceDiagram
@@ -306,7 +307,7 @@ sequenceDiagram
 
             <!-- Contributing -->
             <section id="contributing" class="page hidden grid gap-8">
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Contributing to MCP REST Server</h2>
                     <p class="text-gray-400 mb-6">Thanks for your interest in contributing! This document explains how to propose changes, report issues, add features, improve docs, and release updates.</p>
                     
@@ -324,7 +325,7 @@ sequenceDiagram
                         <li>Agree to the CLA if you haven't</li>
                     </ol>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🗂 Project Layout</h3>
                     <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">app/
   server.py          # FastAPI app wiring
@@ -336,28 +337,28 @@ sequenceDiagram
   mcp_server/        # Server parameter helpers
   test_*.py          # Tests (pytest)</code></pre>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🧪 Testing</h3>
                     <p class="text-gray-400">We use <code>pytest</code>. Write tests for every new feature or bug fix. Favor small, explicit tests.</p>
                     <p class="text-gray-400 mt-2">Run the full suite: <code>pytest -q</code></p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🧹 Code Style & Quality</h3>
                     <p class="text-gray-400">Follow standard Python style (PEP 8). Keep functions small, log appropriately, and avoid broad exception catches. Use type hints for new or changed public functions.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🔐 Security & Privacy</h3>
                     <p class="text-gray-400">Never log raw OAuth tokens or secrets. Validate and sanitize user-provided values. Report vulnerabilities privately before opening a public issue.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🐞 Reporting Issues</h3>
                     <p class="text-gray-400">Include your environment, install method, reproduction steps, expected vs. actual behavior, and logs (with sensitive data trimmed).</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">📝 Commit Messages & Pull Requests</h3>
                     <p class="text-gray-400">Use <a href="https://www.conventionalcommits.org/en/v1.0.0/" class="text-blue-400 hover:underline">Conventional Commits</a> (e.g., <code>feat: add session timeout config</code>, <code>fix: handle unknown tool error</code>). Ensure your PR checklist is complete before submitting, including passing tests, updated documentation, and a clear commit history.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                     <h3 class="text-xl font-bold text-white mb-2">🤖 AI-Assisted Contributions</h3>
                     <p class="text-gray-400">You may use AI tools, but you are the author of record. Carefully review all generated code, ensure it's well-tested, and avoid pasting secrets. Avoid blind bulk rewrites and instead use AI to draft boilerplate or explore alternative designs. Maintainers may request clarification on AI involvement if needed.</p>
                 </div>
