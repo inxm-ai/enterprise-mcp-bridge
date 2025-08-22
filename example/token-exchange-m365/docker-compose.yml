@@ -124,7 +124,7 @@ services:
   
   app-mcp-rest:
     container_name: app.mcp-m365-rest-server
-    image: inxm-ai/mcp-rest-server:latest
+    image: ghcr.io/inxm-ai/mcp-rest-server:latest
     environment:
       SERVICE_NAME: mcp-m365-rest-server
       MCP_SERVER_COMMAND: npx -y @softeria/ms-365-mcp-server --org-mode
