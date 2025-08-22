@@ -9,6 +9,8 @@ import requests
 
 logger = logging.getLogger("uvicorn.error")
 
+def mask_token(text: str, token: str) -> str:
+    return text.replace(token, f"{token[:4]}****") if token else text
 
 class TokenRetriever:
     def retrieve_token(self, token: str) -> Dict[str, Any]:
@@ -111,10 +113,16 @@ class KeyCloakTokenRetriever(TokenRetriever):
             raise UserLoggedOutException("User is logged out or unauthorized")
         else:
             self.logger.error(
-                f"Failed to retrieve token from {url}: {response.status_code} - {response.text}"
+                mask_token(
+                    f"Failed to retrieve token from {url}: {response.status_code} - {response.text}",
+                    keycloak_token
+                )
             )
             raise Exception(
-                f"Failed to retrieve token: {response.status_code} - {response.text}"
+                mask_token(
+                    f"Failed to retrieve token: {response.status_code} - {response.text}",
+                    keycloak_token
+                )
             )
 
     def _token_needs_refresh(self, token_data: Dict[str, Any]) -> bool:
@@ -162,7 +170,10 @@ class KeyCloakTokenRetriever(TokenRetriever):
             if response.status_code == 401:
                 raise UserLoggedOutException("User is logged out or unauthorized")
             self.logger.error(
-                f"Failed to refresh token: {response.status_code} - {response.text}"
+                mask_token(
+                    f"Failed to refresh token: {response.status_code} - {response.text}",
+                    refresh_token
+                )
             )
             # for now we return the user is logged out exception there too
             #  might also be an error that keycloak is not configured for token refresh
@@ -212,6 +223,9 @@ class KeyCloakTokenRetriever(TokenRetriever):
             return response.json()
         else:
             self.logger.error(
-                f"Failed to force broker refresh: {response.status_code} - {response.text}"
+                mask_token(
+                    f"Failed to force broker refresh: {response.status_code} - {response.text}",
+                    keycloak_token
+                )
             )
             raise Exception("Failed to force broker refresh")
