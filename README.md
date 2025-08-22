@@ -145,10 +145,12 @@ To add a backend:
 
 - Celery/Redis/Postgres session manager
 - Other Auth providers
-- Metrics endpoint (Prometheus) for session counts & tool latency
 - Rate limiting / quota per user
-- Pluggable auth providers in `TokenRetrieverFactory`
-- WebSocket streaming for long-running tools
+- Externally extensible auth providers in `TokenRetrieverFactory` and `SessionManagerBase`
+- WebSocket streaming/Long Polling for long-running tools
+- Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
+
+Find more ideas in our [GitHub issues](https://github.com/inxm-ai/mcp-rest-server/issues).
 
 ---
 

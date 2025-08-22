@@ -215,14 +215,23 @@ Maintainers may request clarification on AI involvement or ask for additional te
 By submitting, you confirm you exercised due diligence and accept responsibility for the contribution.
 
 ---
-## 🧭 Roadmap Ideas (Open for PRs)
+## 🧭 Roadmap Ideas
+
+### Ideal for first PRs
 - Add session timeout / eviction policy
-- Optional Redis / external session backend
 - Structured logging config & correlation IDs
 - Type hints + mypy config
-- Automated release workflow (GitHub Actions)
 - Add OpenAPI examples
-- E2E test via Docker
+
+### Other Ideas
+- Celery/Redis/Postgres session manager
+- Other Auth providers
+- Rate limiting / quota per user
+- Externally extensible auth providers in `TokenRetrieverFactory` and `SessionManagerBase`
+- WebSocket streaming/Long Polling for long-running tools
+- Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
+
+Find more ideas in our [GitHub issues](https://github.com/inxm-ai/mcp-rest-server/issues).
 
 ---
 ## 🙏 Thanks
