@@ -1,6 +1,6 @@
 [project]
 name = "enterprise-mcp-bridge"
-version = "0.1.9"
+version = "0.1.10"
 description = "Wrapper for MCP Clients to be called via REST on a platform"
 license = "GPL-3.0"
 authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]
