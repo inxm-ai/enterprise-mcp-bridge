@@ -228,7 +228,6 @@ export class TGI {
             tools: this.tools,
             tool_choice: toolChoice,
             model: this.modelName,
-            max_tokens: 16384,
             stream: true,
         };
 
