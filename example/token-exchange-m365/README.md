@@ -2,6 +2,50 @@
 
 This is a complete demo including authentication with m365
 
+## Architecture
+
+```mermaid
+graph TD
+    subgraph Auth
+        Keycloak["Keycloak (auth.inxm.local)"]
+        OAuth2Proxy["OAuth2-Proxy (inxm.local)"]
+        Redis[Redis]
+    end
+
+    subgraph Ops
+        Jaeger[Jaeger]
+        Grafana[Grafana]
+        Prometheus[Prometheus]
+    end
+
+    subgraph Apps
+        AppNginx[App-Nginx]
+        AppFrontend[App-Frontend]
+        AppMCPRest[MCP-Rest-Server]
+    end
+
+    Entra[Microsoft Entra]
+    GraphAPI[Microsoft Graph API]
+
+    User --> Ingress
+    Ingress --> OAuth2Proxy
+    Ingress --> Keycloak
+    AppNginx --> AppFrontend
+    AppNginx --> AppMCPRest
+    AppMCPRest --> OAuth2Proxy
+    AppMCPRest --> Keycloak
+    OAuth2Proxy --> Keycloak
+    OAuth2Proxy --> Redis
+    OAuth2Proxy --> AppNginx
+    Keycloak --> Entra
+    Entra --> Keycloak
+    AppMCPRest --> GraphAPI
+
+    Prometheus --> AppMCPRest
+    Jaeger --> AppMCPRest
+    Grafana --> Prometheus
+```
+
 ## Login Flow
 
 ```mermaid
