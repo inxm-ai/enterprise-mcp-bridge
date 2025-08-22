@@ -28,18 +28,18 @@ graph TD
     GraphAPI[Microsoft Graph API]
 
     User --> Ingress
-    Ingress --> OAuth2Proxy
-    Ingress --> Keycloak
+    Ingress --[inxm.local]--> OAuth2Proxy
+    Ingress --[auth.inxm.local]--> Keycloak
     AppNginx --> AppFrontend
     AppNginx --> AppMCPRest
     AppMCPRest --> OAuth2Proxy
-    AppMCPRest --> Keycloak
+    AppMCPRest --request provider token--> Keycloak
     OAuth2Proxy --> Keycloak
     OAuth2Proxy --> Redis
     OAuth2Proxy --> AppNginx
     Keycloak --> Entra
     Entra --> Keycloak
-    AppMCPRest --> GraphAPI
+    AppMCPRest --request with provider token--> GraphAPI
 
     Prometheus --> AppMCPRest
     Jaeger --> AppMCPRest
