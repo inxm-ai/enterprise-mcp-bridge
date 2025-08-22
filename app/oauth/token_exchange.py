@@ -7,10 +7,10 @@ import jwt
 
 import requests
 
+from app.utils import mask_token
+
 logger = logging.getLogger("uvicorn.error")
 
-def mask_token(text: str, token: str) -> str:
-    return text.replace(token, f"{token[:4]}****") if token else text
 
 class TokenRetriever:
     def retrieve_token(self, token: str) -> Dict[str, Any]:
@@ -115,13 +115,13 @@ class KeyCloakTokenRetriever(TokenRetriever):
             self.logger.error(
                 mask_token(
                     f"Failed to retrieve token from {url}: {response.status_code} - {response.text}",
-                    keycloak_token
+                    keycloak_token,
                 )
             )
             raise Exception(
                 mask_token(
                     f"Failed to retrieve token: {response.status_code} - {response.text}",
-                    keycloak_token
+                    keycloak_token,
                 )
             )
 
@@ -172,7 +172,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             self.logger.error(
                 mask_token(
                     f"Failed to refresh token: {response.status_code} - {response.text}",
-                    refresh_token
+                    refresh_token,
                 )
             )
             # for now we return the user is logged out exception there too
@@ -225,7 +225,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             self.logger.error(
                 mask_token(
                     f"Failed to force broker refresh: {response.status_code} - {response.text}",
-                    keycloak_token
+                    keycloak_token,
                 )
             )
             raise Exception("Failed to force broker refresh")

@@ -12,6 +12,7 @@ from .oauth.decorator import decorate_args_with_oauth_token
 from fnmatch import fnmatch
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
+from .utils import mask_token
 
 router = APIRouter()
 sessions = session_manager()
@@ -87,7 +88,12 @@ async def list_tools(
             )
             if x_inxm_mcp_session:
                 span.set_attribute("session.id", x_inxm_mcp_session)
-            logger.info(f"[Tools] Listing tools. Session: {x_inxm_mcp_session}")
+            logger.info(
+                mask_token(
+                    f"[Tools] Listing tools. Session: {x_inxm_mcp_session}",
+                    x_inxm_mcp_session,
+                )
+            )
             if x_inxm_mcp_session is None:
                 async with mcp_session(get_server_params(access_token)) as session:
                     result = await session.list_tools()
@@ -96,10 +102,20 @@ async def list_tools(
 
             mcp_task = sessions.get(x_inxm_mcp_session)
             if not mcp_task:
-                logger.warning(f"[Tools] Session not found: {x_inxm_mcp_session}")
+                logger.warning(
+                    mask_token(
+                        f"[Tools] Session not found: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
+                )
                 raise HTTPException(status_code=404, detail="Session not found")
             result = await mcp_task.request("list_tools")
-            logger.debug(f"[Tools] Tools listed for session {x_inxm_mcp_session}.")
+            logger.debug(
+                mask_token(
+                    f"[Tools] Tools listed for session {x_inxm_mcp_session}.",
+                    x_inxm_mcp_session,
+                )
+            )
             return map_tools(result)
     except UserLoggedOutException as e:
         logger.warning(f"[Tools] Unauthorized access: {str(e)}")
@@ -133,7 +149,10 @@ async def run_tool(
                 args = dict(args)
                 args.pop("inxm-session")
             logger.info(
-                f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}"
+                mask_token(
+                    f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}",
+                    x_inxm_mcp_session,
+                )
             )
             if x_inxm_mcp_session is None:
                 async with mcp_session(get_server_params(access_token)) as session:
@@ -147,7 +166,10 @@ async def run_tool(
                 mcp_task = sessions.get(x_inxm_mcp_session)
                 if not mcp_task:
                     logger.warning(
-                        f"[Tool-Call] Session not found: {x_inxm_mcp_session}"
+                        mask_token(
+                            f"[Tool-Call] Session not found: {x_inxm_mcp_session}",
+                            x_inxm_mcp_session,
+                        )
                     )
                     raise HTTPException(
                         status_code=404,
@@ -203,13 +225,23 @@ async def start_session(
             mcp_task = MCPLocalSessionTask(get_server_params(access_token))
             mcp_task.start()
             sessions.set(x_inxm_mcp_session, mcp_task)
-            logger.debug(f"[Session] New session started: {x_inxm_mcp_session}")
+            logger.debug(
+                mask_token(
+                    f"[Session] New session started: {x_inxm_mcp_session}",
+                    x_inxm_mcp_session,
+                )
+            )
             response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
             response.set_cookie(
                 key=SESSION_FIELD_NAME,
                 value=x_inxm_mcp_session,
                 httponly=True,
                 samesite="lax",
+                secure=(
+                    True
+                    if os.environ.get("HTTPS_ENABLED", "false").lower() == "true"
+                    else False
+                ),
             )
             return response
     except HTTPException as e:
@@ -243,11 +275,19 @@ async def close_session(
             mcp_task = sessions.pop(x_inxm_mcp_session, None)
             if not mcp_task:
                 logger.warning(
-                    f"[Session] Session not found on close: {x_inxm_mcp_session}"
+                    mask_token(
+                        f"[Session] Session not found on close: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
                 )
                 raise HTTPException(status_code=404, detail="Session not found")
             await mcp_task.stop()
-            logger.debug(f"[Session] Session closed: {x_inxm_mcp_session}")
+            logger.debug(
+                mask_token(
+                    f"[Session] Session closed: {x_inxm_mcp_session}",
+                    x_inxm_mcp_session,
+                )
+            )
             return {"status": "closed"}
     except HTTPException as e:
         raise e

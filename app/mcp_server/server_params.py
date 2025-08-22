@@ -4,6 +4,7 @@ import sys
 from typing import Optional
 from mcp import StdioServerParameters
 from app.oauth.token_exchange import TokenRetrieverFactory
+from app.utils import mask_token
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -24,7 +25,10 @@ def defined_env(
                 f"Token retrieval failed for {oauth_env_var} with access_token: {access_token}"
             )
         logger.info(
-            f"Server-Params from OAUTH_ENV: {oauth_env_var}={token_result['access_token']}"
+            mask_token(
+                f"Server-Params from OAUTH_ENV: {oauth_env_var}={token_result['access_token']}",
+                token_result["access_token"],
+            )
         )
         env[oauth_env_var] = token_result["access_token"]
     else:
