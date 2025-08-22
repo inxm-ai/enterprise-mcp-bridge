@@ -13,82 +13,128 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        /* Define a custom color palette and font using Tailwind's theme extension */
+        /* Retro-professional theme: black, silver, porcelain, orange accents */
         :root {
-            --bg-color: #0d1117;
-            --card-bg-color: #161b22;
-            --text-color: #c9d1d9;
-            --link-color: #58a6ff;
-            --heading-color: #e6edf3;
-            --border-color: #30363d;
-            --code-bg-color: #6a737d1a;
-            --code-text-color: #e6edf3;
+            --bg-color: #0b0c0e;          /* near-black */
+            --surface-color: #111319;     /* graphite */
+            --card-bg-color: #14171d;     /* dark slate */
+            --text-color: #EEEDE8;        /* porcelain */
+            --muted-text-color: #B8BEC6;  /* soft silver */
+            --heading-color: #FAFAF8;     /* bright porcelain */
+            --border-color: #2b313a;      /* gunmetal */
+            --chrome-silver: #cfd3d6;     /* thin chrome lines */
+            --accent: #ff7a1a;            /* modern orange */
+            --accent-strong: #ff5a00;     /* deeper orange */
+            --link-color: var(--accent);
+            --code-bg-color: rgba(255,255,255,0.04);
+            --code-text-color: #f6f6f4;
         }
 
-        /* Set the base font and background for the body */
+        /* Base */
         body {
             font-family: 'Inter', sans-serif;
-            background-color: var(--bg-color);
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(255,122,26,0.10), transparent 40%),
+                        linear-gradient(180deg, #0b0c0e 0%, #0a0b0c 100%);
             color: var(--text-color);
         }
+        body::before {
+            content: "";
+            position: fixed; inset: 0; pointer-events: none;
+            background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 3px 3px; opacity: .6; mix-blend-mode: soft-light;
+        }
 
-        
+        /* Helpers */
+        .theme-surface { background-color: var(--surface-color) !important; border-color: var(--border-color) !important; }
+        .theme-card { background-color: var(--card-bg-color) !important; border-color: var(--border-color) !important; position: relative; }
+        .theme-border { border-color: var(--border-color) !important; }
+        .theme-muted { color: var(--muted-text-color) !important; }
+        .theme-heading { color: var(--heading-color) !important; }
+        a { color: var(--link-color); }
+        a:hover { color: var(--accent-strong); }
+
+        /* Subtle accent echo on cards (skip hero) */
+        .theme-card:not(.hero)::before {
+            content: "";
+            position: absolute;
+            left: 10px; right: 10px; top: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255,122,26,.45) 20%, rgba(255,90,0,.35) 60%, transparent);
+            border-radius: 2px;
+            opacity: .8;
+        }
+
+        /* Navigation */
+        .nav-button { color: var(--muted-text-color); border: 1px solid transparent; }
         .nav-button.active {
-            background-color: #30363d;
-            border-color: #58a6ff;
-             color: #58a6ff;
+            background-color: rgba(255,122,26,.08);
+            border-color: var(--accent);
+            color: var(--heading-color);
+            box-shadow: 0 0 0 1px rgba(255,122,26,.15) inset;
         }
-        .nav-button:hover {
-             background-color: #30363d;
+        .nav-button:hover { background-color: rgba(255,255,255,.06); color: var(--heading-color); }
+
+        /* Hero */
+        .hero { position: relative; border: 1px solid var(--chrome-silver);
+            background-image: linear-gradient(135deg, rgba(255,122,26,.10), rgba(207,211,214,.06) 40%, rgba(0,0,0,0) 60%),
+                              linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,0) 60%);
+        }
+        .hero::after { content: ""; position: absolute; left:0; right:0; top:0; height:4px;
+            background: linear-gradient(90deg, transparent, var(--accent) 20%, var(--accent-strong) 60%, transparent); opacity:.9; }
+
+        /* Glass effect for navbar */
+        nav.glass {
+            background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)) !important;
+            border: 1px solid rgba(255,255,255,.10);
+            box-shadow: 0 8px 28px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+            backdrop-filter: blur(10px) saturate(120%);
+            -webkit-backdrop-filter: blur(10px) saturate(120%);
         }
 
-        /* Manually style mermaid diagrams to fit the dark theme */
-        .mermaid {
-            background-color: var(--card-bg-color);
-            padding: 1rem;
-            border-radius: 8px;
+        /* Accent button */
+        .btn-accent { background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+            color:#111; border:1px solid rgba(255,255,255,.12); }
+        .btn-accent:hover { color: var(--text-color); transform: translateY(-1px); box-shadow: 0 6px 24px rgba(255,90,0,.25); }
+
+    /* Code blocks (with accent echo) */
+    pre.theme-code { background-color: var(--code-bg-color) !important; color: var(--code-text-color) !important; border: 1px solid var(--border-color); position: relative; box-shadow: 0 0 0 2px rgba(255,122,26,.06) inset; }
+    pre.theme-code::after { content:""; position:absolute; left:10px; right:10px; bottom:0; height:2px; background: linear-gradient(90deg, transparent, rgba(255,122,26,.5) 20%, rgba(255,90,0,.35) 60%, transparent); border-radius:2px; }
+
+        /* Tables */
+        table thead { background-color: #1b1f26; }
+        table tbody tr { background-color: #0f1216; }
+        table tbody tr:hover { background-color: #171b21; }
+
+        /* Mermaid adjustments */
+        .mermaid { background-color: var(--card-bg-color); padding:1rem; border-radius:8px; border:1px solid var(--border-color); text-align:center; }
+        .mermaid .cluster rect { fill: var(--card-bg-color) !important; stroke: var(--border-color) !important; }
+        .mermaid .label text { fill: var(--text-color) !important; }
+        .mermaid .node rect, .mermaid .node circle { fill: var(--surface-color) !important; stroke: var(--border-color) !important; }
+        .mermaid .edgePaths .path { stroke: var(--chrome-silver) !important; }
+        .mermaid .arrowheadPath { fill: var(--accent) !important; }
+        .mermaid .actor { fill: var(--surface-color) !important; stroke: var(--border-color) !important; color: var(--text-color) !important; }
+        .mermaid .messageText { fill: var(--text-color) !important; }
+
+        /* Media accent frame for images */
+        .accent-media { position: relative; padding: .75rem; border-radius: 14px;
+            background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
             border: 1px solid var(--border-color);
-            text-align: center;
+            box-shadow: 0 0 0 1px rgba(255,122,26,.10) inset, 0 10px 24px rgba(0,0,0,.25);
         }
-
-        .mermaid .cluster rect {
-            fill: var(--card-bg-color) !important;
-            stroke: var(--border-color) !important;
-        }
-
-        .mermaid .label text {
-            fill: var(--text-color) !important;
-        }
-
-        .mermaid .node rect, .mermaid .node circle {
-            fill: var(--bg-color) !important;
-            stroke: var(--border-color) !important;
-        }
-
-        .mermaid .edgePaths .path {
-            stroke: var(--text-color) !important;
-        }
-
-        .mermaid .arrowheadPath {
-            fill: var(--text-color) !important;
-        }
-
-        .mermaid .actor {
-            fill: var(--bg-color) !important;
-            stroke: var(--border-color) !important;
-            color: var(--text-color) !important;
-        }
-
-        .mermaid .messageText {
-            fill: var(--text-color) !important;
-        }
+        .accent-media::after { content:""; position:absolute; left:12px; right:12px; bottom:0; height:3px; border-radius:2px;
+            background: linear-gradient(90deg, transparent, rgba(255,122,26,.55) 25%, rgba(255,90,0,.35) 60%, transparent); }
+        .accent-media img { display:block; width:100%; border-radius:10px; border:1px solid var(--border-color);
+            box-shadow: 0 0 0 1px rgba(255,122,26,.06) inset; }
     </style>
 </head>
 <body class="p-4 sm:p-8">
     <div class="container mx-auto max-w-7xl">
         <!-- Navigation bar with dynamic buttons -->
-        <nav class="bg-gray-800/50 backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <h1 class="text-2xl font-bold text-white tracking-tight">mcp-rest-server</h1>
+    <nav class="backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 theme-surface theme-border glass">
+            <h1 class="text-2xl font-bold text-white tracking-tight">
+                <img src="logo.svg" alt="mcp-rest-server Logo" class="inline-block w-12 h-12 mr-2">
+                Enterprise MCP Bridge
+            </h1>
             <div class="flex flex-wrap gap-2 sm:gap-4">
                 <button onclick="showPage('intro')" class="nav-button active px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Why This Project?</button>
                 <button onclick="showPage('quickstart')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Quick Start</button>
@@ -102,13 +148,13 @@
             <!-- Why This Project? - The "WOW" page -->
             <section id="intro" class="page active grid gap-8">
                 <!-- Hero Section -->
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-8 rounded-2xl shadow-xl flex flex-col lg:flex-row items-center justify-between gap-8">
+                <div class="p-8 rounded-2xl shadow-xl flex flex-col lg:flex-row items-center justify-between gap-8 theme-card hero">
                     <div class="lg:w-1/2">
-                        <h2 class="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight leading-tight text-white mb-4">The Production-Grade Wrapper for MCP</h2>
+                        <h2 class="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight leading-tight theme-heading mb-4">The Production-Grade Wrapper for MCP</h2>
                         <p class="text-lg text-gray-400 mb-6">
-                            A robust FastAPI-based wrapper that exposes any <a href="https://github.com/modelcontextprotocol" class="text-blue-400 hover:text-blue-300 transition-colors duration-200">Model Context Protocol (MCP)</a> server over plain HTTP/JSON. This project is engineered for enterprise production use, focusing on security, scalability, and ease of integration.
+                            A robust FastAPI-based wrapper that exposes any <a href="https://github.com/modelcontextprotocol" class="transition-colors duration-200">Model Context Protocol (MCP)</a> server over plain HTTP/JSON. This project is engineered for enterprise production use, focusing on security, scalability, and ease of integration.
                         </p>
-                        <a href="#quickstart" onclick="showPage('quickstart')" class="inline-block bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-8 rounded-full shadow-lg transition-transform duration-300 transform hover:scale-105">Get Started</a>
+                        <a href="#quickstart" onclick="showPage('quickstart')" class="inline-block btn-accent font-semibold py-3 px-8 rounded-full shadow-lg transition-transform duration-300">Get Started</a>
                     </div>
                     <!-- Placeholder for a more professional-looking diagram/image -->
                     <div class="lg:w-1/2">
@@ -119,7 +165,7 @@
                 <!-- Key Capabilities Section -->
                 <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                     <!-- Card: Session & User Management -->
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                    <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                         <h3 class="text-xl font-bold text-white mb-4">Robust Session & User Management</h3>
                         <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
                             <li><strong>Multi-User & Multi-Session:</strong> Securely manage multiple isolated user contexts and concurrent sessions.</li>
@@ -130,7 +176,7 @@
                     </div>
                     <!-- Card: Security & Auth -->
 
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                    <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                         <h3 class="text-xl font-bold text-white mb-4">Integrated Security & Authentication</h3>
                         <ul class="list-disc list-inside space-y-2 text-gray-400">
                             <li><strong>Centralized hosting of the MCP server:</strong> The server can be hosted in a centralized manner, allowing multiple clients to connect and interact with it concurrently, while your IT manages the underlying infrastructure, permissions and monitors it.</li>
@@ -140,7 +186,7 @@
                         </ul>
                     </div>
                     <!-- Card: Developer Experience -->
-                    <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                    <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                         <h3 class="text-xl font-bold text-white mb-4">Developer Experience & API Design</h3>
                         <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
                             <li><strong>REST-first Interface:</strong> All tool discovery and invocation happen over standard HTTP/JSON.</li>
@@ -155,16 +201,16 @@
 
             <!-- Quick Start -->
             <section id="quickstart" class="page hidden grid gap-8">
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="rounded-xl p-6 shadow-md border theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Quick Start</h2>
                     <p class="text-gray-400 mb-4">Run the local demo with a default MCP server.</p>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">git clone https://github.com/inxm-ai/mcp-rest-server.git
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">git clone https://github.com/inxm-ai/mcp-rest-server.git
 cd mcp-rest-server
 pip install "app[all]"
 uvicorn app.server:app --reload</code></pre>
-                    <p class="text-gray-400 mt-4 mb-2">Open the API docs: <a href="http://localhost:8000/docs" class="text-blue-400 hover:underline">http://localhost:8000/docs</a></p>
+                    <p class="text-gray-400 mt-4 mb-2">Open the API docs: <a href="http://localhost:8000/docs" class="hover:underline">http://localhost:8000/docs</a></p>
                     <p class="text-gray-400">You can test it with the following command:</p>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -X 'POST' \
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">curl -X 'POST' \
 'http://127.0.0.1:8000/tools/add' \
 -H 'accept: application/json' \
 -H 'Content-Type: application/json' \
@@ -173,7 +219,7 @@ uvicorn app.server:app --reload</code></pre>
 "b": 1
 }'</code></pre>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Session vs. Stateless Calls</h2>
                     <div class="overflow-x-auto">
                         <table class="w-full text-left rounded-lg overflow-hidden">
@@ -185,12 +231,12 @@ uvicorn app.server:app --reload</code></pre>
                                 </tr>
                             </thead>
                             <tbody class="text-gray-400">
-                                <tr class="bg-gray-900 hover:bg-gray-700 transition-colors">
+                                <tr class="transition-colors">
                                     <td class="p-4">Stateless</td>
                                     <td class="p-4"><code>POST /tools/{tool}</code> (no session header)</td>
                                     <td class="p-4">Simple one-off tool execution</td>
                                 </tr>
-                                <tr class="bg-gray-900 hover:bg-gray-700 transition-colors">
+                                <tr class="transition-colors">
                                     <td class="p-4">Stateful</td>
                                     <td class="p-4"><code>POST /session/start</code> then include header/cookie</td>
                                     <td class="p-4">Conversations, multi-step pipelines</td>
@@ -200,23 +246,25 @@ uvicorn app.server:app --reload</code></pre>
                     </div>
                     <h3 class="text-xl font-bold text-white mb-2 mt-6">Session Management CLI Examples</h3>
                     <p class="text-gray-400 mb-2"><strong>Start a Session:</strong></p>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -X POST http://localhost:8000/session/start -c cookies.txt</code></pre>
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">curl -X POST http://localhost:8000/session/start -c cookies.txt</code></pre>
                     <p class="text-gray-400 mt-4 mb-2"><strong>Use the Session:</strong></p>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'</code></pre>
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'</code></pre>
                     <p class="text-gray-400 mt-4 mb-2"><strong>Close the Session:</strong></p>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/session/close</code></pre>
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">curl -b cookies.txt -X POST http://localhost:8000/session/close</code></pre>
                 </div>
             </section>
 
             <!-- Deployment Example -->
             <section id="deployment" class="page hidden grid gap-8">
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Full-Stack Docker Compose Deployment</h2>
-                    <img src="architecture.png" alt="Architecture Diagram" class="mb-4">
+                    <div class="accent-media my-6">
+                        <img src="architecture.png" alt="Architecture Diagram" loading="lazy">
+                    </div>
                     <p class="text-gray-400 mb-6">The following `docker-compose.yaml` provides a complete example of a production-ready, full-stack deployment. It includes everything from authentication and observability to the REST server itself. This aligns with the project's focus on enterprise-grade use cases.</p>
                     <p class="text-gray-400 mb-4">Here is the specific configuration for the core `app-mcp-rest` service:</p>
 
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-yaml">services:
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
     app-mcp-rest:
         container_name: app.mcp-m365-rest-server
         image: inxm-ai/mcp-rest-server:latest
@@ -262,7 +310,7 @@ uvicorn app.server:app --reload</code></pre>
                     
                     <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
 
-                    <div class="card p-6 rounded-xl border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out bg-gray-900 mt-6">
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
                         <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Login</h4>
                         <pre class="mermaid">
 sequenceDiagram
@@ -282,7 +330,7 @@ sequenceDiagram
     AppIngress ->> AppFrontend: Serve Frontend
                         </pre>
                     </div>
-                    <div class="card p-6 rounded-xl border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out bg-gray-900 mt-6">
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
                         <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Tool Request with Token Exchange</h4>
                         <pre class="mermaid">
 sequenceDiagram
@@ -307,7 +355,7 @@ sequenceDiagram
 
             <!-- Contributing -->
             <section id="contributing" class="page hidden grid gap-8">
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Contributing to MCP REST Server</h2>
                     <p class="text-gray-400 mb-6">Thanks for your interest in contributing! This document explains how to propose changes, report issues, add features, improve docs, and release updates.</p>
                     
@@ -325,9 +373,9 @@ sequenceDiagram
                         <li>Agree to the CLA if you haven't</li>
                     </ol>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🗂 Project Layout</h3>
-                    <pre class="bg-gray-900 rounded-lg p-4 text-sm overflow-x-auto text-gray-200"><code class="language-bash">app/
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">app/
   server.py          # FastAPI app wiring
   routes.py          # REST endpoints & request/session orchestration
   models.py          # Pydantic-style data models
@@ -337,32 +385,32 @@ sequenceDiagram
   mcp_server/        # Server parameter helpers
   test_*.py          # Tests (pytest)</code></pre>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🧪 Testing</h3>
                     <p class="text-gray-400">We use <code>pytest</code>. Write tests for every new feature or bug fix. Favor small, explicit tests.</p>
                     <p class="text-gray-400 mt-2">Run the full suite: <code>pytest -q</code></p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🧹 Code Style & Quality</h3>
                     <p class="text-gray-400">Follow standard Python style (PEP 8). Keep functions small, log appropriately, and avoid broad exception catches. Use type hints for new or changed public functions.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🔐 Security & Privacy</h3>
                     <p class="text-gray-400">Never log raw OAuth tokens or secrets. Validate and sanitize user-provided values. Report vulnerabilities privately before opening a public issue.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🐞 Reporting Issues</h3>
                     <p class="text-gray-400">Include your environment, install method, reproduction steps, expected vs. actual behavior, and logs (with sensitive data trimmed).</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">📝 Commit Messages & Pull Requests</h3>
-                    <p class="text-gray-400">Use <a href="https://www.conventionalcommits.org/en/v1.0.0/" class="text-blue-400 hover:underline">Conventional Commits</a> (e.g., <code>feat: add session timeout config</code>, <code>fix: handle unknown tool error</code>). Ensure your PR checklist is complete before submitting, including passing tests, updated documentation, and a clear commit history.</p>
+                    <p class="text-gray-400">Use <a href="https://www.conventionalcommits.org/en/v1.0.0/" class="hover:underline">Conventional Commits</a> (e.g., <code>feat: add session timeout config</code>, <code>fix: handle unknown tool error</code>). Ensure your PR checklist is complete before submitting, including passing tests, updated documentation, and a clear commit history.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🤖 AI-Assisted Contributions</h3>
                     <p class="text-gray-400">You may use AI tools, but you are the author of record. Carefully review all generated code, ensure it's well-tested, and avoid pasting secrets. Avoid blind bulk rewrites and instead use AI to draft boilerplate or explore alternative designs. Maintainers may request clarification on AI involvement if needed.</p>
                 </div>
-                <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700">
+                <div class="rounded-xl p-6 shadow-md border theme-card">
                     <h3 class="text-xl font-bold text-white mb-2">🧭 Roadmap Ideas</h3>
                     <p class="text-gray-400">Feel free to open PRs for these ideas:</p>
                     <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
@@ -370,7 +418,7 @@ sequenceDiagram
                         <li>Optional Redis / external session backend</li>
                         <li>Structured logging config & correlation IDs</li>
                     </ul>
-                    <p class="text-gray-400 mt-4">Find more ideas in our <a href="https://github.com/inxm-ai/mcp-rest-server/issues" class="text-blue-400 hover:underline">GitHub issues</a>.</p>
+                    <p class="text-gray-400 mt-4">Find more ideas in our <a href="https://github.com/inxm-ai/mcp-rest-server/issues" class="hover:underline">GitHub issues</a>.</p>
                 </div>
             </section>
         </main>
@@ -381,25 +429,27 @@ sequenceDiagram
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             // Initialize Mermaid diagrams
-            mermaid.initialize({
+        mermaid.initialize({
                 startOnLoad: true,
                 theme: 'dark',
                 fontFamily: 'Inter, sans-serif',
                 sequence: {
-                    actorStyle: 'stroke-width:2px; fill:#0d1117;',
-                    noteBkgColor: '#161b22',
-                    noteTextColor: '#c9d1d9',
-                    messageTextColor: '#e6edf3',
-                    arrowColor: '#c9d1d9'
+            actorStyle: 'stroke-width:2px; fill:#111319;',
+            noteBkgColor: '#14171d',
+            noteTextColor: '#EEEDE8',
+            messageTextColor: '#EEEDE8',
+            arrowColor: '#ff7a1a'
                 },
                 themeVariables: {
-                    lineColor: '#30363d',
+            lineColor: '#2b313a',
                     fontFamily: 'Inter, sans-serif',
                     fontSize: '14px',
-                    textColor: '#c9d1d9',
-                    mainBkg: '#161b22',
-                    clusterBkg: '#161b22',
-                    clusterBorder: '#30363d'
+            textColor: '#EEEDE8',
+            mainBkg: '#14171d',
+            clusterBkg: '#14171d',
+            clusterBorder: '#2b313a',
+            primaryColor: '#ff7a1a',
+            secondaryColor: '#ff5a00'
                 },
             });
 

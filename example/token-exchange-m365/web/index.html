@@ -11,28 +11,56 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet">
     <style>
+        /* Match docs theme: black/silver/porcelain with orange accents */
         :root {
-            --bg-color: #0d1117;
-            --card-bg-color: #161b22;
-            --text-color: #c9d1d9;
-            --link-color: #58a6ff;
-            --heading-color: #e6edf3;
-            --border-color: #30363d;
+            --bg-color: #0b0c0e;          /* near-black */
+            --surface-color: #111319;     /* graphite */
+            --card-bg-color: #14171d;     /* dark slate */
+            --text-color: #EEEDE8;        /* porcelain */
+            --muted-text-color: #B8BEC6;  /* soft silver */
+            --heading-color: #FAFAF8;     /* bright porcelain */
+            --border-color: #2b313a;      /* gunmetal */
+            --accent: #ff7a1a;            /* modern orange */
+            --accent-strong: #ff5a00;     /* deeper orange */
         }
 
+        /* Base + subtle grain */
         body {
             font-family: 'Inter', sans-serif;
-            background-color: var(--bg-color);
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(255,122,26,0.10), transparent 40%),
+                        linear-gradient(180deg, #0b0c0e 0%, #0a0b0c 100%);
             color: var(--text-color);
         }
-
-        .chat-with-mcp {
-            background-color: var(--card-bg-color);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        body::before {
+            content: ""; position: fixed; inset: 0; pointer-events: none;
+            background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 3px 3px; opacity: .6; mix-blend-mode: soft-light;
         }
+
+        /* Theme helpers */
+        .theme-surface { background-color: var(--surface-color) !important; border-color: var(--border-color) !important; }
+        .theme-card { background-color: var(--card-bg-color) !important; border-color: var(--border-color) !important; position: relative; }
+        .theme-card:not(.hero)::before { content: ""; position: absolute; left: 10px; right: 10px; top: 0; height: 2px; border-radius: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255,122,26,.45) 20%, rgba(255,90,0,.35) 60%, transparent); opacity:.8; }
+        .theme-border { border-color: var(--border-color) !important; }
+        .theme-heading { color: var(--heading-color) !important; }
+        .theme-muted { color: var(--muted-text-color) !important; }
+
+        /* Glass header */
+        header.glass { 
+            background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)) !important;
+            border: 1px solid rgba(255,255,255,.10);
+            box-shadow: 0 8px 28px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+            backdrop-filter: blur(10px) saturate(120%);
+            -webkit-backdrop-filter: blur(10px) saturate(120%);
+        }
+
+        /* Primary CTA */
+        .btn-accent { background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%); color:#111; border:1px solid rgba(255,255,255,.12); }
+        .btn-accent:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(255,90,0,.25); }
+
+        /* Chat container */
+        .chat-with-mcp { background-color: var(--card-bg-color); border: 1px solid var(--border-color); border-radius: 12px; padding: 1rem; box-shadow: 0 10px 24px rgba(0,0,0,.25); }
 
         .chat-history {
             flex: 1;
@@ -50,37 +78,15 @@
             white-space: pre-wrap;
         }
 
-        .chat-message.user {
-            background-color: #29527a;
-            align-self: flex-end;
-        }
+        .chat-message.user { background-color: rgba(255,122,26,0.16); border: 1px solid rgba(255,122,26,0.35); align-self: flex-end; color: var(--heading-color); }
 
-        .chat-message.assistant {
-            background-color: var(--card-bg-color);
-        }
+        .chat-message.assistant { background-color: var(--card-bg-color); border: 1px solid var(--border-color); }
 
-        .chat-message.tool {
-            background-color: #262f39;
-            font-family: monospace;
-            font-size: 0.85rem;
-        }
+        .chat-message.tool { background-color: #171b21; border: 1px solid var(--border-color); font-family: monospace; font-size: 0.85rem; color: var(--muted-text-color); }
 
-        .chat-input-form {
-            display: flex;
-            gap: 0.5rem;
-            padding: 1rem;
-            background: var(--card-bg-color);
-            border-top: 1px solid var(--border-color);
-        }
+        .chat-input-form { display: flex; gap: 0.5rem; padding: 1rem; background: var(--card-bg-color); border-top: 1px solid var(--border-color); }
 
-        .chat-input-field {
-            flex: 1;
-            padding: 0.6rem 0.75rem;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: var(--bg-color);
-            color: var(--text-color);
-        }
+        .chat-input-field { flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-color); color: var(--text-color); }
 
         select,
         button {
@@ -96,32 +102,54 @@
             background: #2c3848;
             cursor: not-allowed;
         }
+
+        /* Ensure dynamic IDs from component match theme (pfusch output has minimal classes) */
+        #chat-history { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        #chat-form { display: flex; gap: 0.5rem; padding: 1rem; background: var(--card-bg-color); border-top: none; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; position: relative; }
+        #chat-form::before { content:""; position:absolute; left:12px; right:12px; top:0; height:2px; border-radius:2px;
+            background: linear-gradient(90deg, transparent, rgba(255,122,26,.45) 20%, rgba(255,90,0,.35) 60%, transparent); }
+        #chat-input { flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-color); color: var(--text-color); }
+        #tool-choice { border-radius: 0; padding: 0.6rem 0.75rem; border-top-left-radius: 6px;border-bottom-left-radius: 6px; border: 1px solid var(--border-color); background: var(--card-bg-color); color: var(--text-color); }
+        #submit {
+            color: var(--heading-color);
+            margin-left: -8px;
+            background: linear-gradient(180deg, #f08a3a 0%, #cf6018 100%);
+            border:1px solid rgba(255,255,255,.08);
+            padding: 0.65rem 1rem;
+            border-radius: 0px;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+            line-height: 1;
+            display: inline-flex; align-items: center; justify-content: center;
+            box-shadow: 0 0 0 1px rgba(255,122,26,.18) inset, 0 6px 16px rgba(255,90,0,.18);
+            transition: transform .12s ease, box-shadow .2s ease, filter .2s ease;
+        }
+        #submit:hover { transform: translateY(-0.5px); box-shadow: 0 0 0 1px rgba(255,122,26,.22) inset, 0 8px 20px rgba(255,90,0,.2); }
+        #submit:active { transform: translateY(0); box-shadow: 0 0 0 1px rgba(255,122,26,.24) inset, 0 5px 14px rgba(255,90,0,.18); }
+        #submit:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255,122,26,.22), 0 6px 18px rgba(255,90,0,.18); }
     </style>
 </head>
 
 <body class="p-4 sm:p-8">
     <div class="container mx-auto max-w-7xl">
         <header
-            class="bg-gray-800/50 backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border border-gray-700 flex items-center justify-between">
-            <h1 class="text-2xl font-bold text-white tracking-tight">MCP REST + Keycloak + Entra Demo</h1>
+            class="backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border flex items-center justify-between theme-surface theme-border glass">
+            <img src="logo.svg" alt="mcp-rest-server Logo" class="inline-block w-12 h-12 mr-2">
+            <h1 class="text-2xl font-bold text-white tracking-tight">Enterprise MCP Bridge + Keycloak + Entra Demo</h1>
         </header>
 
         <main class="mt-8">
-                <chat-with-mcp inject-styles="style" class="chat-with-mcp bg-gray-800 rounded-xl p-6 shadow-md border border-gray-700 flex flex-col h-[80vh] mx-auto">
+                <chat-with-mcp inject-styles="style" class="chat-with-mcp rounded-xl p-6 shadow-md border flex flex-col h-[80vh] mx-auto theme-card">
                     <div id="chat-history" class="chat-history flex-1 overflow-y-auto p-4 flex flex-col gap-4">
                         <!-- Chat messages will be dynamically inserted here -->
                     </div>
-                    <form id="chat-form" class="chat-input-form flex rounded-xl gap-4 p-4 bg-gray-900 border-t border-gray-700">
-                        <input id="chat-input" name="chat-input"
-                            class="chat-input-field flex-1 p-2 rounded-lg bg-gray-800 text-white border border-gray-700"
-                            type="text" placeholder="Type message...">
-                        <select id="tool-choice" name="tool-choice"
-                            class="p-2 rounded-lg bg-gray-800 text-white border border-gray-700">
+                    <form id="chat-form" class="chat-input-form flex rounded-xl gap-4 p-4">
+                        <input id="chat-input" name="chat-input" class="chat-input-field flex-1" type="text" placeholder="Type message...">
+                        <select id="tool-choice" name="tool-choice">
                             <option value="none">Select tool</option>
                             <!-- Tools will be dynamically inserted here -->
                         </select>
-                        <button id="submit" type="submit"
-                            class="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">Send</button>
+                        <button id="submit" type="submit" class="btn-accent rounded-lg">Send</button>
                     </form>
                 </chat-with-mcp>
         </main>
