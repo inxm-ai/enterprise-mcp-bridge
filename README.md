@@ -9,7 +9,7 @@ Most existing MCP examples are designed for local development or simple demos an
 * Single-user CLI processes driven by a local client.
 * Ephemeral, with state being lost as soon as the process ends.
 * Lacking multi-tenancy, with no built-in orchestration for concurrent users or sessions.
-* Unsuitable for sandboxed environments like browsers or secure remote servers.
+* Hard to monitor/control in an Enterprise environment.
 * No simple way for integrating MCP components into REST-based microservice architectures.
 * Missing a consistent security model for handling delegated permissions (e.g., OAuth) for downstream resources.
 
