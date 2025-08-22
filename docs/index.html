@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MCP REST Server Documentation</title>
+    <title>Enterprise MCP Bridge Documentation</title>
     <!--
       Load Tailwind CSS via CDN. All styling is done with Tailwind classes.
       This simplifies the CSS and makes it more maintainable.
@@ -132,7 +132,7 @@
         <!-- Navigation bar with dynamic buttons -->
     <nav class="backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 theme-surface theme-border glass">
             <h1 class="text-2xl font-bold text-white tracking-tight">
-                <img src="logo.svg" alt="mcp-rest-server Logo" class="inline-block w-12 h-12 mr-2">
+                <img src="logo.svg" alt="enterprise-mcp-bridge Logo" class="inline-block w-12 h-12 mr-2">
                 Enterprise MCP Bridge
             </h1>
             <div class="flex flex-wrap gap-2 sm:gap-4">
@@ -158,7 +158,7 @@
                     </div>
                     <!-- Placeholder for a more professional-looking diagram/image -->
                     <div class="lg:w-1/2">
-                        <img src="example-application.png" alt="Screenshot of the MCP REST Server example deployment with application, jaeger, grafana and keycloak" class="w-full rounded-xl shadow-2xl border border-gray-700">
+                        <img src="example-application.png" alt="Screenshot of the Enterprise MCP Bridge example deployment with application, jaeger, grafana and keycloak" class="w-full rounded-xl shadow-2xl border border-gray-700">
                     </div>
                 </div>
 
@@ -204,8 +204,8 @@
                 <div class="rounded-xl p-6 shadow-md border theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Quick Start</h2>
                     <p class="text-gray-400 mb-4">Run the local demo with a default MCP server.</p>
-                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">git clone https://github.com/inxm-ai/mcp-rest-server.git
-cd mcp-rest-server
+                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">git clone https://github.com/inxm-ai/enterprise-mcp-bridge.git
+cd enterprise-mcp-bridge
 pip install "app[all]"
 uvicorn app.server:app --reload</code></pre>
                     <p class="text-gray-400 mt-4 mb-2">Open the API docs: <a href="http://localhost:8000/docs" class="hover:underline">http://localhost:8000/docs</a></p>
@@ -218,6 +218,8 @@ uvicorn app.server:app --reload</code></pre>
 "a": 2,
 "b": 1
 }'</code></pre>
+                    <p class="text-gray-400 mt-4">This will return a JSON response with the result of the addition.</p>
+                    <p class="text-gray-400 mt-4">For more advanced usage, including session management and authentication, see the <a href="#deployment" onclick="showPage('deployment')">Deployment example</a>.</p>
                 </div>
                 <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Session vs. Stateless Calls</h2>
@@ -267,7 +269,7 @@ uvicorn app.server:app --reload</code></pre>
                     <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
     app-mcp-rest:
         container_name: app.mcp-m365-rest-server
-        image: inxm-ai/mcp-rest-server:latest
+        image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
         environment:
             # A human-readable name for the service, useful for logging and observability.
             SERVICE_NAME: mcp-m365-rest-server
@@ -356,7 +358,7 @@ sequenceDiagram
             <!-- Contributing -->
             <section id="contributing" class="page hidden grid gap-8">
                 <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
-                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Contributing to MCP REST Server</h2>
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Contributing to Enterprise MCP Bridge</h2>
                     <p class="text-gray-400 mb-6">Thanks for your interest in contributing! This document explains how to propose changes, report issues, add features, improve docs, and release updates.</p>
                     
                     <h3 class="text-xl font-bold text-white mb-2 mt-6">📌 Quick Start (TL;DR)</h3>
@@ -418,7 +420,7 @@ sequenceDiagram
                         <li>Optional Redis / external session backend</li>
                         <li>Structured logging config & correlation IDs</li>
                     </ul>
-                    <p class="text-gray-400 mt-4">Find more ideas in our <a href="https://github.com/inxm-ai/mcp-rest-server/issues" class="hover:underline">GitHub issues</a>.</p>
+                    <p class="text-gray-400 mt-4">Find more ideas in our <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/issues" class="hover:underline">GitHub issues</a>.</p>
                 </div>
             </section>
         </main>

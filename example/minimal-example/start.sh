@@ -3,7 +3,7 @@ set -e
 echo "Default mcp example"
 
 echo "Starting docker container"
-server=$(docker run -d -p 8000:8000 ghcr.io/inxm-ai/mcp-rest-server)
+server=$(docker run -d -p 8000:8000 ghcr.io/inxm-ai/enterprise-mcp-bridge)
 sleep 5
 echo "Calling the add tool with {\"a\": 2, \"b\": 1}"
 curl -X 'POST' \

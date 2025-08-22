@@ -17,7 +17,7 @@ instrumentator = Instrumentator()
 instrumentator.instrument(app).expose(app)
 
 # Configure the tracer provider for OTLP
-SERVICE_NAME = os.getenv("SERVICE_NAME", "mcp-rest-server")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 trace.set_tracer_provider(
     TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
 )
