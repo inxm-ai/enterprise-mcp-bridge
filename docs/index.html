@@ -161,6 +161,20 @@
                         <img src="example-application.png" alt="Screenshot of the Enterprise MCP Bridge example deployment with application, jaeger, grafana and keycloak" class="w-full rounded-xl shadow-2xl border border-gray-700">
                     </div>
                 </div>
+                <!-- Problem Statement Section -->
+                <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Why this project?</h2>
+                    <p class="text-gray-400 mb-4">Most existing MCP examples are designed for local development or simple demos and fall short for real-world applications. They are typically:</p>
+                    <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
+                        <li><strong>Single-user CLI processes:</strong> Driven by a local client.</li>
+                        <li><strong>Ephemeral:</strong> State is lost as soon as the process ends.</li>
+                        <li><strong>Lacking multi-tenancy:</strong> No built-in orchestration for concurrent users or sessions.</li>
+                        <li><strong>Unsuitable for sandboxed environments:</strong> Like browsers or secure remote servers.</li>
+                        <li><strong>No simple integration:</strong> For MCP components into REST-based microservice architectures.</li>
+                        <li><strong>Missing a consistent security model:</strong> For handling delegated permissions (e.g., OAuth) for downstream resources.</li>
+                    </ul>
+                    <p class="text-gray-400 mt-4">This project directly addresses these gaps. It's designed for enterprise production use, with a focus on security, scalability, and ease of integration. For small private deployments, it's probably not the right fit.</p>
+                </div>
 
                 <!-- Key Capabilities Section -->
                 <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">

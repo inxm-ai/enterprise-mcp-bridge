@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # Get the current version from pyproject.toml
 current_version=$(grep -oP '(?<=version = ")[^"]*' ./app/pyproject.toml)
