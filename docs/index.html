@@ -129,9 +129,11 @@
                         </ul>
                     </div>
                     <!-- Card: Security & Auth -->
+
                     <div class="bg-gray-800 rounded-xl p-6 shadow-md border border-gray-800 hover:border-gray-700 transition-all duration-100 ease-out">
                         <h3 class="text-xl font-bold text-white mb-4">Integrated Security & Authentication</h3>
-                        <ul class="list-disc list-inside space-y-2 text-gray-400 font-normal">
+                        <ul class="list-disc list-inside space-y-2 text-gray-400">
+                            <li><strong>Centralized hosting of the MCP server:</strong> The server can be hosted in a centralized manner, allowing multiple clients to connect and interact with it concurrently, while your IT manages the underlying infrastructure, permissions and monitors it.</li>
                             <li><strong>Built-in OAuth2:</strong> Natively handles OAuth2 token exchange with brokers like Keycloak.</li>
                             <li><strong>Automatic Token Injection:</strong> Securely injects tokens into tool calls, simplifying client logic.</li>
                             <li><strong>Automated Token Refresh:</strong> Manages token refresh transparently for long-lived, secure sessions.</li>
@@ -367,8 +369,8 @@ sequenceDiagram
                         <li>Add session timeout / eviction policy</li>
                         <li>Optional Redis / external session backend</li>
                         <li>Structured logging config & correlation IDs</li>
-                        <li>Automated release workflow (GitHub Actions)</li>
                     </ul>
+                    <p class="text-gray-400 mt-4">Find more ideas in our <a href="https://github.com/inxm-ai/mcp-rest-server/issues" class="text-blue-400 hover:underline">GitHub issues</a>.</p>
                 </div>
             </section>
         </main>

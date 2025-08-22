@@ -18,6 +18,7 @@ This project directly addresses these gaps. It's designed for enterprise product
 ## Key Capabilities
 
 ### Robust Session & User Management
+* **Centralized hosting of the MCP server:** The server can be hosted in a centralized manner, allowing multiple clients to connect and interact with it concurrently, while your IT manages the underlying infrastructure, permissions and monitors it.
 * **Multi-User & Multi-Session:** A single server instance can securely manage multiple, isolated user contexts, namespaced by OAuth tokens. Each user can run multiple concurrent sessions (`/session/start`), enabling parallel tool execution and long-running conversational state.
 * **Stateful & Stateless Modes:** Supports both **stateless** ("fire-and-forget") tool calls for low-latency tasks and **stateful** sessions for complex, multi-step interactions.
 * **Lifecycle & Resource Hygiene:** Provides explicit endpoints to start and close sessions, coupled with automatic cleanup of idle sessions via inactivity pings. This prevents resource leaks and supports autoscaling.
@@ -145,16 +146,18 @@ To add a backend:
 
 - Celery/Redis/Postgres session manager
 - Other Auth providers
-- Metrics endpoint (Prometheus) for session counts & tool latency
 - Rate limiting / quota per user
-- Pluggable auth providers in `TokenRetrieverFactory`
-- WebSocket streaming for long-running tools
+- Externally extensible auth providers in `TokenRetrieverFactory` and `SessionManagerBase`
+- WebSocket streaming/Long Polling for long-running tools
+- Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
+
+Find more ideas in our [GitHub issues](https://github.com/inxm-ai/mcp-rest-server/issues).
 
 ---
 
 ## Running your own MCP App
 
-### 1. Start the REST API Server
+### Start the REST API Server
 
 By default, the app will use the Demo MCP server at `../mcp/server.py`.
 
@@ -180,6 +183,19 @@ You can call the mcp functions over rest by sending requests to the API endpoint
 }'
 {"isError":false,"content":[{"text":"3","structuredContent":null}],"structuredContent":{"result":3}}
 ```
+
+### Try the fully blown example
+
+Go to [example/token-exchange-m365](https://github.com/inxm-ai/mcp-rest-server/tree/main/example/token-exchange-m365) and try out our full example
+
+#### What it Provides
+
+* Keycloak with token-exchange feature and ingress
+* Automated Entra (Azure AD) app registration
+* MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
+* Minimal chat frontend
+* Tracing via Jaeger
+* Monitoring via Prometheus/Grafana
 
 
 #### Custom MCP Server (in mcp folder)
