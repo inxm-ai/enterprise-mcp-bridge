@@ -27,7 +27,7 @@ sequenceDiagram
 ```mermaid 
 sequenceDiagram
     participant OAuth2Proxy as OAuth2-Proxy
-    participant AppMCPRest as App-MCP-Rest
+    participant AppMCPRest as MCP-Rest-Server
     participant Keycloak as Keycloak
     participant Entra as Microsoft Entra
     participant GraphAPI as Microsoft Graph API
