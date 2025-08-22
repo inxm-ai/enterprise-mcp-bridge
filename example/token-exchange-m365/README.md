@@ -21,7 +21,7 @@ graph TD
     subgraph Apps
         AppNginx[App-Nginx]
         AppFrontend[App-Frontend]
-        AppMCPRest[MCP-Rest-Server]
+        AppMCPRest[enterprise-mcp-bridge]
     end
 
     Entra[Microsoft Entra]
@@ -71,7 +71,7 @@ sequenceDiagram
 ```mermaid 
 sequenceDiagram
     participant OAuth2Proxy as OAuth2-Proxy
-    participant AppMCPRest as MCP-Rest-Server
+    participant AppMCPRest as enterprise-mcp-bridge
     participant Keycloak as Keycloak
     participant Entra as Microsoft Entra
     participant GraphAPI as Microsoft Graph API
@@ -87,7 +87,7 @@ sequenceDiagram
 ## What it Provides
 * Keycloak with token-exchange feature and ingress
 * Automated Entra (Azure AD) app registration
-* MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
+* Enterprise MCP Bridge launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
 * Minimal frontend
 * Tracing via Jaeger
 * Monitoring via Prometheus

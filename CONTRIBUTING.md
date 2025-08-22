@@ -1,4 +1,4 @@
-# Contributing to MCP REST Server
+# Contributing to Enterprise MCP Bridge
 
 Thanks for your interest in contributing! This document explains how to propose changes, report issues, add features, improve docs, and release updates.
 
@@ -231,7 +231,7 @@ By submitting, you confirm you exercised due diligence and accept responsibility
 - WebSocket streaming/Long Polling for long-running tools
 - Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
 
-Find more ideas in our [GitHub issues](https://github.com/inxm-ai/mcp-rest-server/issues).
+Find more ideas in our [GitHub issues](https://github.com/inxm-ai/enterprise-mcp-bridge/issues).
 
 ---
 ## 🙏 Thanks

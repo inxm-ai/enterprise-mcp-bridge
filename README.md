@@ -1,4 +1,4 @@
-# MCP REST Server
+# Enterprise MCP Bridge
 
 FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over plain HTTP/JSON.
 
@@ -58,8 +58,8 @@ This project directly addresses these gaps. It's designed for enterprise product
 ## Quick Start
 
 ```bash
-git clone https://github.com/inxm-ai/mcp-rest-server.git
-cd mcp-rest-server
+git clone https://github.com/inxm-ai/enterprise-mcp-bridge.git
+cd enterprise-mcp-bridge
 pip install app
 uvicorn app.server:app --reload
 ```
@@ -151,7 +151,7 @@ To add a backend:
 - WebSocket streaming/Long Polling for long-running tools
 - Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
 
-Find more ideas in our [GitHub issues](https://github.com/inxm-ai/mcp-rest-server/issues).
+Find more ideas in our [GitHub issues](https://github.com/inxm-ai/enterprise-mcp-bridge/issues).
 
 ---
 
@@ -186,13 +186,13 @@ You can call the mcp functions over rest by sending requests to the API endpoint
 
 ### Try the fully blown example
 
-Go to [example/token-exchange-m365](https://github.com/inxm-ai/mcp-rest-server/tree/main/example/token-exchange-m365) and try out our full example
+Go to [example/token-exchange-m365](https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/token-exchange-m365) and try out our full example
 
 #### What it Provides
 
 * Keycloak with token-exchange feature and ingress
 * Automated Entra (Azure AD) app registration
-* MCP REST server launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
+* Enterprise MCP Bridge launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
 * Minimal chat frontend
 * Tracing via Jaeger
 * Monitoring via Prometheus/Grafana
@@ -203,7 +203,7 @@ Go to [example/token-exchange-m365](https://github.com/inxm-ai/mcp-rest-server/t
 If you are developing or testing with a custom MCP server, you can easily mount it in the `mcp` folder and run the REST server with docker ie like this:
 
 ```bash
-docker run -it -e ENV=dev -v $(pwd)/mcp:/mcp -p 8000:8000 inxm-ai/mcp-rest-server python /mcp/subfoldered_mcp_server/server.py
+docker run -it -e ENV=dev -v $(pwd)/mcp:/mcp -p 8000:8000 inxm-ai/enterprise-mcp-bridge python /mcp/subfoldered_mcp_server/server.py
 ```
 
 Setting the `ENV` variable to `dev` will check if there is a requirements.txt or pyproject.toml file in the mounted directory and install the dependencies in the docker container.
@@ -215,8 +215,8 @@ You can start the REST server with a custom MCP server command in two ways:
 **1. Using the command forwarding (with Docker):**
 
 ```bash
-docker build -t inxm-ai/mcp-rest-server .
-docker run -it -p 8000:8000 inxm-ai/mcp-rest-server npx -y @modelcontextprotocol/server-memory /data/memory.json
+docker build -t inxm-ai/enterprise-mcp-bridge .
+docker run -it -p 8000:8000 inxm-ai/enterprise-mcp-bridge npx -y @modelcontextprotocol/server-memory /data/memory.json
 ```
 
 **2. Using the `MCP_SERVER_COMMAND` environment variable (recommended for Docker/Kubernetes):**
@@ -224,15 +224,15 @@ docker run -it -p 8000:8000 inxm-ai/mcp-rest-server npx -y @modelcontextprotocol
 Set the environment variable to the full command you want to run as the MCP server. This takes precedence over any arguments passed via `--`.
 
 ```bash
-docker run -it -p 8000:8000 -e MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/memory.json" inxm-ai/mcp-rest-server
+docker run -it -p 8000:8000 -e MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/memory.json" inxm-ai/enterprise-mcp-bridge
 ```
 
 Or in Kubernetes YAML:
 
 ```yaml
 containers:
-  - name: mcp-rest-server
-    image: inxm-ai/mcp-rest-server:latest
+  - name: enterprise-mcp-bridge
+    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
     env:
       - name: MCP_SERVER_COMMAND
         value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"
@@ -261,8 +261,8 @@ volumes:
 - Example (Kubernetes):
   ```yaml
   containers:
-    - name: mcp-rest-server
-      image: inxm-ai/mcp-rest-server:latest
+    - name: enterprise-mcp-bridge
+      image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
       env:
         - name: MCP_SERVER_COMMAND
           value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"

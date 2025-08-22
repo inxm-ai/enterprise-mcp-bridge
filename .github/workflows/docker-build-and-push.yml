@@ -33,7 +33,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/mcp-rest-server
+          images: ghcr.io/${{ github.repository_owner }}/enterprise-mcp-bridge
           tags: |
             type=sha # Tag with the git commit SHA (short format)
             type=raw,value=latest,enable={{is_default_branch}} # Tag with 'latest' only on default branch (main)
@@ -98,13 +98,13 @@ jobs:
           script: |
             const tagName = context.ref.replace('refs/tags/', '');
             const commits = JSON.parse(process.env.COMMITS);
-            const dockerImageLink = `ghcr.io/inxm-ai/mcp-rest-server:${tagName}`;
+            const dockerImageLink = `ghcr.io/inxm-ai/enterprise-mcp-bridge:${tagName}`;
             console.log('Creating release for tag:', tagName);
             console.log('Docker image link:', dockerImageLink);
             console.log('Commits since last tag:', commits);
             const releaseBody = [
               `### Docker image`,
-              `[${dockerImageLink}](https://ghcr.io/inxm-ai/mcp-rest-server:${tagName})`,
+              `[${dockerImageLink}](https://ghcr.io/inxm-ai/enterprise-mcp-bridge:${tagName})`,
               '',
               '### Commits since last tag',
               ...commits
