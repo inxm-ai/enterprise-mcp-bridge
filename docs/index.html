@@ -263,10 +263,50 @@ uvicorn app.server:app --reload</code></pre>
                     <div class="accent-media my-6">
                         <img src="architecture.png" alt="Architecture Diagram" loading="lazy">
                     </div>
-                    <p class="text-gray-400 mb-6">The following `docker-compose.yaml` provides a complete example of a production-ready, full-stack deployment. It includes everything from authentication and observability to the REST server itself. This aligns with the project's focus on enterprise-grade use cases.</p>
-                    <p class="text-gray-400 mb-4">Here is the specific configuration for the core `app-mcp-rest` service:</p>
+                    <p class="text-gray-400 mb-6">This is the deployment from <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/token-exchange-m365" title="Standalone Getting Started Example">example/token-exchange-m365</a>. It brings up authentication (Keycloak + OAuth2-Proxy), the Enterprise MCP Bridge, and observability (Jaeger, Prometheus, Grafana).</p>
 
-                    <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card">
+                        <h3 class="text-xl font-bold text-white mb-2">All the things you need in an Enterprise</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                            <li>Federated SSO via Keycloak with token exchange to Microsoft Entra; OAuth2-Proxy protects the app edge.</li>
+                            <li>Least-privilege token handling: user tokens never reach the browser tools; the server exchanges and injects provider tokens per request.</li>
+                            <li>Operational visibility: OTLP traces to Jaeger; metrics for Prometheus; default Grafana Dashboard and connection set up.</li>
+                            <li>Safety rails: route scoping with <code>MCP_BASE_PATH</code>, tool allow/deny lists, and containerized runtime.</li>
+                            <li>Enterprise identity mapping: realms and provider aliases for multi-tenant setups.</li>
+                        </ul>
+                        <p class="text-gray-400 mb-6">
+                            This is not a fully production-ready example, but a starting point for your own deployment. It is designed to be easily extensible and customizable to fit your specific needs.
+                        </p>
+                    </div>
+
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                        <h3 class="text-xl font-bold text-white mb-2">Prerequisites</h3>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                            <li>Docker & Docker Compose</li>
+                            <li>Azure CLI (<code>az</code>)</li>
+                            <li>A free Microsoft Entra (Azure AD) developer account</li>
+                            <li>An OpenAI-compatible API key (for the MCP server)</li>
+                        </ul>
+                    </div>
+
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                        <h3 class="text-xl font-bold text-white mb-2">Start the full stack</h3>
+                        <p class="text-gray-400 mb-3">From the example folder, start everything with one script:</p>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/token-exchange-m365
+./start.sh</code></pre>
+                        <p class="text-gray-400 mt-4">Then open <a href="https://inxm.local" class="hover:underline">https://inxm.local</a>. You’ll be redirected to Keycloak at <code>https://auth.inxm.local</code> to log in. On first run, the script also automates the Entra app registration.</p>
+                    </div>
+
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                        <h3 class="text-xl font-bold text-white mb-2">Stop and clean up</h3>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
+                        <p class="text-gray-400 mt-2">Stops the containers and removes local resources created by the demo.</p>
+                    </div>
+
+                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                        <h3 class="text-xl font-bold text-white mb-2">Service configuration (app-mcp-rest)</h3>
+                        <p class="text-gray-400 mb-4">Key settings for the Enterprise MCP Bridge container:</p>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
     app-mcp-rest:
         container_name: app.mcp-m365-rest-server
         image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
@@ -307,9 +347,9 @@ uvicorn app.server:app --reload</code></pre>
         networks:
             - private
 </code></pre>
+                    </div>
 
                     <h3 class="text-xl font-bold text-white mb-2 mt-6">OAuth Token Integration</h3>
-                    
                     <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
 
                     <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
@@ -350,7 +390,6 @@ sequenceDiagram
     Keycloak -->> AppMCPRest: Return Downstream Token
     AppMCPRest ->> DownstreamAPI: Access API with Downstream Token
                         </pre>
-                        
                     </div>
                 </div>
             </section>
