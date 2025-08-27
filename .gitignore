@@ -130,3 +130,5 @@ Desktop.ini
 venv/
 ENV/
 env/
+
+dev-local-certs/

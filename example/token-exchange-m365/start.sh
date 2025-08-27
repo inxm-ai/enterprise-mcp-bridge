@@ -195,10 +195,9 @@ for host in "${NEEDED_HOSTS[@]}"; do
   else
     echo -e "${INFO}ℹ️ Hosts entry for $host already present${RESET}"
   fi
-
 done
 
-CERT_DIR=$HERE/dev-local-certs
+CERT_DIR=$HERE/../dev-local-certs
 CA_KEY=$CERT_DIR/devLocalCA.key
 CA_CERT=$CERT_DIR/devLocalCA.pem
 
@@ -212,7 +211,7 @@ generate_cert() {
     echo -e "ℹ️ Cert already exists for $domain"
     return 0
   fi
-  echo -e "🔐 Generating certificate for $domain$"
+  echo -e "🔐 Generating certificate for $domain"
   openssl genrsa -out "$key" 2048 >/dev/null 2>&1
   openssl req -new -key "$key" -out "$csr" -subj "/CN=$domain" >/dev/null 2>&1
   cat > "$ext" <<EOF
@@ -264,6 +263,12 @@ fi
 
 generate_cert "$FRONTEND_DOMAIN"
 generate_cert "$KEYCLOAK_DOMAIN"
+
+echo -e "${INFO}🔄 Copying certificates to local dev-local-certs directory...${RESET}"
+mkdir -p "$HERE/dev-local-certs"
+cp "$CERT_DIR"/*.crt "$HERE/dev-local-certs/" 2>/dev/null || true
+cp "$CERT_DIR"/*.key "$HERE/dev-local-certs/" 2>/dev/null || true
+cp "$CERT_DIR"/*.pem "$HERE/dev-local-certs/" 2>/dev/null || true
 
 echo -e "${INFO}ℹ️ Certificates directory: $CERT_DIR${RESET}"
 echo -e "    - CA: $CA_CERT"

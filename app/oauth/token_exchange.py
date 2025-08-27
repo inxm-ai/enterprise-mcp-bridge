@@ -52,6 +52,16 @@ class KeyCloakTokenRetriever(TokenRetriever):
         Retrieve provider API token using Keycloak stored tokens
         """
         try:
+            # If no provider alias configured, pass through the original Keycloak token
+            if not self.provider_alias or self.provider_alias.strip() == "":
+                self.logger.info(
+                    "No KEYCLOAK_PROVIDER_ALIAS configured; passing through Keycloak token"
+                )
+                return {
+                    "success": True,
+                    "access_token": keycloak_token,
+                    "token_type": "Bearer",
+                }
             provider_tokens = self._get_stored_provider_token(keycloak_token)
             if not provider_tokens:
                 self.logger.info(
@@ -184,6 +194,12 @@ class KeyCloakTokenRetriever(TokenRetriever):
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""
         try:
+            # When no provider alias is configured, just return the incoming token
+            if not self.provider_alias:
+                self.logger.info(
+                    "No KEYCLOAK_PROVIDER_ALIAS configured; returning original Keycloak token on force refresh"
+                )
+                return {"success": True, "access_token": keycloak_token}
             current_tokens = self._get_stored_provider_token(keycloak_token)
             if current_tokens and current_tokens.get("refresh_token"):
                 new_token = self._refresh_provider_token(current_tokens)

@@ -28,6 +28,7 @@ This project directly addresses these gaps. It's designed for enterprise product
 * **Built-in OAuth2 Token Exchange:** Natively handles the OAuth2 token exchange flow (e.g., with Keycloak as a broker) to securely acquire tokens for downstream resource providers.
 * **Automatic Token Injection:** If a tool's input schema includes an `oauth_token` argument, the server automatically and securely injects the correct token. This simplifies client-side logic and prevents tokens from being exposed.
 * **Automated Token Refresh:** Manages token refresh logic transparently, allowing for long-lived, secure sessions without requiring clients to handle re-authentication.
+* **Group-Based Data Access:** Dynamically resolves data sources based on OAuth token group membership. Users can access group-specific or user-specific data based on their authenticated identity and group memberships, eliminating the need to expose sensitive file paths or database identifiers.
 
 ### Developer Experience & API Design
 * **REST-first Interface:** All tool discovery and invocation happens over standard HTTP/JSON endpoints, ensuring maximum compatibility with any client, platform, or automation tool (`curl`, browsers, etc.).
@@ -81,6 +82,12 @@ Open: [http://localhost:8000/docs](http://localhost:8000/docs)
   ```
   The response sets `x-inxm-mcp-session` cookie.
 
+- **Start a Group-Specific Session**:
+  ```bash
+  curl -X POST "http://localhost:8000/session/start?group=team-alpha" -c cookies.txt
+  ```
+  Creates a session with access to group-specific data (user must be member of the group).
+
 - **Use the Session**:
   ```bash
   curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'
@@ -91,11 +98,85 @@ Open: [http://localhost:8000/docs](http://localhost:8000/docs)
   curl -b cookies.txt -X POST http://localhost:8000/session/close
   ```
 
+## Group-Based Data Access
+
+The Enterprise MCP Bridge supports secure, group-based data access through OAuth token validation. This feature allows different users to access different data sources based on their group memberships, without exposing file paths or risking path traversal attacks.
+
+### How It Works
+
+1. **User Authentication**: Users authenticate via OAuth (e.g., Keycloak) and receive a token containing group memberships.
+2. **Group Validation**: When requesting group-specific access, the server validates the user's membership in the requested group.
+3. **Dynamic Path Resolution**: Based on group membership, the server resolves secure data paths:
+   - User-specific: `/data/u/{sanitized_user_id}.json`
+   - Group-specific: `/data/g/{sanitized_group_name}.json`
+4. **Template Processing**: The `MCP_SERVER_COMMAND` template is processed with the resolved data path.
+
+### Security Features
+
+- **No Path Exposure**: Clients never specify file paths directly
+- **Group Membership Validation**: Access is granted only to authorized group members
+- **Path Sanitization**: All path components are sanitized to prevent traversal attacks
+- **OAuth-Based Authorization**: Leverages existing identity and access management systems
+
+### Usage Examples
+
+**Sessionless Group Access:**
+```bash
+# Access group-specific data (user must be member of 'finance' group)
+curl -H "Authorization: Bearer $TOKEN" \
+     -X POST "http://localhost:8000/tools/search?group=finance" \
+     -H 'Content-Type: application/json' \
+     -d '{"query": "budget reports"}'
+```
+
+**Session-Based Group Access:**
+```bash
+# Start session with group access
+curl -H "Authorization: Bearer $TOKEN" \
+     -X POST "http://localhost:8000/session/start?group=marketing" \
+     -c cookies.txt
+
+# Use the session (automatically uses group-specific data)
+curl -b cookies.txt \
+     -X POST http://localhost:8000/tools/create_memory \
+     -H 'Content-Type: application/json' \
+     -d '{"content": "Campaign ideas for Q4"}'
+```
+
+### Configuration
+
+Configure your MCP command template to use dynamic data paths:
+
+```bash
+# Memory server with group/user-specific data
+export MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory {data_path}"
+
+# Custom server with additional parameters
+export MCP_SERVER_COMMAND="python custom_mcp.py --data-file {data_path} --user {user_id}"
+```
+
+### Data Directory Structure
+
+```
+/data/
+├── u/           # User-specific data
+│   ├── user123.json
+│   ├── alice_smith.json
+│   └── ...
+├── g/           # Group-specific data
+│   ├── finance.json
+│   ├── marketing.json
+│   ├── engineering.json
+│   └── ...
+└── shared/      # Shared resources (future)
+    └── ...
+```
+
 ## OAuth Token Exchange & Injection
 
 1. Set `OAUTH_ENV=MS_TOKEN` when starting the REST server.
 2. Provide a Keycloak user token (via cookie `_oauth2_proxy` or CLI argument).
-3. The `TokenRetrieverFactory` exchanges the Keycloak token for the provider token.
+3. The `TokenRetrieverFactory` exchanges the Keycloak token for the provider (e.g., Microsoft) token.
 4. The resulting provider token is exported into the MCP subprocess environment (`MS_TOKEN`).
 5. Tools with `oauth_token` in their schema automatically receive the token.
 
@@ -112,20 +193,44 @@ uvicorn app.server:app --reload
 
 ## Environment Variables
 
-| Variable                  | Purpose                                               | Default                |
-| ------------------------- | ----------------------------------------------------- | ---------------------- |
-| `MCP_SERVER_COMMAND`      | Full command to launch MCP server                     | (unset)                |
-| `MCP_BASE_PATH`           | Prefix all routes (e.g., `/api/mcp`)                  | ""                     |
-| `OAUTH_ENV`               | Name of env var injected into MCP subprocess          | (unset)                |
-| `AUTH_PROVIDER`           | Token exchange provider selector (`keycloak`)         | keycloak               |
-| `AUTH_BASE_URL`           | Keycloak base URL for broker/token endpoints          | (required)             |
-| `KEYCLOAK_REALM`          | Keycloak realm                                        | inxm                   |
-| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path                | (required)             |
-| `MCP_SESSION_MANAGER`     | Implementation name (e.g., future Redis)              | InMemorySessionManager |
-| `SESSION_FIELD_NAME`      | Name of the header/cookie containing the session ID   | x-inxm-mcp-session    |
-| `TOKEN_NAME`              | Name of the cookie containing the OAuth token         | _oauth2_proxy          |
-| `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include | ""                     |
-| `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude | ""                     |
+| Variable                  | Purpose                                                   | Default                |
+| ------------------------- | --------------------------------------------------------- | ---------------------- |
+| `MCP_SERVER_COMMAND`      | Full command to launch MCP server (supports placeholders) | (unset)                |
+| `MCP_BASE_PATH`           | Prefix all routes (e.g., `/api/mcp`)                      | ""                     |
+| `OAUTH_ENV`               | Name of env var injected into MCP subprocess              | (unset)                |
+| `AUTH_PROVIDER`           | Token exchange provider selector (`keycloak`)             | keycloak               |
+| `AUTH_BASE_URL`           | Keycloak base URL for broker/token endpoints              | (required)             |
+| `KEYCLOAK_REALM`          | Keycloak realm                                            | inxm                   |
+| `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path                    | (required)             |
+| `MCP_SESSION_MANAGER`     | Implementation name (e.g., future Redis)                  | InMemorySessionManager |
+| `SESSION_FIELD_NAME`      | Name of the header/cookie containing the session ID       | x-inxm-mcp-session     |
+| `TOKEN_NAME`              | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
+| `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
+| `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
+| `MCP_ENV_*`               | Those will be passed to the MCP server process            |                        |
+| `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [Data Resource Templates](#data-resource-templates) for details. | `{*}/{placeholder}` |
+
+### MCP_SERVER_COMMAND Template Placeholders
+
+The `MCP_SERVER_COMMAND` environment variable supports template placeholders that are dynamically resolved based on the user's OAuth token and requested access:
+
+| Placeholder  | Description                                           | Example Resolution     |
+|-------------|-------------------------------------------------------|------------------------|
+| `{data_path}` | Resolves to user or group-specific data path        | `/data/u/user123.json` or `/data/g/team-alpha.json` |
+| `{user_id}`   | User identifier extracted from OAuth token          | `user123` or `john.doe@company.com` |
+| `{group_id}`  | Requested group identifier (if group access)        | `team-alpha` or `finance` |
+
+**Examples:**
+```bash
+# Memory server with dynamic user/group data
+export MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory {data_path}"
+
+# Custom server with user-specific configuration
+export MCP_SERVER_COMMAND="python /app/custom_server.py --user {user_id} --data {data_path}"
+
+# Database connection with group-based access
+export MCP_SERVER_COMMAND="psql-mcp-server --database group_{group_id} --user {user_id}"
+```
 
 ## Extending Session Management
 
@@ -318,9 +423,195 @@ curl http://localhost:8000/tools
 curl -X POST http://localhost:8000/tools/<tool_name> -H 'Content-Type: application/json' -d '{"arg1": "value"}'
 ```
 
-## Notes
-- The REST server launches the MCP server as a subprocess. You can customize the command and arguments as needed.
-- For advanced usage, see the code and comments in `routes.py`.
+## Examples
+
+This project includes several examples to help you get started with different use cases. Below is a summary of the examples and their purposes, along with links to their respective README sections for more details:
+
+### 1. **Minimal Example**
+A lightweight example to quickly get started with the Enterprise MCP Bridge. It provides:
+- A simple script to start the server.
+- Minimal dependencies and configuration.
+
+Check the [Minimal Example README](example/minimal-example/README.md) for more details.
+
+### 2. **Memory Group Access**
+This example demonstrates how to manage group-based data access using OAuth tokens. It includes:
+- Group-specific and user-specific data files.
+- Scripts to start and stop the example environment.
+- Integration with Keycloak for authentication.
+
+Refer to the [Memory Group Access README](example/memory-group-access/README.md) for setup and usage instructions.
+
+### 3. **Token Exchange with Microsoft 365**
+This example showcases the token exchange feature with Microsoft 365. It includes:
+- Dockerized setup for Keycloak and the MCP Bridge.
+- Integration with Microsoft Azure AD for token exchange.
+- Monitoring and tracing with Prometheus, Grafana, and Jaeger.
+
+See the [Token Exchange README](example/token-exchange-m365/README.md) for a comprehensive guide.
+
+Each example is designed to highlight specific features of the Enterprise MCP Bridge, making it easier to understand and integrate into your workflows.
+
+---
+
+## Group-Based Data Access
+
+The Enterprise MCP Bridge supports dynamic data source resolution based on OAuth token group membership. This allows secure, group-based access to data without exposing sensitive file paths, database connection strings, or table names to clients.
+
+### Overview
+
+When using group-based data access, the server:
+
+1. **Extracts user and group information** from OAuth tokens (JWT payload)
+2. **Validates group membership** against requested group access
+3. **Dynamically resolves data sources** using configurable templates
+4. **Prevents unauthorized access** through automatic permission checking
+
+### Configuration
+
+#### MCP_SERVER_COMMAND Template
+
+Use placeholders in your `MCP_SERVER_COMMAND` or `MCP_ENV_` environment variable:
+
+```bash
+# For file-based MCP servers (e.g., memory server)
+MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/{data_path}.json"
+MCP_ENV_MEMORY_FILE_PATH="/data/{data_path}.json"
+
+# For database-based MCP servers
+MCP_SERVER_COMMAND="python db-mcp-server.py --table {data_path}"
+
+# Multiple placeholders supported
+MCP_SERVER_COMMAND="my-mcp-server --user {user_id} --group {group_id} --resource {data_path}"
+```
+
+#### Supported Placeholders
+
+- `{data_path}`: Resolves to group-specific (`g/groupname`) or user-specific (`u/userid`) resource identifier
+- `{user_id}`: User identifier from OAuth token
+- `{group_id}`: Requested group identifier (if accessing group data)
+
+### Usage
+
+#### Session-Based Group Access
+
+Start a session with group-specific data access:
+
+```bash
+# Start session for 'finance' group data
+curl -X POST "http://localhost:8000/session/start?group=finance" \
+  -H "X-Auth-Request-Access-Token: <your-oauth-token>"
+
+# Use session for tool calls
+curl -X POST "http://localhost:8000/tools/read_memory" \
+  -H "x-inxm-mcp-session: <session-id>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "recent transactions"}'
+```
+
+#### Sessionless Group Access
+
+Make direct tool calls with group specification:
+
+```bash
+# Access finance group data without session
+curl -X POST "http://localhost:8000/tools/read_memory?group=finance" \
+  -H "X-Auth-Request-Access-Token: <your-oauth-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "budget reports"}'
+```
+
+#### User-Specific Data Access
+
+Access user-specific data (default behavior):
+
+```bash
+# Access user's personal data
+curl -X POST "http://localhost:8000/tools/read_memory" \
+  -H "X-Auth-Request-Access-Token: <your-oauth-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "my notes"}'
+```
+
+### Security Model
+
+#### Group Membership Validation
+
+The server extracts groups from multiple JWT token claims:
+- `groups`: Direct group membership
+- `realm_access.roles`: Keycloak realm roles
+- `resource_access`: Keycloak client roles
+- `roles`: Generic roles claim
+
+#### Permission Checking
+
+- Users can only access groups they are members of
+- Unauthorized group access returns HTTP 403 Forbidden
+- Invalid tokens return HTTP 401 Unauthorized
+- Resource identifiers are automatically sanitized
+
+#### Resource Identifier Sanitization
+
+All resource identifiers are sanitized to prevent security issues:
+- Dangerous characters are removed or replaced
+- Length is limited to reasonable bounds
+- Path traversal attempts are neutralized
+
+### Example: Memory Server with Groups
+
+See the complete example in `example/memory-group-access/`:
+
+```yaml
+# docker-compose.yml
+services:
+  app-mcp-rest:
+    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    environment:
+      MCP_SERVER_COMMAND: npx -y @modelcontextprotocol/server-memory /data/{data_path}.json
+      AUTH_PROVIDER: keycloak
+      AUTH_BASE_URL: https://auth.example.com
+      KEYCLOAK_REALM: company
+    volumes:
+      - ./data:/data
+```
+
+Directory structure:
+```
+data/
+├── g/                    # Group-specific data
+│   ├── finance.json      # Finance team data
+│   ├── marketing.json    # Marketing team data
+│   └── hr.json          # HR team data
+└── u/                    # User-specific data
+    ├── alice.json        # Alice's personal data
+    └── bob.json         # Bob's personal data
+```
+
+### Token Claims Example
+
+The server extracts user information from JWT tokens like this:
+
+```json
+{
+  "sub": "alice",
+  "email": "alice@company.com",
+  "groups": ["finance", "employees"],
+  "realm_access": {
+    "roles": ["user", "finance-analyst"]
+  },
+  "resource_access": {
+    "frontend-client": {
+      "roles": ["admin"]
+    }
+  }
+}
+```
+
+This user can access:
+- Their personal data: `u/alice`
+- Finance group data: `g/finance` 
+- Employee group data: `g/employees`
+- Admin data through client role: `g/admin`
 
 ---
 
@@ -372,3 +663,15 @@ class TokenRetrieverFactory:
 **Usage:**
 - Set `OAUTH_ENV` and provide the input token when starting the server.
 - The custom retriever will handle token exchange and injection.
+
+### Data Resource Templates
+
+The `DataAccessManager` class in the `app.oauth.user_info` module provides configurable templates for resolving data resources based on user or group access. These templates are defined as environment variables:
+
+| Template Name                     | Default Value               | Description                                      |
+|-----------------------------------|-----------------------------|--------------------------------------------------|
+| `MCP_GROUP_DATA_ACCESS_TEMPLATE` | `g/{group_id}`             | Template for group-specific data resources      |
+| `MCP_USER_DATA_ACCESS_TEMPLATE`  | `u/{user_id}`              | Template for user-specific data resources       |
+| `MCP_SHARED_DATA_ACCESS_TEMPLATE`| `shared/{resource_id}`     | Template for shared data resources              |
+
+These templates are dynamically resolved based on the user's OAuth token and requested access. For example, a group-specific data resource might resolve to `g/finance` for the `finance` group.

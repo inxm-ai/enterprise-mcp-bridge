@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory MCP Server - Group Access Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        /* Theme: match token-exchange example (dark, porcelain text, orange accent) */
+        :root {
+            --bg-color: #0b0c0e;          /* near-black */
+            --surface-color: #111319;     /* graphite */
+            --card-bg-color: #14171d;     /* dark slate */
+            --text-color: #EEEDE8;        /* porcelain */
+            --muted-text-color: #B8BEC6;  /* soft silver */
+            --heading-color: #FAFAF8;     /* bright porcelain */
+            --border-color: #2b313a;      /* gunmetal */
+            --accent: #ff7a1a;            /* modern orange */
+            --accent-strong: #ff5a00;     /* deeper orange */
+            --success: #1e8f47;           /* dark success */
+            --danger: #c63a40;            /* dark danger */
+        }
+
+        /* Base + subtle grain */
+        body {
+            font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            line-height: 1.55;
+            margin: 0;
+            padding: 24px;
+            color: var(--text-color);
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(255,122,26,0.10), transparent 40%),
+                        linear-gradient(180deg, #0b0c0e 0%, #0a0b0c 100%);
+        }
+        body::before {
+            content: ""; position: fixed; inset: 0; pointer-events: none;
+            background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 3px 3px; opacity: .6; mix-blend-mode: soft-light;
+        }
+
+        /* Container/Card */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+            padding: 28px;
+            border-radius: 12px;
+            box-shadow: 0 10px 24px rgba(0,0,0,.25);
+            position: relative;
+        }
+        .container::before { /* subtle accent top line */
+            content: ""; position: absolute; left: 12px; right: 12px; top: 0; height: 2px; border-radius: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255,122,26,.45) 20%, rgba(255,90,0,.35) 60%, transparent);
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .header h1 {
+            color: var(--heading-color);
+            margin: 0 0 8px 0;
+        }
+        .header .subtitle {
+            color: var(--muted-text-color);
+            font-size: 16px;
+        }
+        .header-controls { display: flex; align-items: center; gap: 10px; }
+
+        /* Sections */
+        .section {
+            margin-bottom: 22px;
+            padding: 18px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background-color: var(--surface-color);
+        }
+        .section h2 {
+            color: var(--heading-color);
+            margin: 0 0 12px 0;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .user-info {
+            background: #171b21;
+            border: 1px solid var(--border-color);
+            color: var(--muted-text-color);
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        /* Table */
+        .users-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+        .users-table th,
+        .users-table td {
+            border: 1px solid var(--border-color);
+            padding: 10px 12px;
+            text-align: left;
+        }
+        .users-table th {
+            background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+            color: #111;
+        }
+        .users-table tr:nth-child(even) {
+            background-color: #141922;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 10px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            border: 1px solid rgba(255,255,255,.12);
+            background: var(--card-bg-color);
+            color: var(--text-color);
+            transition: transform .12s ease, box-shadow .2s ease, filter .2s ease;
+        }
+        .btn:disabled { background: #2c3848; cursor: not-allowed; }
+        .btn-small { padding: 6px 10px; font-size: 12px; }
+        .btn-primary {
+            color: #111;
+            background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+            box-shadow: 0 0 0 1px rgba(255,122,26,.18) inset, 0 6px 16px rgba(255,90,0,.18);
+        }
+        .btn-primary:hover { transform: translateY(-0.5px); box-shadow: 0 0 0 1px rgba(255,122,26,.22) inset, 0 8px 20px rgba(255,90,0,.2); }
+        .btn-primary:active { transform: translateY(0); box-shadow: 0 0 0 1px rgba(255,122,26,.24) inset, 0 5px 14px rgba(255,90,0,.18); }
+
+        .btn-danger { background: #3a1a1c; color: #f3d2d2; border-color: rgba(255,255,255,.08); }
+        .btn-danger:hover { filter: brightness(1.05); }
+
+        /* Forms */
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; margin-bottom: 6px; font-weight: 600; color: var(--muted-text-color); }
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 9px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 14px;
+            box-sizing: border-box;
+            background: var(--bg-color);
+            color: var(--text-color);
+        }
+        .form-group textarea { height: 70px; resize: vertical; }
+
+        .inline-form { display: flex; gap: 10px; align-items: flex-end; }
+        .inline-form .form-group { margin-bottom: 0; flex: 1; }
+
+        /* Responses */
+        .response-box {
+            background: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+            padding: 14px;
+            border-radius: 8px;
+            margin-top: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            color: var(--muted-text-color);
+        }
+        .success { border-color: rgba(30, 143, 71, .6); box-shadow: 0 0 0 1px rgba(30,143,71,.18) inset; }
+        .error { border-color: rgba(198, 58, 64, .6); box-shadow: 0 0 0 1px rgba(198,58,64,.18) inset; }
+
+        /* Auth status - remove the display none if you need it */
+        .auth-status { display:none; padding: 10px; border-radius: 8px; margin-bottom: 18px; text-align: center; border: 1px solid var(--border-color); }
+        .auth-status.logged-in { background-color: rgba(30,143,71,.12); color: #c9f3d9; border-color: rgba(30,143,71,.35); }
+        .auth-status.logged-out { background-color: rgba(198,58,64,.12); color: #ffd6d8; border-color: rgba(198,58,64,.35); }
+
+        /* Tabs */
+        .tabs { display: flex; border-bottom: 1px solid var(--border-color); margin-bottom: 14px; gap: 6px; }
+        .tab {
+            padding: 10px 14px;
+            background: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+            border-bottom: none;
+            cursor: pointer;
+            color: var(--muted-text-color);
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+        }
+        .tab.active {
+            background: var(--surface-color);
+            color: var(--heading-color);
+            border-bottom: 1px solid var(--surface-color);
+            position: relative; top: 1px;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <h1>🧠 Memory MCP Server</h1>
+                <p class="subtitle">Group-Based Data Access Demonstration</p>
+            </div>
+            <div class="header-controls">
+                <button id="logoutBtn" class="btn btn-danger" onclick="logout()" style="display: none;">Switch user</button>
+                <span id="userInfo" style="margin-left: 12px; font-weight: 600;"></span>
+            </div>
+        </div>
+
+        <div id="authStatus" class="auth-status logged-out">
+            <strong>Status:</strong> Not authenticated
+        </div>
+
+        <div class="section">
+            <h2>🧪 Test MCP API</h2>
+            <p>Test different MCP endpoints with group-based access control:</p>
+
+            <div class="tabs">
+                <div class="tab active" onclick="showTab('session', this)">Session Management</div>
+                <div class="tab" onclick="showTab('tools', this)">List Tools</div>
+                <div class="tab" onclick="showTab('memory', this)">Add Memory</div>
+                <div class="tab" onclick="showTab('search', this)">Search Memory</div>
+                <div class="tab" onclick="showTab('remove', this)">Remove Memory</div>
+            </div>
+
+            <div id="session" class="tab-content active">
+                <h3>1. Start Session</h3>
+                <form id="sessionForm" class="inline-form">
+                    <div class="form-group">
+                        <label for="sessionGroup">Group (optional - leave empty for personal memory):</label>
+                        <select id="sessionGroup" name="group">
+                            <option value="">Personal Memory (user-specific)</option>
+                            <option value="administrators">administrators</option>
+                            <option value="engineering">engineering</option>
+                            <option value="marketing">marketing</option>
+                            <option value="sales">sales</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Start Session</button>
+                </form>
+                <div id="sessionResponse" class="response-box" style="display: none;"></div>
+            </div>
+
+            <div id="tools" class="tab-content">
+                <h3>2. List Available Tools</h3>
+                <form id="toolsForm" class="inline-form">
+                    <div class="form-group">
+                        <label for="toolsGroup">Group (for sessionless access):</label>
+                        <select id="toolsGroup" name="group">
+                            <option value="">Personal Memory</option>
+                            <option value="administrators">administrators</option>
+                            <option value="engineering">engineering</option>
+                            <option value="marketing">marketing</option>
+                            <option value="sales">sales</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">List Tools</button>
+                </form>
+                <div id="toolsResponse" class="response-box" style="display: none;"></div>
+            </div>
+
+            <div id="memory" class="tab-content">
+                <h3>3. Add Memory</h3>
+                <form id="memoryForm">
+                    <div class="form-group">
+                        <label for="memoryContent">Memory Content:</label>
+                        <textarea id="memoryContent" name="content" placeholder="Enter something to remember..." required></textarea>
+                    </div>
+                    <div class="inline-form">
+                        <div class="form-group">
+                            <label for="memoryGroup">Target Group:</label>
+                            <select id="memoryGroup" name="group">
+                                <option value="">Personal Memory</option>
+                                <option value="administrators">administrators</option>
+                                <option value="engineering">engineering</option>
+                                <option value="marketing">marketing</option>
+                                <option value="sales">sales</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Add Memory</button>
+                    </div>
+                </form>
+                <div id="memoryResponse" class="response-box" style="display: none;"></div>
+            </div>
+
+            <div id="search" class="tab-content">
+                <h3>4. Search Memory</h3>
+                <form id="searchForm">
+                    <div class="inline-form">
+                        <div class="form-group">
+                            <label for="searchQuery">Search Query:</label>
+                            <input type="text" id="searchQuery" name="query" placeholder="Search for memories..." required>
+                        </div>
+                        <div class="form-group">
+                            <label for="searchGroup">Target Group:</label>
+                            <select id="searchGroup" name="group">
+                                <option value="">Personal Memory</option>
+                                <option value="administrators">administrators</option>
+                                <option value="engineering">engineering</option>
+                                <option value="marketing">marketing</option>
+                                <option value="sales">sales</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Search Memory</button>
+                    </div>
+                </form>
+                <div id="searchResponse" class="response-box" style="display: none;"></div>
+            </div>
+
+            <div id="remove" class="tab-content">
+                <h3>5. Remove Memory</h3>
+                <form id="removeForm">
+                    <div class="inline-form">
+                        <div class="form-group">
+                            <label for="removeContent">Memory Content to remove:</label>
+                            <input type="text" id="removeContent" name="content" placeholder="Exact memory content to delete" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="removeGroup">Target Group:</label>
+                            <select id="removeGroup" name="group">
+                                <option value="">Personal Memory</option>
+                                <option value="administrators">administrators</option>
+                                <option value="engineering">engineering</option>
+                                <option value="marketing">marketing</option>
+                                <option value="sales">sales</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-danger">Remove Memory</button>
+                    </div>
+                </form>
+                <div id="removeResponse" class="response-box" style="display: none;"></div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>👥 Test Users</h2>
+            <p>Use these pre-configured users to test group-based memory access:</p>
+            
+            <table class="users-table">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Password</th>
+                        <th>Groups</th>
+                        <th>Memory Access</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>admin</td>
+                        <td>admin123</td>
+                        <td>administrators</td>
+                        <td>All group memories + personal</td>
+                    </tr>
+                    <tr>
+                        <td>john.engineer</td>
+                        <td>engineer123</td>
+                        <td>engineering</td>
+                        <td>Engineering memories + personal</td>
+                    </tr>
+                    <tr>
+                        <td>jane.marketing</td>
+                        <td>marketing123</td>
+                        <td>marketing</td>
+                        <td>Marketing memories + personal</td>
+                    </tr>
+                    <tr>
+                        <td>bob.sales</td>
+                        <td>sales123</td>
+                        <td>sales</td>
+                        <td>Sales memories + personal</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="user-info">
+                <strong>Login:</strong> Use the credentials above and log in via the Keycloak login page.
+            </div>
+        </div>
+
+        
+
+        <div class="section">
+            <h2>🔒 Security Features</h2>
+            <ul>
+                <li><strong>Group-based Access Control:</strong> Users can only access memory stores for groups they belong to</li>
+                <li><strong>Token Validation:</strong> OAuth tokens are validated and user groups are extracted</li>
+                <li><strong>Path Sanitization:</strong> Resource identifiers are sanitized to prevent attacks</li>
+                <li><strong>Session Isolation:</strong> Each session is isolated and tied to the authenticated user</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        let currentSession = null;
+        let isAuthenticated = false;
+        let currentUser = null;
+
+        // Check if user is already authenticated
+        checkAuthStatus();
+
+        async function checkAuthStatus() {
+            try {
+                const response = await fetch('/api/mcp/memory/tools', {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                
+                if (response.ok) {
+                    isAuthenticated = true;
+                    // Try to extract user info from response headers or make additional call
+                    try {
+                        const userResponse = await fetch('/api/user-info', { credentials: 'include' });
+                        if (userResponse.ok) {
+                            currentUser = await userResponse.json();
+                        }
+                    } catch (e) {
+                        // Fallback if no user info endpoint
+                        currentUser = { username: 'authenticated user' };
+                    }
+                    
+                    updateAuthStatus('Authenticated', true);
+                    document.getElementById('logoutBtn').style.display = 'inline-block';
+                    
+                    if (currentUser) {
+                        document.getElementById('userInfo').textContent = `Logged in as: ${currentUser.username || 'unknown'}`;
+                    }
+                } else {
+                    isAuthenticated = false;
+                    window.location.reload();
+                }
+            } catch (error) {
+                isAuthenticated = false;
+                updateAuthStatus('Authentication check failed', false);
+            }
+        }
+
+        function updateAuthStatus(message, authenticated) {
+            const statusEl = document.getElementById('authStatus');
+            statusEl.innerHTML = '<strong>Status:</strong> ' + message;
+            statusEl.className = authenticated ? 'auth-status logged-in' : 'auth-status logged-out';
+        }
+
+        function showTab(tabName, el) {
+            // Hide all tab contents
+            const contents = document.querySelectorAll('.tab-content');
+            contents.forEach(content => content.classList.remove('active'));
+            
+            // Hide all tabs
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => tab.classList.remove('active'));
+            
+            // Show selected tab content
+            document.getElementById(tabName).classList.add('active');
+            
+            // Highlight selected tab
+            if (el) el.classList.add('active');
+        }
+
+        function deriveEntityName(group) {
+            return group ? `${group}_memory` : 'personal_memory';
+        }
+
+        function logout() {
+            isAuthenticated = false;
+            currentUser = null;
+            currentSession = null;
+            
+            // end IdP (Keycloak) SSO session, then clear oauth2-proxy session
+            const origin = window.location.origin;
+            const realm = 'inxm';
+            const clientId = 'frontend-client';
+            const keycloakBase = 'https://auth.inxm.local';
+            const postLogout = encodeURIComponent(`${origin}/oauth2/sign_out`);
+            const keycloakLogout = `${keycloakBase}/realms/${realm}/protocol/openid-connect/logout?client_id=${encodeURIComponent(clientId)}&post_logout_redirect_uri=${postLogout}`;
+            window.location.href = keycloakLogout;
+        }
+
+        async function makeRequest(url, options = {}) {
+            const defaultOptions = {
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                }
+            };
+            
+            // Add session header if we have one
+            if (currentSession && !options.headers?.['x-inxm-mcp-session']) {
+                defaultOptions.headers['x-inxm-mcp-session'] = currentSession;
+            }
+            
+            try {
+                const response = await fetch(url, { ...defaultOptions, ...options });
+                const data = await response.json();
+                
+                return {
+                    ok: response.ok,
+                    status: response.status,
+                    data: data
+                };
+            } catch (error) {
+                return {
+                    ok: false,
+                    status: 0,
+                    data: { error: error.message }
+                };
+            }
+        }
+
+        function displayResponse(elementId, response) {
+            const element = document.getElementById(elementId);
+            element.style.display = 'block';
+            element.className = `response-box ${response.ok ? 'success' : 'error'}`;
+            
+            let displayData = response.data;
+            if (response.ok && elementId === 'sessionResponse' && response.data && response.data['x-inxm-mcp-session']) {
+                currentSession = response.data['x-inxm-mcp-session'];
+                displayData = {
+                    ...response.data,
+                    note: 'Session ID saved for subsequent requests'
+                };
+            }
+            
+            element.textContent = JSON.stringify(displayData, null, 2);
+        }
+
+        // Session form handler
+        document.getElementById('sessionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+            
+            const formData = new FormData(e.target);
+            const group = formData.get('group');
+            
+            let url = '/api/mcp/memory/session/start';
+            if (group) {
+                url += `?group=${encodeURIComponent(group)}`;
+            }
+            
+            const response = await makeRequest(url, { method: 'POST' });
+            displayResponse('sessionResponse', response);
+        });
+
+        // Tools form handler
+        document.getElementById('toolsForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+            
+            const formData = new FormData(e.target);
+            const group = formData.get('group');
+            
+            let url = '/api/mcp/memory/tools';
+            if (group) {
+                url += `?group=${encodeURIComponent(group)}`;
+            }
+            
+            const response = await makeRequest(url, { method: 'GET' });
+            displayResponse('toolsResponse', response);
+        });
+
+        // Memory form handler (uses observations under the hood)
+        document.getElementById('memoryForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+            
+            const formData = new FormData(e.target);
+            const content = formData.get('content');
+            const group = formData.get('group');
+
+            // First try to add an observation to the group's memory entity; if it doesn't exist, create it
+            const entityName = deriveEntityName(group);
+            const querySuffix = group ? `?group=${encodeURIComponent(group)}` : '';
+
+            // Attempt 1: add observation
+            let response = await makeRequest(`/api/mcp/memory/tools/add_observations${querySuffix}`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    observations: [
+                        { entityName, contents: [content] }
+                    ]
+                })
+            });
+
+            if (!response.ok) {
+                if (response.status === 500) {
+                    const createResp = await makeRequest(`/api/mcp/memory/tools/create_entities${querySuffix}`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            entities: [
+                                { name: entityName, entityType: 'memory', observations: [content] }
+                            ]
+                        })
+                    });
+
+                    if (!createResp.ok && (createResp.status === 409 || createResp.status === 422)) {
+                        // Race: entity was created concurrently; retry add
+                        response = await makeRequest(`/api/mcp/memory/tools/add_observations${querySuffix}`, {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                observations: [
+                                    { entityName, contents: [content] }
+                                ]
+                            })
+                        });
+                    } else {
+                        response = createResp;
+                    }
+                }
+            }
+
+            displayResponse('memoryResponse', response);
+        });
+
+        // Search form handler (maps to search_nodes)
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+            
+            const formData = new FormData(e.target);
+            const query = formData.get('query');
+            const group = formData.get('group');
+
+            let url = '/api/mcp/memory/tools/search_nodes';
+            if (group) {
+                url += `?group=${encodeURIComponent(group)}`;
+            }
+
+            const response = await makeRequest(url, {
+                method: 'POST',
+                body: JSON.stringify({ query })
+            });
+            displayResponse('searchResponse', response);
+        });
+
+        // Remove form handler (maps to delete_observations)
+        document.getElementById('removeForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+
+            const formData = new FormData(e.target);
+            const content = formData.get('content');
+            const group = formData.get('group');
+            const entityName = deriveEntityName(group);
+
+            let url = '/api/mcp/memory/tools/delete_observations';
+            if (group) {
+                url += `?group=${encodeURIComponent(group)}`;
+            }
+
+            const response = await makeRequest(url, {
+                method: 'POST',
+                body: JSON.stringify({
+                    deletions: [
+                        { entityName, observations: [content] }
+                    ]
+                })
+            });
+            displayResponse('removeResponse', response);
+        });
+    </script>
+</body>
+</html>

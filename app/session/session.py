@@ -6,6 +6,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from abc import ABC, abstractmethod
 from typing import Optional
+from ..utils.exception_logging import log_exception_with_details
 
 
 def try_get_session_id(
@@ -123,8 +124,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                             result = await session.list_tools()
                             await self.response_queue.put(result)
                         except Exception as e:
-                            logger.error(
-                                f"[MCPLocalSessionTask] Failed to list tools: {e}"
+                            log_exception_with_details(
+                                logger, "[MCPLocalSessionTask]", e
                             )
                             await self.response_queue.put({"error": str(e)})
                     elif isinstance(req, dict) and req.get("action") == "run_tool":
@@ -137,17 +138,16 @@ class MCPLocalSessionTask(MCPSessionBase):
                             result = await session.call_tool(tool_name, **args)
                             await self.response_queue.put(result)
                         except Exception as e:
-                            logger.error(
-                                f"[MCPLocalSessionTask] Error running tool '{tool_name}': {e}"
+                            # Handle TaskGroup exceptions with multiple sub-exceptions
+                            log_exception_with_details(
+                                logger, "[MCPLocalSessionTask]", e
                             )
                             await self.response_queue.put({"error": str(e)})
                     else:
                         logger.warning(f"[MCPLocalSessionTask] Unknown request: {req}")
                         await self.response_queue.put({"error": "Unknown request"})
         except Exception as e:
-            logger.error(
-                f"[MCPLocalSessionTask] Unhandled exception in session task: {e}",
-                exc_info=True,
-            )
+            # Handle TaskGroup exceptions with multiple sub-exceptions
+            log_exception_with_details(logger, "[MCPLocalSessionTask]", e)
         finally:
             logger.info("[MCPLocalSessionTask] Session task stopped.")

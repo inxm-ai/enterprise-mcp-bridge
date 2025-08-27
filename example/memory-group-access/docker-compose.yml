@@ -1,0 +1,195 @@
+services:
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:latest
+    container_name: ops.jaeger
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_HTTP_ENABLED=true
+    networks:
+      - private
+    command: "--set extensions.jaeger_query.base_path=/ops/jaeger"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.2
+    container_name: auth.keycloak
+    command: >
+      start-dev --import-realm --hostname="auth.inxm.local" --https-port=443 --proxy=edge --hostname-strict=false --hostname-strict-https=false --hostname-strict-backchannel=false
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_FEATURES: token-exchange,hostname
+      KEYCLOAK_IMPORT: /opt/keycloak/data/import/realm-memory.json
+    volumes:
+      - ./keycloak/realm-export:/opt/keycloak/data/import
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/sh -c 'exec 3<> /dev/tcp/localhost/8080 || exit 1'"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 30
+    networks:
+      - private
+
+  oauth2-proxy:
+    container_name: auth.oauth2-proxy
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
+    environment:
+      OAUTH2_PROXY_LOG_LEVEL: debug
+      OAUTH2_PROXY_PROVIDER: "keycloak-oidc"
+      OAUTH2_PROXY_CLIENT_ID: "frontend-client"
+      OAUTH2_PROXY_CLIENT_SECRET: "this-is-not-a-secret"
+      OAUTH2_PROXY_COOKIE_SECRET: "1234567890abcdef"
+      OAUTH2_PROXY_COOKIE_SECURE: "false"
+      OAUTH2_PROXY_REDIRECT_URL: "https://inxm.local/oauth2/callback"
+      OAUTH2_PROXY_UPSTREAMS: "http://app-nginx:3099/"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: "https://auth.inxm.local/realms/inxm"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: "redis://redis:6379"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_PASS_BASIC_AUTH: "false"
+      OAUTH2_PROXY_COOKIE_REFRESH: "5m"
+      OAUTH2_PROXY_COOKIE_EXPIRE: "60m"
+      OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY: "true"
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:3098"
+      OAUTH2_PROXY_UPSTREAM_TIMEOUT: "30s"
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true"
+      OAUTH2_PROXY_SET_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_SESSION_STORE_TYPE: "redis"
+      OAUTH2_PROXY_SCOPE: "openid profile email roles"
+    ports:
+      - "3098:3098"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      app-nginx:
+        condition: service_healthy
+      ingress:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+    networks:
+      - private
+
+  app-nginx:
+    container_name: app.ingress
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile.nginx-with-otel
+    ports:
+      - "3099:3099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3099/ || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - app-frontend
+      - app-mcp-rest
+    environment:
+      - OAI_HOST=${OAI_HOST}
+      - OAI_BASE_URL=${OAI_BASE_URL}
+      - OAI_API_TOKEN=${OAI_API_TOKEN}
+      - OAI_MODEL_NAME=${OAI_MODEL_NAME}
+    networks:
+      - private
+
+  app-frontend:
+    container_name: memory.frontend
+    image: node:22-alpine
+    working_dir: /usr/src/app
+    command: sh -c "npx --yes http-server -p 3001 ."
+    volumes:
+      - ./web:/usr/src/app:ro
+    depends_on:
+      - app-mcp-rest
+    ports:
+      - "3001:3001"
+    labels:
+      - "oauth2-proxy.enable=true"
+    networks:
+      - private
+
+  app-mcp-rest:
+    container_name: app.mcp-memory-rest-server
+    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    environment:
+      SERVICE_NAME: mcp-memory-rest-server
+      MCP_SERVER_COMMAND: npx -y @modelcontextprotocol/server-memory
+      MCP_ENV_MEMORY_FILE_PATH: /data/{data_path}.json
+      AUTH_PROVIDER: keycloak
+      AUTH_ALLOW_UNSAFE_CERT: true
+      AUTH_BASE_URL: https://auth.inxm.local
+      KEYCLOAK_REALM: inxm
+      MCP_BASE_PATH: /api/mcp/memory
+      OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    labels:
+      - "oauth2-proxy.enable=true"
+    volumes:
+      - ./data:/data
+    networks:
+      - private
+
+  ingress:
+    container_name: ingress
+    image: nginx:latest
+    volumes:
+      - ./nginx/ingress-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dev-local-certs/auth.inxm.local.crt:/etc/nginx/certs/auth.inxm.local.crt:ro
+      - ./dev-local-certs/auth.inxm.local.key:/etc/nginx/certs/auth.inxm.local.key:ro
+      - ./dev-local-certs/inxm.local.crt:/etc/nginx/certs/inxm.local.crt:ro
+      - ./dev-local-certs/inxm.local.key:/etc/nginx/certs/inxm.local.key:ro
+    ports:
+      - "443:443"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k --resolve auth.inxm.local:443:127.0.0.1 https://auth.inxm.local:443/realms/memory || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    networks:
+      default: {}
+      private:
+        aliases:
+          - inxm.local
+          - auth.inxm.local
+
+  redis:
+    container_name: auth.redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - private
+
+networks:
+  default:
+    name: mcp-memory-demo-net
+  private:
+    name: mcp-memory-private-net
+
+volumes:
+  grafana-data:
+    driver: local

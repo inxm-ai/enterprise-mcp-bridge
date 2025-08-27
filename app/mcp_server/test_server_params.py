@@ -112,3 +112,60 @@ def test_env_command_empty(monkeypatch):
     params = server_params.get_server_params()
     assert params.command == "python"
     assert "server.py" in params.args[0]
+
+
+def test_process_template_basic(monkeypatch):
+    from app.mcp_server.server_params import process_template
+
+    def mock_get_data_access_manager():
+        class MockDataManager:
+            def resolve_data_resource(self, access_token, requested_group):
+                return "mock_data_path"
+
+        return MockDataManager()
+
+    def mock_extract_user_info(self, access_token):
+        return {"user_id": "mock_user_id"}
+
+    monkeypatch.setattr(
+        "app.mcp_server.server_params.get_data_access_manager",
+        mock_get_data_access_manager,
+    )
+    monkeypatch.setattr(
+        "app.oauth.user_info.UserInfoExtractor.extract_user_info",
+        mock_extract_user_info,
+    )
+
+    template = "command --data {data_path} --user {user_id} --group {group_id}"
+    result = process_template(template, "mock_access_token", "mock_group_id")
+
+    assert (
+        result
+        == "command --data mock_data_path --user mock_user_id --group mock_group_id"
+    )
+
+
+def test_process_template_no_placeholders():
+    from app.mcp_server.server_params import process_template
+
+    template = "command --no-placeholders"
+    result = process_template(template, "mock_access_token", "mock_group_id")
+
+    assert result == "command --no-placeholders"
+
+
+def test_process_template_error_handling(monkeypatch):
+    from app.mcp_server.server_params import process_template
+
+    def mock_get_data_access_manager():
+        raise Exception("Mocked exception")
+
+    monkeypatch.setattr(
+        "app.mcp_server.server_params.get_data_access_manager",
+        mock_get_data_access_manager,
+    )
+
+    template = "command --data {data_path}"
+    result = process_template(template, "mock_access_token", "mock_group_id")
+
+    assert result == "command --data {data_path}"
