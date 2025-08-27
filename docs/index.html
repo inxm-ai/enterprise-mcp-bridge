@@ -138,7 +138,7 @@
             <div class="flex flex-wrap gap-2 sm:gap-4">
                 <button onclick="showPage('intro')" class="nav-button active px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Why This Project?</button>
                 <button onclick="showPage('quickstart')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Quick Start</button>
-                <button onclick="showPage('deployment')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Deployment Example</button>
+                <button onclick="showPage('examples')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Examples</button>
                 <button onclick="showPage('contributing')" class="nav-button px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300">Contributing</button>
             </div>
         </nav>
@@ -233,7 +233,7 @@ uvicorn app.server:app --reload</code></pre>
 "b": 1
 }'</code></pre>
                     <p class="text-gray-400 mt-4">This will return a JSON response with the result of the addition.</p>
-                    <p class="text-gray-400 mt-4">For more advanced usage, including session management and authentication, see the <a href="#deployment" onclick="showPage('deployment')">Deployment example</a>.</p>
+                    <p class="text-gray-400 mt-4">For more advanced usage, including session management and authentication, see the <a href="#examples" onclick="showPage('examples')">Examples</a>.</p>
                 </div>
                 <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
                     <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Session vs. Stateless Calls</h2>
@@ -270,57 +270,69 @@ uvicorn app.server:app --reload</code></pre>
                 </div>
             </section>
 
-            <!-- Deployment Example -->
-            <section id="deployment" class="page hidden grid gap-8">
+            <!-- Examples -->
+            <section id="examples" class="page hidden grid gap-8">
                 <div class="rounded-xl p-6 shadow-md border transition-all duration-100 ease-out theme-card">
-                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Full-Stack Docker Compose Deployment</h2>
-                    <div class="accent-media my-6">
-                        <img src="architecture.png" alt="Architecture Diagram" loading="lazy">
-                    </div>
-                    <p class="text-gray-400 mb-6">This is the deployment from <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/token-exchange-m365" title="Standalone Getting Started Example">example/token-exchange-m365</a>. It brings up authentication (Keycloak + OAuth2-Proxy), the Enterprise MCP Bridge, and observability (Jaeger, Prometheus, Grafana).</p>
+                    <h2 class="text-2xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Examples</h2>
+                    <p class="text-gray-400">Explore ready-to-run examples. Switch tabs to see setup and details for each.</p>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card">
-                        <h3 class="text-xl font-bold text-white mb-2">All the things you need in an Enterprise</h3>
-                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
-                            <li>Federated SSO via Keycloak with token exchange to Microsoft Entra; OAuth2-Proxy protects the app edge.</li>
-                            <li>Least-privilege token handling: user tokens never reach the browser tools; the server exchanges and injects provider tokens per request.</li>
-                            <li>Operational visibility: OTLP traces to Jaeger; metrics for Prometheus; default Grafana Dashboard and connection set up.</li>
-                            <li>Safety rails: route scoping with <code>MCP_BASE_PATH</code>, tool allow/deny lists, and containerized runtime.</li>
-                            <li>Enterprise identity mapping: realms and provider aliases for multi-tenant setups.</li>
-                        </ul>
-                        <p class="text-gray-400 mb-6">
-                            This is not a fully production-ready example, but a starting point for your own deployment. It is designed to be easily extensible and customizable to fit your specific needs.
-                        </p>
+                    <!-- Tabs -->
+                    <div class="mt-4 mb-6 flex flex-wrap gap-2">
+                        <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg active" data-tab="minimal" onclick="showExampleTab('minimal')">Minimal Example</button>
+                        <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="memory-group" onclick="showExampleTab('memory-group')">Memory Group Access</button>
+                        <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="token-exchange" onclick="showExampleTab('token-exchange')">Token Exchange (M365)</button>
                     </div>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h3 class="text-xl font-bold text-white mb-2">Prerequisites</h3>
-                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
-                            <li>Docker & Docker Compose</li>
-                            <li>Azure CLI (<code>az</code>)</li>
-                            <li>A free Microsoft Entra (Azure AD) developer account</li>
-                            <li>An OpenAI-compatible API key (for the MCP server)</li>
-                        </ul>
-                    </div>
+                    <!-- Tab: Token Exchange -->
+                    <div class="example-content" data-tab="token-exchange">
+                        <h3 class="text-xl font-bold text-white mb-4">Full-Stack Docker Compose Deployment</h3>
+                        <p class="text-gray-400 mb-6">This is the example from <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/token-exchange-m365" title="Standalone Getting Started Example">example/token-exchange-m365</a>. It brings up authentication (Keycloak + OAuth2-Proxy), the Enterprise MCP Bridge, and observability (Jaeger, Prometheus, Grafana).</p>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h3 class="text-xl font-bold text-white mb-2">Start the full stack</h3>
-                        <p class="text-gray-400 mb-3">From the example folder, start everything with one script:</p>
-                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/token-exchange-m365
+                        <div class="accent-media my-6">
+                            <img src="architecture.png" alt="Architecture Diagram" loading="lazy">
+                        </div>
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card">
+                            <h4 class="text-lg font-bold text-white mb-2">All the things you need in an Enterprise</h4>
+                            <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                                <li>Federated SSO via Keycloak with token exchange to Microsoft Entra; OAuth2-Proxy protects the app edge.</li>
+                                <li>Least-privilege token handling: user tokens never reach the browser tools; the server exchanges and injects provider tokens per request.</li>
+                                <li>Operational visibility: OTLP traces to Jaeger; metrics for Prometheus; default Grafana Dashboard and connection set up.</li>
+                                <li>Safety rails: route scoping with <code>MCP_BASE_PATH</code>, tool allow/deny lists, and containerized runtime.</li>
+                                <li>Enterprise identity mapping: realms and provider aliases for multi-tenant setups.</li>
+                            </ul>
+                            <p class="text-gray-400 mb-6">
+                                This is not a fully production-ready example, but a starting point for your own deployment. It is designed to be easily extensible and customizable to fit your specific needs.
+                            </p>
+                        </div>
+
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h4 class="text-lg font-bold text-white mb-2">Prerequisites</h4>
+                            <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                                <li>Docker & Docker Compose</li>
+                                <li>Azure CLI (<code>az</code>)</li>
+                                <li>A free Microsoft Entra (Azure AD) developer account</li>
+                                <li>An OpenAI-compatible API key (for the MCP server)</li>
+                            </ul>
+                        </div>
+
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h4 class="text-lg font-bold text-white mb-2">Start the full stack</h4>
+                            <p class="text-gray-400 mb-3">From the example folder, start everything with one script:</p>
+                            <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/token-exchange-m365
 ./start.sh</code></pre>
-                        <p class="text-gray-400 mt-4">Then open <a href="https://inxm.local" class="hover:underline">https://inxm.local</a>. You’ll be redirected to Keycloak at <code>https://auth.inxm.local</code> to log in. On first run, the script also automates the Entra app registration.</p>
-                    </div>
+                            <p class="text-gray-400 mt-4">Then open <a href="https://inxm.local" class="hover:underline">https://inxm.local</a>. You’ll be redirected to Keycloak at <code>https://auth.inxm.local</code> to log in. On first run, the script also automates the Entra app registration.</p>
+                        </div>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h3 class="text-xl font-bold text-white mb-2">Stop and clean up</h3>
-                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
-                        <p class="text-gray-400 mt-2">Stops the containers and removes local resources created by the demo.</p>
-                    </div>
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h4 class="text-lg font-bold text-white mb-2">Stop and clean up</h4>
+                            <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
+                            <p class="text-gray-400 mt-2">Stops the containers and removes local resources created by the demo.</p>
+                        </div>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h3 class="text-xl font-bold text-white mb-2">Service configuration (app-mcp-rest)</h3>
-                        <p class="text-gray-400 mb-4">Key settings for the Enterprise MCP Bridge container:</p>
-                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h4 class="text-lg font-bold text-white mb-2">Service configuration (app-mcp-rest)</h4>
+                            <p class="text-gray-400 mb-4">Key settings for the Enterprise MCP Bridge container:</p>
+                            <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-yaml">services:
     app-mcp-rest:
         container_name: app.mcp-m365-rest-server
         image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
@@ -361,14 +373,14 @@ uvicorn app.server:app --reload</code></pre>
         networks:
             - private
 </code></pre>
-                    </div>
+                        </div>
 
-                    <h3 class="text-xl font-bold text-white mb-2 mt-6">OAuth Token Integration</h3>
-                    <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
+                        <h4 class="text-lg font-bold text-white mb-2 mt-6">OAuth Token Integration</h4>
+                        <p class="text-gray-400">The server can retrieve, refresh, and inject OAuth tokens for downstream services, simplifying security for your tools.</p>
 
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Login</h4>
-                        <pre class="mermaid">
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h5 class="text-base font-bold text-white mb-4">Flow Diagram: Login</h5>
+                            <pre class="mermaid">
 sequenceDiagram
     participant User
     participant AppIngress as App-Ingress (NGINX)
@@ -384,11 +396,11 @@ sequenceDiagram
     Keycloak -->> OAuth2Proxy: Redirect with Code/Token
     OAuth2Proxy ->> AppIngress: Set Cookie/Header
     AppIngress ->> AppFrontend: Serve Frontend
-                        </pre>
-                    </div>
-                    <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
-                        <h4 class="text-lg font-bold text-white mb-4">Flow Diagram: Tool Request with Token Exchange</h4>
-                        <pre class="mermaid">
+                            </pre>
+                        </div>
+                        <div class="card p-6 rounded-xl border transition-all duration-100 ease-out theme-card mt-6">
+                            <h5 class="text-base font-bold text-white mb-4">Flow Diagram: Tool Request with Token Exchange</h5>
+                            <pre class="mermaid">
 sequenceDiagram
     participant AppFrontend as App-Frontend
     participant AppIngress as App-Ingress (NGINX)
@@ -403,7 +415,72 @@ sequenceDiagram
     AppMCPRest ->> Keycloak: Request Downstream Token (Token Exchange)
     Keycloak -->> AppMCPRest: Return Downstream Token
     AppMCPRest ->> DownstreamAPI: Access API with Downstream Token
-                        </pre>
+                            </pre>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Minimal Example -->
+                    <div class="example-content hidden" data-tab="minimal">
+                        <h3 class="text-xl font-bold text-white mb-4">Minimal Example</h3>
+                        <p class="text-gray-400 mb-4">This is the example from <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/minimal-example" title="Standalone Getting Started Example">example/minimal-example</a>. It uses the default MCP server and calls the <code>add</code> tool with a simple payload as a simple <code>curl</code> request.</p>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/minimal-example
+./start.sh</code></pre>
+                        <p class="text-gray-400 mt-4">Expected output includes a result of <code>3</code> indicating the add tool is working:</p>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-text">Default mcp example
+Starting docker container
+Calling the add tool with {"a": 2, "b": 1}
+{"isError":false,"content":[{"text":"3","structuredContent":null}],"structuredContent":{"result":3}}</code></pre>
+                    </div>
+
+                    <!-- Tab: Memory Group Access -->
+                    <div class="example-content hidden" data-tab="memory-group">
+                        <h3 class="text-xl font-bold text-white mb-4">Memory Group Access</h3>
+                        <p class="text-gray-400 mb-6">This is the example from <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/memory-group-access" title="Standalone Getting Started Example">example/memory-group-access</a>. It demonstrates how to limit access to the memory of the Memory MCP Server (and thus the memory available to the LLMs) using your IAM Groups.</p>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/memory-group-access
+./start.sh</code></pre>
+                        <p class="text-gray-400 mt-4">Then open <a href="https://inxm.local" class="hover:underline">https://inxm.local</a> and log in using one of the pre-configured users:</p>
+                        <div class="overflow-x-auto mt-4">
+                            <table class="w-full text-left rounded-lg overflow-hidden">
+                                <thead class="bg-gray-700">
+                                    <tr>
+                                        <th class="p-3 text-sm font-semibold text-white">Username</th>
+                                        <th class="p-3 text-sm font-semibold text-white">Password</th>
+                                        <th class="p-3 text-sm font-semibold text-white">Groups</th>
+                                        <th class="p-3 text-sm font-semibold text-white">Access</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="text-gray-400">
+                                    <tr class="transition-colors">
+                                        <td class="p-3"><code>admin</code></td>
+                                        <td class="p-3"><code>admin123</code></td>
+                                        <td class="p-3">administrators</td>
+                                        <td class="p-3">All group memories + personal</td>
+                                    </tr>
+                                    <tr class="transition-colors">
+                                        <td class="p-3"><code>john.engineer</code></td>
+                                        <td class="p-3"><code>engineer123</code></td>
+                                        <td class="p-3">engineering</td>
+                                        <td class="p-3">Engineering memories + personal</td>
+                                    </tr>
+                                    <tr class="transition-colors">
+                                        <td class="p-3"><code>jane.marketing</code></td>
+                                        <td class="p-3"><code>marketing123</code></td>
+                                        <td class="p-3">marketing</td>
+                                        <td class="p-3">Marketing memories + personal</td>
+                                    </tr>
+                                    <tr class="transition-colors">
+                                        <td class="p-3"><code>bob.sales</code></td>
+                                        <td class="p-3"><code>sales123</code></td>
+                                        <td class="p-3">sales</td>
+                                        <td class="p-3">Sales memories + personal</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="text-gray-400 mt-4">Use the small forms that give you access to the <code>@modelcontextprotocol/server-memory</code> tools and try to access data you're not supposed to.</p>
+                        <div class="flex justify-center items-center mt-4">
+                            <img class="rounded-lg" src="mcp-memory-access-denied.png" alt="Memory Access Denied" />
+                        </div>
                     </div>
                 </div>
             </section>
@@ -526,6 +603,25 @@ sequenceDiagram
 
             // Initial state: show the intro page
             showPage('intro');
+
+            // Example tabs logic
+            window.showExampleTab = (tab) => {
+                const contents = document.querySelectorAll('.example-content');
+                const buttons = document.querySelectorAll('.example-tab-btn');
+                contents.forEach(el => {
+                    if (el.getAttribute('data-tab') === tab) el.classList.remove('hidden');
+                    else el.classList.add('hidden');
+                });
+                buttons.forEach(btn => {
+                    if (btn.getAttribute('data-tab') === tab) btn.classList.add('active');
+                    else btn.classList.remove('active');
+                });
+            };
+            // Default to token-exchange tab when opening Examples
+            const examplesNavBtn = document.querySelector("nav button[onclick=\"showPage('examples')\"]");
+            if (examplesNavBtn) {
+                examplesNavBtn.addEventListener('click', () => setTimeout(() => showExampleTab('minimal'), 0));
+            }
         });
     </script>
 </body>

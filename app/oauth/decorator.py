@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Optional
 
 from app.oauth.token_exchange import TokenRetrieverFactory
+import os
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -15,13 +16,17 @@ async def decorate_args_with_oauth_token(
 
     oauth_token = None
     if access_token:
-        retriever = TokenRetrieverFactory().get()
-        token_result = retriever.retrieve_token(access_token)
-        if not token_result or "access_token" not in token_result:
-            raise ValueError(
-                f"Token retrieval failed with access_token: {access_token}"
-            )
-        oauth_token = token_result["access_token"]
+        # If no provider alias, pass through Keycloak access token
+        if not os.getenv("KEYCLOAK_PROVIDER_ALIAS"):
+            oauth_token = access_token
+        else:
+            retriever = TokenRetrieverFactory().get()
+            token_result = retriever.retrieve_token(access_token)
+            if not token_result or "access_token" not in token_result:
+                raise ValueError(
+                    f"Token retrieval failed with access_token: {access_token}"
+                )
+            oauth_token = token_result["access_token"]
 
     if args is None:
         args = {}

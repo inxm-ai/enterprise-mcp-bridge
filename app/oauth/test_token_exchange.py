@@ -221,3 +221,26 @@ def test_extract_keycloak_token_plain(retriever):
 def test_extract_keycloak_token_none(retriever):
     headers = {}
     assert retriever._extract_keycloak_token(headers) is None
+
+
+def test_retrieve_token_passthrough_when_no_provider(monkeypatch):
+    # No KEYCLOAK_PROVIDER_ALIAS set
+    monkeypatch.delenv("KEYCLOAK_PROVIDER_ALIAS", raising=False)
+    monkeypatch.setenv("AUTH_BASE_URL", "https://test.keycloak")
+    monkeypatch.setenv("KEYCLOAK_REALM", "testrealm")
+    r = KeyCloakTokenRetriever()
+    result = r.retrieve_token("kc_token")
+    assert result["success"] is True
+    assert result["access_token"] == "kc_token"
+    assert result["token_type"] == "Bearer"
+
+
+def test_force_token_refresh_passthrough_when_no_provider(monkeypatch):
+    # No KEYCLOAK_PROVIDER_ALIAS set
+    monkeypatch.delenv("KEYCLOAK_PROVIDER_ALIAS", raising=False)
+    monkeypatch.setenv("AUTH_BASE_URL", "https://test.keycloak")
+    monkeypatch.setenv("KEYCLOAK_REALM", "testrealm")
+    r = KeyCloakTokenRetriever()
+    result = r.force_token_refresh("kc_token")
+    assert result["success"] is True
+    assert result["access_token"] == "kc_token"

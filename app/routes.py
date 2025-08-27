@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, HTTPException, Header, Cookie, Request
+from fastapi import APIRouter, HTTPException, Header, Cookie, Request, Query
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict
 import uuid
@@ -9,10 +9,12 @@ from .session_manager import session_manager
 from .models import RunToolsResult
 from .mcp_server import get_server_params
 from .oauth.decorator import decorate_args_with_oauth_token
+from .oauth.user_info import get_data_access_manager
 from fnmatch import fnmatch
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .utils import mask_token
+from .utils.exception_logging import log_exception_with_details
 
 router = APIRouter()
 sessions = session_manager()
@@ -77,6 +79,9 @@ async def list_tools(
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
 ):
     try:
         with tracer.start_as_current_span("list_tools") as span:
@@ -88,14 +93,27 @@ async def list_tools(
             )
             if x_inxm_mcp_session:
                 span.set_attribute("session.id", x_inxm_mcp_session)
+            if group:
+                span.set_attribute("session.group", group)
             logger.info(
                 mask_token(
-                    f"[Tools] Listing tools. Session: {x_inxm_mcp_session}",
+                    f"[Tools] Listing tools. Session: {x_inxm_mcp_session}, Group: {group}",
                     x_inxm_mcp_session,
                 )
             )
             if x_inxm_mcp_session is None:
-                async with mcp_session(get_server_params(access_token)) as session:
+                # Validate group access for sessionless requests
+                if group and access_token:
+                    data_manager = get_data_access_manager()
+                    try:
+                        data_manager.resolve_data_resource(access_token, group)
+                    except PermissionError as e:
+                        logger.warning(f"Group access denied in list_tools: {str(e)}")
+                        raise HTTPException(status_code=403, detail=str(e))
+
+                async with mcp_session(
+                    get_server_params(access_token, group)
+                ) as session:
                     result = await session.list_tools()
                     logger.debug("[Tools] Tools listed without session.")
                     return map_tools(result)
@@ -130,6 +148,9 @@ async def run_tool(
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None,
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
 ):
     try:
         with tracer.start_as_current_span(
@@ -145,17 +166,30 @@ async def run_tool(
             )
             if x_inxm_mcp_session:
                 span.set_attribute("session.id", x_inxm_mcp_session)
+            if group:
+                span.set_attribute("session.group", group)
             if args and "inxm-session" in args:
                 args = dict(args)
                 args.pop("inxm-session")
             logger.info(
                 mask_token(
-                    f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Args: {args}",
+                    f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
                     x_inxm_mcp_session,
                 )
             )
             if x_inxm_mcp_session is None:
-                async with mcp_session(get_server_params(access_token)) as session:
+                # Validate group access for sessionless requests
+                if group and access_token:
+                    data_manager = get_data_access_manager()
+                    try:
+                        data_manager.resolve_data_resource(access_token, group)
+                    except PermissionError as e:
+                        logger.warning(f"Group access denied in run_tool: {str(e)}")
+                        raise HTTPException(status_code=403, detail=str(e))
+
+                async with mcp_session(
+                    get_server_params(access_token, group)
+                ) as session:
                     tools = await session.list_tools()
                     decorated_args = await decorate_args_with_oauth_token(
                         tools, tool_name, args, access_token
@@ -210,28 +244,54 @@ async def run_tool(
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
+        # Handle TaskGroup exceptions with multiple sub-exceptions
+        log_exception_with_details(logger, "[Tool-Call]", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/session/start")
 async def start_session(
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for group-specific data access"
+    ),
 ):
     try:
         with tracer.start_as_current_span("start_session") as span:
             x_inxm_mcp_session = session_id(str(uuid.uuid4()), access_token)
             span.set_attribute("session.id", x_inxm_mcp_session)
-            mcp_task = MCPLocalSessionTask(get_server_params(access_token))
+            if group:
+                span.set_attribute("session.group", group)
+
+            # Validate group access if specified
+            if group and access_token:
+                data_manager = get_data_access_manager()
+                try:
+                    # This will raise PermissionError if user doesn't have access
+                    data_manager.resolve_data_resource(access_token, group)
+                    logger.info(f"Group access validated for user, group: {group}")
+                except PermissionError as e:
+                    logger.warning(f"Group access denied: {str(e)}")
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Access denied to group '{group}': {str(e)}",
+                    )
+
+            mcp_task = MCPLocalSessionTask(get_server_params(access_token, group))
             mcp_task.start()
             sessions.set(x_inxm_mcp_session, mcp_task)
+
+            session_info = {SESSION_FIELD_NAME: x_inxm_mcp_session}
+            if group:
+                session_info["group"] = group
+
             logger.debug(
                 mask_token(
-                    f"[Session] New session started: {x_inxm_mcp_session}",
+                    f"[Session] New session started: {x_inxm_mcp_session} for group: {group}",
                     x_inxm_mcp_session,
                 )
             )
-            response = JSONResponse(content={SESSION_FIELD_NAME: x_inxm_mcp_session})
+            response = JSONResponse(content=session_info)
             response.set_cookie(
                 key=SESSION_FIELD_NAME,
                 value=x_inxm_mcp_session,
@@ -250,7 +310,8 @@ async def start_session(
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
+        # Handle TaskGroup exceptions with multiple sub-exceptions
+        log_exception_with_details(logger, "[Session]", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -295,5 +356,6 @@ async def close_session(
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        logger.error(f"[Tool-Call] Unexpected error: {str(e)}")
+        # Handle TaskGroup exceptions with multiple sub-exceptions
+        log_exception_with_details(logger, "[Session]", e)
         raise HTTPException(status_code=500, detail="Internal server error")
