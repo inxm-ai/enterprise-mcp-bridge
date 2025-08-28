@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+git pull origin main
+
 # Get the current version from pyproject.toml
 current_version=$(grep -oP '(?<=version = ")[^"]*' ./app/pyproject.toml)
 echo "Current version: $current_version"

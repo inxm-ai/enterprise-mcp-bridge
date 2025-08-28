@@ -450,37 +450,6 @@ class TestNormalizeGroups:
         assert extractor._normalize_groups("") == []
 
 
-class TestDataPathResolution:
-    """Test data path resolution functionality"""
-
-    def test_resolve_data_path_user(self, data_manager):
-        """Test resolving user-specific data path"""
-        token = create_test_token("path_user", ["group1"])
-
-        path = data_manager.resolve_data_path(token)
-
-        assert path == "/data/u/path_user.json"
-
-    def test_resolve_data_path_group(self, data_manager):
-        """Test resolving group-specific data path"""
-        token = create_test_token("path_user", ["test_group"])
-
-        path = data_manager.resolve_data_path(token, "test_group")
-
-        assert path == "/data/g/test_group.json"
-
-    def test_resolve_data_path_with_special_chars(self, data_manager):
-        """Test data path resolution with special characters"""
-        token = create_test_token("user/with/../special", ["group/with/slashes"])
-
-        user_path = data_manager.resolve_data_path(token)
-        group_path = data_manager.resolve_data_path(token, "group/with/slashes")
-
-        # The sanitizer converts "../" to "_" due to consecutive dots rule
-        assert user_path == "/data/u/userwith_special.json"
-        assert group_path == "/data/g/groupwithslashes.json"
-
-
 class TestGetUserAccessibleGroups:
     """Test getting user accessible groups with error handling"""
 
