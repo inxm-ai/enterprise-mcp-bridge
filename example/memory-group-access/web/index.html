@@ -229,6 +229,7 @@
             <div class="tabs">
                 <div class="tab active" onclick="showTab('session', this)">Session Management</div>
                 <div class="tab" onclick="showTab('tools', this)">List Tools</div>
+                <div class="tab" onclick="showTab('prompts', this)">List Prompts</div>
                 <div class="tab" onclick="showTab('memory', this)">Add Memory</div>
                 <div class="tab" onclick="showTab('search', this)">Search Memory</div>
                 <div class="tab" onclick="showTab('remove', this)">Remove Memory</div>
@@ -268,6 +269,16 @@
                     <button type="submit" class="btn btn-primary">List Tools</button>
                 </form>
                 <div id="toolsResponse" class="response-box" style="display: none;"></div>
+            </div>
+            <div id="prompts" class="tab-content">
+                <h3>2. List Prompts</h3>
+                <form id="promptForm" class="inline-form">
+                    <div class="form-group">
+                        <label for="promptGroup">Prompts:</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">List Prompts</button>
+                </form>
+                <div id="promptResponse" class="response-box" style="display: none;"></div>
             </div>
 
             <div id="memory" class="tab-content">
@@ -574,6 +585,21 @@
             
             const response = await makeRequest(url, { method: 'GET' });
             displayResponse('toolsResponse', response);
+        });
+
+        // Prompt form handler
+        document.getElementById('promptForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthenticated) {
+                alert('Please login first');
+                return;
+            }
+            
+            const formData = new FormData(e.target);
+            
+            let url = '/api/mcp/memory/prompts';
+            const response = await makeRequest(url, { method: 'GET' });
+            displayResponse('promptResponse', response);
         });
 
         // Memory form handler (uses observations under the hood)

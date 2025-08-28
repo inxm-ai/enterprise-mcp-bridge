@@ -5,8 +5,9 @@ import os
 from contextlib import asynccontextmanager
 
 from app.session import mcp_session
+from app.session_manager.prompt_helper import list_prompts, call_prompt
 from app.session_manager.session_manager import SessionManagerBase
-from app.models import RunToolsResult
+from app.models import RunPromptResult, RunToolsResult
 from app.mcp_server import get_server_params
 from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
@@ -82,6 +83,9 @@ async def mcp_session_context(
         async with mcp_session(get_server_params(access_token, group)) as session:
 
             class SessionDelegate:
+                async def list_prompts(self):
+                    return await list_prompts(session.list_prompts)
+
                 async def list_tools(self):
                     tools = await session.list_tools()
                     return map_tools(tools)
@@ -98,6 +102,14 @@ async def mcp_session_context(
                     )
                     result = await session.call_tool(tool_name, decorated_args)
                     return RunToolsResult(result)
+
+                async def call_prompt(
+                    self,
+                    prompt_name: str,
+                    args: Optional[Dict],
+                ):
+                    result = await call_prompt(session.get_prompt, prompt_name, args)
+                    return RunPromptResult(result)
 
             yield SessionDelegate()
         return
@@ -135,6 +147,24 @@ async def mcp_session_context(
                 {"action": "run_tool", "tool_name": tool_name, "args": decorated_args}
             )
             return RunToolsResult(result)
+
+        async def list_prompts(self):
+            async def request():
+                return await mcp_task.request("list_prompts")
+
+            return await list_prompts(request)
+
+        async def call_prompt(
+            self,
+            prompt_name: str,
+            args: Optional[Dict],
+        ):
+            async def request(prompt_name, args):
+                return await mcp_task.request(
+                    {"action": "get_prompt", "prompt_name": prompt_name, "args": args}
+                )
+
+            return RunPromptResult(await call_prompt(request, prompt_name, args))
 
     try:
         yield TaskDelegate()

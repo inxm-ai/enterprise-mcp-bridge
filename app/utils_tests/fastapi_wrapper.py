@@ -18,6 +18,15 @@ class FastAPIWrapper:
         assert "hello" in tool_names, f"'hello' not in tools: {tool_names}"
         assert "error" in tool_names, f"'error' not in tools: {tool_names}"
 
+    def test_prompts_loaded(self):
+        r = self.client.get(f"{self.base_url}/prompts", timeout=10)
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+        prompts = r.json()
+        prompt_names = [p["name"] for p in prompts.get("prompts")]
+        assert "greeting" in prompt_names, f"'greeting' not in prompts: {prompt_names}"
+
     def test_call_tool(self):
         r = self.client.post(
             f"{self.base_url}/tools/add", json={"a": 2, "b": 3}, timeout=10
@@ -28,6 +37,18 @@ class FastAPIWrapper:
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
         assert (
             r.json()["structuredContent"]["result"] == 5
+        ), f"Unexpected result: {r.json()}"
+
+    def test_call_prompt(self):
+        r = self.client.post(
+            f"{self.base_url}/prompts/greeting", json={"name": "John"}, timeout=10
+        )
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+        assert len(r.json()["messages"]) > 0, f"No messages: {r.json()}"
+        assert (
+            r.json()["messages"][0]["content"]["text"] == "Hello, John!"
         ), f"Unexpected result: {r.json()}"
 
     def test_tool_wrong_args(self):
@@ -69,6 +90,36 @@ class FastAPIWrapper:
         r = self.client.post(f"{self.base_url}/tools/doesnotexist", json={}, timeout=10)
         assert (
             r.status_code == 404
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+
+    def test_prompts_in_a_session_doesnt_do_anything_but_it_should_work(self):
+        r = self.client.post(f"{self.base_url}/session/start", timeout=10)
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+
+        r = self.client.get(f"{self.base_url}/prompts", timeout=10)
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+        prompts = r.json()
+        prompt_names = [p["name"] for p in prompts.get("prompts")]
+        assert "greeting" in prompt_names, f"'greeting' not in prompts: {prompt_names}"
+
+        r = self.client.post(
+            f"{self.base_url}/prompts/greeting", json={"name": "John"}, timeout=10
+        )
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+        assert len(r.json()["messages"]) > 0, f"No messages: {r.json()}"
+        assert (
+            r.json()["messages"][0]["content"]["text"] == "Hello, John!"
+        ), f"Unexpected result: {r.json()}"
+
+        r = self.client.post(f"{self.base_url}/session/close", timeout=10)
+        assert (
+            r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_counts_up_in_a_session_correctly(self):

@@ -128,6 +128,29 @@ class MCPLocalSessionTask(MCPSessionBase):
                                 logger, "[MCPLocalSessionTask]", e
                             )
                             await self.response_queue.put({"error": str(e)})
+                    elif req == "list_prompts":
+                        logger.debug("[MCPLocalSessionTask] Listing available prompts.")
+                        try:
+                            result = await session.list_prompts()
+                            await self.response_queue.put(result)
+                        except Exception as e:
+                            log_exception_with_details(
+                                logger, "[MCPLocalSessionTask]", e
+                            )
+                    elif isinstance(req, dict) and req.get("action") == "get_prompt":
+                        prompt_name = req["prompt_name"]
+                        args = req.get("args", {})
+                        logger.info(
+                            f"[MCPLocalSessionTask] Running prompt: {prompt_name} with args: {args}"
+                        )
+                        try:
+                            result = await session.get_prompt(prompt_name, args)
+                            await self.response_queue.put(result)
+                        except Exception as e:
+                            log_exception_with_details(
+                                logger, "[MCPLocalSessionTask]", e
+                            )
+                            await self.response_queue.put({"error": str(e)})
                     elif isinstance(req, dict) and req.get("action") == "run_tool":
                         tool_name = req["tool_name"]
                         args = req.get("args", {})

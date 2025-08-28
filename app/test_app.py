@@ -70,10 +70,22 @@ def test_tools_loaded(test_client):
     suite.test_tools_loaded()
 
 
+def test_prompts_loaded(test_client):
+    client, base_url = test_client
+    suite = FastAPIWrapper(client, base_url)
+    suite.test_prompts_loaded()
+
+
 def test_call_tool(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_call_tool()
+
+
+def test_call_prompt(test_client):
+    client, base_url = test_client
+    suite = FastAPIWrapper(client, base_url)
+    suite.test_call_prompt()
 
 
 def test_tool_wrong_args(test_client):
@@ -104,3 +116,9 @@ def test_counts_up_in_a_session_correctly(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_counts_up_in_a_session_correctly()
+
+
+def test_prompts_in_a_session_doesnt_do_anything_but_it_should_work(test_client):
+    client, base_url = test_client
+    suite = FastAPIWrapper(client, base_url)
+    suite.test_prompts_in_a_session_doesnt_do_anything_but_it_should_work()

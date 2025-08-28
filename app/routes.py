@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, HTTPException, Header, Cookie, Request, Query
+from fastapi import APIRouter, HTTPException, Header, Cookie, Query
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict
 import uuid
@@ -13,7 +13,10 @@ from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .utils import mask_token
-from .utils.exception_logging import log_exception_with_details
+from .utils.exception_logging import (
+    find_exception_in_exception_groups,
+    log_exception_with_details,
+)
 
 router = APIRouter()
 sessions = session_manager()
@@ -30,6 +33,51 @@ tracer = trace.get_tracer(__name__)
 
 if MCP_BASE_PATH:
     router.prefix = MCP_BASE_PATH
+
+
+@router.get("/prompts")
+async def list_prompts(
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
+):
+    try:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            access_token,
+        )
+        with traced_request(
+            tracer,
+            operation="list_prompts",
+            session_value=x_inxm_mcp_session,
+            group=group,
+            start_message=f"[Prompts] Listing prompts. Session: {x_inxm_mcp_session}, Group: {group}",
+        ):
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                result = await session.list_prompts()
+                logger.debug(
+                    mask_token(
+                        f"[Prompts] Prompts listed. Session: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
+                )
+                return result
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Prompts] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        log_exception_with_details(logger, "[Session]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/tools")
@@ -72,7 +120,6 @@ async def list_tools(
 @router.post("/tools/{tool_name}")
 async def run_tool(
     tool_name: str,
-    request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
@@ -128,6 +175,73 @@ async def run_tool(
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
         log_exception_with_details(logger, "[Tool-Call]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/prompts/{prompt_name}")
+async def run_prompt(
+    prompt_name: str,
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    args: Optional[Dict] = None,
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
+):
+    try:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(
+                x_inxm_mcp_session_header,
+                x_inxm_mcp_session_cookie,
+                args.get("inxm-session", None) if args else None,
+            ),
+            access_token,
+        )
+        if args and "inxm-session" in args:
+            args = dict(args)
+            args.pop("inxm-session")
+        with traced_request(
+            tracer=tracer,
+            operation="run_prompt",
+            session_value=x_inxm_mcp_session,
+            group=group,
+            start_message=f"[Prompt-Call] Prompt call: {prompt_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
+            extra_attrs={"prompt.name": prompt_name},
+        ):
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                result = await session.call_prompt(prompt_name, args)
+
+        logger.info(f"[Prompt-Call] Prompt {prompt_name} called. Result: {result}")
+        if result.isError:
+            if "Unknown prompt" in result.content[0].text:
+                logger.info(f"[Prompt-Call] Prompt not found: {prompt_name}")
+                raise HTTPException(status_code=404, detail=str(result))
+            if "validation error" in result.content[0].text:
+                logger.info(
+                    f"[Prompt-Call] Prompt called with invalid parameters: {prompt_name}. Result: {result}"
+                )
+                raise HTTPException(status_code=400, detail=str(result))
+
+            logger.error(f"[Prompt-Call] Error in prompt {prompt_name}: {result}")
+            raise HTTPException(status_code=500, detail=str(result))
+        return result
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Prompt-Call] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        # Handle TaskGroup exceptions with multiple sub-exceptions
+        log_exception_with_details(logger, "[Prompt-Call]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -194,6 +308,9 @@ async def start_session(
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
         log_exception_with_details(logger, "[Session]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

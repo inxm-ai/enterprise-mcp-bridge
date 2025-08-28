@@ -207,9 +207,45 @@ uvicorn app.server:app --reload
 | `TOKEN_NAME`              | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
 | `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
 | `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
+| `SYSTEM_DEFINED_PROMPTS`  | <a href="#system-defined-prompts">JSON array of built-in prompts available to all users</a> | "[]"                    |
 | `MCP_ENV_*`               | Those will be passed to the MCP server process            |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [Data Resource Templates](#data-resource-templates) for details. | `{*}/{placeholder}` |
 
+
+---
+
+## System Defined Prompts
+
+### SYSTEM_DEFINED_PROMPTS
+
+The `SYSTEM_DEFINED_PROMPTS` environment variable allows you to inject a list of built-in prompts that are available to all users, regardless of the underlying MCP server. This is useful for providing default or global prompt templates (such as greetings, onboarding, or FAQ responses) that do not depend on the MCP toolset.
+
+**Format:**
+
+Set `SYSTEM_DEFINED_PROMPTS` to a JSON array of prompt objects, each with the following fields:
+
+```json
+[
+  {
+    "name": "greeting",
+    "title": "Hello You",
+    "description": "Get a personalized greeting.",
+    "arguments": [{ "name": "name" }],
+    "template": "Hello, {name}!"
+  }
+]
+```
+
+**Fields:**
+- `name`: Unique identifier for the prompt
+- `title`: Display name
+- `description`: Short explanation of the prompt's purpose
+- `arguments`: List of argument definitions (name, type, etc.)
+- `template`: String template with placeholders for arguments
+
+These prompts are merged into the `/prompts` endpoint and can be invoked by name using the standard API. See [prompt_helper.py](app/session_manager/prompt_helper.py) for implementation details.
+
+---
 ### MCP_SERVER_COMMAND Template Placeholders
 
 The `MCP_SERVER_COMMAND` environment variable supports template placeholders that are dynamically resolved based on the user's OAuth token and requested access:
