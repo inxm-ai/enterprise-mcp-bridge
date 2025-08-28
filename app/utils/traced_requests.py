@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Dict
 from contextlib import contextmanager
 
-from opentracing import Tracer
+from opentelemetry.trace import Tracer
 
 from app.utils import mask_token
 

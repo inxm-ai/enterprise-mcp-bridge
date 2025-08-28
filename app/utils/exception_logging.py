@@ -43,6 +43,39 @@ def _safe_get_exceptions(exception_group) -> list:
         return []
 
 
+def find_exception_in_exception_groups(exception: Exception, target_type: any):
+    """
+    Recursively search through an exception and its sub-exceptions to find
+    if any exception is of the target type.
+
+    Args:
+        exception: The exception to search through
+        target_type: The exception type to look for
+
+    Returns:
+        The first exception matching the target type, or None if not found
+    """
+    try:
+        print(f"Searching for {target_type.__name__} in exception: {exception}")
+        if isinstance(exception, target_type):
+            print(f"Found {target_type.__name__} in exception: {exception}")
+            return exception
+
+        # Check for sub-exceptions if this is an exception group
+        if hasattr(exception, "exceptions"):
+            sub_exceptions = _safe_get_exceptions(exception)
+            for sub_exc in sub_exceptions:
+                inner_exc = find_exception_in_exception_groups(sub_exc, target_type)
+                if inner_exc is not None:
+                    print(f"Found {target_type.__name__} in sub-exception: {inner_exc}")
+                    return inner_exc
+
+        return None
+    except Exception:
+        # If anything goes wrong, we assume we didn't find the target type
+        return None
+
+
 def log_exception_with_details(
     logger: logging.Logger,
     prefix: str,

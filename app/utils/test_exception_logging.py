@@ -534,6 +534,59 @@ class TestEdgeCasesAndStressTests:
         assert all(result == "success" for result in results)
         assert len(results) == 50
 
+    class TestFindExceptionInExceptionGroups:
+        """Tests for find_exception_in_exception_groups function."""
+
+        def test_find_direct_exception(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            exc = ValueError("Test error")
+            found = find_exception_in_exception_groups(exc, ValueError)
+            assert found is exc
+
+        def test_find_nested_exception(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            class MockGroup:
+                def __init__(self, exceptions):
+                    self.exceptions = exceptions
+
+            inner = TypeError("Inner error")
+            group = MockGroup([ValueError("Other"), inner])
+            found = find_exception_in_exception_groups(group, TypeError)
+            assert found is inner
+
+        def test_find_none(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            exc = ValueError("Test error")
+            found = find_exception_in_exception_groups(exc, KeyError)
+            assert found is None
+
+        def test_find_in_deeply_nested_groups(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            class MockGroup:
+                def __init__(self, exceptions):
+                    self.exceptions = exceptions
+
+            target = RuntimeError("Target error")
+            group = MockGroup([MockGroup([MockGroup([target])])])
+            found = find_exception_in_exception_groups(group, RuntimeError)
+            assert found is target
+
+        def test_find_with_broken_exceptions(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            class BrokenGroup:
+                @property
+                def exceptions(self):
+                    raise RuntimeError("Cannot access exceptions!")
+
+            exc = BrokenGroup()
+            found = find_exception_in_exception_groups(exc, ValueError)
+            assert found is None
+
 
 if __name__ == "__main__":
     # Run the tests

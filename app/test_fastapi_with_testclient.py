@@ -18,6 +18,16 @@ def test_tools_loaded(test_client):
     suite.test_tools_loaded()
 
 
+def test_prompts_loaded(test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_prompts_loaded()
+
+
+def test_call_prompt(test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_call_prompt()
+
+
 def test_call_tool(test_client):
     suite = FastAPIWrapper(test_client)
     suite.test_call_tool()
@@ -46,3 +56,8 @@ def test_non_existing_tool(test_client):
 def test_counts_up_in_a_session_correctly(test_client):
     suite = FastAPIWrapper(test_client)
     suite.test_counts_up_in_a_session_correctly()
+
+
+def test_prompts_in_a_session_doesnt_do_anything_but_it_should_work(test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_prompts_in_a_session_doesnt_do_anything_but_it_should_work()
