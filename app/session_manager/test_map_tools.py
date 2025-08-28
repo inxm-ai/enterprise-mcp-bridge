@@ -1,5 +1,5 @@
 import pytest
-from app.routes import map_tools
+from app.session_manager.session_context import map_tools
 from unittest.mock import patch
 
 
@@ -35,7 +35,9 @@ def mock_tools():
 
 
 def test_works_without_filters(mock_tools):
-    with patch("app.routes.INCLUDE_TOOLS", []), patch("app.routes.EXCLUDE_TOOLS", []):
+    with patch("app.session_manager.session_context.INCLUDE_TOOLS", []), patch(
+        "app.session_manager.session_context.EXCLUDE_TOOLS", []
+    ):
         result = map_tools(mock_tools)
         assert len(result) == 3
         assert all(
@@ -44,8 +46,8 @@ def test_works_without_filters(mock_tools):
 
 
 def test_include_tools(mock_tools):
-    with patch("app.routes.INCLUDE_TOOLS", ["tool*"]), patch(
-        "app.routes.EXCLUDE_TOOLS", []
+    with patch("app.session_manager.session_context.INCLUDE_TOOLS", ["tool*"]), patch(
+        "app.session_manager.session_context.EXCLUDE_TOOLS", []
     ):
         result = map_tools(mock_tools)
         assert len(result) == 2
@@ -53,8 +55,8 @@ def test_include_tools(mock_tools):
 
 
 def test_exclude_tools(mock_tools):
-    with patch("app.routes.INCLUDE_TOOLS", []), patch(
-        "app.routes.EXCLUDE_TOOLS", ["tool*"]
+    with patch("app.session_manager.session_context.INCLUDE_TOOLS", []), patch(
+        "app.session_manager.session_context.EXCLUDE_TOOLS", ["tool*"]
     ):
         result = map_tools(mock_tools)
         assert len(result) == 1
@@ -62,8 +64,8 @@ def test_exclude_tools(mock_tools):
 
 
 def test_include_and_exclude_tools(mock_tools):
-    with patch("app.routes.INCLUDE_TOOLS", ["*"]), patch(
-        "app.routes.EXCLUDE_TOOLS", ["special*"]
+    with patch("app.session_manager.session_context.INCLUDE_TOOLS", ["*"]), patch(
+        "app.session_manager.session_context.EXCLUDE_TOOLS", ["special*"]
     ):
         result = map_tools(mock_tools)
         assert len(result) == 2
