@@ -17,6 +17,7 @@ from .utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
 )
+from .tgi.routes import router as tgi_router
 
 router = APIRouter()
 sessions = session_manager()
@@ -358,3 +359,7 @@ async def close_session(
         # Handle TaskGroup exceptions with multiple sub-exceptions
         log_exception_with_details(logger, "[Session]", e)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Include TGI router
+router.include_router(tgi_router)
