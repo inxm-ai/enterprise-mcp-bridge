@@ -22,14 +22,14 @@ def _reset_env():
     pytest_configure()
 
 
-test_app = FastAPI()
-test_app.include_router(tgi_router)
+app_to_test = FastAPI()
+app_to_test.include_router(tgi_router)
 
 
 @pytest.fixture
 def client():
     """Create test client."""
-    return TestClient(test_app)
+    return TestClient(app_to_test)
 
 
 @pytest.fixture
@@ -226,6 +226,7 @@ class TestTGIRoutesEdgyCases:
             return "session123"
 
         monkeypatch.setattr("app.tgi.routes.session_id", mock_session_id)
+        client.cookies.set("x-inxm-mcp-session", "cookie-session")
         client.post(
             "/tgi/v1/chat/completions",
             json=sample_chat_request,
@@ -233,7 +234,6 @@ class TestTGIRoutesEdgyCases:
                 "X-Auth-Request-Access-Token": "test-token",
                 "x-inxm-mcp-session": "header-session",
             },
-            cookies={"x-inxm-mcp-session": "cookie-session"},
         )
         assert called["val"] == "header-session"
         assert called["token"] == "test-token"
