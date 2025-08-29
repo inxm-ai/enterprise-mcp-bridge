@@ -2,13 +2,38 @@ import random
 import threading
 
 
+class ClientWrapper:
+    def __init__(self, client):
+        self.client = client
+        try:
+            from fastapi.testclient import TestClient
+
+            self.is_test_client = isinstance(client, TestClient)
+        except ImportError:
+            self.is_test_client = False
+
+    @property
+    def cookies(self):
+        return self.client.cookies
+
+    def get(self, url, **kwargs):
+        if not self.is_test_client:
+            kwargs.setdefault("timeout", 10)
+        return self.client.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        if not self.is_test_client:
+            kwargs.setdefault("timeout", 10)
+        return self.client.post(url, **kwargs)
+
+
 class FastAPIWrapper:
     def __init__(self, client, base_url=""):
-        self.client = client
+        self.client = ClientWrapper(client)
         self.base_url = base_url
 
     def test_tools_loaded(self):
-        r = self.client.get(f"{self.base_url}/tools", timeout=10)
+        r = self.client.get(f"{self.base_url}/tools")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -19,7 +44,7 @@ class FastAPIWrapper:
         assert "error" in tool_names, f"'error' not in tools: {tool_names}"
 
     def test_prompts_loaded(self):
-        r = self.client.get(f"{self.base_url}/prompts", timeout=10)
+        r = self.client.get(f"{self.base_url}/prompts")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -28,9 +53,7 @@ class FastAPIWrapper:
         assert "greeting" in prompt_names, f"'greeting' not in prompts: {prompt_names}"
 
     def test_call_tool(self):
-        r = self.client.post(
-            f"{self.base_url}/tools/add", json={"a": 2, "b": 3}, timeout=10
-        )
+        r = self.client.post(f"{self.base_url}/tools/add", json={"a": 2, "b": 3})
         print(f"Response: {r.text}")
         assert (
             r.status_code == 200
@@ -40,9 +63,7 @@ class FastAPIWrapper:
         ), f"Unexpected result: {r.json()}"
 
     def test_call_prompt(self):
-        r = self.client.post(
-            f"{self.base_url}/prompts/greeting", json={"name": "John"}, timeout=10
-        )
+        r = self.client.post(f"{self.base_url}/prompts/greeting", json={"name": "John"})
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -52,15 +73,13 @@ class FastAPIWrapper:
         ), f"Unexpected result: {r.json()}"
 
     def test_tool_wrong_args(self):
-        r = self.client.post(f"{self.base_url}/tools/add", json={"a": 1}, timeout=10)
+        r = self.client.post(f"{self.base_url}/tools/add", json={"a": 1})
         assert (
             r.status_code >= 400 and r.status_code < 500
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_tool_error(self):
-        r = self.client.post(
-            f"{self.base_url}/tools/error", json={"message": "fail!"}, timeout=10
-        )
+        r = self.client.post(f"{self.base_url}/tools/error", json={"message": "fail!"})
         assert (
             r.status_code >= 500
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -69,9 +88,7 @@ class FastAPIWrapper:
         def call_add():
             a = random.randint(1, 100)
             b = random.randint(1, 100)
-            r = self.client.post(
-                f"{self.base_url}/tools/add", json={"a": a, "b": b}, timeout=10
-            )
+            r = self.client.post(f"{self.base_url}/tools/add", json={"a": a, "b": b})
             assert (
                 r.status_code == 200
             ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -87,18 +104,18 @@ class FastAPIWrapper:
         # If no exceptions, parallel worked
 
     def test_non_existing_tool(self):
-        r = self.client.post(f"{self.base_url}/tools/doesnotexist", json={}, timeout=10)
+        r = self.client.post(f"{self.base_url}/tools/doesnotexist", json={})
         assert (
             r.status_code == 404
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_prompts_in_a_session_doesnt_do_anything_but_it_should_work(self):
-        r = self.client.post(f"{self.base_url}/session/start", timeout=10)
+        r = self.client.post(f"{self.base_url}/session/start")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
-        r = self.client.get(f"{self.base_url}/prompts", timeout=10)
+        r = self.client.get(f"{self.base_url}/prompts")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -106,9 +123,7 @@ class FastAPIWrapper:
         prompt_names = [p["name"] for p in prompts.get("prompts")]
         assert "greeting" in prompt_names, f"'greeting' not in prompts: {prompt_names}"
 
-        r = self.client.post(
-            f"{self.base_url}/prompts/greeting", json={"name": "John"}, timeout=10
-        )
+        r = self.client.post(f"{self.base_url}/prompts/greeting", json={"name": "John"})
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -117,13 +132,13 @@ class FastAPIWrapper:
             r.json()["messages"][0]["content"]["text"] == "Hello, John!"
         ), f"Unexpected result: {r.json()}"
 
-        r = self.client.post(f"{self.base_url}/session/close", timeout=10)
+        r = self.client.post(f"{self.base_url}/session/close")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_counts_up_in_a_session_correctly(self):
-        r = self.client.post(f"{self.base_url}/session/start", timeout=10)
+        r = self.client.post(f"{self.base_url}/session/start")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -139,7 +154,6 @@ class FastAPIWrapper:
             f"{self.base_url}/tools/call_counter",
             headers={"x-inxm-mcp-session": session_id},
             json={},
-            timeout=10,
         )
         assert (
             r.status_code == 200
@@ -153,7 +167,6 @@ class FastAPIWrapper:
             f"{self.base_url}/tools/call_counter",
             headers={"x-inxm-mcp-session": session_id},
             json={},
-            timeout=10,
         )
         assert (
             r.status_code == 200
@@ -163,7 +176,7 @@ class FastAPIWrapper:
         ), f"Unexpected result: {r.json()}"
 
         self.client.cookies.clear()
-        r = self.client.post(f"{self.base_url}/tools/call_counter", json={}, timeout=10)
+        r = self.client.post(f"{self.base_url}/tools/call_counter", json={})
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -172,7 +185,7 @@ class FastAPIWrapper:
         ), f"Unexpected result: {r.json()}"
 
         self.client.cookies.update(cookie)
-        r = self.client.post(f"{self.base_url}/tools/call_counter", json={}, timeout=10)
+        r = self.client.post(f"{self.base_url}/tools/call_counter", json={})
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
@@ -180,12 +193,12 @@ class FastAPIWrapper:
             r.json()["structuredContent"]["result"] == 3
         ), f"Unexpected result: {r.json()}"
 
-        r = self.client.post(f"{self.base_url}/session/close", timeout=10)
+        r = self.client.post(f"{self.base_url}/session/close")
         assert (
             r.status_code == 200
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
-        r = self.client.post(f"{self.base_url}/tools/call_counter", json={}, timeout=10)
+        r = self.client.post(f"{self.base_url}/tools/call_counter", json={})
         assert (
             r.status_code == 404
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
