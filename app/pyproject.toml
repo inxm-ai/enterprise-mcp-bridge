@@ -13,6 +13,7 @@ dependencies = [
     "celery",
     "PyJWT",
     "requests",
+    "aiohttp",
     "prometheus-fastapi-instrumentator",
     "opentelemetry-api",
     "opentelemetry-sdk",
