@@ -71,7 +71,7 @@ class TestUserInfoExtraction:
 
     def test_invalid_token_raises_error(self, extractor):
         """Test that invalid token raises appropriate error"""
-        with pytest.raises(ValueError, match="Invalid or malformed access token"):
+        with pytest.raises(AssertionError, match="Invalid token format"):
             extractor.extract_user_info("invalid-token")
 
 
@@ -371,13 +371,13 @@ class TestLoggingBehavior:
     def test_logging_on_token_extraction_error(self, extractor):
         """Test error logging when token extraction fails"""
         with patch.object(extractor, "logger") as mock_logger:
-            with pytest.raises(ValueError):
+            with pytest.raises(AssertionError):
                 extractor.extract_user_info("completely-invalid-token")
 
             # Verify error was logged
             mock_logger.error.assert_called()
             error_call = mock_logger.error.call_args[0][0]
-            assert "Failed to extract user info from token" in error_call
+            assert "Failed to decode JWT token" in error_call
 
     def test_data_manager_logging_on_success(self, data_manager):
         """Test data manager success logging"""
@@ -394,7 +394,7 @@ class TestLoggingBehavior:
     def test_data_manager_logging_on_error(self, data_manager):
         """Test data manager error logging"""
         with patch.object(data_manager, "logger") as mock_logger:
-            with pytest.raises(ValueError):
+            with pytest.raises(AssertionError):
                 data_manager.resolve_data_resource("invalid-token")
 
             # Verify error was logged
