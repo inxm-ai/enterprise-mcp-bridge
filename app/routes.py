@@ -261,12 +261,18 @@ async def start_session(
                 span.set_attribute("session.group", group)
 
             # Validate group access if specified
-            if group and access_token:
+            if group:
                 data_manager = get_data_access_manager()
                 try:
                     # This will raise PermissionError if user doesn't have access
                     data_manager.resolve_data_resource(access_token, group)
                     logger.info(f"Group access validated for user, group: {group}")
+                except AssertionError as e:
+                    logger.error(f"Group access assertion error: {str(e)}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid group or token",
+                    )
                 except PermissionError as e:
                     logger.warning(f"Group access denied: {str(e)}")
                     raise HTTPException(
