@@ -159,6 +159,14 @@
         import { otelFetch } from "./otelFetch.js";
         import { TGI } from "./chat.js";
         import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
+        function keepLastThinkTag(streaming) {
+            const thinkTags = [...streaming.matchAll(/<think>[\s\S]*?(?=<think>|$)/g)];
+            if (thinkTags.length === 0) return streaming;
+            // Get up to 5 most recent <think> tags
+            const lastThinks = thinkTags.slice(-5).map(t => t[0]).join('');
+            const withoutThinks = streaming.replace(/<think>[\s\S]*?(?=<think>|$)/g, '');
+            return lastThinks + withoutThinks;
+        }
         pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true }, (state, trigger) => [
             script(async () => {
                 state.model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
@@ -180,21 +188,20 @@
                     state.streaming = "";
                     // Add user message
                     state.messages = [...state.messages, { role: 'user', content: input }];
+                    const originalState = [...state.messages];
                     // Send to TGI
                     try {
-                        const tgiInstance = new TGI(state.availableTools, "https://inxm.local/api/mcp/m365/tools", state.model);
+                        const tgiInstance = new TGI(state.availableTools, state.model);
                         const response = await tgiInstance.send(
                             input,
                             toolChoice,
                             chunk => {
                                 state.streaming += chunk;
-                            },
-                            message => {
-                                state.messages = [...state.messages, message];
+                                state.messages = [...originalState, { role: 'assistant', content: keepLastThinkTag(state.streaming) }];
                             }
                         );
                         // Remove streaming preview, add final assistant message
-                        state.messages = [...state.messages, { role: 'assistant', content: response }];
+                        //state.messages = [...state.messages, { role: 'assistant', content: response }];
                         state.streaming = "";
                     } catch (err) {
                         state.messages = [...state.messages, { role: 'assistant', content: `Error: ${err.message}` }];

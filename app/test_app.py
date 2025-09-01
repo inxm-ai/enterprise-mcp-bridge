@@ -123,41 +123,49 @@ def test_prompts_in_a_session_doesnt_do_anything_but_it_should_work(test_client)
     suite = FastAPIWrapper(client, base_url)
     suite.test_prompts_in_a_session_doesnt_do_anything_but_it_should_work()
 
+
 # Additional edge/error branch tests for routes.py
 def test_start_session_group_access_denied(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_start_session_group_access_denied()
 
+
 def test_run_tool_session_not_found(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_tool_session_not_found()
+
 
 def test_run_prompt_session_not_found(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_prompt_session_not_found()
 
+
 def test_run_tool_validation_error(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_tool_validation_error()
+
 
 def test_run_prompt_validation_error(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_prompt_validation_error()
 
+
 def test_run_tool_internal_error(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_tool_internal_error()
 
+
 def test_run_prompt_internal_error(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_prompt_internal_error()
+
 
 # Edge case tests for routes.py
 def test_missing_session_header_on_close(test_client):
@@ -165,20 +173,24 @@ def test_missing_session_header_on_close(test_client):
     suite = FastAPIWrapper(client, base_url)
     suite.test_missing_session_header_on_close()
 
+
 def test_run_tool_missing_args(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_tool_missing_args()
+
 
 def test_run_prompt_missing_args(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_run_prompt_missing_args()
 
+
 def test_start_session_with_group_and_no_token(test_client):
     client, base_url = test_client
     suite = FastAPIWrapper(client, base_url)
     suite.test_start_session_with_group_and_no_token()
+
 
 def test_start_session_with_invalid_token(test_client):
     client, base_url = test_client

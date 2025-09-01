@@ -71,7 +71,8 @@ async def chat_completions(
 
         # Check if streaming is requested
         accept_header = request.headers.get("accept", "")
-        is_streaming = chat_request.stream or "text/event-stream" in accept_header
+        chat_request.stream = chat_request.stream or "text/event-stream" in accept_header
+        is_streaming = chat_request.stream
 
         with traced_request(
             tracer=tracer,
@@ -85,28 +86,39 @@ async def chat_completions(
                 "chat.tools_count": (
                     len(chat_request.tools) if chat_request.tools else 0
                 ),
+                "chat.tool_choice": chat_request.tool_choice or "",
                 "chat.model": chat_request.model,
                 "chat.prompt_requested": prompt or "",
             },
         ):
-            async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
-            ) as session:
+            # For streaming, we need to ensure the session stays alive during streaming
+            if is_streaming:
+                async def streaming_with_session():
+                    # Create a dedicated session context for streaming
+                    async with mcp_session_context(
+                        sessions, x_inxm_mcp_session, access_token, group
+                    ) as stream_session:
+                        stream_gen = await tgi_service.chat_completion(
+                            stream_session, chat_request, access_token, prompt
+                        )
+                        async for chunk in stream_gen:
+                            yield chunk
 
-                if is_streaming:
-                    # Use the proxied service for streaming
-                    return StreamingResponse(
-                        tgi_service.chat_completion(
-                            session, chat_request, access_token, prompt
-                        ),
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "Connection": "keep-alive",
-                        },
-                    )
-                else:
-                    # Use the proxied service for non-streaming
+                return StreamingResponse(
+                    streaming_with_session(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                        "Transfer-Encoding": "chunked",
+                    },
+                )
+            else:
+                # For non-streaming, use the existing session context
+                async with mcp_session_context(
+                    sessions, x_inxm_mcp_session, access_token, group
+                ) as session:
                     return await tgi_service.chat_completion(
                         session, chat_request, access_token, prompt
                     )

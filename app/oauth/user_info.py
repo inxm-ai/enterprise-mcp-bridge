@@ -54,11 +54,11 @@ class UserInfoExtractor:
             )
 
             return user_info
-        
+
         except jwt.exceptions.DecodeError:
             self.logger.error("Failed to decode JWT token")
             raise AssertionError("Invalid token format")
-        
+
         except AssertionError as e:
             self.logger.error(f"Token assertion error: {str(e)}")
             raise e

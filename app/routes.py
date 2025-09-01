@@ -271,7 +271,7 @@ async def start_session(
                     logger.error(f"Group access assertion error: {str(e)}")
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Invalid group or token",
+                        detail="Invalid group or token",
                     )
                 except PermissionError as e:
                     logger.warning(f"Group access denied: {str(e)}")
