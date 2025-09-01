@@ -43,31 +43,57 @@ class FastAPIWrapper:
 
     def test_run_tool_session_not_found(self):
         # Simulate session not found (should return 404)
-        r = self.client.post(f"{self.base_url}/tools/add", headers={"x-inxm-mcp-session": "bogus-session"}, json={"a": 1, "b": 2})
+        r = self.client.post(
+            f"{self.base_url}/tools/add",
+            headers={"x-inxm-mcp-session": "bogus-session"},
+            json={"a": 1, "b": 2},
+        )
         assert r.status_code == 404, f"Expected 404, got {r.status_code}, {r.text}"
 
     def test_run_prompt_session_not_found(self):
-        r = self.client.post(f"{self.base_url}/prompts/greeting", headers={"x-inxm-mcp-session": "bogus-session"}, json={"name": "John"})
+        r = self.client.post(
+            f"{self.base_url}/prompts/greeting",
+            headers={"x-inxm-mcp-session": "bogus-session"},
+            json={"name": "John"},
+        )
         assert r.status_code == 404, f"Expected 404, got {r.status_code}, {r.text}"
 
     def test_run_tool_validation_error(self):
         # Should return 400, 422, or 404 for validation error (missing required arg)
-        r = self.client.post(f"{self.base_url}/tools/add", json={"a": "not-an-int", "b": 2})
-        assert r.status_code in [400, 422, 404], f"Expected 400, 422, or 404, got {r.status_code}, {r.text}"
+        r = self.client.post(
+            f"{self.base_url}/tools/add", json={"a": "not-an-int", "b": 2}
+        )
+        assert r.status_code in [
+            400,
+            422,
+            404,
+        ], f"Expected 400, 422, or 404, got {r.status_code}, {r.text}"
 
     def test_run_prompt_validation_error(self):
         r = self.client.post(f"{self.base_url}/prompts/greeting", json={"name": 123})
-        assert r.status_code in [400, 422, 404], f"Expected 400, 422, or 404, got {r.status_code}, {r.text}"
+        assert r.status_code in [
+            400,
+            422,
+            404,
+        ], f"Expected 400, 422, or 404, got {r.status_code}, {r.text}"
 
     def test_run_tool_internal_error(self):
         # Should return 500 or 404 for tool error
         r = self.client.post(f"{self.base_url}/tools/error", json={"message": "fail!"})
-        assert r.status_code in [500, 404], f"Expected 500 or 404, got {r.status_code}, {r.text}"
+        assert r.status_code in [
+            500,
+            404,
+        ], f"Expected 500 or 404, got {r.status_code}, {r.text}"
 
     def test_run_prompt_internal_error(self):
         # Should return 500, 404, 400, or 422 for prompt error (simulate by passing bad args)
         r = self.client.post(f"{self.base_url}/prompts/greeting", json={"bad": "param"})
-        assert r.status_code in [400, 422, 500, 404], f"Expected 400, 422, 500, or 404, got {r.status_code}, {r.text}"
+        assert r.status_code in [
+            400,
+            422,
+            500,
+            404,
+        ], f"Expected 400, 422, 500, or 404, got {r.status_code}, {r.text}"
 
     # UserLoggedOutException tests removed (only testable via mocking)
     def __init__(self, client, base_url=""):
@@ -248,7 +274,10 @@ class FastAPIWrapper:
     def test_missing_session_header_on_close(self):
         # Should return 400 or 404 if session header is missing
         r = self.client.post(f"{self.base_url}/session/close")
-        assert r.status_code in [400, 404], f"Expected 400 or 404, got {r.status_code}, {r.text}"
+        assert r.status_code in [
+            400,
+            404,
+        ], f"Expected 400 or 404, got {r.status_code}, {r.text}"
 
     def test_run_tool_missing_args(self):
         # Should handle missing args gracefully (args=None)
@@ -263,12 +292,18 @@ class FastAPIWrapper:
     def test_start_session_with_group_and_no_token(self):
         # Should fail gracefully if group is set but no token
         r = self.client.post(f"{self.base_url}/session/start?group=testgroup")
-        assert r.status_code in [400], f"Unexpected status code: {r.status_code}, {r.text}"
+        assert r.status_code in [
+            400
+        ], f"Unexpected status code: {r.status_code}, {r.text}"
 
     def test_start_session_with_invalid_token(self):
         # This works atm, because the server does not validate the token
         #   I guess this is okay for now, as it will just fail on requests
         #   that need a valid token, and for those that don't it just works
-        r = self.client.post(f"{self.base_url}/session/start", headers={"X-Auth-Request-Access-Token": "invalid"})
-        assert r.status_code in [200], f"Unexpected status code: {r.status_code}, {r.text}"
-
+        r = self.client.post(
+            f"{self.base_url}/session/start",
+            headers={"X-Auth-Request-Access-Token": "invalid"},
+        )
+        assert r.status_code in [
+            200
+        ], f"Unexpected status code: {r.status_code}, {r.text}"

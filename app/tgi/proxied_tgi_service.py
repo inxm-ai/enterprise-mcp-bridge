@@ -1,501 +1,67 @@
-import logging
 import json
-import os
-import time
-import uuid
-from typing import List, Optional, Dict, Any, AsyncGenerator, Union
-import aiohttp
-from fastapi import HTTPException
+import logging
+from typing import List, Optional, Union, AsyncGenerator
 from opentelemetry import trace
 
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ChatCompletionChunk,
     Message,
     MessageRole,
-    Choice,
-    DeltaMessage,
-    Usage,
     Tool,
     ToolCall,
-    FunctionDefinition,
 )
 from app.session import MCPSessionBase
+from app.tgi.prompt_service import PromptService
+from app.tgi.tool_service import ToolService
+from app.tgi.llm_client import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
 
 
 class ProxiedTGIService:
-    """Service that proxies chat completions to an actual deployed LLM model."""
+    """Service that orchestrates chat completions with tool support."""
 
     def __init__(self):
         self.logger = logger
-        self.tgi_url = os.environ.get("TGI_URL", "https://api.openai.com/v1")
-        self.tgi_token = os.environ.get("TGI_TOKEN", "")
-
-        # Ensure TGI_URL doesn't end with slash for consistent URL building
-        if self.tgi_url.endswith("/"):
-            self.tgi_url = self.tgi_url[:-1]
-
-        self.logger.info(f"[ProxiedTGI] Initialized with URL: {self.tgi_url}")
-        if self.tgi_token:
-            self.logger.info(
-                f"[ProxiedTGI] Using authentication token: {self.tgi_token[:10]}..."
-            )
-        else:
-            self.logger.info("[ProxiedTGI] No authentication token configured")
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Get headers for API requests."""
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "mcp-rest-server/1.0",
-        }
-
-        if self.tgi_token:
-            headers["Authorization"] = f"Bearer {self.tgi_token}"
-
-        return headers
-
-    async def find_prompt_by_name_or_role(
-        self, session: MCPSessionBase, prompt_name: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Find a prompt by name or by role=system, or return the first available prompt.
-
-        Args:
-            session: The MCP session to use
-            prompt_name: Optional specific prompt name to search for
-
-        Returns:
-            The found prompt data or None if no prompts available
-        """
-        with tracer.start_as_current_span("find_prompt") as span:
-            span.set_attribute("prompt.requested_name", prompt_name or "")
-
-            try:
-                # Get all available prompts
-                prompts_result = await session.list_prompts()
-                if not prompts_result or not hasattr(prompts_result, "prompts"):
-                    self.logger.debug(
-                        "[ProxiedTGI] No prompts available from MCP server"
-                    )
-                    span.set_attribute("prompt.found", False)
-                    return None
-
-                prompts = prompts_result.prompts
-                self.logger.debug(
-                    f"[ProxiedTGI] Found {len(prompts)} prompts available"
-                )
-
-                # If specific prompt name requested, search for it
-                if prompt_name:
-                    for prompt in prompts:
-                        if prompt.name == prompt_name:
-                            span.set_attribute("prompt.found_name", prompt.name)
-                            span.set_attribute("prompt.found", True)
-                            self.logger.debug(
-                                f"[ProxiedTGI] Found requested prompt: {prompt_name}"
-                            )
-                            return prompt
-
-                    # Prompt not found
-                    span.set_attribute("prompt.found", False)
-                    self.logger.warning(
-                        f"[ProxiedTGI] Requested prompt '{prompt_name}' not found"
-                    )
-                    return None
-
-                # Look for 'system' prompt or one with role=system
-                for prompt in prompts:
-                    if prompt.name == "system":
-                        span.set_attribute("prompt.found_name", prompt.name)
-                        span.set_attribute("prompt.found", True)
-                        self.logger.debug("[ProxiedTGI] Found 'system' prompt")
-                        return prompt
-
-                # Look for any prompt with role information
-                for prompt in prompts:
-                    if hasattr(prompt, "description") and prompt.description:
-                        if (
-                            "role=system" in prompt.description.lower()
-                            or "system" in prompt.description.lower()
-                        ):
-                            span.set_attribute("prompt.found_name", prompt.name)
-                            span.set_attribute("prompt.found", True)
-                            self.logger.debug(
-                                f"[ProxiedTGI] Found system-role prompt: {prompt.name}"
-                            )
-                            return prompt
-
-                # Return first available prompt as fallback
-                if prompts:
-                    first_prompt = prompts[0]
-                    span.set_attribute("prompt.found_name", first_prompt.name)
-                    span.set_attribute("prompt.found", True)
-                    self.logger.debug(
-                        f"[ProxiedTGI] Using first available prompt: {first_prompt.name}"
-                    )
-                    return first_prompt
-
-                span.set_attribute("prompt.found", False)
-                return None
-
-            except Exception as e:
-                self.logger.error(f"[ProxiedTGI] Error finding prompt: {str(e)}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                raise
-
-    async def get_prompt_content(
-        self, session: MCPSessionBase, prompt: Dict[str, Any]
-    ) -> str:
-        """
-        Get the actual content of a prompt by calling it.
-
-        Args:
-            session: The MCP session to use
-            prompt: The prompt object to execute
-
-        Returns:
-            The prompt content as a string
-        """
-        with tracer.start_as_current_span("get_prompt_content") as span:
-            span.set_attribute("prompt.name", prompt.name)
-
-            try:
-                # Call the prompt to get its content
-                result = await session.call_prompt(prompt.name, {})
-
-                if result.isError:
-                    error_msg = f"Error getting prompt content: {result}"
-                    self.logger.error(f"[ProxiedTGI] {error_msg}")
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", error_msg)
-                    raise HTTPException(status_code=500, detail=error_msg)
-
-                # Extract content from the result
-                content = ""
-                if hasattr(result, "messages") and result.messages:
-                    for message in result.messages:
-                        if hasattr(message, "content") and hasattr(
-                            message.content, "text"
-                        ):
-                            content += message.content.text + "\n"
-                        elif hasattr(message, "text"):
-                            content += message.text + "\n"
-
-                content = content.strip()
-                self.logger.debug(
-                    f"[ProxiedTGI] Retrieved prompt content: {len(content)} characters"
-                )
-                span.set_attribute("prompt.content_length", len(content))
-                return content
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                error_msg = f"Error retrieving prompt content: {str(e)}"
-                self.logger.error(f"[ProxiedTGI] {error_msg}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                raise HTTPException(status_code=500, detail=error_msg)
-
-    async def get_all_mcp_tools(self, session: MCPSessionBase) -> List[Tool]:
-        """
-        Get all available tools from the MCP server as OpenAI-compatible tools.
-
-        Args:
-            session: The MCP session to use
-
-        Returns:
-            List of all available tools in OpenAI format
-        """
-        with tracer.start_as_current_span("get_all_mcp_tools") as span:
-            try:
-                # Get available tools from MCP server
-                tools_result = await session.list_tools()
-                if not tools_result or not hasattr(tools_result, "tools"):
-                    self.logger.debug("[ProxiedTGI] No tools available from MCP server")
-                    span.set_attribute("tools.count", 0)
-                    return []
-
-                # Convert MCP tools to OpenAI format
-                openai_tools = []
-                for mcp_tool in tools_result.tools:
-                    tool = Tool(
-                        type="function",
-                        function=FunctionDefinition(
-                            name=mcp_tool.name,
-                            description=getattr(mcp_tool, "description", ""),
-                            parameters=getattr(mcp_tool, "inputSchema", {}),
-                        ),
-                    )
-                    openai_tools.append(tool)
-                    self.logger.debug(f"[ProxiedTGI] Added MCP tool: {mcp_tool.name}")
-
-                span.set_attribute("tools.count", len(openai_tools))
-                self.logger.debug(
-                    f"[ProxiedTGI] Retrieved {len(openai_tools)} MCP tools"
-                )
-                return openai_tools
-
-            except Exception as e:
-                self.logger.error(f"[ProxiedTGI] Error getting MCP tools: {str(e)}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                raise
-
-    async def execute_tool_call(
-        self, session: MCPSessionBase, tool_call: ToolCall, access_token: Optional[str]
-    ) -> Dict[str, Any]:
-        """
-        Execute a single tool call via MCP.
-
-        Args:
-            session: The MCP session to use
-            tool_call: The tool call to execute
-            access_token: Optional access token for authentication
-
-        Returns:
-            The result of the tool execution
-        """
-        with tracer.start_as_current_span("execute_tool_call") as span:
-            span.set_attribute("tool.name", tool_call.function.name)
-            span.set_attribute("tool.call_id", tool_call.id)
-
-            try:
-                # Parse tool arguments
-                try:
-                    args = (
-                        json.loads(tool_call.function.arguments)
-                        if tool_call.function.arguments
-                        else {}
-                    )
-                except json.JSONDecodeError as e:
-                    error_msg = f"Invalid tool arguments JSON: {str(e)}"
-                    self.logger.error(f"[ProxiedTGI] {error_msg}")
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", error_msg)
-                    return {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": json.dumps({"error": error_msg}),
-                    }
-
-                # Execute the tool
-                result = await session.call_tool(
-                    tool_call.function.name, args, access_token
-                )
-
-                if result.isError:
-                    error_content = ""
-                    if hasattr(result, "content") and result.content:
-                        error_content = (
-                            str(result.content[0].text)
-                            if result.content
-                            else str(result)
-                        )
-
-                    self.logger.error(
-                        f"[ProxiedTGI] Tool execution error: {error_content}"
-                    )
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", error_content)
-
-                    return {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": json.dumps({"error": error_content}),
-                    }
-
-                # Format successful result
-                content = ""
-                if hasattr(result, "structuredContent") and result.structuredContent:
-                    content = json.dumps(result.structuredContent)
-                elif hasattr(result, "content") and result.content:
-                    if len(result.content) == 1 and hasattr(
-                        result.content[0], "structuredContent"
-                    ):
-                        content = json.dumps(result.content[0].structuredContent)
-                    else:
-                        content = json.dumps(
-                            [
-                                {
-                                    "text": (
-                                        item.text
-                                        if hasattr(item, "text")
-                                        else str(item)
-                                    )
-                                }
-                                for item in result.content
-                            ]
-                        )
-                else:
-                    content = json.dumps({"result": str(result)})
-
-                self.logger.debug(
-                    f"[ProxiedTGI] Tool '{tool_call.function.name}' executed successfully"
-                )
-                span.set_attribute("tool.success", True)
-
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "content": content,
-                }
-
-            except Exception as e:
-                error_msg = f"Error executing tool: {str(e)}"
-                self.logger.error(f"[ProxiedTGI] {error_msg}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "content": json.dumps({"error": error_msg}),
-                }
-
-    async def prepare_messages(
-        self,
-        session: MCPSessionBase,
-        messages: List[Message],
-        prompt_name: Optional[str] = None,
-    ) -> List[Message]:
-        """
-        Prepare messages by adding system prompt if needed.
-
-        Args:
-            session: The MCP session to use
-            messages: Original messages from the request
-            prompt_name: Optional specific prompt name to use
-
-        Returns:
-            Messages with system prompt prepended if found
-        """
-        with tracer.start_as_current_span("prepare_messages") as span:
-            span.set_attribute("messages.original_count", len(messages))
-
-            try:
-                # Find appropriate prompt
-                prompt = await self.find_prompt_by_name_or_role(session, prompt_name)
-
-                prepared_messages = []
-
-                # Add system prompt if found and no system message exists
-                has_system_message = any(
-                    msg.role == MessageRole.SYSTEM for msg in messages
-                )
-
-                if prompt and not has_system_message:
-                    prompt_content = await self.get_prompt_content(session, prompt)
-                    if prompt_content:
-                        system_message = Message(
-                            role=MessageRole.SYSTEM, content=prompt_content
-                        )
-                        prepared_messages.append(system_message)
-                        self.logger.debug(
-                            f"[ProxiedTGI] Added system prompt: {prompt.name}"
-                        )
-                        span.set_attribute("prompt.added", True)
-                        span.set_attribute("prompt.name", prompt.name)
-
-                # Add original messages
-                prepared_messages.extend(messages)
-
-                span.set_attribute("messages.final_count", len(prepared_messages))
-                self.logger.debug(
-                    f"[ProxiedTGI] Prepared {len(prepared_messages)} messages"
-                )
-
-                return prepared_messages
-
-            except Exception as e:
-                self.logger.error(f"[ProxiedTGI] Error preparing messages: {str(e)}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                # Return original messages on error
-                return messages
-
-    def create_completion_id(self) -> str:
-        """Generate a unique completion ID."""
-        return f"chatcmpl-{uuid.uuid4().hex[:29]}"
-
-    def create_usage_stats(
-        self, prompt_tokens: int = 0, completion_tokens: int = 0
-    ) -> Usage:
-        """Create usage statistics."""
-        return Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        )
+        self.prompt_service = PromptService()
+        self.tool_service = ToolService()
+        self.llm_client = LLMClient()
 
     async def chat_completion(
         self,
         session: MCPSessionBase,
-        chat_request: ChatCompletionRequest,
+        request: ChatCompletionRequest,
         access_token: Optional[str] = None,
-        prompt_name: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> Union[ChatCompletionResponse, AsyncGenerator[str, None]]:
-        """
-        Execute chat completion with tool call handling, similar to chat.js flow.
-
-        Args:
-            session: The MCP session to use
-            chat_request: The chat completion request
-            access_token: Optional access token for tool execution
-            prompt_name: Optional specific prompt name to use
-
-        Returns:
-            ChatCompletionResponse for non-streaming, AsyncGenerator for streaming
-        """
+        """Handle chat completion requests with optional tool support."""
         with tracer.start_as_current_span("chat_completion") as span:
-            span.set_attribute("chat.model", chat_request.model or "unknown")
-            span.set_attribute("chat.streaming", chat_request.stream)
-            span.set_attribute("chat.messages_count", len(chat_request.messages))
+            span.set_attribute("chat.model", request.model or "unknown")
+            span.set_attribute("chat.streaming", request.stream or False)
+            span.set_attribute("chat.messages_count", len(request.messages))
+            span.set_attribute("chat.has_tools", bool(request.tools))
+            
+            if request.tools:
+                span.set_attribute("chat.tools_count", len(request.tools))
 
-            try:
-                # Step 1: Prepare messages with system prompt
-                prepared_messages = await self.prepare_messages(
-                    session, chat_request.messages, prompt_name
+            # Prepare messages including system prompt if provided
+            messages = await self.prompt_service.prepare_messages(session, request.messages, prompt, span)
+
+            # Get available tools from the session
+            available_tools = await self.tool_service.get_all_mcp_tools(session, span)
+
+            if request.stream:
+                # Return streaming async generator
+                return self._stream_chat_with_tools(
+                    session, messages, available_tools, request, access_token, span
                 )
-
-                # Step 2: Get available tools
-                available_tools = await self.get_all_mcp_tools(session)
-                span.set_attribute("chat.available_tools_count", len(available_tools))
-
-                if chat_request.stream:
-                    return self._stream_chat_with_tools(
-                        session,
-                        prepared_messages,
-                        available_tools,
-                        chat_request,
-                        access_token,
-                        span,
-                    )
-                else:
-                    return await self._non_stream_chat_with_tools(
-                        session,
-                        prepared_messages,
-                        available_tools,
-                        chat_request,
-                        access_token,
-                        span,
-                    )
-
-            except Exception as e:
-                self.logger.error(f"[ProxiedTGI] Error in chat completion: {str(e)}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                raise
+            else:
+                # Return complete response
+                return await self._non_stream_chat_with_tools(
+                    session, messages, available_tools, request, access_token, span
+                )
 
     async def _stream_chat_with_tools(
         self,
@@ -506,33 +72,220 @@ class ProxiedTGIService:
         access_token: Optional[str],
         parent_span,
     ) -> AsyncGenerator[str, None]:
-        """Stream chat completion with tool handling."""
+        """Stream chat completion with tool handling, supporting tool calls."""
         messages_history = messages.copy()
+        user_request = " ".join(
+            message.content for message in messages if message.role == MessageRole.USER
+        )
         max_iterations = 10
         iteration = 0
+        with tracer.start_as_current_span("stream_chat_with_tools") as outer_span:
+            outer_span.set_attribute("chat.max_iterations", max_iterations)
+            outer_span.set_attribute("chat.has_available_tools", bool(available_tools))
+            
+            while iteration < max_iterations:
+                iteration += 1
+                self.logger.debug(f"[ProxiedTGI] Starting stream chat iteration {iteration}/{max_iterations}")
 
-        while iteration < max_iterations:
-            iteration += 1
-            self.logger.debug(f"[ProxiedTGI] Stream chat iteration {iteration}")
+                llm_request = ChatCompletionRequest(
+                    messages=messages_history,
+                    model=chat_request.model,
+                    tools=available_tools if available_tools else chat_request.tools,
+                    tool_choice=chat_request.tool_choice,
+                    stream=True,
+                    temperature=chat_request.temperature,
+                    max_tokens=chat_request.max_tokens,
+                    top_p=chat_request.top_p,
+                )
 
-            # Create request for LLM
-            llm_request = ChatCompletionRequest(
-                messages=messages_history,
-                model=chat_request.model,
-                tools=available_tools if available_tools else None,
-                tool_choice=chat_request.tool_choice,
-                stream=True,
-                temperature=chat_request.temperature,
-                max_tokens=chat_request.max_tokens,
-                top_p=chat_request.top_p,
-            )
+                # Log the ChatCompletionRequest, but replace tools with their count
+                llm_request_log = llm_request.model_dump(exclude_none=True)
+                if "tools" in llm_request_log and llm_request_log["tools"] is not None:
+                    llm_request_log["tools"] = f"[{len(llm_request_log['tools'])} tools]"
+                self.logger.debug(f"ChatCompletionRequest: {llm_request_log}")
 
-            # For streaming, we need to handle this differently
-            # For now, let's implement a simpler approach that doesn't support tool calls in streaming
-            async for chunk in self._stream_llm_completion(llm_request, parent_span):
-                yield chunk
-            break  # For streaming, we'll do one iteration for now
+                # Tool call chunk accumulator: {id: {index, name, arguments}}
+                tool_call_chunks = {}
+                tool_call_ready = set()
 
+                self.logger.debug(f"[ProxiedTGI] Creating LLM stream for iteration {iteration}")
+                llm_stream_generator = self.llm_client.stream_completion(
+                    llm_request, access_token, outer_span
+                )
+                
+                self.logger.debug(f"[ProxiedTGI] Starting to consume LLM stream for iteration {iteration}")
+                finish_reason = "no reason given"
+                async for raw_chunk in llm_stream_generator:
+                    # Remove chunk span to avoid context issues
+                    with tracer.start_as_current_span("process_stream_chunk") as chunk_span:
+                        # Parse chunk JSON
+                        try:
+                            if raw_chunk.startswith("data: "):
+                                chunk_data = raw_chunk[len("data: ") :].strip()
+                                if chunk_data == "[DONE]":
+                                    if finish_reason:
+                                        self.logger.debug(f"[ProxiedTGI] Finish reason: {finish_reason}")
+                                    chunk_span.set_attribute("stream_chat.done", True)
+                                    #yield raw_chunk
+                                    self.logger.debug(f"[ProxiedTGI] Received [DONE] chunk, breaking stream for iteration {iteration}")
+                                    break
+                                chunk_span.set_attribute("stream_chat.done", False)                                
+                                chunk = json.loads(chunk_data)
+                            else:
+                                yield raw_chunk
+                                continue
+                        except Exception as e:
+                            self.logger.error(f"[ProxiedTGI] Error parsing streamed chunk: {e}")
+                            yield raw_chunk
+                            continue
+
+                        # OpenAI compatible chunk: check for choices[0].delta.tool_calls or content
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            yield raw_chunk
+                            continue
+                        
+                        choice = choices[0]
+                        delta = choice.get("delta", {})
+                        finish_reason = choice.get("finish_reason")
+                        # We need to build this over multiple chunks, jieij...
+                        if "tool_calls" in delta and delta["tool_calls"]:
+                            chunk_span.set_attribute("stream_chat.tool_call_chunk", True)
+                            for tc in delta["tool_calls"]:
+                                tc_id = tc.get("id")
+                                tc_index = tc.get("index")
+                                tc_func = tc.get("function", {})
+                                chunk_span.set_attribute("tool_call.index", tc_index or "unknown")
+                                if tc_id not in tool_call_chunks:
+                                    tool_call_chunks[tc_id] = {
+                                        "index": tc_index,
+                                        "name": "",
+                                        "arguments": "",
+                                    }
+                                    content = "<think>I need to call a tool. Preparing tools to call...</think>\n\n"
+                                    # Be nice, inform them we are still awake
+                                    yield f"data: {json.dumps({'choices':[{'delta':{'content':content},'index':tc_index}]})}\n\n"
+                                if "name" in tc_func and tc_func["name"]:
+                                    tool_call_chunks[tc_id]["name"] = tc_func["name"]
+                                    status_str = (
+                                        f"<think>{tc_index + 1}. I will run <code>{tc_func['name']}</code></think>\n\n"
+                                    )
+                                    # still nice, yielding more spam
+                                    yield f"data: {json.dumps({'choices':[{'delta':{'content': status_str},'index': tc_index}]})}\n\n"
+                                if "arguments" in tc_func and tc_func["arguments"]:
+                                    tool_call_chunks[tc_id]["arguments"] += tc_func["arguments"]
+
+                                chunk_span.set_attribute("tool_call.id", tc_id or "unknown")
+                                # If both name and arguments are present, mark as ready
+                                if (
+                                    tool_call_chunks[tc_id]["name"]
+                                    and tool_call_chunks[tc_id]["arguments"]
+                                    and tc_id not in tool_call_ready
+                                ):
+                                    chunk_span.set_attribute("tool_call.ready", True)
+                                    tool_call_ready.add(tc_id)
+                                else:
+                                    chunk_span.set_attribute("tool_call.ready", False)
+                        if "content" in delta and delta["content"]:
+                            # If content is present, just yield
+                            chunk_span.set_attribute("stream_chat.content_chunk", True)
+                            yield raw_chunk
+
+                # After streaming, if any tool calls are ready, execute them ("OF WITH THEIR HEADS!" ah wait, not that type of execute?)
+                # Remove tool span to avoid context issues
+                with tracer.start_as_current_span("execute_tool_calls") as tool_span:
+                    if tool_call_ready:
+                        tool_span.set_attribute("tool_calls.ready_count", len(tool_call_ready))
+                        tool_calls_to_execute = []
+                        for tc_id in tool_call_ready:
+                            tc = tool_call_chunks[tc_id]
+                            tool_call = ToolCall(
+                                id=tc_id,
+                                index=tc["index"],
+                                function={
+                                    "name": tc["name"],
+                                    "arguments": tc["arguments"],
+                                    "description": "",
+                                    "parameters": {},
+                                },
+                            )
+                            tool_calls_to_execute.append(tool_call)
+
+                        # For the LLM
+                        messages_history.append(
+                            Message(
+                                role=MessageRole.ASSISTANT,
+                                content=None,
+                                tool_calls=tool_calls_to_execute,
+                            )
+                        )
+                        
+                        tool_span.set_attribute("tool_calls.execute_count", len(tool_calls_to_execute))
+
+                        self.logger.debug(f"[ProxiedTGI] Executing {len(tool_calls_to_execute)} tool calls")
+                        tool_results, success = await self.tool_service.execute_tool_calls(
+                            session,
+                            tool_calls_to_execute,
+                            access_token,
+                            parent_span,
+                        )
+                        
+                        tool_span.set_attribute("tool_calls.executed_count", len(tool_results))
+                        # tool calls might be quite lengthy. Check their size, and if they are huge start summarizing their contents entry by entry via llm
+                        for result in tool_results:
+                            if isinstance(result.content, list):
+                                # Summarize each item in the list if it's too long
+                                summarized_items = []
+                                for idx, item in enumerate(result.content):
+                                    item_text = item.text if hasattr(item, "text") else str(item)
+                                    if len(item_text) > 10000:
+                                        self.logger.debug(f"[ProxiedTGI] Reading tool response, location 0 to {len(item_text)}")
+                                        yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Summarizing tool result item {idx+1}...</think>'},'index':0}]})}\n\n"
+                                        summary = await self.llm_client.summarize_text(chat_request, user_request, item_text, access_token, parent_span)
+                                        summarized_items.append(summary)
+                                    else:
+                                        summarized_items.append(item_text)
+                                result.content = summarized_items
+                            elif len(str(result.content)) > 10000:
+                                text_to_summarize = str(result.content)
+                                chunk_size = 10000
+                                chunks = [text_to_summarize[i:i+chunk_size] for i in range(0, len(text_to_summarize), chunk_size)]
+                                summarized_chunks = []
+                                self.logger.debug(f"[ProxiedTGI] Total chunks to summarize: {len(chunks)}")
+                                for idx, chunk in enumerate(chunks):
+                                    start = idx * chunk_size
+                                    end = start + len(chunk)
+                                    self.logger.debug(f"[ProxiedTGI] Reading tool response, location {start} to {end}")
+                                    yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Summarizing tool result chunk {idx+1}...</think>'},'index':0}]})}\n\n"
+                                    summary = await self.llm_client.summarize_text(chat_request, user_request, chunk, access_token, parent_span)
+                                    summarized_chunks.append(summary)
+                                result.content = "\n".join(summarized_chunks)
+
+                        messages_history.extend(tool_results)
+
+                        # If we didn't fail, this should repeat the cycle
+                        if success:
+                            self.logger.debug("[ProxiedTGI] Tool execution successful, continuing to next iteration")
+                            tool_span.set_attribute("tool_calls.success", True)
+                        else:
+                            failure_report = "<think>The tool call failed. I will try to adjust my approach</think>"
+                            yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': tc_index}]})}\n\n" 
+                            self.logger.info("[ProxiedTGI] Tool execution failed, asking the llm the tool call")
+                            tool_span.set_attribute("tool_calls.success", False)
+
+                        # Continue to next iteration (both success and error paths)
+                        continue
+                    else:
+                        # No tool calls, break loop, we are probably done
+                        tool_span.set_attribute("tool_calls.ready_count", 0)
+                        self.logger.debug(f"[ProxiedTGI] No tool calls in iteration {iteration}, breaking loop")
+                        break
+                    
+            
+        self.logger.debug(f"[ProxiedTGI] Stream chat completed after {iteration} iterations")
+        
+        yield "data: [DONE]\n\n"
+        
     async def _non_stream_chat_with_tools(
         self,
         session: MCPSessionBase,
@@ -543,6 +296,9 @@ class ProxiedTGIService:
         parent_span,
     ) -> ChatCompletionResponse:
         """Non-streaming chat completion with tool handling."""
+        from app.tgi.models import ChatCompletionResponse, Choice, Usage
+        import time
+
         messages_history = messages.copy()
         max_iterations = 10
         iteration = 0
@@ -564,7 +320,9 @@ class ProxiedTGIService:
             )
 
             # Call actual LLM
-            response = await self._non_stream_llm_completion(llm_request, parent_span)
+            response = await self.llm_client.non_stream_completion(
+                llm_request, access_token, parent_span
+            )
 
             # Check if response contains tool calls
             if (
@@ -576,8 +334,7 @@ class ProxiedTGIService:
                 # Add assistant message with tool calls to history
                 messages_history.append(response.choices[0].message)
 
-                # Execute tool calls
-                tool_results = await self._execute_tool_calls(
+                tool_results, success = await self.tool_service.execute_tool_calls(
                     session,
                     response.choices[0].message.tool_calls,
                     access_token,
@@ -586,16 +343,13 @@ class ProxiedTGIService:
 
                 # Add tool results to history
                 messages_history.extend(tool_results)
-
-                # Continue to next iteration
-                continue
             else:
                 # No tool calls, return final response
                 return response
 
         # If we reach here, we hit max iterations
         return ChatCompletionResponse(
-            id=self.create_completion_id(),
+            id=self.llm_client.create_completion_id(),
             object="chat.completion",
             created=int(time.time()),
             model=chat_request.model or "unknown",
@@ -609,147 +363,7 @@ class ProxiedTGIService:
                     finish_reason="stop",
                 )
             ],
-            usage=self.create_usage_stats(0, 0),
+            usage=self.llm_client.create_usage_stats(0, 0),
         )
 
-    async def _stream_llm_completion(
-        self, request: ChatCompletionRequest, parent_span
-    ) -> AsyncGenerator[str, None]:
-        """Stream completion from the actual LLM."""
-        with tracer.start_as_current_span("stream_llm_completion") as span:
-            span.set_attribute("llm.url", self.tgi_url)
-            span.set_attribute("llm.model", request.model or "unknown")
 
-            try:
-                # Convert request to dict for JSON serialization
-                payload = request.model_dump(exclude_none=True)
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.tgi_url}/chat/completions",
-                        headers=self._get_headers(),
-                        json=payload,
-                    ) as response:
-
-                        if not response.ok:
-                            error_text = await response.text()
-                            error_msg = f"LLM API error: {response.status} {error_text}"
-                            self.logger.error(f"[ProxiedTGI] {error_msg}")
-                            span.set_attribute("error", True)
-                            span.set_attribute("error.message", error_msg)
-
-                            # Return error as streaming response
-                            error_chunk = ChatCompletionChunk(
-                                id=self.create_completion_id(),
-                                created=int(time.time()),
-                                model=request.model or "unknown",
-                                choices=[
-                                    Choice(
-                                        index=0,
-                                        delta=DeltaMessage(
-                                            content=f"Error: {error_msg}"
-                                        ),
-                                        finish_reason="stop",
-                                    )
-                                ],
-                            )
-                            yield f"data: {error_chunk.model_dump_json()}\n\n"
-                            yield "data: [DONE]\n\n"
-                            return
-
-                        # Stream response
-                        async for line in response.content:
-                            line_str = line.decode("utf-8").strip()
-                            if line_str:
-                                yield f"{line_str}\n"
-
-            except Exception as e:
-                error_msg = f"Error streaming from LLM: {str(e)}"
-                self.logger.error(f"[ProxiedTGI] {error_msg}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-
-                # Return error as streaming response
-                error_chunk = ChatCompletionChunk(
-                    id=self.create_completion_id(),
-                    created=int(time.time()),
-                    model=request.model or "unknown",
-                    choices=[
-                        Choice(
-                            index=0,
-                            delta=DeltaMessage(content=f"Error: {error_msg}"),
-                            finish_reason="stop",
-                        )
-                    ],
-                )
-                yield f"data: {error_chunk.model_dump_json()}\n\n"
-                yield "data: [DONE]\n\n"
-
-    async def _non_stream_llm_completion(
-        self, request: ChatCompletionRequest, parent_span
-    ) -> ChatCompletionResponse:
-        """Get non-streaming completion from the actual LLM."""
-        with tracer.start_as_current_span("non_stream_llm_completion") as span:
-            span.set_attribute("llm.url", self.tgi_url)
-            span.set_attribute("llm.model", request.model or "unknown")
-
-            try:
-                # Convert request to dict for JSON serialization, ensure stream=False
-                payload = request.model_dump(exclude_none=True)
-                payload["stream"] = False
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.tgi_url}/chat/completions",
-                        headers=self._get_headers(),
-                        json=payload,
-                    ) as response:
-
-                        if not response.ok:
-                            error_text = await response.text()
-                            error_msg = f"LLM API error: {response.status} {error_text}"
-                            self.logger.error(f"[ProxiedTGI] {error_msg}")
-                            span.set_attribute("error", True)
-                            span.set_attribute("error.message", error_msg)
-                            raise HTTPException(
-                                status_code=response.status, detail=error_msg
-                            )
-
-                        # Parse response
-                        response_data = await response.json()
-                        return ChatCompletionResponse(**response_data)
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                error_msg = f"Error calling LLM: {str(e)}"
-                self.logger.error(f"[ProxiedTGI] {error_msg}")
-                span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
-                raise HTTPException(status_code=500, detail=error_msg)
-
-    async def _execute_tool_calls(
-        self,
-        session: MCPSessionBase,
-        tool_calls: List[ToolCall],
-        access_token: Optional[str],
-        parent_span,
-    ) -> List[Message]:
-        """Execute multiple tool calls and return tool result messages."""
-        with tracer.start_as_current_span("execute_tool_calls") as span:
-            span.set_attribute("tool_calls.count", len(tool_calls))
-
-            tool_results = []
-
-            for tool_call in tool_calls:
-                result = await self.execute_tool_call(session, tool_call, access_token)
-
-                tool_message = Message(
-                    role=MessageRole.TOOL,
-                    content=result["content"],
-                    tool_call_id=result["tool_call_id"],
-                    name=result["name"],
-                )
-                tool_results.append(tool_message)
-
-            return tool_results

@@ -1,5 +1,4 @@
-import { otelFetch, trace, context } from "./otelFetch.js";
-
+import { otelFetch } from "./otelFetch.js";
 
 function inlineSchema(schema, topLevelSchema, seen = new Set()) {
   // If the schema is not an object or is null, return it as is.
@@ -80,228 +79,100 @@ function mapTools(tools) {
     };
   });
 }
-const onExecuteTool = (mcpServer) => async (toolName, toolArgs) => {
-    const res = await otelFetch(`${mcpServer}/${toolName}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(toolArgs)
-    });
-    if (!res.ok) {
-        const errorText = await res.text();
-        throw new Error(`Tool execution failed: ${res.status} ${errorText}`);
-    }
-    return res.json();
-}
-
 export class TGI {
-    
-    constructor(toolDetails, mcpServer, modelName = "Qwen/Qwen3-Coder-480B-A35B-Instruct:fireworks-ai", tgiUrl = '/api/tgi/chat/completions') {
-        this.tools = mapTools(toolDetails);
-        this.url = tgiUrl;
-        this.onExecuteTool = onExecuteTool(mcpServer);
-        this.messages = []; // Stores the conversation history for a session
-        this.tracer = trace.getTracer('chat-tracer');
-        this.modelName = modelName;
+  /**
+   * @param {Array<Object>} [tools=[]] - Array of OpenAI tool objects
+   * @param {string} [tgiUrl='/api/tgi/chat/completions'] - Backend endpoint
+   * @param {string} [modelName] - Model name
+   */
+  constructor(tools = [], modelName = "Qwen/Qwen3-Coder-480B-A35B-Instruct:fireworks-ai", tgiUrl = '/api/mcp/m365/tgi/v1/chat/completions') {
+    this.url = tgiUrl;
+    this.modelName = modelName;
+    this.messages = [];
+    this.tools = mapTools(tools);
+  }
+
+  clearHistory() {
+    this.messages = [];
+  }
+
+  /**
+   * Sends a prompt to the backend and returns the assistant's response.
+   * @param {string} prompt - The user's prompt to send to the model.
+   * @param {function(string): void} [onStream] - A callback function that receives chunks of the streaming text response.
+   * @param {Array<Object>} [toolsOverride] - Optional array of tools to use for this request only
+   * @param {Object} [toolChoice] - Optional tool selection strategy (OpenAI format)
+   * @returns {Promise<string>} A promise that resolves with the final text response from the assistant.
+   */
+  async send(prompt, toolChoice = undefined, onStream = () => {}) {
+    this.messages.push({ role: 'user', content: prompt });
+
+    // Only keep the first and last 4 messages for performance
+    let messages = this.messages.length > 5 ? [this.messages[0], ...this.messages.slice(-4)] : this.messages;
+
+    const payload = {
+      messages,
+      model: this.modelName,
+      stream: true,
+    };
+    // Use override tools if provided, else default
+    if (this.tools && this.tools.length > 0) {
+      payload.tools = this.tools;
+    }
+    // Optionally specify tool_choice
+    if (toolChoice !== undefined) {
+      payload.tool_choice = toolChoice;
     }
 
-    /**
-     * Clears the conversation history.
-     */
-    clearHistory() {
-        this.messages = [];
+    const response = await otelFetch(this.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
     }
 
-    /**
-     * Sends a prompt to the model and manages the entire conversation flow, including tool calls.
-     * @param {string} prompt - The user's prompt to send to the model.
-     * @param {string|'auto'} [toolChoice='auto'] - The tool selection strategy. Can be 'auto' or the name of a specific function.
-     * @param {function(string): void} [onStream] - A callback function that receives chunks of the streaming text response.
-     * @returns {Promise<string>} A promise that resolves with the final text response from the assistant.
-     */
-    async send(prompt, toolChoice = 'auto', onStream = () => {}, newMessage = () => {}) {
-        // Start a parent span for the entire chat session
-        const parentSpan = this.tracer.startSpan('chat-session', {
-            attributes: {
-                'chat.prompt': prompt,
-                'otel.scope.name': 'chat-tracer',
-                'otel.scope.version': '1.0.0',
-            },
-        });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
 
-        // Set the parent span as the active context
-        const parentContext = trace.setSpan(context.active(), parentSpan);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-        this.messages.push({ role: 'user', content: prompt });
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
 
-        try {
-            while (true) {
-                toolChoice = toolChoice !== 'auto'
-                    ? { type: "function", function: { name: toolChoice } }
-                    : "auto";
-
-                // Get the response (text or a tool call)
-                const assistantMessage = await context.with(parentContext, async () => {
-                    return this._chat(this.messages, {
-                        toolChoice,
-                        onStream,
-                    });
-                });
-
-                console.log("Assistant message:", assistantMessage);
-
-                if (assistantMessage) {
-                    this.messages.push(assistantMessage);
-                }
-
-                // If the response was a tool call, handle it
-                if (assistantMessage && assistantMessage.tool_calls) {
-                    if (!this.onExecuteTool) {
-                        throw new Error("Model requested a tool call, but no 'onExecuteTool' callback was provided in the TGI constructor.");
-                    }
-
-                    const toolResults = await Promise.all(
-                        assistantMessage.tool_calls.map(async (toolCall) => {
-                            const toolName = toolCall.function.name;
-                            const toolArgs = JSON.parse(toolCall.function.arguments);
-
-                            // Start a child span for the tool call
-                            const toolSpan = this.tracer.startSpan(`tool-call:${toolName}`, {
-                                attributes: {
-                                    'tool.name': toolName,
-                                    'tool.args': JSON.stringify(toolArgs),
-                                },
-                                parent: parentSpan,
-                            });
-
-                            try {
-                                // Execute the tool using the provided callback
-                                const result = await context.with(trace.setSpan(parentContext, toolSpan), async () => {
-                                    return this.onExecuteTool(toolName, toolArgs);
-                                });
-                                const jsonResult = typeof result === 'string' ? JSON.parse(result) : result;
-
-                                return {
-                                    role: 'tool',
-                                    tool_call_id: toolCall.id,
-                                    name: toolName,
-                                    content: JSON.stringify(jsonResult.structuredContent || jsonResult.content || result),
-                                };
-                            } finally {
-                                toolSpan.end();
-                            }
-                        })
-                    );
-
-                    // Add all tool results to the message history and continue the loop
-                    this.messages.push(...toolResults);
-                    // Continue to the next iteration to get the final text response
-
-                } else {
-                    // If there were no tool calls, the conversation is done for this turn.
-                    // Return the final text content.
-                    return assistantMessage ? assistantMessage.content : "";
-                }
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.substring(6);
+          if (data.trim() === '[DONE]') break;
+          try {
+            const chunk = JSON.parse(data);
+            if (chunk.error) {
+              onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`);
+              fullContent += `[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`;
+              break;
             }
-        } catch (error) {
-            parentSpan.setAttribute('error', true);
-            parentSpan.setStatus({
-                code: 2, // SpanStatusCode.ERROR
-                message: error.message,
-            });
-            throw error;
-        } finally {
-            parentSpan.end();
-        }
-    }
-
-    async _chat(messages, options) {
-        const { toolChoice, onStream = () => {} } = options || { toolChoice: 'none', onStream: () => {} };
-
-        // limit the messages to the last 5 for performance, but keep the first user message
-        if (messages.length > 5) {
-            messages = [messages[0], ...messages.slice(-4)];
-        }
-
-        const payload = {
-            messages,
-            tools: this.tools,
-            tool_choice: toolChoice,
-            model: this.modelName,
-            stream: true,
-        };
-
-        const response = await otelFetch(this.url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-            credentials: 'include',
-            body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        let fullContent = '';
-        let toolCalls = [];
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop(); // Keep the last, possibly incomplete, line
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.substring(6);
-                    if (data.trim() === '[DONE]') break;
-
-                    try {
-                        console.log("Streaming data:", data);
-                        const chunk = JSON.parse(data);
-                        if (chunk.error) {
-                          onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`);
-                          fullContent += `[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`;
-                          break;
-                        }
-
-                        const delta = chunk.choices[0].delta;
-
-                        if (delta.content) {
-                            fullContent += delta.content;
-                            //onStream(delta.content);
-                        }
-
-                        if (delta.tool_calls) {
-                          delta.tool_calls.forEach(tcDelta => {
-                            if (toolCalls.length <= tcDelta.index) {
-                              toolCalls.push({ id: '', type: 'function', function: { name: '', arguments: '' } });
-                            }
-                            const currentTool = toolCalls[tcDelta.index];
-                            if (tcDelta.id) currentTool.id = tcDelta.id;
-                            if (tcDelta.function.name) currentTool.function.name = tcDelta.function.name;
-                            if (tcDelta.function.arguments) currentTool.function.arguments += tcDelta.function.arguments;
-                          });
-                        }
-                    } catch (error) {
-                        console.error('Error parsing stream data chunk:', error, 'Chunk:', data);
-                    }
-                }
+            const delta = chunk.choices[0].delta;
+            if (delta.content) {
+              fullContent += delta.content;
+              onStream(delta.content);
             }
+          } catch (error) {
+            console.error('Error parsing stream data chunk:', error, 'Chunk:', data);
+          }
         }
-
-        const finalMessage = { role: 'assistant', content: fullContent || null };
-        if (toolCalls.length > 0) {
-            finalMessage.tool_calls = toolCalls;
-        }
-
-        return finalMessage.content === null && toolCalls.length === 0 ? null : finalMessage;
+      }
     }
+
+    this.messages.push({ role: 'assistant', content: fullContent });
+    return fullContent;
+  }
 }

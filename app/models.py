@@ -115,7 +115,6 @@ class RunToolsResult(BaseModel):
     structuredContent: Optional[Dict]
 
     def __init__(self, result):
-        print(f"[RunToolsResult] Initializing with result: {result}")
         isError = error_finder(result)
         content = content_resolver(result, isError)
         super().__init__(

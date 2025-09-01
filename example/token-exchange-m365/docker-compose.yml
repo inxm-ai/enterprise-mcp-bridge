@@ -87,6 +87,8 @@ services:
     build:
       context: ./nginx
       dockerfile: Dockerfile.nginx-with-otel
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3099:3099"
     healthcheck:
@@ -125,6 +127,8 @@ services:
   app-mcp-rest:
     container_name: app.mcp-m365-rest-server
     image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       SERVICE_NAME: mcp-m365-rest-server
       MCP_SERVER_COMMAND: npx -y @softeria/ms-365-mcp-server --org-mode
@@ -138,6 +142,21 @@ services:
       EXCLUDE_TOOLS: login,logout,verify-login
       INCLUDE_TOOLS: "*mail*"
       OTLP_ENDPOINT: http://jaeger:4317
+      TGI_URL: ${OAI_BASE_URL}
+      UVICORN_LOG_LEVEL: debug
+      SYSTEM_DEFINED_PROMPTS: >
+        [
+          {
+            "name": "system",
+            "title": "Specialized M365 Agent",
+            "description": "Acts as a specialized Microsoft 365 agent. Always try to reply with tool_calls unless delivering the final response.",
+            "arguments": [],
+            "template": {
+              "role": "system",
+              "content": "You are a highly specialized Microsoft 365 agent. Your primary function is to respond to user requests by identifying and executing the correct Microsoft Graph API tool calls.\n\nYour workflow is strictly as follows:\n1.  **Analyze the user's request.** Determine the user's intent and identify which of your available tools are required.\n2.  **Generate a tool call.** Based on your analysis, construct the appropriate tool call. All values must adhere strictly to the Microsoft Graph API specifications.\n3.  **Strictly adhere to these rules:**\n    * **Prioritize tool calls:** Always respond with a tool call unless you have sufficient information to provide a final, complete answer to the user.\n    * **Use simple requests:** Only provide the minimum required parameters for a tool call. Do not guess or add unnecessary values.\n    * **Correct data types:** If a parameter requires a boolean, use `true` or `false`, not a string. If a parameter requires a number, use a number, not a string.\n    * **If you are failing to call the tool successfully,** review the error message and adjust your request accordingly. Try to remove failing parameters to simplify the request, and expand them in a second pass if they are successful and you know more.\n    * **Final response:** Only provide a final human-readable response when the user's request is fully resolved and no further tool calls are needed.\n\nIf a tool call fails, you will receive an error message. Use this information to correct the tool call in your next turn. Do not generate conversational text or explanations during the tool-calling process; the only exceptions are in a final, complete response or if you are specifically asked to \"think.\"\n\n\n\nExample of a simple, correct tool call:\n{\"name\": \"get-user-profile\", \"parameters\": {\"userId\": \"adeleV@M365x123456.onmicrosoft.com\"}}\n"
+            }
+          }
+        ]
     depends_on:
       keycloak:
         condition: service_healthy
@@ -149,6 +168,7 @@ services:
       - "oauth2-proxy.enable=true"
     networks:
       - private
+      - default
 
   ingress:
     container_name: ingress
