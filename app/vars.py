@@ -8,7 +8,7 @@ INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "")
 OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
-HOST = os.environ.get("HOST", "")
+HOST = os.environ.get("HOSTNAME", "")
 PORT = os.environ.get("PORT", "")
 
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT")
