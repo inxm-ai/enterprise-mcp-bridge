@@ -3,10 +3,14 @@ OAuth token analysis and user/group information extraction
 """
 
 import logging
+from app.vars import (
+    MCP_GROUP_DATA_ACCESS_TEMPLATE,
+    MCP_SHARED_DATA_ACCESS_TEMPLATE,
+    MCP_USER_DATA_ACCESS_TEMPLATE,
+)
 import jwt
 from typing import Dict, Any, List, Optional
 import re
-import os
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -180,11 +184,9 @@ class DataAccessManager:
         self.logger = logger
         # Configurable data resource templates - these could be paths, database tables, etc.
         self.data_resource_templates = {
-            "group": os.getenv("MCP_GROUP_DATA_ACCESS_TEMPLATE", "g/{group_id}"),
-            "user": os.getenv("MCP_USER_DATA_ACCESS_TEMPLATE", "u/{user_id}"),
-            "shared": os.getenv(
-                "MCP_SHARED_DATA_ACCESS_TEMPLATE", "shared/{resource_id}"
-            ),
+            "group": MCP_GROUP_DATA_ACCESS_TEMPLATE,
+            "user": MCP_USER_DATA_ACCESS_TEMPLATE,
+            "shared": MCP_SHARED_DATA_ACCESS_TEMPLATE,
         }
 
     def resolve_data_resource(

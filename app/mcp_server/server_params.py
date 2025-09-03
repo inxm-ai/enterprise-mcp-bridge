@@ -14,11 +14,12 @@ def defined_env(
     env: dict[str, str],
     access_token: Optional[str] = None,
     requested_group: Optional[str] = None,
+    anon: bool = False,
 ) -> dict[str, str]:
     oauth_env_var = env.get("OAUTH_ENV")
     token_result = {"access_token": access_token} if access_token else None
 
-    if oauth_env_var:
+    if oauth_env_var and not anon:
         if not access_token:
             raise ValueError("access_token required when OAUTH_ENV is set")
         logger.info(f"Using OAUTH_ENV: {oauth_env_var} for token retrieval")
@@ -52,10 +53,14 @@ def defined_env(
 
 
 def get_server_params(
-    access_token: Optional[str] = None, requested_group: Optional[str] = None
+    access_token: Optional[str] = None,
+    requested_group: Optional[str] = None,
+    anon: bool = False,
 ) -> StdioServerParameters:
     env_command = os.environ.get("MCP_SERVER_COMMAND")
-    env, token_result = defined_env(os.environ.copy(), access_token, requested_group)
+    env, token_result = defined_env(
+        os.environ.copy(), access_token, requested_group, anon
+    )
 
     # Process command template with dynamic data path
     if env_command and token_result:

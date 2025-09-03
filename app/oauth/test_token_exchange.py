@@ -2,14 +2,20 @@ from datetime import datetime
 import pytest
 import jwt
 from unittest.mock import patch, MagicMock
+import app.oauth.token_exchange as token_exchange
 from app.oauth.token_exchange import KeyCloakTokenRetriever, UserLoggedOutException
 
 
 @pytest.fixture
 def retriever(monkeypatch):
-    monkeypatch.setenv("AUTH_BASE_URL", "https://test.keycloak")
-    monkeypatch.setenv("KEYCLOAK_REALM", "testrealm")
-    monkeypatch.setenv("KEYCLOAK_PROVIDER_ALIAS", "testprovider")
+    # Patch module-level constants used by KeyCloakTokenRetriever (sourced from app.vars)
+    monkeypatch.setattr(
+        token_exchange, "AUTH_BASE_URL", "https://test.keycloak", raising=False
+    )
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_REALM", "testrealm", raising=False)
+    monkeypatch.setattr(
+        token_exchange, "KEYCLOAK_PROVIDER_ALIAS", "testprovider", raising=False
+    )
     return KeyCloakTokenRetriever()
 
 
@@ -121,7 +127,7 @@ def test_refresh_provider_token_failure(monkeypatch, retriever):
     mock_response.status_code = 400
     mock_response.text = "fail"
     with patch("requests.post", return_value=mock_response):
-        with pytest.raises(Exception):
+        with pytest.raises(UserLoggedOutException):
             retriever._refresh_provider_token(token_data.copy())
 
 
@@ -144,7 +150,7 @@ def test_get_stored_provider_token_unauthorized(monkeypatch, retriever):
     mock_response.status_code = 401
     mock_response.text = "unauthorized"
     with patch("requests.get", return_value=mock_response):
-        with pytest.raises(Exception):
+        with pytest.raises(UserLoggedOutException):
             retriever._get_stored_provider_token("tok")
 
 
@@ -224,10 +230,12 @@ def test_extract_keycloak_token_none(retriever):
 
 
 def test_retrieve_token_passthrough_when_no_provider(monkeypatch):
-    # No KEYCLOAK_PROVIDER_ALIAS set
-    monkeypatch.delenv("KEYCLOAK_PROVIDER_ALIAS", raising=False)
-    monkeypatch.setenv("AUTH_BASE_URL", "https://test.keycloak")
-    monkeypatch.setenv("KEYCLOAK_REALM", "testrealm")
+    # No KEYCLOAK_PROVIDER_ALIAS set -> patch module constant
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_ALIAS", "", raising=False)
+    monkeypatch.setattr(
+        token_exchange, "AUTH_BASE_URL", "https://test.keycloak", raising=False
+    )
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_REALM", "testrealm", raising=False)
     r = KeyCloakTokenRetriever()
     result = r.retrieve_token("kc_token")
     assert result["success"] is True
@@ -236,10 +244,12 @@ def test_retrieve_token_passthrough_when_no_provider(monkeypatch):
 
 
 def test_force_token_refresh_passthrough_when_no_provider(monkeypatch):
-    # No KEYCLOAK_PROVIDER_ALIAS set
-    monkeypatch.delenv("KEYCLOAK_PROVIDER_ALIAS", raising=False)
-    monkeypatch.setenv("AUTH_BASE_URL", "https://test.keycloak")
-    monkeypatch.setenv("KEYCLOAK_REALM", "testrealm")
+    # No KEYCLOAK_PROVIDER_ALIAS set -> patch module constant
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_ALIAS", "", raising=False)
+    monkeypatch.setattr(
+        token_exchange, "AUTH_BASE_URL", "https://test.keycloak", raising=False
+    )
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_REALM", "testrealm", raising=False)
     r = KeyCloakTokenRetriever()
     result = r.force_token_refresh("kc_token")
     assert result["success"] is True

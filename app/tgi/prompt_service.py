@@ -1,6 +1,7 @@
 """
 Prompt service module for handling MCP prompt operations.
 """
+
 import logging
 from typing import List, Optional, Dict, Any
 from opentelemetry import trace
@@ -90,13 +91,43 @@ class PromptService:
                             )
                             return prompt
 
-                # Return first available prompt as fallback
+                # Prefer prompts that don't require arguments as fallback
+                def _requires_args(p) -> bool:
+                    try:
+                        args = getattr(p, "arguments", None)
+                        if args is None:
+                            return False
+                        # If it's a list and non-empty, assume it requires args
+                        if isinstance(args, (list, tuple)):
+                            return len(args) > 0
+                        # If it's a dict-like, check for required keys
+                        if isinstance(args, dict):
+                            required = args.get("required")
+                            return bool(required)
+                        # Fallback: any truthy value means it likely needs args
+                        return bool(args)
+                    except Exception:
+                        return True
+
+                no_arg_prompts = [p for p in prompts if not _requires_args(p)]
+                if no_arg_prompts:
+                    chosen = no_arg_prompts[0]
+                    span.set_attribute(
+                        "prompt.found_name", getattr(chosen, "name", "unknown")
+                    )
+                    span.set_attribute("prompt.found", True)
+                    self.logger.debug(
+                        f"[PromptService] Using first available no-arg prompt: {getattr(chosen, 'name', 'unknown')}"
+                    )
+                    return chosen
+
+                # As a last resort, return the first prompt
                 if prompts:
                     first_prompt = prompts[0]
                     span.set_attribute("prompt.found_name", first_prompt.name)
                     span.set_attribute("prompt.found", True)
                     self.logger.debug(
-                        f"[PromptService] Using first available prompt: {first_prompt.name}"
+                        f"[PromptService] Using first available prompt (may require args): {first_prompt.name}"
                     )
                     return first_prompt
 
@@ -154,13 +185,26 @@ class PromptService:
                 span.set_attribute("prompt.content_length", len(content))
                 return content
 
-            except HTTPException:
+            except HTTPException as he:
+                # Gracefully ignore prompts that require arguments we don't have
+                detail = getattr(he, "detail", "")
+                if isinstance(detail, str) and "Missing required arguments" in detail:
+                    self.logger.warning(
+                        "[PromptService] Prompt requires arguments; skipping content retrieval"
+                    )
+                    return ""
                 raise
             except Exception as e:
-                error_msg = f"Error retrieving prompt content: {str(e)}"
+                msg = str(e)
+                if "Missing required arguments" in msg:
+                    self.logger.warning(
+                        "[PromptService] Prompt requires arguments; skipping content retrieval"
+                    )
+                    return ""
+                error_msg = f"Error retrieving prompt content: {msg}"
                 self.logger.error(f"[PromptService] {error_msg}")
                 span.set_attribute("error", True)
-                span.set_attribute("error.message", str(e))
+                span.set_attribute("error.message", msg)
                 raise HTTPException(status_code=500, detail=error_msg)
 
     async def prepare_messages(
@@ -185,7 +229,7 @@ class PromptService:
         with tracer.start_as_current_span("prepare_messages") as span:
             span.set_attribute("messages.count", len(messages))
             span.set_attribute("prompt_name", prompt_name or "none")
-            
+
             try:
                 # Find appropriate prompt
                 prompt = await self.find_prompt_by_name_or_role(session, prompt_name)
@@ -196,7 +240,7 @@ class PromptService:
                 has_system_message = any(
                     msg.role == MessageRole.SYSTEM for msg in messages
                 )
-                
+
                 span.set_attribute("has_system_message", has_system_message)
 
                 if prompt and not has_system_message:

@@ -3,6 +3,7 @@ from .tools_map import map_tools
 
 # test_tools_map.py
 
+
 def test_map_tools_basic_inlining():
     tools = [
         {
@@ -13,19 +14,17 @@ def test_map_tools_basic_inlining():
                 "properties": {
                     "location": {
                         "type": "string",
-                        "description": "The city and state, e.g. San Francisco, CA"
+                        "description": "The city and state, e.g. San Francisco, CA",
                     },
-                    "unit": {
-                        "$ref": "#/$defs/TemperatureUnit"
-                    }
+                    "unit": {"$ref": "#/$defs/TemperatureUnit"},
                 },
                 "$defs": {
                     "TemperatureUnit": {
                         "type": "string",
-                        "enum": ["celsius", "fahrenheit"]
+                        "enum": ["celsius", "fahrenheit"],
                     }
-                }
-            }
+                },
+            },
         }
     ]
     result = map_tools(tools)
@@ -38,6 +37,7 @@ def test_map_tools_basic_inlining():
     assert params["properties"]["unit"]["enum"] == ["celsius", "fahrenheit"]
     assert "$defs" not in params
 
+
 def test_map_tools_nested_ref():
     tools = [
         {
@@ -45,26 +45,15 @@ def test_map_tools_nested_ref():
             "description": "Tool with nested $ref.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "outer": {
-                        "$ref": "#/$defs/Outer"
-                    }
-                },
+                "properties": {"outer": {"$ref": "#/$defs/Outer"}},
                 "$defs": {
                     "Outer": {
                         "type": "object",
-                        "properties": {
-                            "inner": {
-                                "$ref": "#/$defs/Inner"
-                            }
-                        }
+                        "properties": {"inner": {"$ref": "#/$defs/Inner"}},
                     },
-                    "Inner": {
-                        "type": "string",
-                        "enum": ["foo", "bar"]
-                    }
-                }
-            }
+                    "Inner": {"type": "string", "enum": ["foo", "bar"]},
+                },
+            },
         }
     ]
     result = map_tools(tools)
@@ -72,7 +61,11 @@ def test_map_tools_nested_ref():
     assert "outer" in params["properties"]
     assert "inner" in params["properties"]["outer"]["properties"]
     assert params["properties"]["outer"]["properties"]["inner"]["type"] == "string"
-    assert params["properties"]["outer"]["properties"]["inner"]["enum"] == ["foo", "bar"]
+    assert params["properties"]["outer"]["properties"]["inner"]["enum"] == [
+        "foo",
+        "bar",
+    ]
+
 
 def test_map_tools_cyclic_ref():
     tools = [
@@ -85,14 +78,9 @@ def test_map_tools_cyclic_ref():
                     "a": {"$ref": "#/$defs/B"},
                 },
                 "$defs": {
-                    "B": {
-                        "type": "object",
-                        "properties": {
-                            "b": {"$ref": "#/$defs/B"}
-                        }
-                    }
-                }
-            }
+                    "B": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}}
+                },
+            },
         }
     ]
     result = map_tools(tools)
@@ -102,6 +90,7 @@ def test_map_tools_cyclic_ref():
     assert "b" in params["properties"]["a"]["properties"]
     assert params["properties"]["a"]["properties"]["b"] == {}
 
+
 def test_map_tools_missing_ref_raises():
     tools = [
         {
@@ -109,26 +98,21 @@ def test_map_tools_missing_ref_raises():
             "description": "Tool with missing $ref.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "foo": {"$ref": "#/$defs/NotFound"}
-                },
-                "$defs": {}
-            }
+                "properties": {"foo": {"$ref": "#/$defs/NotFound"}},
+                "$defs": {},
+            },
         }
     ]
     with pytest.raises(ValueError):
         map_tools(tools)
 
+
 def test_map_tools_no_input_schema():
-    tools = [
-        {
-            "name": "no_input",
-            "description": "Tool with no inputSchema."
-        }
-    ]
+    tools = [{"name": "no_input", "description": "Tool with no inputSchema."}]
     result = map_tools(tools)
     params = result[0]["function"]["parameters"]
     assert params == {}
+
 
 def test_map_tools_list_with_ref():
     tools = [
@@ -138,18 +122,10 @@ def test_map_tools_list_with_ref():
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {"$ref": "#/$defs/ItemType"}
-                    }
+                    "items": {"type": "array", "items": {"$ref": "#/$defs/ItemType"}}
                 },
-                "$defs": {
-                    "ItemType": {
-                        "type": "string",
-                        "enum": ["x", "y"]
-                    }
-                }
-            }
+                "$defs": {"ItemType": {"type": "string", "enum": ["x", "y"]}},
+            },
         }
     ]
     result = map_tools(tools)

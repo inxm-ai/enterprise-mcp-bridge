@@ -1,9 +1,8 @@
 import pytest
-import json
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, patch
 
 from app.tgi.tool_service import ToolService
-from app.tgi.models import ToolCall, ToolCallFunction, Message, MessageRole
+from app.tgi.models import ToolCall, ToolCallFunction, MessageRole
 
 
 class DummySession:
@@ -11,7 +10,9 @@ class DummySession:
         mock_result = Mock()
         mock_result.isError = False
         mock_result.content = []
-        mock_result.structuredContent = {"result": f"Tool {name} executed with args {args}"}
+        mock_result.structuredContent = {
+            "result": f"Tool {name} executed with args {args}"
+        }
         return mock_result
 
     async def list_tools(self):
@@ -19,7 +20,10 @@ class DummySession:
             {
                 "name": "list-files",
                 "description": "List files in a directory",
-                "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
             },
             {
                 "name": "read-file",
@@ -73,12 +77,12 @@ class TestToolService:
     async def test_get_all_mcp_tools(self, tool_service):
         """Test getting all MCP tools in OpenAI format."""
         session = DummySession()
-        with patch('app.tgi.tool_service.map_tools') as mock_map_tools:
+        with patch("app.tgi.tool_service.map_tools") as mock_map_tools:
             mock_map_tools.return_value = [
                 {"type": "function", "function": {"name": "list-files"}},
                 {"type": "function", "function": {"name": "read-file"}},
             ]
-            
+
             openai_tools = await tool_service.get_all_mcp_tools(session)
             assert isinstance(openai_tools, list)
             assert len(openai_tools) == 2
@@ -90,9 +94,9 @@ class TestToolService:
     async def test_get_all_mcp_tools_no_tools(self, tool_service):
         """Test get_all_mcp_tools when no tools are available."""
         session = ErrorSession()
-        with patch('app.tgi.tool_service.map_tools') as mock_map_tools:
+        with patch("app.tgi.tool_service.map_tools") as mock_map_tools:
             mock_map_tools.return_value = []
-            
+
             tools = await tool_service.get_all_mcp_tools(session)
             assert isinstance(tools, list)
             assert tools == []
@@ -101,7 +105,7 @@ class TestToolService:
     async def test_get_all_mcp_tools_exception(self, tool_service):
         """Test get_all_mcp_tools with exception."""
         session = ExceptionSession()
-        
+
         with pytest.raises(RuntimeError):
             await tool_service.get_all_mcp_tools(session)
 
@@ -168,7 +172,7 @@ class TestToolService:
         assert "error" in result["content"].lower()
 
     def test_parse_json_array_from_message_valid(self, tool_service):
-        msg = "Some error occurred: [\n {\"code\": \"invalid_type\", \"expected\": \"boolean\", \"received\": \"string\", \"path\": [\"foo\"], \"message\": \"Type error\"}\n]"
+        msg = 'Some error occurred: [\n {"code": "invalid_type", "expected": "boolean", "received": "string", "path": ["foo"], "message": "Type error"}\n]'
         result = tool_service._parse_json_array_from_message(msg)
         assert isinstance(result, list)
         assert result[0]["code"] == "invalid_type"
@@ -190,7 +194,7 @@ class TestToolService:
                 "expected": "boolean",
                 "received": "string",
                 "path": ["foo"],
-                "message": "Type error"
+                "message": "Type error",
             }
         ]
         formatted = tool_service._format_errors(errors)
@@ -201,11 +205,7 @@ class TestToolService:
 
     def test_format_errors_other_error(self, tool_service):
         errors = [
-            {
-                "code": "other_error",
-                "message": "Something went wrong",
-                "path": ["bar"]
-            }
+            {"code": "other_error", "message": "Something went wrong", "path": ["bar"]}
         ]
         formatted = tool_service._format_errors(errors)
         assert "An error occurred" in formatted
@@ -223,7 +223,9 @@ class TestToolService:
     async def test_execute_tool_calls_success(self, tool_service):
         session = DummySession()
         tool_call = make_tool_call()
-        result, success = await tool_service.execute_tool_calls(session, [tool_call], None, None)
+        result, success = await tool_service.execute_tool_calls(
+            session, [tool_call], None, None
+        )
         assert success
         assert len(result) == 1
         assert result[0].role == MessageRole.TOOL
@@ -235,7 +237,9 @@ class TestToolService:
     async def test_execute_tool_calls_error(self, tool_service):
         session = ErrorSession()
         tool_call = make_tool_call()
-        result, success = await tool_service.execute_tool_calls(session, [tool_call], None, None)
+        result, success = await tool_service.execute_tool_calls(
+            session, [tool_call], None, None
+        )
         assert not success
         assert len(result) == 1
         assert result[0].role == MessageRole.TOOL
@@ -245,13 +249,18 @@ class TestToolService:
     async def test_execute_tool_calls_exception(self, tool_service):
         session = ExceptionSession()
         tool_call = make_tool_call()
-        result, success = await tool_service.execute_tool_calls(session, [tool_call], None, None)
+        result, success = await tool_service.execute_tool_calls(
+            session, [tool_call], None, None
+        )
         assert not success
         assert len(result) == 2
         assert result[0].role == MessageRole.TOOL
         assert "Failed to execute tool" in result[0].content
         assert result[1].role == MessageRole.USER
-        assert "Please fix the error" in result[1].content or "No errors to format." in result[1].content
+        assert (
+            "Please fix the error" in result[1].content
+            or "No errors to format." in result[1].content
+        )
 
 
 if __name__ == "__main__":

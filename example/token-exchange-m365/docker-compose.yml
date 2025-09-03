@@ -98,8 +98,10 @@ services:
       retries: 5
       start_period: 30s
     depends_on:
-      - app-frontend
-      - app-mcp-rest
+      app-frontend:
+        condition: service_started
+      app-mcp-rest:
+        condition: service_healthy
     environment:
       - OAI_HOST=${OAI_HOST}
       - OAI_BASE_URL=${OAI_BASE_URL}
@@ -130,7 +132,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      SERVICE_NAME: mcp-m365-rest-server
+      SERVICE_NAME: mcp-m365-agent
       MCP_SERVER_COMMAND: npx -y @softeria/ms-365-mcp-server --org-mode
       OAUTH_ENV: MS365_MCP_OAUTH_TOKEN
       AUTH_PROVIDER: keycloak
@@ -144,6 +146,7 @@ services:
       OTLP_ENDPOINT: http://jaeger:4317
       TGI_URL: ${OAI_BASE_URL}
       UVICORN_LOG_LEVEL: debug
+      DEFAULT_MODEL: ${OAI_MODEL_NAME}
       SYSTEM_DEFINED_PROMPTS: >
         [
           {
@@ -162,6 +165,12 @@ services:
         condition: service_healthy
       jaeger:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/mcp/m365/.well-known/agent.json || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
     ports:
       - "8000:8000"
     labels:

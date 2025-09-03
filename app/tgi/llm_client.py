@@ -7,7 +7,7 @@ import logging
 import os
 import time
 import uuid
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 import aiohttp
 from opentelemetry import trace
 
@@ -17,6 +17,8 @@ from app.tgi.models import (
     ChatCompletionChunk,
     Choice,
     DeltaMessage,
+    Message,
+    MessageRole,
     Usage,
 )
 from app.utils import mask_token
@@ -232,16 +234,50 @@ class LLMClient:
         Returns:
             Summarized text
         """
-        from app.tgi.models import Message, MessageRole
+        await self.ask(
+            base_prompt="You are a summarization expert. Read the question from the user, and then summarize the reply by the assistant. The reply from the assistant is coming from a tool, and might contain content not relevant to the original question. For instance, emails contain html, if the user wants a summary you are only interested in the text. If the user wants to know which senders send html emails than the information is important",
+            base_request=base_request,
+            question=user_request,
+            assistant_statement=content,
+            access_token=access_token,
+            outer_span=outer_span,
+        )
+
+    async def ask(
+        self,
+        base_prompt: str,
+        base_request: ChatCompletionRequest,
+        outer_span,
+        question: str = None,
+        assistant_statement: str = None,
+        access_token: str = None,
+    ) -> str:
+        """
+        Ask a question, get a reply
+
+        Args:
+            base_prompt: A base system prompt to use for the question
+            base_request: Base request to use for summarization
+            question: The question to ask
+            access_token: Access token for authentication
+            outer_span: Parent span for tracing
+
+        Returns:
+            Summarized text
+        """
 
         messages_history = [
             Message(
                 role=MessageRole.SYSTEM,
-                content="You are a summarization expert. Read the question from the user, and then summarize the reply by the assistant. The reply from the assistant is coming from a tool, and might contain content not relevant to the original question. For instance, emails contain html, if the user wants a summary you are only interested in the text. If the user wants to know which senders send html emails than the information is important",
+                content=base_prompt,
             ),
-            Message(role=MessageRole.USER, content=user_request),
-            Message(role=MessageRole.ASSISTANT, content=content),
         ]
+        if question:
+            messages_history.append(Message(role=MessageRole.USER, content=question))
+        if assistant_statement:
+            messages_history.append(
+                Message(role=MessageRole.ASSISTANT, content=assistant_statement)
+            )
 
         llm_request = ChatCompletionRequest(
             messages=messages_history,
@@ -259,14 +295,14 @@ class LLMClient:
         result = ""
 
         async for raw_chunk in llm_stream_generator:
-            # Remove chunk span to avoid context issues
             with tracer.start_as_current_span("process_stream_chunk") as chunk_span:
-                # Parse chunk JSON
                 try:
                     if raw_chunk.startswith("data: "):
                         chunk_data = raw_chunk[len("data: ") :].strip()
                         if chunk_data == "[DONE]":
+                            chunk_span.set_attribute("stream.done", True)
                             break
+                        chunk_span.set_attribute("stream.done", False)
                         chunk = json.loads(chunk_data)
                     else:
                         continue

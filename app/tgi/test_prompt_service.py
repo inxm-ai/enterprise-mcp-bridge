@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from app.tgi.prompt_service import PromptService
 from app.tgi.models import Message, MessageRole
@@ -91,7 +91,9 @@ class TestPromptService:
         """Test finding prompt by name that doesn't exist."""
         session = MockMCPSession(prompts=mock_prompts)
 
-        result = await prompt_service.find_prompt_by_name_or_role(session, "nonexistent")
+        result = await prompt_service.find_prompt_by_name_or_role(
+            session, "nonexistent"
+        )
 
         assert result is None
 
@@ -135,11 +137,15 @@ class TestPromptService:
 
         user_message = Message(role=MessageRole.USER, content="Hello")
         messages = [user_message]
-        prepared = await prompt_service.prepare_messages(BadSession(), messages, "system")
+        prepared = await prompt_service.prepare_messages(
+            BadSession(), messages, "system"
+        )
         assert prepared == messages
 
     @pytest.mark.asyncio
-    async def test_prepare_messages_with_system_prompt(self, prompt_service, mock_prompts):
+    async def test_prepare_messages_with_system_prompt(
+        self, prompt_service, mock_prompts
+    ):
         """Test message preparation with system prompt addition."""
         session = MockMCPSession(prompts=mock_prompts)
 
@@ -154,7 +160,9 @@ class TestPromptService:
         assert prepared[1] == user_message
 
     @pytest.mark.asyncio
-    async def test_prepare_messages_with_existing_system(self, prompt_service, mock_prompts):
+    async def test_prepare_messages_with_existing_system(
+        self, prompt_service, mock_prompts
+    ):
         """Test message preparation when system message already exists."""
         session = MockMCPSession(prompts=mock_prompts)
 

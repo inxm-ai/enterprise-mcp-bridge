@@ -165,6 +165,7 @@ class TestTGIRoutesEdgyCases:
             async def generator():
                 yield 'data: {"id":"test","choices":[{"delta":{"content":"Error: Prompt \'doesnotexist\' not found"},"finish_reason":"stop"}]}\n\n'
                 yield "data: [DONE]\n\n"
+
             return generator()
 
         mock_service.chat_completion = mock_chat_completion
@@ -199,6 +200,7 @@ class TestTGIRoutesEdgyCases:
                 yield 'data: {"id":"test","choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"demo_tool","arguments":"{}"}}]},"finish_reason":null}]}\n\n'
                 yield 'data: {"id":"test","choices":[{"delta":{"content":"Tool executed successfully"},"finish_reason":"stop"}]}\n\n'
                 yield "data: [DONE]\n\n"
+
             return generator()
 
         mock_service.chat_completion = mock_chat_completion
@@ -346,6 +348,7 @@ class TestTGIRoutesEdgyCases:
                         async def generator():
                             async for chunk in streaming_generator():
                                 yield chunk
+
                         return generator()
 
                     mock_service.chat_completion = mock_stream
@@ -444,6 +447,7 @@ class TestTGIRoutes:
                     yield 'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
                     yield 'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
                     yield "data: [DONE]\n\n"
+
                 return generator()
 
             mock_service.chat_completion = mock_stream
