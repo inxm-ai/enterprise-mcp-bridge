@@ -1,8 +1,14 @@
 from datetime import datetime, timedelta
-import os
 import logging
 from typing import Dict, Any
 
+from app.vars import (
+    AUTH_ALLOW_UNSAFE_CERT,
+    AUTH_BASE_URL,
+    AUTH_PROVIDER,
+    KEYCLOAK_PROVIDER_ALIAS,
+    KEYCLOAK_REALM,
+)
 import jwt
 
 import requests
@@ -22,7 +28,7 @@ class TokenRetrieverFactory:
         """
         Factory method to retrieve the appropriate token retriever based on environment variables.
         """
-        provider: str = os.getenv("AUTH_PROVIDER", "keycloak").lower()
+        provider: str = AUTH_PROVIDER
         if provider == "keycloak":
             return KeyCloakTokenRetriever()
         else:
@@ -39,12 +45,10 @@ class UserLoggedOutException(Exception):
 
 class KeyCloakTokenRetriever(TokenRetriever):
     def __init__(self):
-        self.keycloak_base_url = os.getenv("AUTH_BASE_URL")
-        self.realm = os.getenv("KEYCLOAK_REALM", "inxm")
-        self.provider_alias = os.getenv("KEYCLOAK_PROVIDER_ALIAS")
-        self.allow_unsafe_cert = (
-            os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
-        )
+        self.keycloak_base_url = AUTH_BASE_URL
+        self.realm = KEYCLOAK_REALM
+        self.provider_alias = KEYCLOAK_PROVIDER_ALIAS
+        self.allow_unsafe_cert = AUTH_ALLOW_UNSAFE_CERT
         self.logger = logger
 
     def retrieve_token(self, keycloak_token: str) -> Dict[str, Any]:

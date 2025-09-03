@@ -1,5 +1,6 @@
 import copy
 
+
 def inline_schema(schema, top_level_schema, seen=None):
     """
     Recursively inlines JSON schema references ($ref).
@@ -29,21 +30,21 @@ def inline_schema(schema, top_level_schema, seen=None):
         seen.add(ref_path)
 
         if ref_path.startswith("#/"):
-            path_parts = ref_path[2:].split('/')
+            path_parts = ref_path[2:].split("/")
             definition = top_level_schema
             for part in path_parts:
                 if isinstance(definition, dict):
                     definition = definition.get(part)
                 else:
                     raise ValueError(f"Schema definition not found for ref: {ref_path}")
-            
+
             if definition is None:
                 raise ValueError(f"Schema definition not found for ref: {ref_path}")
-            
+
             return inline_schema(definition, top_level_schema, seen)
         else:
             # Handle other types of references, like definitions in $defs
-            def_name = ref_path.split('/')[-1]
+            def_name = ref_path.split("/")[-1]
             definition = top_level_schema.get("$defs", {}).get(def_name)
             if definition is None:
                 raise ValueError(f"Schema definition not found for ref: {ref_path}")
@@ -54,6 +55,7 @@ def inline_schema(schema, top_level_schema, seen=None):
         new_schema[key] = inline_schema(value, top_level_schema, seen)
 
     return new_schema
+
 
 def map_tools(tools):
     """
@@ -70,7 +72,7 @@ def map_tools(tools):
     for tool in tools:
         input_schema_copy = copy.deepcopy(tool.get("inputSchema", {}))
         processed_schema = inline_schema(input_schema_copy, input_schema_copy)
-        
+
         # The top-level $defs is no longer needed after inlining
         if "$defs" in processed_schema:
             del processed_schema["$defs"]
@@ -80,9 +82,9 @@ def map_tools(tools):
             "function": {
                 "name": tool.get("name"),
                 "description": tool.get("description"),
-                "parameters": processed_schema
-            }
+                "parameters": processed_schema,
+            },
         }
         mapped_tools.append(mapped_tool)
-    
+
     return mapped_tools

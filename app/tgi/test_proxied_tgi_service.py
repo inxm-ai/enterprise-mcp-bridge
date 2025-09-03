@@ -123,7 +123,10 @@ class TestProxiedTGIService:
 
     def test_init_without_token(self, proxied_tgi_service_no_token):
         """Test service initialization without token."""
-        assert proxied_tgi_service_no_token.llm_client.tgi_url == "https://api.test-llm.com/v1"
+        assert (
+            proxied_tgi_service_no_token.llm_client.tgi_url
+            == "https://api.test-llm.com/v1"
+        )
         assert proxied_tgi_service_no_token.llm_client.tgi_token == ""
 
     def test_init_strips_trailing_slash(self):
@@ -168,7 +171,9 @@ class TestProxiedTGIService:
     async def test_find_prompt_by_name_or_role_no_prompts(self, proxied_tgi_service):
         """Test finding prompt when no prompts are available."""
         session = MockMCPSession(prompts=[])
-        result = await proxied_tgi_service.prompt_service.find_prompt_by_name_or_role(session)
+        result = await proxied_tgi_service.prompt_service.find_prompt_by_name_or_role(
+            session
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -180,7 +185,9 @@ class TestProxiedTGIService:
                 raise RuntimeError("MCP error")
 
         with pytest.raises(Exception):
-            await proxied_tgi_service.prompt_service.find_prompt_by_name_or_role(BadSession())
+            await proxied_tgi_service.prompt_service.find_prompt_by_name_or_role(
+                BadSession()
+            )
 
     @pytest.mark.asyncio
     async def test_find_prompt_by_name_not_found(
@@ -268,7 +275,9 @@ class TestProxiedTGIService:
             function=ToolCallFunction(name="list-files", arguments='{"path": "/tmp"}'),
         )
 
-        result = await proxied_tgi_service.tool_service.execute_tool_call(session, tool_call, None)
+        result = await proxied_tgi_service.tool_service.execute_tool_call(
+            session, tool_call, None
+        )
 
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_123"
@@ -328,7 +337,9 @@ class TestProxiedTGIService:
             function=ToolCallFunction(name="list-files", arguments="invalid json"),
         )
 
-        result = await proxied_tgi_service.tool_service.execute_tool_call(session, tool_call, None)
+        result = await proxied_tgi_service.tool_service.execute_tool_call(
+            session, tool_call, None
+        )
 
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_123"
@@ -531,9 +542,7 @@ class TestProxiedTGIServiceLLMCalls:
             async def __aexit__(self, *args):
                 return None
 
-        with patch(
-            "app.tgi.llm_client.aiohttp.ClientSession", MockErrorSession
-        ):
+        with patch("app.tgi.llm_client.aiohttp.ClientSession", MockErrorSession):
             with patch("opentelemetry.trace.get_tracer") as mock_tracer:
                 mock_span = Mock()
                 mock_span.set_attribute = Mock()
@@ -616,9 +625,7 @@ class TestProxiedTGIServiceLLMCalls:
             async def __aexit__(self, *args):
                 return None
 
-        with patch(
-            "app.tgi.llm_client.aiohttp.ClientSession", MockStreamSession
-        ):
+        with patch("app.tgi.llm_client.aiohttp.ClientSession", MockStreamSession):
             with patch("opentelemetry.trace.get_tracer") as mock_tracer:
                 mock_span = Mock()
                 mock_span.set_attribute = Mock()
@@ -644,7 +651,9 @@ class TestProxiedTGIServiceLLMCalls:
     async def test_non_stream_chat_with_tools(self, proxied_tgi_service, mock_tools):
         """Test non-streaming chat with tool execution."""
         # Patch _non_stream_chat_with_tools to avoid pydantic validation error
-        with patch.object(proxied_tgi_service, "_non_stream_chat_with_tools") as mock_chat:
+        with patch.object(
+            proxied_tgi_service, "_non_stream_chat_with_tools"
+        ) as mock_chat:
             mock_chat.return_value = ChatCompletionResponse(
                 id="chatcmpl-test456",
                 object="chat.completion",
@@ -664,7 +673,9 @@ class TestProxiedTGIServiceLLMCalls:
             )
             session = MockMCPSession(tools=mock_tools)
             messages = [Message(role=MessageRole.USER, content="List files")]
-            available_tools = await proxied_tgi_service.tool_service.get_all_mcp_tools(session)
+            available_tools = await proxied_tgi_service.tool_service.get_all_mcp_tools(
+                session
+            )
             chat_request = ChatCompletionRequest(
                 messages=messages, model="test-model", stream=False
             )

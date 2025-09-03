@@ -1,9 +1,9 @@
+from app.vars import KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
 from typing import Dict, Optional
 
 from app.oauth.token_exchange import TokenRetrieverFactory
-import os
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -17,7 +17,7 @@ async def decorate_args_with_oauth_token(
     oauth_token = None
     if access_token:
         # If no provider alias, pass through Keycloak access token
-        if not os.getenv("KEYCLOAK_PROVIDER_ALIAS"):
+        if not KEYCLOAK_PROVIDER_ALIAS:
             oauth_token = access_token
         else:
             retriever = TokenRetrieverFactory().get()

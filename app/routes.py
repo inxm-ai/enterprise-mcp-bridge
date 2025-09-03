@@ -1,4 +1,5 @@
 import logging
+from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict
@@ -18,17 +19,12 @@ from .utils.exception_logging import (
     log_exception_with_details,
 )
 from .tgi.routes import router as tgi_router
+from app.well_known.agent import router as agent_router
 
 router = APIRouter()
 sessions = session_manager()
 
 logger = logging.getLogger("uvicorn.error")
-
-TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
-SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
-MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
-INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
-EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 
 tracer = trace.get_tracer(__name__)
 
@@ -369,3 +365,6 @@ async def close_session(
 
 # Include TGI router
 router.include_router(tgi_router)
+
+# Include well-known agent router
+router.include_router(agent_router)

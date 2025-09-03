@@ -711,3 +711,129 @@ The `DataAccessManager` class in the `app.oauth.user_info` module provides confi
 | `MCP_SHARED_DATA_ACCESS_TEMPLATE`| `shared/{resource_id}`     | Template for shared data resources              |
 
 These templates are dynamically resolved based on the user's OAuth token and requested access. For example, a group-specific data resource might resolve to `g/finance` for the `finance` group.
+
+---
+
+## Use as Agents
+
+Note: Using the mcp with agent capabilities will create token consumption on your LLM deployment. Dynamically generated elements, like the agent card and tool invocations, will incur costs based on the underlying LLM usage.
+
+#### `.well-known/agent.json`
+This file contains metadata about the agent, including its capabilities and configuration options.
+
+#### `/tgi/v1/chat/completions`
+This endpoint provides OpenAI-compatible chat completions with MCP integration. It supports both streaming and non-streaming responses.
+
+- **Method**: `POST`
+- **Path**: `/tgi/v1/chat/completions`
+- **Headers**:
+  - `X-Auth-Request-Access-Token`: OAuth token for authentication.
+  - `x-inxm-mcp-session`: Session header for stateful calls (optional).
+- **Query Parameters**:
+  - `prompt`: Specific prompt name to use (optional).
+  - `group`: Group name for sessionless group-specific data access (optional).
+- **Request Body**:
+  - JSON payload conforming to the `ChatCompletionRequest` schema. You can specify your tool choice with the openai api `tool_choice` parameter.
+- **Response**:
+  - Streaming: `text/event-stream` with incremental updates.
+  - Non-streaming: JSON response with the full completion.
+
+**Example**:
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"messages": [{"role": "user", "content": "Hello!"}], "model": "gpt-4"}' \
+     http://localhost:8000/tgi/v1/chat/completions
+```
+
+#### `/tgi/v1/a2a`
+This endpoint maps A2A JSON-RPC requests to internal OpenAI-compatible chat completions. It is designed for interoperability with A2A-compliant clients.
+
+- **Method**: `POST`
+- **Path**: `/tgi/v1/a2a`
+- **Headers**:
+  - `X-Auth-Request-Access-Token`: OAuth token for authentication.
+  - `x-inxm-mcp-session`: Session header for stateful calls (optional).
+- **Request Body**:
+  - JSON payload conforming to the `A2ARequest` schema. As method you can choose:
+    - `$SERVICE_NAME`: This will delegate the tool usage to the agent, and you will have to provide a prompt param.
+    - `mcp-tool`: You can specify one of the mcp tools available.
+- **Response**:
+  - Streaming: `text/event-stream` with incremental updates.
+  - Non-streaming: JSON response with the full completion.
+
+**Example**:
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc": "2.0", "method": "enterprise-mcp-bridge", "params": {"prompt": "Hello!"}, "id": "1"}' \
+     http://localhost:8000/tgi/v1/a2a
+```
+
+### Key Features
+- **Automatic Tool Invocation**: Both endpoints automatically call tools from the MCP or a selected MCP instance.
+- **Streaming Support**: Real-time updates for streaming requests.
+- **Error Handling**: Structured error responses for invalid requests or server errors.
+- **Group-Based Data Access**: Dynamically resolves data sources based on group memberships.
+
+---
+
+## Automatic System Prompt Usage for Agents
+
+The Enterprise MCP Bridge includes functionality to automatically use system prompts or prompt templates during interactions with the Agent. This feature ensures that predefined prompts are seamlessly integrated into the conversation flow.
+
+#### How It Works
+
+1. **Prompt Discovery**:
+   - The server searches for a specific prompt by name if provided.
+   - If no name is specified, it looks for a default `system` prompt or a prompt with a `role=system` description.
+   - If no such prompt exists, the first available prompt is used as a fallback.
+
+2. **Prompt Content Retrieval**:
+   - Once a prompt is identified, its content is fetched by executing the prompt on the MCP server.
+   - The content is then used to initialize or guide the conversation.
+
+3. **Message Preparation**:
+   - The system prompt is prepended to the user-provided messages if no `system` message already exists.
+   - This ensures that the conversation starts with the appropriate context.
+
+#### Example Configuration
+
+The `SYSTEM_DEFINED_PROMPTS` environment variable can be used to define global prompts available to all users. These prompts are merged with the prompts provided by the MCP server.
+
+```json
+        [
+          {
+            "name": "system",
+            "title": "Specialized M365 Agent",
+            "description": "Acts as a specialized Microsoft 365 agent. Always try to reply with tool_calls unless delivering the final response.",
+            "arguments": [],
+            "template": {
+              "role": "system",
+              "content": "You are a highly specialized Microsoft 365 agent. Your primary function is to respond to user requests by identifying and executing the correct Microsoft Graph API tool calls.\n\nYour workflow is strictly as follows:\n1.  **Analyze the user's request.** Determine the user's intent and identify which of your available tools are required.\n2.  **Generate a tool call.** Based on your analysis, construct the appropriate tool call. All values must adhere strictly to the Microsoft Graph API specifications.\n3.  **Strictly adhere to these rules:**\n    * **Prioritize tool calls:** Always respond with a tool call unless you have sufficient information to provide a final, complete answer to the user.\n    * **Use simple requests:** Only provide the minimum required parameters for a tool call. Do not guess or add unnecessary values.\n    * **Correct data types:** If a parameter requires a boolean, use `true` or `false`, not a string. If a parameter requires a number, use a number, not a string.\n    * **If you are failing to call the tool successfully,** review the error message and adjust your request accordingly. Try to remove failing parameters to simplify the request, and expand them in a second pass if they are successful and you know more.\n    * **Final response:** Only provide a final human-readable response when the user's request is fully resolved and no further tool calls are needed.\n\nIf a tool call fails, you will receive an error message. Use this information to correct the tool call in your next turn. Do not generate conversational text or explanations during the tool-calling process; the only exceptions are in a final, complete response or if you are specifically asked to \"think.\"\n\n\n\nExample of a simple, correct tool call:\n{\"name\": \"get-user-profile\", \"parameters\": {\"userId\": \"adeleV@M365x123456.onmicrosoft.com\"}}\n"
+            }
+          }
+        ]
+```
+
+#### Example Usage
+
+**Session-Based Prompt Usage**:
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"messages": [{"role": "user", "content": "Summarize my emails by folder"}], "model": "gpt-5"}' \
+     http://localhost:8000/tgi/v1/chat/completions?prompt=system
+```
+
+**Sessionless Prompt Usage**:
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc": "2.0", "method": "enterprise-mcp-bridge", "params": {"prompt": "Summarize my emails by folder"}, "id": "1"}' \
+     http://localhost:8000/tgi/v1/a2a?prompt=system
+```

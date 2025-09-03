@@ -1,6 +1,7 @@
 """
 Tool service module for handling MCP tool operations.
 """
+
 import json
 import logging
 from typing import List, Optional, Dict, Any, Tuple
@@ -21,7 +22,9 @@ class ToolService:
     def __init__(self):
         self.logger = logger
 
-    async def get_all_mcp_tools(self, session: MCPSessionBase, parent_span=None) -> List[Tool]:
+    async def get_all_mcp_tools(
+        self, session: MCPSessionBase, parent_span=None
+    ) -> List[Tool]:
         """
         Get all available tools from the MCP server as OpenAI-compatible tools.
 
@@ -37,7 +40,9 @@ class ToolService:
                 # Get available tools from MCP server
                 tools_result = map_tools(await session.list_tools())
                 if not tools_result:
-                    self.logger.debug("[ToolService] No tools available from MCP server")
+                    self.logger.debug(
+                        "[ToolService] No tools available from MCP server"
+                    )
                     span.set_attribute("tools.count", 0)
                     return []
 
@@ -96,7 +101,7 @@ class ToolService:
                     }
 
                 # Check if session is still valid before calling
-                if not hasattr(session, 'call_tool'):
+                if not hasattr(session, "call_tool"):
                     error_msg = "MCP session is invalid or closed"
                     self.logger.error(f"[ToolService] {error_msg}")
                     if span:
@@ -110,7 +115,9 @@ class ToolService:
                     }
 
                 span.set_attribute("args", str(args))
-                result = await session.call_tool(tool_call.function.name, args, access_token)
+                result = await session.call_tool(
+                    tool_call.function.name, args, access_token
+                )
 
                 if result.isError:
                     error_content = ""
@@ -138,11 +145,15 @@ class ToolService:
                 # Format successful result
                 content = ""
                 if hasattr(result, "structuredContent") and result.structuredContent:
-                    logger.debug(f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {result.structuredContent}")
+                    logger.debug(
+                        f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {result.structuredContent}"
+                    )
                     content = json.dumps(result.structuredContent)
                 elif hasattr(result, "content") and result.content:
-                    logger.debug(f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}")
-                    
+                    logger.debug(
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
+                    )
+
                     if isinstance(result.content, RunToolResultContent):
                         value = result.content.value
                         content = value
@@ -166,7 +177,9 @@ class ToolService:
                             ]
                         )
                 else:
-                    logger.debug(f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}")
+                    logger.debug(
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
+                    )
                     content = json.dumps({"result": str(result)})
 
                 self.logger.debug(
@@ -199,7 +212,7 @@ class ToolService:
             if span:
                 try:
                     span.end()
-                except:
+                except Exception:
                     pass  # Ignore any span cleanup errors
 
     def _parse_json_array_from_message(self, message):
@@ -217,13 +230,13 @@ class ToolService:
         """
         try:
             # Find the first and last brackets to isolate the potential JSON array
-            start_index = message.find('[')
-            end_index = message.rfind(']')
+            start_index = message.find("[")
+            end_index = message.rfind("]")
 
             if start_index == -1 or end_index == -1:
                 return None
 
-            json_string = message[start_index:end_index + 1]
+            json_string = message[start_index : end_index + 1]
 
             # Attempt to load the JSON string
             parsed_data = json.loads(json_string)
@@ -253,7 +266,7 @@ class ToolService:
             return "No errors to format."
 
         formatted_messages = []
-        
+
         for error in errors:
             # Safely get the values, providing defaults if keys are missing
             code = error.get("code", "N/A")
@@ -261,12 +274,17 @@ class ToolService:
             received_type = error.get("received", "N/A")
             path_list = error.get("path", [])
             message = error.get("message", "No message provided.")
-            
+
             # Join the path parts to form a clear parameter name
             parameter_path = ".".join(path_list)
-            
+
             # Check for the specific error type mentioned in the prompt
-            if code == "invalid_type" and parameter_path and expected_type and received_type:
+            if (
+                code == "invalid_type"
+                and parameter_path
+                and expected_type
+                and received_type
+            ):
                 formatted_message = (
                     f"A data type mismatch occurred. The tool expected the value for "
                     f"the parameter '{parameter_path}' to be a '{expected_type}', but it "
@@ -309,9 +327,11 @@ class ToolService:
                 tool_results.append(tool_message)
             except Exception as e:
                 # If tool execution fails completely, create an error message
-                error_msg = f"Failed to execute tool {tool_call.function.name}: {str(e)}"
+                error_msg = (
+                    f"Failed to execute tool {tool_call.function.name}: {str(e)}"
+                )
                 self.logger.error(f"[ToolService] {error_msg}")
-                
+
                 error_message = Message(
                     role=MessageRole.TOOL,
                     content=json.dumps({"error": error_msg}),
@@ -322,9 +342,11 @@ class ToolService:
                 parsed_errors = self._parse_json_array_from_message(error_msg)
                 user_asks_for_correction = Message(
                     role=MessageRole.USER,
-                    content=
+                    content=(
                         self._format_errors(parsed_errors)
-                        if parsed_errors else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {tool_call.function.name} with the corrected arguments again.",
+                        if parsed_errors
+                        else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {tool_call.function.name} with the corrected arguments again."
+                    ),
                 )
                 tool_results.append(user_asks_for_correction)
                 success = False

@@ -85,7 +85,7 @@ async def test_streaming_tool_call_merging_and_status_messages():
                     name="get_weather",
                 )
             ],
-            True
+            True,
         )
     )
     # Patch MCPSessionBase
@@ -179,7 +179,7 @@ async def test_streaming_multiple_tool_calls_parallel():
                     name="func2",
                 ),
             ],
-            True
+            True,
         )
     )
     session = MagicMock()
@@ -242,7 +242,7 @@ async def test_streaming_tool_call_missing_arguments():
                     name="func1",
                 ),
             ],
-            True
+            True,
         )
     )
     session = MagicMock()
@@ -369,7 +369,7 @@ async def test_streaming_tool_call_chunked_arguments():
                     name="func1",
                 ),
             ],
-            True
+            True,
         )
     )
     session = MagicMock()
