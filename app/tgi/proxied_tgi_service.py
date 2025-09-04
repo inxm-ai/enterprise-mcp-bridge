@@ -175,11 +175,14 @@ class ProxiedTGIService:
                                 tc_id = tc.get("id")
                                 tc_index = tc.get("index")
                                 tc_func = tc.get("function", {})
+                                logger.debug(
+                                    f"[ProxiedTGI] Tool call chunk for index {tc_index} detected: {str(tc)}"
+                                )
                                 chunk_span.set_attribute(
                                     "tool_call.index", tc_index or "unknown"
                                 )
-                                if tc_id not in tool_call_chunks:
-                                    tool_call_chunks[tc_id] = {
+                                if tc_index not in tool_call_chunks:
+                                    tool_call_chunks[tc_index] = {
                                         "index": tc_index,
                                         "name": "",
                                         "arguments": "",
@@ -187,13 +190,15 @@ class ProxiedTGIService:
                                     content = "<think>I need to call a tool. Preparing tools to call...</think>\n\n"
                                     # Be nice, inform them we are still awake
                                     yield f"data: {json.dumps({'choices':[{'delta':{'content':content},'index':tc_index}]})}\n\n"
+                                if "id" in tc and tc["id"]:
+                                    tool_call_chunks[tc_index]["id"] = tc["id"]
                                 if "name" in tc_func and tc_func["name"]:
-                                    tool_call_chunks[tc_id]["name"] = tc_func["name"]
+                                    tool_call_chunks[tc_index]["name"] = tc_func["name"]
                                     status_str = f"<think>{tc_index + 1}. I will run <code>{tc_func['name']}</code></think>\n\n"
                                     # still nice, yielding more spam
                                     yield f"data: {json.dumps({'choices':[{'delta':{'content': status_str},'index': tc_index}]})}\n\n"
                                 if "arguments" in tc_func and tc_func["arguments"]:
-                                    tool_call_chunks[tc_id]["arguments"] += tc_func[
+                                    tool_call_chunks[tc_index]["arguments"] += tc_func[
                                         "arguments"
                                     ]
 
@@ -202,12 +207,12 @@ class ProxiedTGIService:
                                 )
                                 # If both name and arguments are present, mark as ready
                                 if (
-                                    tool_call_chunks[tc_id]["name"]
-                                    and tool_call_chunks[tc_id]["arguments"]
-                                    and tc_id not in tool_call_ready
+                                    tool_call_chunks[tc_index]["name"]
+                                    and tool_call_chunks[tc_index]["arguments"]
+                                    and tc_index not in tool_call_ready
                                 ):
                                     chunk_span.set_attribute("tool_call.ready", True)
-                                    tool_call_ready.add(tc_id)
+                                    tool_call_ready.add(tc_index)
                                 else:
                                     chunk_span.set_attribute("tool_call.ready", False)
                         if "content" in delta and delta["content"]:
@@ -216,17 +221,16 @@ class ProxiedTGIService:
                             yield raw_chunk
 
                 # After streaming, if any tool calls are ready, execute them ("OF WITH THEIR HEADS!" ah wait, not that type of execute?)
-                # Remove tool span to avoid context issues
                 with tracer.start_as_current_span("execute_tool_calls") as tool_span:
                     if tool_call_ready:
                         tool_span.set_attribute(
                             "tool_calls.ready_count", len(tool_call_ready)
                         )
                         tool_calls_to_execute = []
-                        for tc_id in tool_call_ready:
-                            tc = tool_call_chunks[tc_id]
+                        for tc_index in tool_call_ready:
+                            tc = tool_call_chunks[tc_index]
                             tool_call = ToolCall(
-                                id=tc_id,
+                                id=tc["id"],
                                 index=tc["index"],
                                 function={
                                     "name": tc["name"],
