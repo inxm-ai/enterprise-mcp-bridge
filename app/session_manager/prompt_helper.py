@@ -32,7 +32,7 @@ def default_prompt_list_result(prompts: list[Prompt] = []):
         "_meta": None,
         "nextCursor": None,
         "prompts": [
-            {k: v for k, v in prompt.__dict__.items() if k != "template"}
+            {k: v for k, v in prompt.__dict__.items()}
             for prompt in prompts
         ],
     }
@@ -50,11 +50,11 @@ async def list_prompts(list_prompts: any):
     try:
         prompts = await list_prompts()
         prompts.prompts += [
-            {k: v for k, v in prompt.__dict__.items() if k != "template"}
+            {k: v for k, v in prompt.__dict__.items()}
             for prompt in system_prompts
         ]
     except Exception as e:
-        logger.error(f"Error listing prompts: {str(e)}")
+        logger.warning(f"[PromptHelper] Error listing prompts: {str(e)}")
         # Not every MCP has list_prompts, so deal with it friendly
         if (
             hasattr(e, "__class__")
@@ -62,8 +62,10 @@ async def list_prompts(list_prompts: any):
             and "Method not found" in str(e)
         ):
             if len(system_prompts) < 1:
+                logger.info("[PromptHelper] No system prompts available")
                 raise HTTPException(status_code=404, detail="Method not found")
             else:
+                logger.info(f"[PromptHelper] Returning system prompts: {system_prompts}")
                 prompts = default_prompt_list_result(system_prompts)
         else:
             raise HTTPException(status_code=500, detail="Loading prompts failed")

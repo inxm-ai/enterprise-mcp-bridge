@@ -2,9 +2,8 @@ FROM nginx:alpine
 
 RUN apk add --no-cache curl
 
-# Copy nginx configuration
-COPY nginx.conf /etc/nginx/nginx.conf
-
 EXPOSE 3099
 
-CMD ["nginx", "-g", "daemon off;"]
+COPY nginx.conf /etc/nginx/templates/app-nginx.conf.template
+RUN echo '{ "OAI_MODEL_NAME": "${OAI_MODEL_NAME}" }' > /tmp/settings.json.template
+CMD envsubst < /tmp/settings.json.template > /tmp/settings.json && envsubst '${OAI_BASE_URL} ${OAI_API_TOKEN} ${OAI_HOST}' < /etc/nginx/templates/app-nginx.conf.template > /etc/nginx/nginx.conf && nginx -g "daemon off;"

@@ -145,7 +145,6 @@ services:
       INCLUDE_TOOLS: "*mail*"
       OTLP_ENDPOINT: http://jaeger:4317
       TGI_URL: ${OAI_BASE_URL}
-      UVICORN_LOG_LEVEL: debug
       DEFAULT_MODEL: ${OAI_MODEL_NAME}
       SYSTEM_DEFINED_PROMPTS: >
         [
@@ -177,7 +176,6 @@ services:
       - "oauth2-proxy.enable=true"
     networks:
       - private
-      - default
 
   ingress:
     container_name: ingress

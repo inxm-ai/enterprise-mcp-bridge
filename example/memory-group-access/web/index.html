@@ -233,6 +233,7 @@
                 <div class="tab" onclick="showTab('memory', this)">Add Memory</div>
                 <div class="tab" onclick="showTab('search', this)">Search Memory</div>
                 <div class="tab" onclick="showTab('remove', this)">Remove Memory</div>
+                <div class="tab" onclick="showTab('chat', this)">Chat with LLM</div>
             </div>
 
             <div id="session" class="tab-content active">
@@ -329,28 +330,47 @@
                 <div id="searchResponse" class="response-box" style="display: none;"></div>
             </div>
 
-            <div id="remove" class="tab-content">
+                        <div id="remove" class="tab-content">
                 <h3>5. Remove Memory</h3>
                 <form id="removeForm">
                     <div class="inline-form">
                         <div class="form-group">
-                            <label for="removeContent">Memory Content to remove:</label>
-                            <input type="text" id="removeContent" name="content" placeholder="Exact memory content to delete" required>
                         </div>
                         <div class="form-group">
-                            <label for="removeGroup">Target Group:</label>
-                            <select id="removeGroup" name="group">
-                                <option value="">Personal Memory</option>
-                                <option value="administrators">administrators</option>
-                                <option value="engineering">engineering</option>
-                                <option value="marketing">marketing</option>
-                                <option value="sales">sales</option>
-                            </select>
                         </div>
                         <button type="submit" class="btn btn-danger">Remove Memory</button>
                     </div>
                 </form>
                 <div id="removeResponse" class="response-box" style="display: none;"></div>
+            </div>
+
+            <div id="chat" class="tab-content">
+                <h3>6. Chat with LLM</h3>
+                <p>Chat with the LLM using available MCP tools and memory:</p>
+
+                <div class="form-group">
+                    <label for="chatGroup">Group Context (optional):</label>
+                    <select id="chatGroup" name="group">
+                        <option value="">Personal Memory</option>
+                        <option value="administrators">administrators</option>
+                        <option value="engineering">engineering</option>
+                        <option value="marketing">marketing</option>
+                        <option value="sales">sales</option>
+                    </select>
+                </div>
+
+                <div id="chatContainer" class="response-box" style="height: 400px; overflow-y: auto; margin-bottom: 12px; display: block;">
+                    <div id="chatMessages"></div>
+                </div>
+
+                <form id="chatForm" class="inline-form">
+                    <div class="form-group" style="flex: 1;">
+                        <label for="chatInput">Your message:</label>
+                        <input type="text" id="chatInput" name="message" placeholder="Type your message here..." required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Send</button>
+                    <button type="button" id="clearChatBtn" class="btn btn-danger btn-small">Clear Chat</button>
+                </form>
             </div>
         </div>
 
@@ -413,6 +433,8 @@
         </div>
     </div>
 
+    <script type="module" src="chat.js"></script>
+    <script type="module" src="otelFetch.js"></script>
     <script>
         let currentSession = null;
         let isAuthenticated = false;
@@ -709,6 +731,116 @@
                 })
             });
             displayResponse('removeResponse', response);
+        });
+    </script>
+    <script type="module">
+        import { TGI } from './chat.js';
+        import {otelFetch} from './otelFetch.js';
+
+        let chatInstance = null;
+        let availableTools = [];
+
+        // Initialize chat when authenticated
+        async function initializeChat() {
+
+            try {
+                addMessage('system', 'Initializing chat...');
+                // Fetching model
+                const model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
+                // Fetch available tools
+                const toolsResponse = await makeRequest('/api/mcp/memory/tools', { method: 'GET' });
+                if (toolsResponse.ok && toolsResponse.data.tools) {
+                    availableTools = toolsResponse.data.tools;
+                }
+
+                // Initialize TGI chat instance
+                chatInstance = new TGI(availableTools, model);
+                addMessage('system', 'Chat initialized with available MCP tools. You can now chat with the LLM!');
+            } catch (error) {
+                console.error('Failed to initialize chat:', error);
+                addMessage('system', 'Failed to initialize chat. Please check your authentication.');
+            }
+        }
+        await initializeChat()
+
+        function addMessage(role, content) {
+            console.log(`Adding message to chat: ${role} - ${content}`);
+            const messagesContainer = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message ${role}`;
+            messageDiv.style.marginBottom = '8px';
+            messageDiv.style.padding = '8px';
+            messageDiv.style.borderRadius = '6px';
+            messageDiv.style.backgroundColor = role === 'user' ? 'rgba(255,122,26,0.1)' : 'rgba(255,255,255,0.05)';
+            messageDiv.innerHTML = `<strong>${role === 'user' ? 'You' : role === 'assistant' ? 'LLM' : 'System'}:</strong> ${content.replace(/\n/g, '<br>')}`;
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Chat form handler
+        document.getElementById('chatForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!chatInstance) {
+                alert('Please login first and ensure chat is initialized');
+                console.log('Chat instance not initialized or user not authenticated', { isAuthenticated, chatInstance });
+                return;
+            }
+
+            const formData = new FormData(e.target);
+            const message = formData.get('message');
+            const group = document.getElementById('chatGroup').value;
+
+            if (!message.trim()) return;
+
+            // Clear input
+            document.getElementById('chatInput').value = '';
+
+            // Add user message to chat
+            addMessage('user', message);
+
+            try {
+                // Send message to LLM
+                let responseText = '';
+                await chatInstance.send(message, undefined, (chunk) => {
+                    responseText += chunk;
+                });
+
+                // Add LLM response to chat
+                addMessage('assistant', responseText);
+            } catch (error) {
+                addMessage('system', `Error: ${error.message}`);
+            }
+        });
+
+        // Clear chat handler
+        document.getElementById('clearChatBtn').addEventListener('click', () => {
+            document.getElementById('chatMessages').innerHTML = '';
+            if (chatInstance) {
+                chatInstance.clearHistory();
+                addMessage('system', 'Chat history cleared.');
+            }
+        });
+
+        // Update chat when group changes
+        document.getElementById('chatGroup').addEventListener('change', async () => {
+            if (!isAuthenticated) return;
+
+            const group = document.getElementById('chatGroup').value;
+            try {
+                let url = '/api/mcp/memory/tools';
+                if (group) {
+                    url += `?group=${encodeURIComponent(group)}`;
+                }
+
+                const toolsResponse = await makeRequest(url, { method: 'GET' });
+                if (toolsResponse.ok && toolsResponse.data.tools) {
+                    availableTools = toolsResponse.data.tools;
+                    chatInstance = new TGI(availableTools);
+                    addMessage('system', `Switched to ${group || 'personal'} context. Tools updated.`);
+                }
+            } catch (error) {
+                addMessage('system', `Failed to update tools for group: ${error.message}`);
+            }
         });
     </script>
 </body>
