@@ -31,10 +31,7 @@ def default_prompt_list_result(prompts: list[Prompt] = []):
     return {
         "_meta": None,
         "nextCursor": None,
-        "prompts": [
-            {k: v for k, v in prompt.__dict__.items()}
-            for prompt in prompts
-        ],
+        "prompts": [{k: v for k, v in prompt.__dict__.items()} for prompt in prompts],
     }
 
 
@@ -50,8 +47,7 @@ async def list_prompts(list_prompts: any):
     try:
         prompts = await list_prompts()
         prompts.prompts += [
-            {k: v for k, v in prompt.__dict__.items()}
-            for prompt in system_prompts
+            {k: v for k, v in prompt.__dict__.items()} for prompt in system_prompts
         ]
     except Exception as e:
         logger.warning(f"[PromptHelper] Error listing prompts: {str(e)}")
@@ -65,7 +61,9 @@ async def list_prompts(list_prompts: any):
                 logger.info("[PromptHelper] No system prompts available")
                 raise HTTPException(status_code=404, detail="Method not found")
             else:
-                logger.info(f"[PromptHelper] Returning system prompts: {system_prompts}")
+                logger.info(
+                    f"[PromptHelper] Returning system prompts: {system_prompts}"
+                )
                 prompts = default_prompt_list_result(system_prompts)
         else:
             raise HTTPException(status_code=500, detail="Loading prompts failed")
