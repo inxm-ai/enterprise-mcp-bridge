@@ -168,9 +168,10 @@ echo -e "Keycloak admin:         ${INFO}https://$KEYCLOAK_DOMAIN${RESET}"
 echo -e "See memory API:         ${INFO}https://$FRONTEND_DOMAIN/api/mcp/memory/tools${RESET}"
 echo
 echo -e "${INFO}Test users configured in Keycloak:${RESET}"
-echo -e "  • alice (password: alice) - member of 'finance' and 'users' groups"
-echo -e "  • bob (password: bob) - member of 'marketing' and 'users' groups"  
-echo -e "  • admin (password: admin) - member of 'finance', 'marketing', 'hr', and 'admin' groups"
+echo -e "  • admin (password: admin123) - 	All group memories + personal"
+echo -e "  • john.engineer (password: engineer123) - Engineering memories + personal"
+echo -e "  • jane.marketing (password: marketing123) - Marketing memories + personal"  
+echo -e "  • bob.sales (password: sales123) - Sales memories + personal"
 echo
 echo -e "${INFO}Group-based memory access:${RESET}"
 echo -e "  • User-specific: /data/u/{user_id}.json (always accessible to the user)"
