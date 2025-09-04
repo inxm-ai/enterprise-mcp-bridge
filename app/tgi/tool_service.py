@@ -115,6 +115,9 @@ class ToolService:
                     }
 
                 span.set_attribute("args", str(args))
+                logger.debug(
+                    f"[ToolService] Executing tool '{tool_call.function.name}' with args: {args}"
+                )
                 result = await session.call_tool(
                     tool_call.function.name, args, access_token
                 )
@@ -354,3 +357,98 @@ class ToolService:
                 break
 
         return tool_results, success
+
+
+def process_tool_arguments(arguments_str):
+    """
+    Robustly processes a JSON string, handling nested JSON that may be
+    incorrectly double-escaped.
+    """
+
+    def is_json_string(s):
+        try:
+            json.loads(s)
+            return True
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+    try:
+        data = json.loads(arguments_str)
+
+        for key, value in data.items():
+            if isinstance(value, str) and is_json_string(value):
+                data[key] = json.loads(value)
+        logger.debug(
+            f"[ToolService] Processed tool arguments: {arguments_str} -> {json.dumps(data)}"
+        )
+        return json.dumps(data)
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"[ToolService] Error decoding top-level JSON: {e}")
+        return arguments_str
+    except Exception as e:
+        logger.error(f"[ToolService] An unexpected error occurred: {e}")
+        return arguments_str
+
+
+def parse_and_clean_tool_call(tool_call_dict):
+    """
+    Parses a complete tool call dictionary and cleans its 'arguments' field
+    using the process_tool_arguments function.
+    """
+    if "function" in tool_call_dict and "arguments" in tool_call_dict["function"]:
+        arguments_str = tool_call_dict["function"]["arguments"]
+        cleaned_arguments_str = process_tool_arguments(arguments_str)
+        tool_call_dict["function"]["arguments"] = cleaned_arguments_str
+    elif "arguments" in tool_call_dict:
+        arguments_str = tool_call_dict["arguments"]
+        cleaned_arguments_str = process_tool_arguments(arguments_str)
+        tool_call_dict["arguments"] = cleaned_arguments_str
+    else:
+        logger.warning(
+            f"[ToolService] Tool call is missing 'function' or 'arguments': {tool_call_dict}"
+        )
+    return tool_call_dict
+
+
+def extract_tool_call_from_streamed_content(content_str):
+    """
+    Finds and extracts a potential tool call dictionary from a streamed content string.
+
+    It looks for a JSON object and validates if it has the required
+    tool call structure.
+    """
+    # Find all complete JSON objects by balancing braces
+    json_strings = []
+    start = None
+    brace_count = 0
+    i = 0
+    while i < len(content_str):
+        if content_str[i] == "{":
+            if brace_count == 0:
+                start = i
+            brace_count += 1
+        elif content_str[i] == "}":
+            brace_count -= 1
+            if brace_count == 0 and start is not None:
+                json_strings.append(content_str[start : i + 1])
+                start = None
+        i += 1
+
+    for json_str in json_strings:
+        try:
+            potential_tool_call = json.loads(json_str)
+            if all(
+                key in potential_tool_call
+                for key in ["id", "index", "type", "function"]
+            ):
+                function_part = potential_tool_call["function"]
+                if all(key in function_part for key in ["name", "arguments"]):
+                    potential_tool_call["function"]["arguments"] = (
+                        process_tool_arguments(function_part["arguments"])
+                    )
+                    return potential_tool_call
+        except json.JSONDecodeError:
+            continue  # Move to the next potential JSON object
+
+    return None

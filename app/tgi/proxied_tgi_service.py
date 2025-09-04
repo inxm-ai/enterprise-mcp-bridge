@@ -13,7 +13,11 @@ from app.tgi.models import (
 )
 from app.session import MCPSessionBase
 from app.tgi.prompt_service import PromptService
-from app.tgi.tool_service import ToolService
+from app.tgi.tool_service import (
+    ToolService,
+    extract_tool_call_from_streamed_content,
+    parse_and_clean_tool_call,
+)
 from app.tgi.llm_client import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
@@ -125,6 +129,7 @@ class ProxiedTGIService:
                     f"[ProxiedTGI] Starting to consume LLM stream for iteration {iteration}"
                 )
                 finish_reason = "no reason given"
+                content_message = ""
                 async for raw_chunk in llm_stream_generator:
                     # Remove chunk span to avoid context issues
                     with tracer.start_as_current_span(
@@ -218,17 +223,31 @@ class ProxiedTGIService:
                         if "content" in delta and delta["content"]:
                             # If content is present, just yield
                             chunk_span.set_attribute("stream_chat.content_chunk", True)
+                            content_message += delta["content"]
                             yield raw_chunk
 
                 # After streaming, if any tool calls are ready, execute them ("OF WITH THEIR HEADS!" ah wait, not that type of execute?)
                 with tracer.start_as_current_span("execute_tool_calls") as tool_span:
+                    if not tool_call_chunks and "{" in content_message:
+                        self.logger.debug(
+                            "[ProxiedTGI] No tool call chunks detected but saw curly braces in content, possible LLM confusion"
+                        )
+                        tool_call_chunks = extract_tool_call_from_streamed_content(
+                            content_message
+                        )
+                        if tool_call_chunks:
+                            self.logger.debug(
+                                f"[ProxiedTGI] Extracted {len(tool_call_chunks)} tool call chunks from content"
+                            )
+                            tool_call_ready = set(tool_call_chunks.keys())
+
                     if tool_call_ready:
                         tool_span.set_attribute(
                             "tool_calls.ready_count", len(tool_call_ready)
                         )
                         tool_calls_to_execute = []
                         for tc_index in tool_call_ready:
-                            tc = tool_call_chunks[tc_index]
+                            tc = parse_and_clean_tool_call(tool_call_chunks[tc_index])
                             tool_call = ToolCall(
                                 id=tc["id"],
                                 index=tc["index"],
@@ -330,6 +349,7 @@ class ProxiedTGIService:
 
                         # If we didn't fail, this should repeat the cycle
                         if success:
+                            yield f"data: {json.dumps({'choices':[{'delta':{'content': '<think>I executed the tools successfully, resuming response generation...</think>'},'index':0}]})}\n\n"
                             self.logger.debug(
                                 "[ProxiedTGI] Tool execution successful, continuing to next iteration"
                             )
