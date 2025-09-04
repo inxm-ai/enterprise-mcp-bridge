@@ -1,8 +1,13 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from app.tgi.tool_service import ToolService
 from app.tgi.models import ToolCall, ToolCallFunction, MessageRole
+from app.tgi.tool_service import (
+    ToolService,
+    process_tool_arguments,
+    parse_and_clean_tool_call,
+    extract_tool_call_from_streamed_content,
+)
 
 
 class DummySession:
@@ -261,6 +266,215 @@ class TestToolService:
             "Please fix the error" in result[1].content
             or "No errors to format." in result[1].content
         )
+
+
+def test_process_tool_arguments_valid_simple_json():
+    """Test processing valid simple JSON."""
+    input_str = '{"key": "value"}'
+    result = process_tool_arguments(input_str)
+    expected = '{"key": "value"}'
+    assert result == expected
+
+
+def test_process_tool_arguments_nested_json_string():
+    """Test processing JSON with nested JSON string that gets parsed."""
+    input_str = '{"key": "{\\"nested\\": \\"value\\"}"}'
+    result = process_tool_arguments(input_str)
+    expected = '{"key": {"nested": "value"}}'
+    assert result == expected
+
+
+def test_process_tool_arguments_multiple_nested():
+    """Test processing JSON with multiple nested JSON strings."""
+    input_str = '{"arg1": "{\\"a\\": 1}", "arg2": "{\\"b\\": 2}"}'
+    result = process_tool_arguments(input_str)
+    expected = '{"arg1": {"a": 1}, "arg2": {"b": 2}}'
+    assert result == expected
+
+
+def test_process_tool_arguments_invalid_json():
+    """Test processing invalid JSON returns original string."""
+    input_str = "invalid json"
+    result = process_tool_arguments(input_str)
+    assert result == input_str
+
+
+def test_process_tool_arguments_empty_string():
+    """Test processing empty string."""
+    input_str = ""
+    result = process_tool_arguments(input_str)
+    assert result == input_str
+
+
+def test_process_tool_arguments_non_string_nested():
+    """Test processing JSON with non-string nested values."""
+    input_str = '{"key": 123}'
+    result = process_tool_arguments(input_str)
+    expected = '{"key": 123}'
+    assert result == expected
+
+
+def test_process_tool_arguments_mixed_types():
+    """Test processing JSON with mixed types including valid nested JSON."""
+    input_str = '{"str": "value", "num": 42, "nested": "{\\"inner\\": \\"data\\"}"}'
+    result = process_tool_arguments(input_str)
+    expected = '{"str": "value", "num": 42, "nested": {"inner": "data"}}'
+    assert result == expected
+
+
+def test_parse_and_clean_tool_call_valid_dict():
+    """Test parsing and cleaning valid tool call dict."""
+    tool_call = {"function": {"arguments": '{"param": "{\\"nested\\": \\"value\\"}"}'}}
+    result = parse_and_clean_tool_call(tool_call)
+    expected_arguments = '{"param": {"nested": "value"}}'
+    assert result["function"]["arguments"] == expected_arguments
+
+
+def test_parse_and_clean_tool_call_missing_function():
+    """Test parsing dict without function key."""
+    tool_call = {"other": "data"}
+    result = parse_and_clean_tool_call(tool_call)
+    assert result == tool_call  # Should return unchanged
+
+
+def test_parse_and_clean_tool_call_with_llama_failure_example():
+    tool_call = {
+        "id": "call_w5gydic5",
+        "index": 0,
+        "type": "function",
+        "function": {
+            "name": "create_entities",
+            "arguments": '{"entities":"[{\\"entityType\\": \\"Person\\", \\"name\\": \\"Matthias\\", \\"observations\\": []}, {\\"entityType\\": \\"Department\\", \\"name\\": \\"HR\\", \\"observations\\": []}]"}',
+        },
+    }
+    result = parse_and_clean_tool_call(tool_call)
+    expected_arguments = '{"entities": [{"entityType": "Person", "name": "Matthias", "observations": []}, {"entityType": "Department", "name": "HR", "observations": []}]}'
+    assert result["function"]["arguments"] == expected_arguments
+
+
+def test_parse_and_clean_tool_call_missing_arguments():
+    """Test parsing dict with function but no arguments."""
+    tool_call = {"function": {"name": "test"}}
+    result = parse_and_clean_tool_call(tool_call)
+    assert result == tool_call  # Should return unchanged
+
+
+def test_parse_and_clean_tool_call_arguments_not_string():
+    """Test parsing dict with non-string arguments."""
+    tool_call = {"function": {"arguments": 123}}
+    result = parse_and_clean_tool_call(tool_call)
+    assert result == tool_call  # Should return unchanged
+
+
+def test_parse_and_clean_tool_call_invalid_arguments_json():
+    """Test parsing dict with invalid JSON in arguments."""
+    tool_call = {"function": {"arguments": "invalid json"}}
+    result = parse_and_clean_tool_call(tool_call)
+    assert result["function"]["arguments"] == "invalid json"  # Should remain unchanged
+
+
+def test_extract_tool_call_from_streamed_content_valid_tool_call():
+    """Test extracting valid tool call from content."""
+    content = 'Some text {"id": "call_1", "index": 0, "type": "function", "function": {"name": "test_tool", "arguments": "{}"}} more text'
+    result = extract_tool_call_from_streamed_content(content)
+    expected = {
+        "id": "call_1",
+        "index": 0,
+        "type": "function",
+        "function": {"name": "test_tool", "arguments": "{}"},
+    }
+    assert result == expected
+
+
+def test_extract_tool_call_from_streamed_content_with_nested_arguments():
+    """Test extracting tool call with nested JSON in arguments."""
+    content = '{"id": "call_2", "index": 1, "type": "function", "function": {"name": "nested_tool", "arguments": "{\\"param\\": \\"{\\\\\\"inner\\\\\\": \\\\\\"value\\\\\\"}\\"}"}}'
+    result = extract_tool_call_from_streamed_content(content)
+    expected = {
+        "id": "call_2",
+        "index": 1,
+        "type": "function",
+        "function": {
+            "name": "nested_tool",
+            "arguments": '{"param": {"inner": "value"}}',
+        },
+    }
+    assert result == expected
+
+
+def test_extract_tool_call_from_streamed_content_multiple_json_first_valid():
+    """Test extracting from content with multiple JSON objects, first is valid."""
+    content = '{"id": "call_3", "index": 0, "type": "function", "function": {"name": "first_tool", "arguments": "{}"}} {"invalid": json}'
+    result = extract_tool_call_from_streamed_content(content)
+    expected = {
+        "id": "call_3",
+        "index": 0,
+        "type": "function",
+        "function": {"name": "first_tool", "arguments": "{}"},
+    }
+    assert result == expected
+
+
+def test_extract_tool_call_from_streamed_content_multiple_json_second_valid():
+    """Test extracting from content with multiple JSON objects, second is valid."""
+    content = '{"invalid": "json"} {"id": "call_4", "index": 1, "type": "function", "function": {"name": "second_tool", "arguments": "{\\"key\\": \\"value\\"}"}}'
+    result = extract_tool_call_from_streamed_content(content)
+    expected = {
+        "id": "call_4",
+        "index": 1,
+        "type": "function",
+        "function": {"name": "second_tool", "arguments": '{"key": "value"}'},
+    }
+    assert result == expected
+
+
+def test_extract_tool_call_from_streamed_content_no_valid_json():
+    """Test extracting from content with no valid JSON."""
+    content = "Just some plain text without any JSON objects."
+    result = extract_tool_call_from_streamed_content(content)
+    assert result is None
+
+
+def test_extract_tool_call_from_streamed_content_invalid_json_only():
+    """Test extracting from content with only invalid JSON."""
+    content = '{"invalid": json syntax}'
+    result = extract_tool_call_from_streamed_content(content)
+    assert result is None
+
+
+def test_extract_tool_call_from_streamed_content_missing_required_keys():
+    """Test extracting from content with JSON missing required keys."""
+    content = '{"id": "call_5", "index": 0}'  # Missing type and function
+    result = extract_tool_call_from_streamed_content(content)
+    assert result is None
+
+
+def test_extract_tool_call_from_streamed_content_missing_function_keys():
+    """Test extracting from content with JSON missing function sub-keys."""
+    content = '{"id": "call_6", "index": 0, "type": "function", "function": {"name": "test"}}'  # Missing arguments
+    result = extract_tool_call_from_streamed_content(content)
+    assert result is None
+
+
+def test_extract_tool_call_from_streamed_content_empty_content():
+    """Test extracting from empty content."""
+    content = ""
+    result = extract_tool_call_from_streamed_content(content)
+    assert result is None
+
+
+def test_extract_tool_call_from_streamed_content_json_with_extra_keys():
+    """Test extracting from content with valid JSON plus extra keys."""
+    content = '{"id": "call_7", "index": 0, "type": "function", "function": {"name": "extra_tool", "arguments": "{}"}, "extra": "data"}'
+    result = extract_tool_call_from_streamed_content(content)
+    expected = {
+        "id": "call_7",
+        "index": 0,
+        "type": "function",
+        "function": {"name": "extra_tool", "arguments": "{}"},
+        "extra": "data",
+    }
+    assert result == expected
 
 
 if __name__ == "__main__":
