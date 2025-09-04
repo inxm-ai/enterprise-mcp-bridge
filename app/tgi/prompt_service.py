@@ -39,14 +39,14 @@ class PromptService:
             try:
                 # Get all available prompts
                 prompts_result = await session.list_prompts()
-                if not prompts_result or not hasattr(prompts_result, "prompts"):
+                if not prompts_result or not prompts_result["prompts"]:
                     self.logger.debug(
-                        "[PromptService] No prompts available from MCP server"
+                        f"[PromptService] No prompts available from MCP server: {prompts_result}"
                     )
                     span.set_attribute("prompt.found", False)
                     return None
 
-                prompts = prompts_result.prompts
+                prompts = prompts_result["prompts"]
                 self.logger.debug(
                     f"[PromptService] Found {len(prompts)} prompts available"
                 )
@@ -54,8 +54,8 @@ class PromptService:
                 # If specific prompt name requested, search for it
                 if prompt_name:
                     for prompt in prompts:
-                        if prompt.name == prompt_name:
-                            span.set_attribute("prompt.found_name", prompt.name)
+                        if prompt["name"] == prompt_name:
+                            span.set_attribute("prompt.found_name", prompt["name"])
                             span.set_attribute("prompt.found", True)
                             self.logger.debug(
                                 f"[PromptService] Found requested prompt: {prompt_name}"
@@ -71,23 +71,23 @@ class PromptService:
 
                 # Look for 'system' prompt or one with role=system
                 for prompt in prompts:
-                    if prompt.name == "system":
-                        span.set_attribute("prompt.found_name", prompt.name)
+                    if prompt["name"] == "system":
+                        span.set_attribute("prompt.found_name", prompt["name"])
                         span.set_attribute("prompt.found", True)
                         self.logger.debug("[PromptService] Found 'system' prompt")
                         return prompt
 
                 # Look for any prompt with role information
                 for prompt in prompts:
-                    if hasattr(prompt, "description") and prompt.description:
+                    if prompt["description"]:
                         if (
-                            "role=system" in prompt.description.lower()
-                            or "system" in prompt.description.lower()
+                            "role=system" in prompt["description"].lower()
+                            or "system" in prompt["description"].lower()
                         ):
-                            span.set_attribute("prompt.found_name", prompt.name)
+                            span.set_attribute("prompt.found_name", prompt["name"])
                             span.set_attribute("prompt.found", True)
                             self.logger.debug(
-                                f"[PromptService] Found system-role prompt: {prompt.name}"
+                                f"[PromptService] Found system-role prompt: {prompt['name']}"
                             )
                             return prompt
 
@@ -124,10 +124,10 @@ class PromptService:
                 # As a last resort, return the first prompt
                 if prompts:
                     first_prompt = prompts[0]
-                    span.set_attribute("prompt.found_name", first_prompt.name)
+                    span.set_attribute("prompt.found_name", first_prompt["name"])
                     span.set_attribute("prompt.found", True)
                     self.logger.debug(
-                        f"[PromptService] Using first available prompt (may require args): {first_prompt.name}"
+                        f"[PromptService] Using first available prompt (may require args): {first_prompt['name']}"
                     )
                     return first_prompt
 
@@ -154,11 +154,19 @@ class PromptService:
             The prompt content as a string
         """
         with tracer.start_as_current_span("get_prompt_content") as span:
-            span.set_attribute("prompt.name", prompt.name)
+            span.set_attribute("prompt.name", prompt["name"])
 
             try:
+                if prompt["template"]:
+                    content = prompt["template"]["content"]
+                    self.logger.debug(
+                        f"[PromptService] Retrieved prompt content: {len(content)} characters"
+                    )
+                    span.set_attribute("prompt.content_length", len(content))
+                    return content
+
                 # Call the prompt to get its content
-                result = await session.call_prompt(prompt.name, {})
+                result = await session.call_prompt(prompt["name"], {})
 
                 if result.isError:
                     error_msg = f"Error getting prompt content: {result}"
@@ -251,7 +259,7 @@ class PromptService:
                         )
                         prepared_messages.append(system_message)
                         self.logger.debug(
-                            f"[PromptService] Added system prompt: {prompt.name}"
+                            f"[PromptService] Added system prompt: {prompt['name']}"
                         )
 
                 # Add original messages

@@ -296,6 +296,7 @@ class ToolService:
                 # Fallback for other error types
                 formatted_messages.append(
                     f"An error occurred: '{message}'\n"
+                    f"Make sure you have correctly formatted the json, didn't put any data in strings, or failed to escape special characters. The following message should help you to identify the problem:\n"
                     f"Error details: {json.dumps(error, indent=2)}"
                 )
 
