@@ -32,8 +32,26 @@ KEYCLOAK_ADMIN=admin
 KEYCLOAK_ADMIN_PASSWORD=admin
 # No external LLM needed for this example - it's just demonstrating group-based memory access
 EOF
+
+  # Configure optional LLM connection
+  echo -e "${INFO}🔄 Configuring optional LLM connection...${RESET}"
+  read -p "Enter base URL for LLM API (e.g., https://api.openai.com/v1), or leave empty to skip: " base_url
+  if [ -n "$base_url" ]; then
+    read -p "Enter API token: " api_token
+    read -p "Enter model name: " model_name
+    cat >> "$ENV_FILE" <<EOF
+
+  OAI_BASE_URL=$base_url
+  OAI_API_TOKEN=$api_token
+  OAI_MODEL_NAME=$model_name
+EOF
+    echo -e "${GREEN}✔${RESET} LLM connection added to .env"
+  else
+    echo -e "${INFO}ℹ️ Skipping LLM connection${RESET}"
+  fi
   echo -e "${GREEN}✔${RESET} .env created"
 fi
+
 
 source "$ENV_FILE"
 
