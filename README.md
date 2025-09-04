@@ -716,6 +716,12 @@ These templates are dynamically resolved based on the user's OAuth token and req
 
 ## Use as Agents
 
+As soon as you add the following environment variables to the deployed application, the enterprise mcp bridge will expose endpoints allowing you to use it as an agent:
+
+* TGI_API_URL: The api to your OpenAI API compatible endpoint (ie https://api.openai.com/v1, https://router.huggingface.co/v1)
+* TGI_API_TOKEN (optional): <your_api_token> If required by the service, add the API Token
+* TGI_MODEL_NAME: <your_model_name> The model to use for requests.
+
 Note: Using the mcp with agent capabilities will create token consumption on your LLM deployment. Dynamically generated elements, like the agent card and tool invocations, will incur costs based on the underlying LLM usage.
 
 #### `.well-known/agent.json`
