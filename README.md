@@ -722,7 +722,7 @@ As soon as you add the following environment variables to the deployed applicati
 * TGI_API_TOKEN (optional): <your_api_token> If required by the service, add the API Token
 * TGI_MODEL_NAME: <your_model_name> The model to use for requests.
 
-Note: Using the mcp with agent capabilities will create token consumption on your LLM deployment. Dynamically generated elements, like the agent card and tool invocations, will incur costs based on the underlying LLM usage.
+Note: Using the mcp with agent capabilities will create significant token consumption on your LLM deployment. Dynamically generated elements, like the agent card and tool invocations, will incur costs based on the underlying LLM usage. Based on the number of tools used and the complexity of the tasks, this could lead to vastly increased usage and associated costs.
 
 #### `.well-known/agent.json`
 This file contains metadata about the agent, including its capabilities and configuration options.
