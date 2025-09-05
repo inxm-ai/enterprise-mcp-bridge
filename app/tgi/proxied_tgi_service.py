@@ -241,7 +241,7 @@ class ProxiedTGIService:
 
                         for parsed_call in parsed_tool_calls:
                             if parsed_call.name not in map(
-                                lambda tool: tool.function.name, available_tools
+                                lambda tool: tool["function"]["name"], available_tools
                             ):
                                 self.logger.info(
                                     f"[ProxiedTGI] Tool {parsed_call.name} is not in the available tools, but that might be the LLM hallucinating"
