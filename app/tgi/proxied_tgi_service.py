@@ -15,9 +15,8 @@ from app.session import MCPSessionBase
 from app.tgi.prompt_service import PromptService
 from app.tgi.tool_service import (
     ToolService,
-    extract_tool_call_from_streamed_content,
-    parse_and_clean_tool_call,
 )
+from app.tgi.tool_resolution import ToolResolutionStrategy
 from app.tgi.llm_client import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
@@ -31,6 +30,7 @@ class ProxiedTGIService:
         self.logger = logger
         self.prompt_service = PromptService()
         self.tool_service = ToolService()
+        self.tool_resolution = ToolResolutionStrategy()
         self.llm_client = LLMClient()
 
     async def chat_completion(
@@ -226,39 +226,38 @@ class ProxiedTGIService:
                             content_message += delta["content"]
                             yield raw_chunk
 
-                # After streaming, if any tool calls are ready, execute them ("OF WITH THEIR HEADS!" ah wait, not that type of execute?)
+                # After streaming, resolve tool calls using the new strategy
                 with tracer.start_as_current_span("execute_tool_calls") as tool_span:
-                    if not tool_call_chunks and "{" in content_message:
-                        self.logger.debug(
-                            "[ProxiedTGI] No tool call chunks detected but saw curly braces in content, possible LLM confusion"
+                    # Use the new tool resolution strategy
+                    parsed_tool_calls, resolution_success = (
+                        self.tool_resolution.resolve_tool_calls(
+                            content_message, tool_call_chunks
                         )
-                        tool_call_chunks = extract_tool_call_from_streamed_content(
-                            content_message
-                        )
-                        if tool_call_chunks:
-                            self.logger.debug(
-                                f"[ProxiedTGI] Extracted {len(tool_call_chunks)} tool call chunks from content"
-                            )
-                            tool_call_ready = set(tool_call_chunks.keys())
+                    )
 
-                    if tool_call_ready:
+                    if parsed_tool_calls:
                         tool_span.set_attribute(
-                            "tool_calls.ready_count", len(tool_call_ready)
+                            "tool_calls.resolved_count", len(parsed_tool_calls)
                         )
                         tool_calls_to_execute = []
-                        for tc_index in tool_call_ready:
-                            tc = parse_and_clean_tool_call(tool_call_chunks[tc_index])
+
+                        for parsed_call in parsed_tool_calls:
                             tool_call = ToolCall(
-                                id=tc["id"],
-                                index=tc["index"],
+                                id=parsed_call.id,
+                                index=parsed_call.index,
                                 function={
-                                    "name": tc["name"],
-                                    "arguments": tc["arguments"],
+                                    "name": parsed_call.name,
+                                    "arguments": json.dumps(parsed_call.arguments),
                                     "description": "",
                                     "parameters": {},
                                 },
                             )
                             tool_calls_to_execute.append(tool_call)
+
+                            # Log the format detected for each tool call
+                            self.logger.debug(
+                                f"[ProxiedTGI] Resolved {parsed_call.format.value} tool call: {parsed_call.name}"
+                            )
 
                         # For the LLM
                         messages_history.append(
@@ -365,10 +364,10 @@ class ProxiedTGIService:
                         # Continue to next iteration (both success and error paths)
                         continue
                     else:
-                        # No tool calls, break loop, we are probably done
-                        tool_span.set_attribute("tool_calls.ready_count", 0)
+                        # No tool calls resolved, break loop, we are probably done
+                        tool_span.set_attribute("tool_calls.resolved_count", 0)
                         self.logger.debug(
-                            f"[ProxiedTGI] No tool calls in iteration {iteration}, breaking loop"
+                            f"[ProxiedTGI] No tool calls resolved in iteration {iteration}, breaking loop"
                         )
                         break
 

@@ -53,7 +53,8 @@ def test_default_prompt_list_result(system_prompts):
     result = prompt_helper.default_prompt_list_result(system_prompts)
     assert "prompts" in result
     assert result["prompts"][0]["name"] == "greeting"
-    assert "template" not in result["prompts"][0]
+    assert "template" in result["prompts"][0]
+    assert result["prompts"][0]["template"]["content"] == "Hello, {name}!"
 
 
 def test_system_defined_prompts(system_prompts):

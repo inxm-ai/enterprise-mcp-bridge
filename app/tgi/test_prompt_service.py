@@ -13,9 +13,7 @@ class MockMCPSession:
 
     async def list_prompts(self):
         """Mock list_prompts method."""
-        mock_result = Mock()
-        mock_result.prompts = self.prompts
-        return mock_result
+        return {"prompts": self.prompts}
 
     async def call_prompt(self, name, args):
         """Mock call_prompt method."""
@@ -25,7 +23,7 @@ class MockMCPSession:
 
         # Find the prompt and return mock content
         for prompt in self.prompts:
-            if prompt.name == name:
+            if prompt["name"] == name:
                 mock_message = Mock()
                 mock_message.content = Mock()
                 mock_message.content.text = f"System prompt from {name}"
@@ -38,13 +36,17 @@ class MockMCPSession:
 @pytest.fixture
 def mock_prompts():
     """Create mock prompts for testing."""
-    system_prompt = Mock()
-    system_prompt.name = "system"
-    system_prompt.description = "System prompt with role=system"
+    system_prompt = {
+        "name": "system",
+        "description": "System prompt with role=system",
+        "template": {"role": "system", "content": "System prompt from system"},
+    }
 
-    custom_prompt = Mock()
-    custom_prompt.name = "custom"
-    custom_prompt.description = "Custom prompt"
+    custom_prompt = {
+        "name": "custom",
+        "description": "Custom prompt",
+        "template": {"role": "system", "content": "Custom prompt content"},
+    }
 
     return [system_prompt, custom_prompt]
 
@@ -66,7 +68,7 @@ class TestPromptService:
         result = await prompt_service.find_prompt_by_name_or_role(session, "custom")
 
         assert result is not None
-        assert result.name == "custom"
+        assert result["name"] == "custom"
 
     @pytest.mark.asyncio
     async def test_find_prompt_by_name_or_role_no_prompts(self, prompt_service):

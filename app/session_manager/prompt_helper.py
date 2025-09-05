@@ -24,15 +24,22 @@ class Prompt:
     title: str
     description: str
     arguments: list[dict]
-    template: str
+    template: dict  # Changed from str to dict to match expected structure
+
+    def to_dict(self) -> dict:
+        """Convert the prompt to a dictionary."""
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "arguments": self.arguments,
+            "template": self.template,
+        }
 
 
-def default_prompt_list_result(prompts: list[Prompt] = []):
-    return {
-        "_meta": None,
-        "nextCursor": None,
-        "prompts": [{k: v for k, v in prompt.__dict__.items()} for prompt in prompts],
-    }
+def default_prompt_list_result(prompts: list[Prompt]) -> dict[str, list[dict]]:
+    """Convert prompts to the default MCP list format."""
+    return {"prompts": [prompt.to_dict() for prompt in prompts]}
 
 
 def system_defined_prompts() -> list[Prompt]:
@@ -46,9 +53,7 @@ async def list_prompts(list_prompts: any):
     system_prompts = system_defined_prompts()
     try:
         prompts = await list_prompts()
-        prompts.prompts += [
-            {k: v for k, v in prompt.__dict__.items()} for prompt in system_prompts
-        ]
+        prompts.prompts += [prompt.to_dict() for prompt in system_prompts]
     except Exception as e:
         logger.warning(f"[PromptHelper] Error listing prompts: {str(e)}")
         # Not every MCP has list_prompts, so deal with it friendly

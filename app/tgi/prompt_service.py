@@ -94,7 +94,7 @@ class PromptService:
                 # Prefer prompts that don't require arguments as fallback
                 def _requires_args(p) -> bool:
                     try:
-                        args = getattr(p, "arguments", None)
+                        args = p.get("arguments", None)
                         if args is None:
                             return False
                         # If it's a list and non-empty, assume it requires args
@@ -113,11 +113,11 @@ class PromptService:
                 if no_arg_prompts:
                     chosen = no_arg_prompts[0]
                     span.set_attribute(
-                        "prompt.found_name", getattr(chosen, "name", "unknown")
+                        "prompt.found_name", chosen.get("name", "unknown")
                     )
                     span.set_attribute("prompt.found", True)
                     self.logger.debug(
-                        f"[PromptService] Using first available no-arg prompt: {getattr(chosen, 'name', 'unknown')}"
+                        f"[PromptService] Using first available no-arg prompt: {chosen.get('name', 'unknown')}"
                     )
                     return chosen
 
@@ -157,7 +157,7 @@ class PromptService:
             span.set_attribute("prompt.name", prompt["name"])
 
             try:
-                if prompt["template"]:
+                if "template" in prompt and prompt["template"]:
                     content = prompt["template"]["content"]
                     self.logger.debug(
                         f"[PromptService] Retrieved prompt content: {len(content)} characters"

@@ -11,9 +11,10 @@ client = TestClient(router)
 
 
 @pytest.fixture(autouse=True)
-def _set_env():
+def _set_env(monkeypatch):
     os.environ["TGI_URL"] = "https://api.test-llm.com/v1"
     os.environ["TGI_TOKEN"] = "test-token-123"
+    monkeypatch.setattr("app.tgi.routes.DEFAULT_MODEL", "test-model")
 
 
 @pytest.mark.asyncio
@@ -81,4 +82,5 @@ async def test_a2a_chat_completion_non_streaming(monkeypatch):
     response_json = response.json()
     assert response_json["jsonrpc"] == "2.0"
     assert response_json["id"] == "1"
+    assert response_json["error"] is None
     assert "Hello World!" in response_json["result"]["completion"]
