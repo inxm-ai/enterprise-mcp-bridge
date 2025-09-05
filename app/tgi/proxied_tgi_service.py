@@ -226,9 +226,7 @@ class ProxiedTGIService:
                             content_message += delta["content"]
                             yield raw_chunk
 
-                # After streaming, resolve tool calls using the new strategy
                 with tracer.start_as_current_span("execute_tool_calls") as tool_span:
-                    # Use the new tool resolution strategy
                     parsed_tool_calls, resolution_success = (
                         self.tool_resolution.resolve_tool_calls(
                             content_message, tool_call_chunks
@@ -242,6 +240,13 @@ class ProxiedTGIService:
                         tool_calls_to_execute = []
 
                         for parsed_call in parsed_tool_calls:
+                            if parsed_call.name not in map(
+                                lambda tool: tool.function.name, available_tools
+                            ):
+                                self.logger.info(
+                                    f"[ProxiedTGI] Tool {parsed_call.name} is not in the available tools, but that might be the LLM hallucinating"
+                                )
+                                continue
                             tool_call = ToolCall(
                                 id=parsed_call.id,
                                 index=parsed_call.index,
