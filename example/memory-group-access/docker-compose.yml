@@ -99,7 +99,6 @@ services:
       - app-frontend
       - app-mcp-rest
     environment:
-      - OAI_HOST=${OAI_HOST}
       - OAI_BASE_URL=${OAI_BASE_URL}
       - OAI_API_TOKEN=${OAI_API_TOKEN}
       - OAI_MODEL_NAME=${OAI_MODEL_NAME}
