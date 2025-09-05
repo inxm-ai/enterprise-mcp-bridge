@@ -360,10 +360,10 @@ class ProxiedTGIService:
                             tool_span.set_attribute("tool_calls.success", True)
                         else:
                             failure_report = "<think>The tool call failed. I will try to adjust my approach</think>"
-                            yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': tc_index}]})}\n\n"
                             self.logger.info(
-                                "[ProxiedTGI] Tool execution failed, asking the llm the tool call"
+                                "[ProxiedTGI] Tool execution failed, asking the llm to fix the tool call"
                             )
+                            yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\n\n"
                             tool_span.set_attribute("tool_calls.success", False)
 
                         # Continue to next iteration (both success and error paths)
