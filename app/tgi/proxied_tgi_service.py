@@ -268,7 +268,7 @@ class ProxiedTGIService:
                         messages_history.append(
                             Message(
                                 role=MessageRole.ASSISTANT,
-                                content=None,
+                                content=f"Calling {len(tool_calls_to_execute)} tools",
                                 tool_calls=tool_calls_to_execute,
                             )
                         )
