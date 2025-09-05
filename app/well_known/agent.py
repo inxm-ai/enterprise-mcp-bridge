@@ -19,13 +19,26 @@ def get_description(reply: str) -> str:
 
 
 def get_as_list(reply: str) -> list[str]:
-    examples = reply.split("\n") if reply else []
-    examples = [
-        ex.strip("-* ").strip()
-        for ex in examples
-        if ex.strip() and (ex.lstrip().startswith("-") or ex.lstrip().startswith("*"))
-    ]
-    return examples
+    if not reply:
+        return []
+    lines = reply.split("\n")
+    items = []
+    current = None
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("-") or stripped.startswith("*"):
+            content = stripped[1:].strip()
+            if current is not None:
+                items.append(current)
+            current = content
+        elif current is not None:
+            if line.strip() == "":
+                current += "\n"
+            else:
+                current += "\n" + line
+    if current is not None:
+        items.append(current)
+    return [item.strip() for item in items]
 
 
 @router.get("/.well-known/agent.json")
@@ -126,7 +139,7 @@ async def get_agent_card():
                 )
                 if "inputSchema" in tool:
                     tool_examples = await llm.ask(
-                        base_prompt="You are an Agent prompt example generator. Based on the tool description and inputSchema, generate a few examples (show the example json) for how the tool can be used. If the properties are empty, just return a single example with `\{\}` Create the examples as unordered markdown list, and only return the examples.",
+                        base_prompt=r"You are an Agent prompt example generator. Based on the tool description and inputSchema, generate a few examples (show the example json) for how the tool can be used. If the properties are empty, just return a single example with `\{\}` Create the examples as unordered markdown list, and only return the examples.",
                         question=f"Generate examples for: {tool['description']}\n\nInput Schema:\n```json\n{tool['inputSchema']}\n```",
                         base_request=base_request,
                         outer_span=span,

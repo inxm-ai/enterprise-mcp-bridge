@@ -101,6 +101,29 @@ def reset_agent_globals():
     yield
 
 
+def test_get_as_list():
+    assert agent_module.get_as_list("") == []
+    assert agent_module.get_as_list("No bullets here") == []
+    assert agent_module.get_as_list("- First item\n- Second item") == [
+        "First item",
+        "Second item",
+    ]
+    assert agent_module.get_as_list("* Item one\n* Item two\n* Item three") == [
+        "Item one",
+        "Item two",
+        "Item three",
+    ]
+    assert agent_module.get_as_list(
+        "  - Mixed bullet\nSome text\n  * Another bullet\n- Last bullet"
+    ) == ["Mixed bullet\nSome text", "Another bullet", "Last bullet"]
+    assert agent_module.get_as_list(
+        '- ```json\n  { "name": "-value" }\n   ```\n- ```json\n  { "name": "-value" }\n   ```\n'
+    ) == [
+        '```json\n  { "name": "-value" }\n   ```',
+        '```json\n  { "name": "-value" }\n   ```',
+    ]
+
+
 @pytest.mark.asyncio
 async def test_get_agent_card_happy_case(
     mock_llm_client, mock_mcp_session, mock_get_server_params, ensure_default_model
