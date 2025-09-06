@@ -393,17 +393,17 @@ class ToolService:
     async def execute_tool_calls(
         self,
         session: MCPSessionBase,
-        tool_calls: List[ToolCall],
+        tool_calls: List[Tuple[ToolCall, ToolCallFormat]],
         access_token: Optional[str],
         parent_span,
     ) -> Tuple[List[Message], bool]:
         """Execute multiple tool calls and return tool result messages."""
         tool_results = []
         success = True
-        # Part of the todo to verify arguments before calling the toolp
+        # Part of the todo to verify arguments before calling the tool
         available_tools = map_tools(await session.list_tools())
 
-        for tool_call in tool_calls:
+        for tool_call, tool_call_format in tool_calls:
             try:
                 tool_call = fix_tool_arguments(tool_call, available_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
@@ -413,7 +413,7 @@ class ToolService:
                     success = False
 
                 tool_message = await self.create_result_message(
-                    tool_call.format, result
+                    tool_call_format, result
                 )
                 tool_results.append(tool_message)
             except Exception as e:
@@ -422,7 +422,7 @@ class ToolService:
                 self.logger.error(f"[ToolService] {error_msg}")
 
                 error_message = await self.create_result_message(
-                    tool_call.format,
+                    tool_call_format,
                     {
                         "name": getattr(tool_call.function, "name", None),
                         "tool_call_id": tool_call.id,
@@ -431,7 +431,7 @@ class ToolService:
                 )
                 tool_results.append(error_message)
                 parsed_errors = self._parse_json_array_from_message(error_msg)
-                if tool_call.format != ToolCallFormat.CLAUDE_XML:
+                if tool_call_format != ToolCallFormat.CLAUDE_XML:
                     user_asks_for_correction = Message(
                         role=MessageRole.USER,
                         content=(

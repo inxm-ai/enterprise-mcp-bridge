@@ -2,7 +2,6 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List, Union, Any
 from enum import Enum
 
-from app.tgi.tool_resolution import ToolCallFormat
 
 
 class MessageRole(str, Enum):
@@ -20,7 +19,6 @@ class ToolCallFunction(BaseModel):
 class ToolCall(BaseModel):
     id: str
     type: str = "function"
-    format: ToolCallFormat = ToolCallFormat.OPENAI_JSON
     function: ToolCallFunction
 
 

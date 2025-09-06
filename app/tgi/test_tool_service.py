@@ -242,7 +242,7 @@ class TestToolService:
         session = DummySession()
         tool_call = make_tool_call()
         result, success = await tool_service.execute_tool_calls(
-            session, [tool_call], None, None
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
         )
         print(result)
         assert success
@@ -257,7 +257,7 @@ class TestToolService:
         session = ErrorSession()
         tool_call = make_tool_call()
         result, success = await tool_service.execute_tool_calls(
-            session, [tool_call], None, None
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
         )
         assert not success
         assert len(result) == 1
@@ -269,7 +269,7 @@ class TestToolService:
         session = ExceptionSession(list_tools_fails=False)
         tool_call = make_tool_call()
         result, success = await tool_service.execute_tool_calls(
-            session, [tool_call], None, None
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
         )
         assert not success
         assert len(result) == 2

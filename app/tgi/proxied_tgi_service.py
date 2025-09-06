@@ -10,6 +10,7 @@ from app.tgi.models import (
     MessageRole,
     Tool,
     ToolCall,
+    ToolCallFunction,
 )
 from app.session import MCPSessionBase
 from app.tgi.prompt_service import PromptService
@@ -73,7 +74,7 @@ class ProxiedTGIService:
         self,
         session: MCPSessionBase,
         messages: List[Message],
-        available_tools: List[Tool],
+        available_tools: List[dict],
         chat_request: ChatCompletionRequest,
         access_token: Optional[str],
         parent_span,
@@ -246,16 +247,14 @@ class ProxiedTGIService:
                                 continue
                             tool_call = ToolCall(
                                 id=parsed_call.id,
-                                index=parsed_call.index,
-                                format=parsed_call.format,
-                                function={
-                                    "name": parsed_call.name,
-                                    "arguments": json.dumps(parsed_call.arguments),
-                                    "description": "",
-                                    "parameters": {},
-                                },
+                                function=ToolCallFunction(
+                                    name=parsed_call.name,
+                                    arguments=json.dumps(parsed_call.arguments),
+                                ),
                             )
-                            tool_calls_to_execute.append(tool_call)
+                            tool_calls_to_execute.append(
+                                (tool_call, parsed_call.format)
+                            )
 
                             # Log the format detected for each tool call
                             self.logger.debug(
@@ -268,7 +267,7 @@ class ProxiedTGIService:
                                 Message(
                                     role=MessageRole.ASSISTANT,
                                     content=content_message,
-                                    tool_calls=tool_calls_to_execute,
+                                    tool_calls=[tc for tc, _ in tool_calls_to_execute],
                                 )
                             )
 
