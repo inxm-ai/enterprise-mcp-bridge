@@ -92,12 +92,14 @@ async def test_streaming_tool_call_merging_and_status_messages():
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="What's the weather in Berlin?")]
     available_tools = [
-        Tool(
-            type="function",
-            function=FunctionDefinition(
-                name="get_weather", description="", parameters={}
-            ),
-        )
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "",
+                "parameters": {},
+            },
+        }
     ]
     chat_request = ChatCompletionRequest(
         messages=messages, model="test-model", stream=True
@@ -185,14 +187,22 @@ async def test_streaming_multiple_tool_calls_parallel():
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Do two things.")]
     available_tools = [
-        Tool(
-            type="function",
-            function=FunctionDefinition(name="func1", description="", parameters={}),
-        ),
-        Tool(
-            type="function",
-            function=FunctionDefinition(name="func2", description="", parameters={}),
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "func1",
+                "description": "",
+                "parameters": {},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "func2",
+                "description": "",
+                "parameters": {},
+            },
+        },
     ]
     chat_request = ChatCompletionRequest(
         messages=messages, model="test-model", stream=True
@@ -248,10 +258,14 @@ async def test_streaming_tool_call_missing_arguments():
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Call func1.")]
     available_tools = [
-        Tool(
-            type="function",
-            function=FunctionDefinition(name="func1", description="", parameters={}),
-        )
+        {
+            "type": "function",
+            "function": {
+                "name": "func1",
+                "description": "",
+                "parameters": {},
+            },
+        }
     ]
     chat_request = ChatCompletionRequest(
         messages=messages, model="test-model", stream=True
@@ -375,10 +389,14 @@ async def test_streaming_tool_call_chunked_arguments():
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Call func1.")]
     available_tools = [
-        Tool(
-            type="function",
-            function=FunctionDefinition(name="func1", description="", parameters={}),
-        )
+        {
+            "type": "function",
+            "function": {
+                "name": "func1",
+                "description": "",
+                "parameters": {},
+            },
+        }
     ]
     chat_request = ChatCompletionRequest(
         messages=messages, model="test-model", stream=True
