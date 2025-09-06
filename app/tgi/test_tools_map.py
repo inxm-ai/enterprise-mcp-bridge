@@ -1,8 +1,43 @@
 import pytest
 from .tools_map import map_tools
 
-# test_tools_map.py
-
+def test_map_tools():
+    tools = [
+        {
+            "name": "get_weather",
+            "description": "Get the current weather for a given location.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA",
+                    }
+                },
+            },
+        }
+    ]
+    result = map_tools(tools)
+    assert isinstance(result, list)
+    expected = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a given location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        }
+                    },
+                },
+            },
+        }
+    ]
+    assert result == expected
 
 def test_map_tools_basic_inlining():
     tools = [
