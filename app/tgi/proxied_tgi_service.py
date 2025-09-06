@@ -80,9 +80,6 @@ class ProxiedTGIService:
     ) -> AsyncGenerator[str, None]:
         """Stream chat completion with tool handling, supporting tool calls."""
         messages_history = messages.copy()
-        user_request = " ".join(
-            message.content for message in messages if message.role == MessageRole.USER
-        )
         max_iterations = 10
         iteration = 0
         with tracer.start_as_current_span("stream_chat_with_tools") as outer_span:
@@ -294,62 +291,6 @@ class ProxiedTGIService:
                         tool_span.set_attribute(
                             "tool_calls.executed_count", len(tool_results)
                         )
-                        # tool calls might be quite lengthy. Check their size, and if they are huge start summarizing their contents entry by entry via llm
-                        for result in tool_results:
-                            if isinstance(result.content, list):
-                                # Summarize each item in the list if it's too long
-                                summarized_items = []
-                                for idx, item in enumerate(result.content):
-                                    item_text = (
-                                        item.text
-                                        if hasattr(item, "text")
-                                        else str(item)
-                                    )
-                                    if len(item_text) > 10000:
-                                        self.logger.debug(
-                                            f"[ProxiedTGI] Reading tool response, location 0 to {len(item_text)}"
-                                        )
-                                        yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Summarizing tool result item {idx+1}...</think>'},'index':0}]})}\n\n"
-                                        summary = await self.llm_client.summarize_text(
-                                            chat_request,
-                                            user_request,
-                                            item_text,
-                                            access_token,
-                                            parent_span,
-                                        )
-                                        summarized_items.append(summary)
-                                    else:
-                                        summarized_items.append(item)
-                                result.content = summarized_items
-                            elif len(str(result.content)) > 10000:
-                                text_to_summarize = str(result.content)
-                                chunk_size = 10000
-                                chunks = [
-                                    text_to_summarize[i : i + chunk_size]
-                                    for i in range(
-                                        0, len(text_to_summarize), chunk_size
-                                    )
-                                ]
-                                summarized_chunks = []
-                                self.logger.debug(
-                                    f"[ProxiedTGI] Total chunks to summarize: {len(chunks)}"
-                                )
-                                for idx, chunk in enumerate(chunks):
-                                    start = idx * chunk_size
-                                    end = start + len(chunk)
-                                    self.logger.debug(
-                                        f"[ProxiedTGI] Reading tool response, location {start} to {end}"
-                                    )
-                                    yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Summarizing tool result chunk {idx+1}...</think>'},'index':0}]})}\n\n"
-                                    summary = await self.llm_client.summarize_text(
-                                        chat_request,
-                                        user_request,
-                                        chunk,
-                                        access_token,
-                                        parent_span,
-                                    )
-                                    summarized_chunks.append(summary)
-                                result.content = "\n".join(summarized_chunks)
 
                         messages_history.extend(tool_results)
 
