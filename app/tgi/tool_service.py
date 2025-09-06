@@ -315,9 +315,12 @@ class ToolService:
         """Execute multiple tool calls and return tool result messages."""
         tool_results = []
         success = True
+        # Part of the todo to verify arguments before calling the tool
+        # available_tools = map_tools(await session.list_tools())
 
         for tool_call in tool_calls:
             try:
+                # TODO: Before calling tool, verify arguments
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
                 if "error" in result["content"]:

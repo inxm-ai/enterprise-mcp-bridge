@@ -12,7 +12,7 @@ class MessageRole(str, Enum):
 
 class ToolCallFunction(BaseModel):
     name: str
-    arguments: str
+    arguments: str  # JSON string
 
 
 class ToolCall(BaseModel):

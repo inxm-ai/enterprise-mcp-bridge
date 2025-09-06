@@ -6,8 +6,6 @@ from app.tgi.models import (
     ChatCompletionRequest,
     Message,
     MessageRole,
-    Tool,
-    FunctionDefinition,
 )
 
 

@@ -1,6 +1,7 @@
 import pytest
 from .tools_map import map_tools
 
+
 def test_map_tools():
     tools = [
         {
@@ -38,6 +39,7 @@ def test_map_tools():
         }
     ]
     assert result == expected
+
 
 def test_map_tools_basic_inlining():
     tools = [
