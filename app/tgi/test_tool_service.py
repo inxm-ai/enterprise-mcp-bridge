@@ -1,9 +1,12 @@
 import pytest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
-from app.tgi.models import ToolCall, ToolCallFunction, MessageRole
+from app.tgi.tool_service import ToolService
+from app.tgi.models import Message, MessageRole
+from app.tgi.tool_resolution import ToolCallFormat
+from app.tgi.models import ToolCall, ToolCallFunction
 from app.tgi.tool_service import (
-    ToolService,
     process_tool_arguments,
     parse_and_clean_tool_call,
     extract_tool_call_from_streamed_content,
@@ -486,6 +489,96 @@ def test_extract_tool_call_from_streamed_content_json_with_extra_keys():
         "extra": "data",
     }
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_basic():
+    service = ToolService()
+    tool_result = {
+        "content": "result content",
+        "tool_call_id": "abc123",
+        "name": "my_tool",
+    }
+    msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
+    assert isinstance(msg, Message)
+    assert msg.role == MessageRole.TOOL
+    assert msg.content == "result content"
+    assert msg.tool_call_id == "abc123"
+    assert msg.name == "my_tool"
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_claude_xml():
+    service = ToolService()
+    tool_result = {
+        "content": "42",
+        "tool_call_id": "id789",
+        "name": "sum_numbers",
+    }
+    msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
+    assert isinstance(msg, Message)
+    assert msg.role == MessageRole.ASSISTANT
+    assert msg.tool_call_id == "id789"
+    assert msg.name == "sum_numbers"
+    assert msg.content == "<sum_numbers_result>42</sum_numbers_result>"
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_claude_xml_missing_fields():
+    service = ToolService()
+    tool_result = {}
+    msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
+    assert msg.role == MessageRole.ASSISTANT
+    assert msg.content == "<None_result></None_result>"
+    assert msg.tool_call_id is None
+    assert msg.name is None
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_missing_fields():
+    service = ToolService()
+    tool_result = {}
+    msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
+    assert msg.content == ""
+    assert msg.tool_call_id is None
+    assert msg.name is None
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_with_extra_fields():
+    service = ToolService()
+    tool_result = {
+        "content": "extra content",
+        "tool_call_id": "id456",
+        "name": "tool_x",
+        "extra": "should be ignored",
+    }
+    msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
+    assert msg.content == "extra content"
+    assert msg.tool_call_id == "id456"
+    assert msg.name == "tool_x"
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_summarizes_long_content(monkeypatch):
+    service = ToolService()
+    long_text = "a" * 12000
+    tool_result = {
+        "content": long_text,
+        "tool_call_id": "long1",
+        "name": "big_tool",
+    }
+
+    async def fake_summarize(
+        base_request, user_request, content, access_token, outer_span
+    ):
+        return "SHORT_SUMMARY"
+
+    # attach fake llm client
+    service.llm_client = SimpleNamespace(summarize_text=fake_summarize)
+
+    msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
+    assert msg.content == "SHORT_SUMMARY"
 
 
 if __name__ == "__main__":

@@ -66,7 +66,6 @@ def test_fix_tool_arguments_camel_to_snake():
     tool_call = make_tool_call("my_tool", {"argumentName": "value"})
     fixed = fix_tool_arguments(tool_call, [tool_def])
     args = json.loads(fixed.function.arguments)
-    # This will fail until the function is improved to map camelCase to snake_case
     assert args == {"argument_name": "value"}
 
 
@@ -75,7 +74,6 @@ def test_fix_tool_arguments_snake_to_camel():
     tool_call = make_tool_call("my_tool", {"argument_name": "value"})
     fixed = fix_tool_arguments(tool_call, [tool_def])
     args = json.loads(fixed.function.arguments)
-    # This will fail until the function is improved to map snake_case to camelCase
     assert args == {"argumentName": "value"}
 
 
@@ -84,7 +82,6 @@ def test_fix_tool_arguments_case_insensitive():
     tool_call = make_tool_call("my_tool", {"argumentname": "value"})
     fixed = fix_tool_arguments(tool_call, [tool_def])
     args = json.loads(fixed.function.arguments)
-    # This will fail until the function is improved to handle case insensitivity
     assert args == {"ArgumentName": "value"}
 
 

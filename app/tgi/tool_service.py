@@ -9,8 +9,11 @@ from opentelemetry import trace
 
 from app.models import RunToolResultContent
 from app.tgi.models import Message, MessageRole, Tool, ToolCall
+from app.tgi.llm_client import LLMClient
+from app.tgi.models import ChatCompletionRequest
 from app.session import MCPSessionBase
 from app.tgi.tool_argument_fixer_service import fix_tool_arguments
+from app.tgi.tool_resolution import ToolCallFormat
 from app.tgi.tools_map import map_tools
 
 logger = logging.getLogger("uvicorn.error")
@@ -22,6 +25,13 @@ class ToolService:
 
     def __init__(self):
         self.logger = logger
+        # llm client used for optional summarization of large tool outputs
+        try:
+            self.llm_client = LLMClient()
+        except Exception:
+            # Keep ToolService usable in tests/environments where LLMClient
+            # may not initialize cleanly
+            self.llm_client = None
 
     async def get_all_mcp_tools(
         self, session: MCPSessionBase, parent_span=None
@@ -306,6 +316,73 @@ class ToolService:
 
         return "\n\n".join(formatted_messages)
 
+    async def create_result_message(
+        self, format: ToolCallFormat, tool_result: Dict[str, Any]
+    ) -> Message:
+        """Create a Message object from a tool result dictionary.
+
+        If the tool result content is very large (>10000 characters) and an
+        LLM client is available, try to summarize it via
+        llm_client.summarize_text.
+        """
+        content = tool_result.get("content", "")
+
+        # Normalize content into a string for size checks and message creation.
+        # If content is not a string, try to JSON-dump it; if that fails, fallback to str().
+        if isinstance(content, str):
+            text_content = content
+        else:
+            try:
+                text_content = json.dumps(content)
+            except Exception:
+                text_content = str(content)
+
+        # If content is very large and we have an llm client, try to summarize it.
+        if len(text_content) > 10000 and getattr(self, "llm_client", None):
+            try:
+                # Create a minimal ChatCompletionRequest to allow summarize_text
+                base_request = ChatCompletionRequest(messages=[], model=None)
+                # ask the LLM client to summarize the large content
+                summary = await self.llm_client.summarize_text(
+                    base_request, "Summarize tool output", text_content, None, None
+                )
+                # If summarize_text returns a value, use it; otherwise fall back
+                if summary:
+                    content = summary
+                else:
+                    # keep original long content if no summary returned
+                    content = text_content
+            except Exception:
+                # On any summarization failure, keep the original content
+                content = text_content
+        else:
+            # Ensure the content used in the Message is a string
+            if not isinstance(content, str):
+                content = text_content
+
+        if format == ToolCallFormat.OPENAI_JSON:
+            return Message(
+                role=MessageRole.TOOL,
+                content=content,
+                tool_call_id=tool_result.get("tool_call_id"),
+                name=tool_result.get("name"),
+            )
+        elif format == ToolCallFormat.CLAUDE_XML:
+            name = tool_result.get("name")
+            xml_tag = f"<{name}_result>{content}</{name}_result>"
+            return Message(
+                role=MessageRole.ASSISTANT,
+                content=xml_tag,
+                tool_call_id=tool_result.get("tool_call_id"),
+                name=name,
+            )
+        return Message(
+            role=MessageRole.TOOL,
+            content=content,
+            tool_call_id=tool_result.get("tool_call_id"),
+            name=tool_result.get("name"),
+        )
+
     async def execute_tool_calls(
         self,
         session: MCPSessionBase,
@@ -324,39 +401,39 @@ class ToolService:
                 tool_call = fix_tool_arguments(tool_call, available_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
-                if "error" in result["content"]:
+                content_check = result.get("content")
+                if isinstance(content_check, str) and "error" in content_check:
                     success = False
-                tool_message = Message(
-                    role=MessageRole.TOOL,
-                    content=result["content"],
-                    tool_call_id=result["tool_call_id"],
-                    name=result["name"],
+
+                tool_message = await self.create_result_message(
+                    tool_call.format, result
                 )
                 tool_results.append(tool_message)
             except Exception as e:
                 # If tool execution fails completely, create an error message
-                error_msg = (
-                    f"Failed to execute tool {tool_call.function.name}: {str(e)}"
-                )
+                error_msg = f"Failed to execute tool {getattr(tool_call.function, 'name', 'unknown')}: {str(e)}"
                 self.logger.error(f"[ToolService] {error_msg}")
 
-                error_message = Message(
-                    role=MessageRole.TOOL,
-                    content=json.dumps({"error": error_msg}),
-                    tool_call_id=tool_call.id,
-                    name=tool_call.function.name,
+                error_message = await self.create_result_message(
+                    tool_call.format,
+                    {
+                        "name": getattr(tool_call.function, "name", None),
+                        "tool_call_id": tool_call.id,
+                        "content": {"error": error_msg},
+                    },
                 )
                 tool_results.append(error_message)
                 parsed_errors = self._parse_json_array_from_message(error_msg)
-                user_asks_for_correction = Message(
-                    role=MessageRole.USER,
-                    content=(
-                        self._format_errors(parsed_errors)
-                        if parsed_errors
-                        else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {tool_call.function.name} with the corrected arguments again."
-                    ),
-                )
-                tool_results.append(user_asks_for_correction)
+                if tool_call.format != ToolCallFormat.CLAUDE_XML:
+                    user_asks_for_correction = Message(
+                        role=MessageRole.USER,
+                        content=(
+                            self._format_errors(parsed_errors)
+                            if parsed_errors
+                            else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {getattr(tool_call.function, 'name', 'unknown')} with the corrected arguments again."
+                        ),
+                    )
+                    tool_results.append(user_asks_for_correction)
                 success = False
                 break
 

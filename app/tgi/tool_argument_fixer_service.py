@@ -62,7 +62,6 @@ def fix_tool_arguments(tool_call: ToolCall, available_tools: list[dict]) -> Tool
             if isinstance(value, int):
                 return bool(value)
             return value
-        # Add more types as needed
         return value
 
     def fix_args(args, properties):

@@ -16,7 +16,7 @@ from app.tgi.prompt_service import PromptService
 from app.tgi.tool_service import (
     ToolService,
 )
-from app.tgi.tool_resolution import ToolResolutionStrategy
+from app.tgi.tool_resolution import ToolCallFormat, ToolResolutionStrategy
 from app.tgi.llm_client import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
@@ -250,6 +250,7 @@ class ProxiedTGIService:
                             tool_call = ToolCall(
                                 id=parsed_call.id,
                                 index=parsed_call.index,
+                                format=parsed_call.format,
                                 function={
                                     "name": parsed_call.name,
                                     "arguments": json.dumps(parsed_call.arguments),
@@ -264,14 +265,15 @@ class ProxiedTGIService:
                                 f"[ProxiedTGI] Resolved {parsed_call.format.value} tool call: {parsed_call.name}"
                             )
 
-                        # For the LLM
-                        messages_history.append(
-                            Message(
-                                role=MessageRole.ASSISTANT,
-                                content=f"Calling {len(tool_calls_to_execute)} tools",
-                                tool_calls=tool_calls_to_execute,
+                        # For the LLM, if not claude like
+                        if tool_calls_to_execute[0].format != ToolCallFormat.CLAUDE_XML:
+                            messages_history.append(
+                                Message(
+                                    role=MessageRole.ASSISTANT,
+                                    content=f"Calling {len(tool_calls_to_execute)} tools",
+                                    tool_calls=tool_calls_to_execute,
+                                )
                             )
-                        )
 
                         tool_span.set_attribute(
                             "tool_calls.execute_count", len(tool_calls_to_execute)
@@ -317,7 +319,7 @@ class ProxiedTGIService:
                                         )
                                         summarized_items.append(summary)
                                     else:
-                                        summarized_items.append(item_text)
+                                        summarized_items.append(item)
                                 result.content = summarized_items
                             elif len(str(result.content)) > 10000:
                                 text_to_summarize = str(result.content)
