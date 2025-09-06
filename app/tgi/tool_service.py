@@ -10,6 +10,7 @@ from opentelemetry import trace
 from app.models import RunToolResultContent
 from app.tgi.models import Message, MessageRole, Tool, ToolCall
 from app.session import MCPSessionBase
+from app.tgi.tool_argument_fixer_service import fix_tool_arguments
 from app.tgi.tools_map import map_tools
 
 logger = logging.getLogger("uvicorn.error")
@@ -315,12 +316,12 @@ class ToolService:
         """Execute multiple tool calls and return tool result messages."""
         tool_results = []
         success = True
-        # Part of the todo to verify arguments before calling the tool
-        # available_tools = map_tools(await session.list_tools())
+        # Part of the todo to verify arguments before calling the toolp
+        available_tools = map_tools(await session.list_tools())
 
         for tool_call in tool_calls:
             try:
-                # TODO: Before calling tool, verify arguments
+                tool_call = fix_tool_arguments(tool_call, available_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
                 if "error" in result["content"]:

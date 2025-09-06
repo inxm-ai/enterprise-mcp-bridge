@@ -54,14 +54,24 @@ class ErrorSession:
 
 
 class ExceptionSession:
+    def __init__(self, list_tools_fails=True, call_tool_fails=True):
+        self.list_tools_fails = list_tools_fails
+        self.call_tool_fails = call_tool_fails
+
     async def call_tool(self, name, args, access_token):
-        raise RuntimeError("Tool crashed!")
+        if self.call_tool_fails:
+            raise RuntimeError("Tool crashed!")
+        else:
+            return await DummySession().call_tool(name, args, access_token)
 
     async def list_tools(self):
-        raise RuntimeError("Session crashed!")
+        if self.list_tools_fails:
+            raise RuntimeError("Session crashed!")
+        else:
+            return await DummySession().list_tools()
 
 
-def make_tool_call(name="tool1", args='{"foo": "bar"}', id="call_1"):
+def make_tool_call(name="list-files", args='{"path": "bar"}', id="call_1"):
     return ToolCall(
         id=id,
         type="function",
@@ -231,12 +241,13 @@ class TestToolService:
         result, success = await tool_service.execute_tool_calls(
             session, [tool_call], None, None
         )
+        print(result)
         assert success
         assert len(result) == 1
         assert result[0].role == MessageRole.TOOL
         assert result[0].tool_call_id == tool_call.id
         assert result[0].name == tool_call.function.name
-        assert "Tool tool1 executed" in result[0].content
+        assert "Tool list-files executed" in result[0].content
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_error(self, tool_service):
@@ -252,7 +263,7 @@ class TestToolService:
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_exception(self, tool_service):
-        session = ExceptionSession()
+        session = ExceptionSession(list_tools_fails=False)
         tool_call = make_tool_call()
         result, success = await tool_service.execute_tool_calls(
             session, [tool_call], None, None

@@ -20,7 +20,11 @@ def fix_tool_arguments(tool_call: ToolCall, available_tools: list[dict]) -> Tool
     """
     # Find the tool definition
     tool_definition = next(
-        (tool for tool in available_tools if tool["name"] == tool_call.function.name),
+        (
+            tool
+            for tool in available_tools
+            if tool["function"]["name"] == tool_call.function.name
+        ),
         None,
     )
 
@@ -30,11 +34,75 @@ def fix_tool_arguments(tool_call: ToolCall, available_tools: list[dict]) -> Tool
         )
         return tool_call
 
-    # Map the arguments to the tool definition
-    fixed_arguments = {}
+    # Map the arguments to the tool definition recursively
+    def normalize_for_compare(name):
+        return "".join(c for c in name.upper() if c.isalnum())
+
+    def coerce_type(value, schema):
+        t = schema.get("type")
+        if t == "integer":
+            try:
+                return int(value)
+            except Exception:
+                return value
+        elif t == "number":
+            try:
+                return float(value)
+            except Exception:
+                return value
+        elif t == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "1", "yes", "on"):
+                    return True
+                if v in ("false", "0", "no", "off"):
+                    return False
+            if isinstance(value, int):
+                return bool(value)
+            return value
+        # Add more types as needed
+        return value
+
+    def fix_args(args, properties):
+        if not isinstance(args, dict):
+            return args
+        fixed = {}
+        direct_map = {prop: prop for prop in properties}
+        normalized_map = {normalize_for_compare(prop): prop for prop in properties}
+        for arg_name, arg_value in args.items():
+            if arg_name in direct_map:
+                prop_name = arg_name
+            else:
+                norm_arg = normalize_for_compare(arg_name)
+                prop_name = normalized_map.get(norm_arg)
+            if prop_name:
+                prop_schema = properties[prop_name]
+                if (
+                    prop_schema.get("type") == "object"
+                    and "properties" in prop_schema
+                    and isinstance(arg_value, dict)
+                ):
+                    fixed[prop_name] = fix_args(arg_value, prop_schema["properties"])
+                elif (
+                    prop_schema.get("type") == "array"
+                    and "items" in prop_schema
+                    and isinstance(arg_value, list)
+                ):
+                    # Coerce each item in the array
+                    fixed[prop_name] = [
+                        coerce_type(item, prop_schema["items"]) for item in arg_value
+                    ]
+                else:
+                    fixed[prop_name] = coerce_type(arg_value, prop_schema)
+            else:
+                logger.warning(
+                    f"[ToolArgumentFixerService] Argument '{arg_name}' not found in tool '{tool_call.function.name}' definition"
+                )
+        return fixed
 
     # try to parse the arguments as JSON, if it's not already a dict
-    args = {}
     if not isinstance(tool_call.function.arguments, dict):
         try:
             args = json.loads(tool_call.function.arguments)
@@ -47,40 +115,11 @@ def fix_tool_arguments(tool_call: ToolCall, available_tools: list[dict]) -> Tool
         args = tool_call.function.arguments
         logger.debug("[ToolArgumentFixerService] Tool call arguments already a dict")
 
-    # TODO: Implement argument fixing logic here
-    # The tool_definition contains a "parameters" key with the expected argument structure as JSON Schema
-    #  The LLM might have confused the argument names, and for instance changed argumentName to argument_name
-    #  We need to map the arguments back to the expected names and types
+    properties = (
+        tool_definition.get("function", {}).get("parameters", {}).get("properties", {})
+    )
 
-    def normalize(name):
-        import re
-
-        if "_" in name:
-            # snake_case to camelCase
-            camel = "".join(
-                word.capitalize() if i > 0 else word
-                for i, word in enumerate(name.split("_"))
-            )
-            return [name, camel]
-        else:
-            # camelCase to snake_case
-            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-            return [name, snake]
-
-    properties = tool_definition.get("parameters", {}).get("properties", {})
-    normalized_map = {}
-    for prop in properties:
-        for norm in normalize(prop):
-            normalized_map[norm] = prop
-
-    for arg_name, arg_value in args.items():
-        mapped_name = normalized_map.get(arg_name)
-        if mapped_name:
-            fixed_arguments[mapped_name] = arg_value
-        else:
-            logger.warning(
-                f"[ToolArgumentFixerService] Argument '{arg_name}' not found in tool '{tool_call.function.name}' definition"
-            )
+    fixed_arguments = fix_args(args, properties)
 
     return ToolCall(
         id=tool_call.id,
