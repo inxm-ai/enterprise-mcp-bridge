@@ -361,6 +361,9 @@ class ToolService:
                 content = text_content
 
         if format == ToolCallFormat.OPENAI_JSON:
+            logger.debug(
+                f"[ToolService] Creating OPENAI_JSON tool result message: {content}"
+            )
             return Message(
                 role=MessageRole.TOOL,
                 content=content,
@@ -368,6 +371,9 @@ class ToolService:
                 name=tool_result.get("name"),
             )
         elif format == ToolCallFormat.CLAUDE_XML:
+            logger.debug(
+                f"[ToolService] Creating CLAUDE_XML tool result message: {content}"
+            )
             name = tool_result.get("name")
             xml_tag = f"<{name}_result>{content}</{name}_result>"
             return Message(
@@ -376,6 +382,7 @@ class ToolService:
                 tool_call_id=tool_result.get("tool_call_id"),
                 name=name,
             )
+        logger.debug(f"[ToolService] Creating default tool result message: {content}")
         return Message(
             role=MessageRole.TOOL,
             content=content,

@@ -16,7 +16,7 @@ from app.tgi.prompt_service import PromptService
 from app.tgi.tool_service import (
     ToolService,
 )
-from app.tgi.tool_resolution import ToolCallFormat, ToolResolutionStrategy
+from app.tgi.tool_resolution import ToolResolutionStrategy
 from app.tgi.llm_client import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
@@ -262,12 +262,12 @@ class ProxiedTGIService:
                                 f"[ProxiedTGI] Resolved {parsed_call.format.value} tool call: {parsed_call.name}"
                             )
 
-                        # For the LLM, if not claude like
-                        if tool_calls_to_execute[0].format != ToolCallFormat.CLAUDE_XML:
+                        # Add content message
+                        if content_message.strip():
                             messages_history.append(
                                 Message(
                                     role=MessageRole.ASSISTANT,
-                                    content=f"Calling {len(tool_calls_to_execute)} tools",
+                                    content=content_message,
                                     tool_calls=tool_calls_to_execute,
                                 )
                             )
