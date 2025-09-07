@@ -4,7 +4,18 @@ from app.session_manager.session_context import map_tools
 from app.tgi.models import ChatCompletionRequest
 from opentelemetry import trace
 from app.tgi.llm_client import LLMClient
-from app.vars import HOST, MCP_BASE_PATH, PORT, SERVICE_NAME, OAUTH_ENV, DEFAULT_MODEL
+from app.vars import (
+    HOST,
+    MCP_BASE_PATH,
+    PORT,
+    SERVICE_NAME,
+    OAUTH_ENV,
+    DEFAULT_MODEL,
+    AGENT_CARD_CACHE_FILE,
+)
+import json
+import os
+import tempfile
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -12,6 +23,46 @@ router = APIRouter()
 tracer = trace.get_tracer(__name__)
 _agent_card_cache = None
 _running = False
+
+
+def _load_agent_card_from_file() -> dict | None:
+    """Load agent card from AGENT_CARD_CACHE_FILE if present and valid."""
+    path = AGENT_CARD_CACHE_FILE
+    if not path:
+        return None
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        # If the file is corrupt or unreadable, ignore and regenerate
+        return None
+
+
+def _save_agent_card_to_file(card: dict) -> None:
+    """Atomically write the agent card JSON to AGENT_CARD_CACHE_FILE."""
+    path = AGENT_CARD_CACHE_FILE
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    try:
+        os.makedirs(dirpath, exist_ok=True)
+        # write to a temp file then rename
+        fd, tmp_path = tempfile.mkstemp(dir=dirpath)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(card, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    except Exception:
+        # Do not fail agent creation if we cannot write the cache
+        return
 
 
 def get_description(reply: str) -> str:
@@ -51,6 +102,7 @@ async def get_agent_card():
             raise HTTPException(status_code=404, detail="Not Found")
 
         span.set_attribute("agent_card.available", True)
+        # try load from in-memory cache first
         if _agent_card_cache is not None:
             span.set_attribute("agent_card.cache.hit", True)
             return JSONResponse(content=_agent_card_cache)
@@ -167,5 +219,17 @@ async def get_agent_card():
                 agent_card["skills"].append(skill)
 
             _agent_card_cache = agent_card
+
+            try:
+                _save_agent_card_to_file(agent_card)
+            except Exception:
+                pass
             _running = False
             return JSONResponse(content=agent_card)
+
+
+# Try to populate the in-memory cache from disk
+try:
+    _agent_card_cache = _load_agent_card_from_file()
+except Exception:
+    _agent_card_cache = None

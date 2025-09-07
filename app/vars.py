@@ -11,6 +11,8 @@ OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
 HOST = os.environ.get("HOSTNAME", "")
 PORT = os.environ.get("PORT", "")
 
+AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
+
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT")
 OTLP_HEADERS = os.getenv("OTLP_HEADERS", "")
 
