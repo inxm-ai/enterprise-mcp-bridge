@@ -570,7 +570,7 @@ async def test_create_result_message_summarizes_long_content(monkeypatch):
     }
 
     async def fake_summarize(
-        base_request, user_request, content, access_token, outer_span
+        base_request, content, access_token, outer_span
     ):
         return "SHORT_SUMMARY"
 

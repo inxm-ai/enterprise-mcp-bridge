@@ -287,7 +287,7 @@ class TestLLMClient:
             LLMClient, "stream_completion", return_value=MockStreamGenerator()
         ) as mock_stream:
             result = await llm_client.summarize_text(
-                base_request, user_request, content, "test-token", None
+                base_request, content, "test-token", None
             )
 
             # summarize_text does not return the ask() result in current implementation

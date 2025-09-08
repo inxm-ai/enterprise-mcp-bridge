@@ -5,6 +5,7 @@ Tool service module for handling MCP tool operations.
 import json
 import logging
 from typing import List, Optional, Dict, Any, Tuple
+from app.vars import TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
 from app.models import RunToolResultContent
@@ -338,13 +339,13 @@ class ToolService:
                 text_content = str(content)
 
         # If content is very large and we have an llm client, try to summarize it.
-        if len(text_content) > 10000 and getattr(self, "llm_client", None):
+        if len(text_content) > TOOL_CHUNK_SIZE and getattr(self, "llm_client", None):
             try:
                 # Create a minimal ChatCompletionRequest to allow summarize_text
                 base_request = ChatCompletionRequest(messages=[], model=None)
                 # ask the LLM client to summarize the large content
                 summary = await self.llm_client.summarize_text(
-                    base_request, "Summarize tool output", text_content, None, None
+                    base_request, text_content, None, None
                 )
                 # If summarize_text returns a value, use it; otherwise fall back
                 if summary:

@@ -251,7 +251,6 @@ class LLMClient:
     async def summarize_text(
         self,
         base_request: ChatCompletionRequest,
-        user_request: str,
         content: str,
         access_token: str,
         outer_span,
@@ -269,9 +268,8 @@ class LLMClient:
             Summarized text
         """
         await self.ask(
-            base_prompt="You are a summarization expert. Read the question from the user, and then summarize the reply by the assistant. The reply from the assistant is coming from a tool, and might contain content not relevant to the original question. For instance, emails contain html, if the user wants a summary you are only interested in the text. If the user wants to know which senders send html emails than the information is important",
+            base_prompt="# System Prompt: Summarization Expert\n\nYou are a **summarization expert**. Your task is to read the **user's question** and the **assistant's reply** (which may include tool outputs), and then produce a concise, accurate summary of the reply that directly addresses the user's question.  \n\n---\n\n## Key Instructions\n\n### 1. Stay Aligned with the User's Question\n- Only summarize the information that is relevant to what the user asked.  \n- If the assistant's reply contains extraneous content (e.g., HTML markup in emails, raw metadata, or formatting noise), **ignore it** unless the user explicitly requested it.  \n\n### 2. Context-Sensitive Relevance\n- If the user asked about the *content* (e.g., “Summarize the email”), focus only on the meaningful text.  \n- If the user asked about *structure or metadata* (e.g., “Which senders use HTML emails?”), then the presence of HTML or metadata details is essential and should be included in the summary.  \n\n### 3. Clarity & Brevity\n- Rewrite in plain, natural language.  \n- Strip out technical noise, boilerplate, or irrelevant tool artifacts.  \n- Preserve essential details (facts, names, actions, outcomes).  \n\n### 4. Prioritization\n- Always privilege the **user's intent** over the assistant's full reply.  \n- Keep summaries **short but complete**: capture the key points, not every detail.  \n\n---\n\n## Examples\n\n- **User asks:** “Summarize this email.”  \n  - **Assistant reply (tool output):** Includes full HTML source.  \n  - **Your summary:** Only the human-readable body text of the email.  \n\n- **User asks:** “Which senders use HTML emails?”  \n  - **Assistant reply:** Includes headers and HTML details.\n  - **Your summary:** Mention the senders and the fact they use HTML formatting.\n",
             base_request=base_request,
-            question=user_request,
             assistant_statement=content,
             access_token=access_token,
             outer_span=outer_span,
