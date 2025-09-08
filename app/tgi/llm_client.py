@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import AsyncGenerator
 import aiohttp
+from app.vars import TGI_MODEL_NAME, TOOL_INJECTION_MODE
 from opentelemetry import trace
 
 from app.tgi.models import (
@@ -19,6 +20,7 @@ from app.tgi.models import (
     DeltaMessage,
     Message,
     MessageRole,
+    Tool,
     Usage,
 )
 from app.utils import mask_token
@@ -65,6 +67,38 @@ class LLMClient:
 
         return headers
 
+    def _generate_llm_payload(self, request: ChatCompletionRequest) -> dict:
+        """Generate the payload for the LLM API request."""
+
+        def _claude_tool_format(tool: Tool) -> str:
+            return f"<{tool.function.name}>{json.dumps(tool.function.parameters, separators=(',', ':'))}</{tool.function.name}>"
+
+        if "claude" in TGI_MODEL_NAME or TOOL_INJECTION_MODE == "claude":
+            tools = [_claude_tool_format(tool) for tool in request.tools]
+            tool_descriptions = "\n".join(tools)
+
+            # Find or create system message
+            messages = request.messages[:]
+            system_msg = next(
+                (msg for msg in messages if msg.role == MessageRole.SYSTEM), None
+            )
+            if system_msg:
+                system_msg.content += (
+                    f"\n\nYou have access to the following tools:\n{tool_descriptions}"
+                )
+            else:
+                system_msg = Message(
+                    role=MessageRole.SYSTEM,
+                    content=f"You have access to the following tools:\n{tool_descriptions}",
+                )
+                messages.insert(0, system_msg)
+
+            request.messages = messages
+            request.tools = []
+
+        payload = request.model_dump(exclude_none=True)
+        return payload
+
     def create_completion_id(self) -> str:
         """Generate a unique completion ID."""
         return f"chatcmpl-{uuid.uuid4().hex[:29]}"
@@ -89,7 +123,7 @@ class LLMClient:
         # Remove all tracing to avoid context cleanup issues with async generators
         try:
             # Convert request to dict for JSON serialization
-            payload = request.model_dump(exclude_none=True)
+            payload = self._generate_llm_payload(request)
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -181,7 +215,7 @@ class LLMClient:
 
             try:
                 # Convert request to dict for JSON serialization, ensure stream=False
-                payload = request.model_dump(exclude_none=True)
+                payload = self._generate_llm_payload(request)
                 payload["stream"] = False
 
                 async with aiohttp.ClientSession() as session:

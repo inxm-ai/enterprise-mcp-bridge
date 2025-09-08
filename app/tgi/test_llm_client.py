@@ -1,8 +1,15 @@
 import pytest
 from unittest.mock import patch
 
+from app.tgi import llm_client as llm
 from app.tgi.llm_client import LLMClient
-from app.tgi.models import ChatCompletionRequest, Message, MessageRole
+from app.tgi.models import (
+    ChatCompletionRequest,
+    Message,
+    MessageRole,
+    Tool,
+    FunctionDefinition,
+)
 
 
 @pytest.fixture
@@ -286,6 +293,93 @@ class TestLLMClient:
             # summarize_text does not return the ask() result in current implementation
             assert result is None
             mock_stream.assert_called_once()
+
+
+def make_tool(name, params):
+    return Tool(function=FunctionDefinition(name=name, parameters=params))
+
+
+def test_no_injection_keeps_tools(monkeypatch):
+    """When TOOL_INJECTION_MODE is not 'claude', the request should be unchanged."""
+    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "none")
+
+    tool = make_tool("fn", {"a": 1})
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    req = ChatCompletionRequest(messages=messages, tools=[tool], model="m")
+
+    payload = llm.LLMClient()._generate_llm_payload(req)
+
+    # tools should be present and unchanged
+    assert "tools" in payload
+    assert payload["tools"] != []
+    assert payload["tools"][0]["function"]["name"] == "fn"
+
+    # messages unchanged
+    assert payload["messages"][0]["content"] == "hi"
+
+
+def test_claude_with_existing_system_appends(monkeypatch):
+    """When TOOL_INJECTION_MODE is 'claude' and a system message exists, tools are injected into it."""
+    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
+
+    tool = make_tool("doThing", {"x": 1})
+    # place system message not at index 0 to ensure position is preserved
+    messages = [
+        Message(role=MessageRole.USER, content="hi"),
+        Message(role=MessageRole.SYSTEM, content="sys start"),
+    ]
+    req = ChatCompletionRequest(messages=messages, tools=[tool])
+
+    payload = llm.LLMClient()._generate_llm_payload(req)
+
+    # tools should be emptied (injected into system prompt)
+    assert payload.get("tools") == []
+
+    # find system message and verify injection
+    sys_msg = next(m for m in payload["messages"] if m["role"] == MessageRole.SYSTEM)
+    assert "You have access to the following tools" in sys_msg["content"]
+    assert "<doThing>" in sys_msg["content"]
+    # compact JSON (no spaces) as produced by json.dumps with separators(',',':')
+    assert '{"x":1}' in sys_msg["content"]
+
+
+def test_claude_without_system_inserts_at_start(monkeypatch):
+    """When no system message exists, a new system message is inserted at the start."""
+    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
+
+    tool1 = make_tool("t1", {"a": "b"})
+    messages = [Message(role=MessageRole.USER, content="u1")]
+    req = ChatCompletionRequest(messages=messages, tools=[tool1])
+
+    payload = llm.LLMClient()._generate_llm_payload(req)
+
+    assert payload.get("tools") == []
+
+    # first message must be the injected system message
+    first = payload["messages"][0]
+    assert first["role"] == MessageRole.SYSTEM
+    assert "You have access to the following tools" in first["content"]
+    assert "<t1>" in first["content"]
+    # parameters should be rendered as compact JSON
+    assert '{"a":"b"}' in first["content"]
+
+
+def test_claude_preserves_system_position(monkeypatch):
+    """If a system message exists not at index 0, its position should be preserved."""
+    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
+
+    tool = make_tool("fn", {"n": 2})
+    messages = [
+        Message(role=MessageRole.USER, content="u"),
+        Message(role=MessageRole.SYSTEM, content="s"),
+        Message(role=MessageRole.ASSISTANT, content="a"),
+    ]
+    req = ChatCompletionRequest(messages=messages, tools=[tool])
+
+    payload = llm.LLMClient()._generate_llm_payload(req)
+
+    roles = [m["role"] for m in payload["messages"]]
+    assert roles == [MessageRole.USER, MessageRole.SYSTEM, MessageRole.ASSISTANT]
 
 
 if __name__ == "__main__":

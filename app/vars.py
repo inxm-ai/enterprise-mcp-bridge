@@ -11,6 +11,9 @@ OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
 HOST = os.environ.get("HOSTNAME", "")
 PORT = os.environ.get("PORT", "")
 
+TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", "")
+
+TOOL_INJECTION_MODE = os.getenv("TOOL_INJECTION_MODE", "openai")
 AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT")
