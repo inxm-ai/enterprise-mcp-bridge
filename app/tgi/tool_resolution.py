@@ -46,7 +46,8 @@ class ToolResolutionStrategy:
         self.logger = logger
         self._xml_tag_patterns = [
             # Generic function call patterns
-            r"<(\w+)>(.*?)</\1>",
+            # Allow tag names with non-alpha characters (e.g. create-entities, create+entity)
+            r"<([^>]+)>(.*?)</\1>",
             # Function call with explicit arguments
             r'<function_calls?>\s*<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>\s*</function_calls?>',
         ]
@@ -187,8 +188,9 @@ class ToolResolutionStrategy:
         tool_calls = []
 
         # First, handle Anthropic-style function invocations (highest priority)
-        invoke_pattern = r'<function_calls?>\s*<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>\s*</function_calls?>'
-        invoke_matches = re.findall(invoke_pattern, content, re.DOTALL | re.IGNORECASE)
+        invoke_matches = re.findall(
+            self._xml_tag_patterns[1], content, re.DOTALL | re.IGNORECASE
+        )
 
         # Keep track of function_calls content that was processed by invoke pattern
         processed_invoke_content = set()
@@ -214,10 +216,8 @@ class ToolResolutionStrategy:
                     f"[ToolResolution] Error parsing invoke call {function_name}: {e}"
                 )
 
-        # Handle generic function calls
-        generic_pattern = r"<(\w+)>(.*?)</\1>"
         generic_matches = re.findall(
-            generic_pattern, content, re.DOTALL | re.IGNORECASE
+            self._xml_tag_patterns[0], content, re.DOTALL | re.IGNORECASE
         )
 
         for tag_name, tag_content in generic_matches:

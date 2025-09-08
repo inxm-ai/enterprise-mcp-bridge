@@ -284,6 +284,28 @@ class TestToolResolutionStrategy:
         assert len(tool_calls) == 1
         assert tool_calls[0].name == "create_entities"
 
+    def test_resolve_claude_xml_works_with_functions_that_have_nonalpha_characters(
+        self,
+    ):
+        """Test that functions with non-alpha characters are resolved."""
+        content = """
+        <p>This is a paragraph</p>
+        <create-entities>{"entity_id": "test"}</create-entities>
+        <create+entity1>{"param": "value"}</create+entity1>
+        <create#entity2>{"param": "value"}</create#entity2>
+        <create entity3>{"param": "value"}</create entity3>
+        <think>This is thinking</think>
+        """
+
+        tool_calls, success = self.strategy.resolve_tool_calls(content)
+
+        assert success
+        assert len(tool_calls) == 4
+        assert tool_calls[0].name == "create-entities"
+        assert tool_calls[1].name == "create+entity1"
+        assert tool_calls[2].name == "create#entity2"
+        assert tool_calls[3].name == "create entity3"
+
     # ===== MIXED FORMAT TESTS =====
 
     def test_resolve_mixed_format(self):
