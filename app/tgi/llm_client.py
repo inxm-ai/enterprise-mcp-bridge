@@ -73,7 +73,7 @@ class LLMClient:
         def _claude_tool_format(tool: Tool) -> str:
             return f"<{tool.function.name}>{json.dumps(tool.function.parameters, separators=(',', ':'))}</{tool.function.name}>"
 
-        if "claude" in TGI_MODEL_NAME or TOOL_INJECTION_MODE == "claude":
+        if TOOL_INJECTION_MODE == "claude":
             tools = [_claude_tool_format(tool) for tool in request.tools]
             tool_descriptions = "\n".join(tools)
 
@@ -84,16 +84,19 @@ class LLMClient:
             )
             if system_msg:
                 system_msg.content += (
-                    f"\n\nYou have access to the following tools:\n{tool_descriptions}"
+                    f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each tool call with <stop/>."
                 )
             else:
                 system_msg = Message(
                     role=MessageRole.SYSTEM,
-                    content=f"You have access to the following tools:\n{tool_descriptions}",
+                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each tool call with <stop/>."
                 )
                 messages.insert(0, system_msg)
 
             request.messages = messages
+            # Anthropic would require stop_sequences, but this is handled in the TG-Core for INXM
+            # think about a way to pass this through if needed
+            request.stop = (request.stop or []) + ["<stop/>"]
             request.tools = []
 
         payload = request.model_dump(exclude_none=True)

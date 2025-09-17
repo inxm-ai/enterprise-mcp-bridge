@@ -54,6 +54,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
+    stop: Optional[List[str]] = None
 
 
 class DeltaMessage(BaseModel):
