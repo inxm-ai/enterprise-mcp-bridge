@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import AsyncGenerator
 import aiohttp
-from app.vars import TGI_MODEL_NAME, TOOL_INJECTION_MODE
+from app.vars import TOOL_INJECTION_MODE
 from opentelemetry import trace
 
 from app.tgi.models import (
@@ -83,13 +83,11 @@ class LLMClient:
                 (msg for msg in messages if msg.role == MessageRole.SYSTEM), None
             )
             if system_msg:
-                system_msg.content += (
-                    f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
-                )
+                system_msg.content += f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
             else:
                 system_msg = Message(
                     role=MessageRole.SYSTEM,
-                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
+                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>.",
                 )
                 messages.insert(0, system_msg)
 

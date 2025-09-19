@@ -275,7 +275,6 @@ class TestLLMClient:
             model="test-model",
         )
 
-        user_request = "Summarize this."
         content = ""
 
         class MockStreamGenerator:

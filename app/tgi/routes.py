@@ -351,8 +351,7 @@ async def a2a_chat_completion(
     stream_requested = False
     if isinstance(raw_body, dict):
         stream_requested = bool(
-            raw_body.get("stream")
-            or (raw_body.get("params") or {}).get("stream")
+            raw_body.get("stream") or (raw_body.get("params") or {}).get("stream")
         )
 
     try:
