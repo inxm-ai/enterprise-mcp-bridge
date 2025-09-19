@@ -136,7 +136,7 @@ async def get_agent_card():
             agent_card = {
                 "name": SERVICE_NAME,
                 "description": get_description(summary),
-                "url": f"{HOST}{':' + str(PORT) if PORT else ''}{MCP_BASE_PATH}/v1/a2a",
+                "url": f"https://{HOST}{':' + str(PORT) if PORT else ''}{MCP_BASE_PATH}/tgi/v1/a2a",
                 "version": "1.0.0",
                 "capabilities": {"streaming": True, "pushNotifications": False},
                 "authentication": {"schemes": ["bearer"] if OAUTH_ENV else []},
