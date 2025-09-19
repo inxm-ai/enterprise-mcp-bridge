@@ -84,3 +84,30 @@ async def test_a2a_chat_completion_non_streaming(monkeypatch):
     assert response_json["id"] == "1"
     assert response_json["error"] is None
     assert "Hello World!" in response_json["result"]["completion"]
+
+
+@pytest.mark.asyncio
+async def test_a2a_chat_completion_minimal_payload(monkeypatch):
+    async def mock_chat_completion(*args, **kwargs):
+        return [
+            {
+                "choices": [
+                    {"delta": {"content": "Hello Minimal!"}, "index": 0},
+                ]
+            }
+        ]
+
+    class MockService:
+        async def chat_completion(self, *args, **kwargs):
+            return await mock_chat_completion()
+
+    monkeypatch.setattr("app.tgi.routes.tgi_service", MockService())
+
+    response = client.post("/tgi/v1/a2a", json={"prompt": "Say hello"})
+
+    assert response.status_code == 200
+    response_json = response.json()
+    assert response_json["jsonrpc"] == "2.0"
+    assert response_json["error"] is None
+    assert response_json["id"] != "unknown"
+    assert "Hello Minimal!" in response_json["result"]["completion"]

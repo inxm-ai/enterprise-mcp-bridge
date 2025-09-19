@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, ValidationError
 from opentelemetry import trace
 import json
+from uuid import uuid4
 
 from app.utils.traced_requests import traced_request
 from app.session import try_get_session_id, session_id
@@ -57,6 +58,53 @@ def _create_a2a_response(result: Any, request_id: str) -> A2AResponse:
 def _create_a2a_error_response(code: int, message: str, request_id: str) -> A2AResponse:
     """Creates a JSON-RPC 2.0 compliant error response."""
     return A2AResponse(error={"code": code, "message": message}, id=request_id)
+
+
+def _extract_request_id(raw_body: Any) -> str:
+    """Extracts a best-effort request id from an incoming payload."""
+    if isinstance(raw_body, dict):
+        for key in ("id", "request_id", "requestId", "tool_call_id", "toolCallId"):
+            value = raw_body.get(key)
+            if value is not None:
+                return str(value)
+    return "unknown"
+
+
+def _coerce_a2a_request(raw_body: Any) -> A2ARequest:
+    """Coerces various payload shapes into an A2ARequest."""
+    if not isinstance(raw_body, dict):
+        raise ValueError("Request body must be a JSON object")
+
+    if "jsonrpc" in raw_body or {"method", "params", "id"}.issubset(raw_body.keys()):
+        return A2ARequest.model_validate(raw_body)
+
+    # Some clients send params but omit jsonrpc/id. Respect their data when possible.
+    if "params" in raw_body and isinstance(raw_body["params"], dict):
+        params_dict = raw_body["params"]
+        prompt = params_dict.get("prompt")
+        if prompt:
+            request_id = raw_body.get("id") or str(uuid4())
+            method = raw_body.get("method") or SERVICE_NAME
+            return A2ARequest(
+                method=str(method),
+                params=A2AParams(prompt=prompt),
+                id=str(request_id),
+                jsonrpc=str(raw_body.get("jsonrpc", "2.0")),
+            )
+
+    # Minimal payload (prompt at top level)
+    prompt = raw_body.get("prompt")
+    if prompt:
+        request_id = raw_body.get("id") or raw_body.get("request_id") or str(uuid4())
+        method = raw_body.get("method") or SERVICE_NAME
+        return A2ARequest(
+            method=str(method),
+            params=A2AParams(prompt=prompt),
+            id=str(request_id),
+            jsonrpc=str(raw_body.get("jsonrpc", "2.0")),
+        )
+
+    raise ValueError("Invalid A2A request payload: missing 'prompt'")
 
 
 # --- Core Logic Abstraction ---
@@ -256,7 +304,6 @@ async def chat_completions(
 @router.post("/a2a")
 async def a2a_chat_completion(
     request: Request,
-    a2a_request: A2ARequest,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -269,6 +316,45 @@ async def a2a_chat_completion(
     A2A-compliant endpoint that maps an A2A JSON-RPC request to an internal
     OpenAI-compatible chat completion call.
     """
+    raw_body: Any = None
+    parse_error: Optional[str] = None
+    try:
+        raw_body = await request.json()
+    except json.JSONDecodeError as exc:
+        parse_error = f"Invalid JSON payload: {exc.msg}"
+    except Exception as exc:  # pragma: no cover - defensive, should be rare
+        parse_error = f"Unable to read request body: {str(exc)}"
+
+    request_id = _extract_request_id(raw_body)
+
+    if parse_error:
+        return JSONResponse(
+            content=_create_a2a_error_response(
+                code=-32600,
+                message=f"Invalid Request: {parse_error}",
+                request_id=request_id,
+            ).model_dump()
+        )
+
+    try:
+        a2a_request = _coerce_a2a_request(raw_body)
+    except (ValidationError, ValueError) as exc:
+        message = str(exc)
+        return JSONResponse(
+            content=_create_a2a_error_response(
+                code=-32600,
+                message=f"Invalid Request: {message}",
+                request_id=request_id,
+            ).model_dump()
+        )
+
+    stream_requested = False
+    if isinstance(raw_body, dict):
+        stream_requested = bool(
+            raw_body.get("stream")
+            or (raw_body.get("params") or {}).get("stream")
+        )
+
     try:
         if a2a_request.method != SERVICE_NAME:
             return JSONResponse(
@@ -293,6 +379,7 @@ async def a2a_chat_completion(
         chat_request = ChatCompletionRequest(
             messages=[{"role": "user", "content": a2a_request.params.prompt}],
             model=model,
+            stream=stream_requested,
         )
 
         x_inxm_mcp_session = session_id(
