@@ -520,7 +520,7 @@ async def test_create_result_message_claude_xml():
     assert msg.role == MessageRole.ASSISTANT
     assert msg.tool_call_id == "id789"
     assert msg.name == "sum_numbers"
-    assert msg.content == "<sum_numbers_result>42</sum_numbers_result>"
+    assert msg.content == "<sum_numbers_result>42</sum_numbers_result><stop/>"
 
 
 @pytest.mark.asyncio
@@ -529,7 +529,7 @@ async def test_create_result_message_claude_xml_missing_fields():
     tool_result = {}
     msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
     assert msg.role == MessageRole.ASSISTANT
-    assert msg.content == "<None_result></None_result>"
+    assert msg.content == "<None_result></None_result><stop/>"
     assert msg.tool_call_id is None
     assert msg.name is None
 

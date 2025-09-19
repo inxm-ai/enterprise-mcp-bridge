@@ -376,7 +376,7 @@ class ToolService:
                 f"[ToolService] Creating CLAUDE_XML tool result message: {content}"
             )
             name = tool_result.get("name")
-            xml_tag = f"<{name}_result>{content}</{name}_result>"
+            xml_tag = f"<{name}_result>{content}</{name}_result><stop/>"
             return Message(
                 role=MessageRole.ASSISTANT,
                 content=xml_tag,

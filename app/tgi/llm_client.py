@@ -84,12 +84,12 @@ class LLMClient:
             )
             if system_msg:
                 system_msg.content += (
-                    f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each tool call with <stop/>."
+                    f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
                 )
             else:
                 system_msg = Message(
                     role=MessageRole.SYSTEM,
-                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each tool call with <stop/>."
+                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
                 )
                 messages.insert(0, system_msg)
 
