@@ -74,22 +74,33 @@ class LLMClient:
             return f"<{tool.function.name}>{json.dumps(tool.function.parameters, separators=(',', ':'))}</{tool.function.name}>"
 
         if TOOL_INJECTION_MODE == "claude":
-            tools = [_claude_tool_format(tool) for tool in request.tools]
+            logger.debug("[LLMClient] Using Claude-style tool injection")
+            tools = (
+                [_claude_tool_format(tool) for tool in request.tools]
+                if request.tools
+                else []
+            )
+            if tools is None or len(tools) == 0:
+                logger.warning(
+                    "[LLMClient] No tools available for Claude tool injection, result will be limited"
+                )
             tool_descriptions = "\n".join(tools)
 
             # Find or create system message
+
             messages = request.messages[:]
             system_msg = next(
                 (msg for msg in messages if msg.role == MessageRole.SYSTEM), None
             )
-            if system_msg:
-                system_msg.content += f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
-            else:
-                system_msg = Message(
-                    role=MessageRole.SYSTEM,
-                    content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>.",
-                )
-                messages.insert(0, system_msg)
+            if tools is not None and len(tools) > 0:
+                if system_msg:
+                    system_msg.content += f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
+                else:
+                    system_msg = Message(
+                        role=MessageRole.SYSTEM,
+                        content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>.",
+                    )
+                    messages.insert(0, system_msg)
 
             request.messages = messages
             # Anthropic would require stop_sequences, but this is handled in the TG-Core for INXM
@@ -157,6 +168,9 @@ class LLMClient:
 
                     # Count streamed lines for observability (without tracing)
                     line_count = 0
+                    self.logger.debug(
+                        f"[LLMClient] Response OK, starting to stream (model={request.model}, content={response.content})"
+                    )
                     async for line in response.content:
                         line_str = line.decode("utf-8").strip()
                         if line_str:
@@ -183,7 +197,7 @@ class LLMClient:
 
         except Exception as e:
             error_msg = f"Error streaming from LLM: {str(e)}"
-            self.logger.error(f"[LLMClient] {error_msg}")
+            self.logger.error(f"[LLMClient] {error_msg} - Stack trace:", exc_info=True)
 
             # Return error as streaming response
             error_chunk = ChatCompletionChunk(
