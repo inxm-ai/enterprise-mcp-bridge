@@ -1,5 +1,67 @@
 import copy
 
+_SCHEMA_DROP_KEYS = {
+    "description",
+    "examples",
+    "example",
+    "default",
+    "title",
+    "$id",
+    "$schema",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+}
+
+
+def prune_schema(schema, depth=2):
+    """Trim verbose JSON schema fields to keep payloads compact."""
+
+    if not isinstance(schema, (dict, list)) or schema is None:
+        return schema
+
+    if isinstance(schema, list):
+        return [prune_schema(item, depth) for item in schema]
+
+    pruned = {}
+    for key, value in schema.items():
+        if key in _SCHEMA_DROP_KEYS:
+            continue
+        if key == "properties":
+            if depth <= 0:
+                pruned[key] = {}
+            else:
+                pruned[key] = {
+                    prop: prune_schema(prop_schema, depth - 1)
+                    for prop, prop_schema in value.items()
+                }
+            continue
+        if key == "items":
+            if depth <= 0:
+                if isinstance(value, dict):
+                    pruned[key] = {"type": value.get("type", "object")}
+                else:
+                    pruned[key] = value
+            else:
+                pruned[key] = prune_schema(value, depth - 1)
+            continue
+        if key in {"allOf", "anyOf", "oneOf"}:
+            if depth <= 0:
+                continue
+            pruned[key] = [prune_schema(item, depth - 1) for item in value]
+            continue
+        if key == "additionalProperties":
+            # Preserve booleans, otherwise prune recursively.
+            if isinstance(value, bool) or depth <= 0:
+                pruned[key] = value
+            else:
+                pruned[key] = prune_schema(value, depth - 1)
+            continue
+
+        pruned[key] = prune_schema(value, depth)
+
+    return pruned
+
 
 def inline_schema(schema, top_level_schema, seen=None):
     """
@@ -72,6 +134,7 @@ def map_tools(tools):
     for tool in tools:
         input_schema_copy = copy.deepcopy(tool.get("inputSchema", {}))
         processed_schema = inline_schema(input_schema_copy, input_schema_copy)
+        processed_schema = prune_schema(processed_schema)
 
         # The top-level $defs is no longer needed after inlining
         if "$defs" in processed_schema:

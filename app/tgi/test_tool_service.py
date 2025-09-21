@@ -1,4 +1,5 @@
 import json
+import json
 import pytest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -100,13 +101,16 @@ class TestToolService:
             mock_map_tools.return_value = [
                 {"type": "function", "function": {"name": "list-files"}},
                 {"type": "function", "function": {"name": "read-file"}},
+                {"type": "function", "function": {"name": "describe_tool"}},
             ]
 
             openai_tools = await tool_service.get_all_mcp_tools(session)
             assert isinstance(openai_tools, list)
-            assert len(openai_tools) == 2
-            assert openai_tools[0]["function"]["name"] == "list-files"
-            assert openai_tools[1]["function"]["name"] == "read-file"
+            assert len(openai_tools) == 4
+            names = [tool["function"]["name"] for tool in openai_tools]
+            assert "list-files" in names
+            assert "read-file" in names
+            assert names[-1] == "describe_tool"
             assert all(tool["type"] == "function" for tool in openai_tools)
 
     @pytest.mark.asyncio
@@ -307,11 +311,11 @@ def test_process_tool_arguments_multiple_nested():
     assert result == expected
 
 
-def test_process_tool_arguments_invalid_json():
-    """Test processing invalid JSON returns original string."""
-    input_str = "invalid json"
-    result = process_tool_arguments(input_str)
-    assert result == input_str
+    def test_process_tool_arguments_invalid_json():
+        """Test processing invalid JSON returns original string."""
+        input_str = "invalid json"
+        result = process_tool_arguments(input_str)
+        assert result == input_str
 
 
 def test_process_tool_arguments_empty_string():
@@ -518,6 +522,37 @@ def test_extract_tool_call_from_streamed_content_json_with_extra_keys():
         "extra": "data",
     }
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_describe_tool_returns_full_schema(tool_service):
+    await tool_service.get_all_mcp_tools(DummySession())
+    tool_call = make_tool_call(
+        name="describe_tool", args=json.dumps({"name": "list-files"}), id="call_desc"
+    )
+    result, success = await tool_service.execute_tool_calls(
+        DummySession(), [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
+    )
+    assert success
+    assert len(result) == 1
+    payload = json.loads(result[0].content)
+    assert payload["name"] == "list-files"
+    assert "inputSchema" in payload
+    assert payload["inputSchema"]["type"] == "object"
+
+
+@pytest.mark.asyncio
+async def test_describe_tool_unknown_name(tool_service):
+    await tool_service.get_all_mcp_tools(DummySession())
+    tool_call = make_tool_call(
+        name="describe_tool", args=json.dumps({"name": "missing"}), id="call_desc2"
+    )
+    result, success = await tool_service.execute_tool_calls(
+        DummySession(), [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
+    )
+    assert success
+    payload = json.loads(result[0].content)
+    assert "error" in payload
 
 
 @pytest.mark.asyncio

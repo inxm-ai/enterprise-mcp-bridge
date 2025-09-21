@@ -3,6 +3,7 @@ Tool service module for handling MCP tool operations.
 """
 
 import json
+import copy
 import logging
 from typing import List, Optional, Dict, Any, Tuple, Union
 from app.vars import TOOL_CHUNK_SIZE
@@ -15,7 +16,7 @@ from app.tgi.models import ChatCompletionRequest
 from app.session import MCPSessionBase
 from app.tgi.tool_argument_fixer_service import fix_tool_arguments
 from app.tgi.tool_resolution import ToolCallFormat
-from app.tgi.tools_map import map_tools
+from app.tgi.tools_map import map_tools, inline_schema
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -52,6 +53,7 @@ class ToolService:
             # Keep ToolService usable in tests/environments where LLMClient
             # may not initialize cleanly
             self.llm_client = None
+        self._tool_registry: dict[str, dict] = {}
 
     async def get_all_mcp_tools(
         self, session: MCPSessionBase, parent_span=None
@@ -69,13 +71,35 @@ class ToolService:
         with tracer.start_as_current_span("get_all_mcp_tools") as span:
             try:
                 # Get available tools from MCP server
-                tools_result = map_tools(await session.list_tools())
+                raw_tools = await session.list_tools()
+                self._tool_registry = {tool.get("name"): tool for tool in raw_tools}
+                tools_result = map_tools(raw_tools)
                 if not tools_result:
                     self.logger.debug(
                         "[ToolService] No tools available from MCP server"
                     )
                     span.set_attribute("tools.count", 0)
                     return []
+
+                tools_result.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "describe_tool",
+                            "description": "Return the full schema for one of your available tools. Use this when you need parameter details.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Tool name exactly as provided in the tool list",
+                                    }
+                                },
+                                "required": ["name"],
+                            },
+                        },
+                    }
+                )
 
                 span.set_attribute("tools.count", len(tools_result))
                 self.logger.debug(
@@ -462,6 +486,13 @@ class ToolService:
 
         for tool_call, tool_call_format in _coerce_tool_calls():
             try:
+                if tool_call.function.name == "describe_tool":
+                    result = await self._handle_describe_tool(tool_call)
+                    tool_message = await self.create_result_message(
+                        tool_call_format, result
+                    )
+                    tool_results.append(tool_message)
+                    continue
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
@@ -507,6 +538,61 @@ class ToolService:
                 break
 
         return tool_results, success
+
+    async def _handle_describe_tool(self, tool_call: ToolCall) -> Dict[str, Any]:
+        try:
+            args = (
+                json.loads(tool_call.function.arguments)
+                if tool_call.function.arguments
+                else {}
+            )
+        except json.JSONDecodeError as exc:
+            error_content = json.dumps(
+                {"error": f"Invalid JSON: {exc}"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": error_content,
+            }
+
+        target = args.get("name")
+        tool_info = self._tool_registry.get(target)
+        if not tool_info:
+            content = json.dumps(
+                {"error": f"Unknown tool '{target}'"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": content,
+            }
+
+        schema = tool_info.get("inputSchema") or {}
+        schema = inline_schema(copy.deepcopy(schema), schema)
+
+        content = json.dumps(
+            {
+                "name": tool_info.get("name"),
+                "description": tool_info.get("description"),
+                "inputSchema": schema,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "content": content,
+        }
 
 
 def process_tool_arguments(arguments_str):

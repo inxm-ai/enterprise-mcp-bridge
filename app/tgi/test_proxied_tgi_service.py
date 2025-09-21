@@ -242,9 +242,11 @@ class TestProxiedTGIService:
         session = MockMCPSession(tools=mock_tools)
         openai_tools = await proxied_tgi_service.tool_service.get_all_mcp_tools(session)
         assert isinstance(openai_tools, list)
-        assert len(openai_tools) == 2
-        assert openai_tools[0]["function"]["name"] == "list-files"
-        assert openai_tools[1]["function"]["name"] == "read-file"
+        assert len(openai_tools) == 3
+        names = [tool["function"]["name"] for tool in openai_tools]
+        assert "list-files" in names
+        assert "read-file" in names
+        assert names[-1] == "describe_tool"
         assert all(tool["type"] == "function" for tool in openai_tools)
 
     @pytest.mark.asyncio
