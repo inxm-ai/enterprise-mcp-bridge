@@ -207,6 +207,7 @@ uvicorn app.server:app --reload
 | `TOKEN_NAME`              | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
 | `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
 | `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
+| `LLM_MAX_PAYLOAD_BYTES`   | Maximum serialized payload size sent to the backing LLM; large histories are compacted or truncated to stay below this limit | 120000                |
 | `SYSTEM_DEFINED_PROMPTS`  | <a href="#system-defined-prompts">JSON array of built-in prompts available to all users</a> | "[]"                    |
 | `MCP_ENV_*`               | Those will be passed to the MCP server process            |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [Data Resource Templates](#data-resource-templates) for details. | `{*}/{placeholder}` |

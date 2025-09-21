@@ -9,6 +9,8 @@ from app.tgi.models import (
     MessageRole,
     Tool,
     FunctionDefinition,
+    ToolCall,
+    ToolCallFunction,
 )
 
 
@@ -139,7 +141,7 @@ class TestLLMClient:
             async def __aexit__(self, exc_type, exc_val, exc_tb):
                 pass
 
-            def post(self, url, headers, json):
+            def post(self, url, headers, data=None):
                 return MockResponse()
 
         with patch("app.tgi.llm_client.aiohttp.ClientSession", MockSession):
@@ -185,7 +187,7 @@ class TestLLMClient:
             async def __aexit__(self, exc_type, exc_val, exc_tb):
                 pass
 
-            def post(self, url, headers, json):
+            def post(self, url, headers, data=None):
                 return MockResponse()
 
         with patch("app.tgi.llm_client.aiohttp.ClientSession", MockSession):
@@ -383,3 +385,91 @@ def test_claude_preserves_system_position(monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPayloadCompaction:
+    def test_prepare_payload_compacts_messages_and_arguments(self, monkeypatch):
+        client = llm.LLMClient()
+        monkeypatch.setattr(llm, "LLM_MAX_PAYLOAD_BYTES", 360)
+
+        request = ChatCompletionRequest(
+            messages=[
+                Message(
+                    role=MessageRole.SYSTEM,
+                    content="  system prompt  " + " " * 200,
+                ),
+                Message(
+                    role=MessageRole.USER,
+                    content="  hi there  " + " " * 200,
+                ),
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content='  {   "foo" :  "bar"  }  ' + " " * 400,
+                    tool_calls=[
+                        ToolCall(
+                            id="tc_1",
+                            function=ToolCallFunction(
+                                name="doThing",
+                                arguments=' {  "value" :  "xyz"  } ' + " " * 200,
+                            ),
+                        )
+                    ],
+                ),
+            ],
+            model="test-model",
+            stream=True,
+        )
+
+        payload, serialized, size = client._prepare_payload(request)
+
+        assert size <= llm.LLM_MAX_PAYLOAD_BYTES
+        system = payload["messages"][0]["content"]
+        assistant = payload["messages"][2]
+        assert system == "system prompt"
+        assert assistant["content"] == '{"foo":"bar"}'
+        assert assistant["tool_calls"][0]["function"]["arguments"] == '{"value":"xyz"}'
+
+    def test_prepare_payload_truncates_long_messages(self, monkeypatch):
+        client = llm.LLMClient()
+        monkeypatch.setattr(llm, "LLM_MAX_PAYLOAD_BYTES", 200)
+        monkeypatch.setattr(llm, "TOOL_CHUNK_SIZE", 20)
+
+        long_text = "x" * 200
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content="system"),
+                Message(role=MessageRole.ASSISTANT, content=long_text),
+            ],
+            model="test-model",
+            stream=True,
+        )
+
+        _, serialized, _ = client._prepare_payload(request)
+
+        truncated_content = request.messages[1].content
+        assert "[truncated" in truncated_content
+        assert len(serialized.encode("utf-8")) <= llm.LLM_MAX_PAYLOAD_BYTES
+
+    def test_prepare_payload_drops_old_tool_messages(self, monkeypatch):
+        client = llm.LLMClient()
+        monkeypatch.setattr(llm, "TOOL_CHUNK_SIZE", 60)
+
+        big_payload = "{" + ("y" * 300) + "}"
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content="system"),
+                Message(role=MessageRole.TOOL, content=big_payload, name="tool"),
+                Message(role=MessageRole.USER, content="what next?"),
+            ],
+            model="test-model",
+            stream=True,
+        )
+
+        client._generate_llm_payload(request)
+        payload, serialized, size = client._drop_messages_until_fit(request, 120)
+
+        roles = [msg["role"] for msg in payload["messages"]]
+        assert MessageRole.TOOL not in roles
+        assert len(request.messages) == 2
+        assert request.messages[0].role == MessageRole.SYSTEM
+        assert request.messages[1].role == MessageRole.USER

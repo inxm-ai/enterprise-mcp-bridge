@@ -4,7 +4,7 @@ Tool service module for handling MCP tool operations.
 
 import json
 import logging
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 from app.vars import TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
@@ -19,6 +19,25 @@ from app.tgi.tools_map import map_tools
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
+
+
+def _compact_text(text: str) -> str:
+    """Trim leading whitespace and minify JSON-like payloads."""
+    if not isinstance(text, str):
+        return text
+    compact = text.strip()
+    if not compact:
+        return compact
+    if compact[0] in ("{", "["):
+        try:
+            compact = json.dumps(
+                json.loads(compact),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return compact
 
 
 class ToolService:
@@ -109,7 +128,11 @@ class ToolService:
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": tool_call.function.name,
-                        "content": json.dumps({"error": error_msg}),
+                        "content": json.dumps(
+                            {"error": error_msg},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     }
 
                 # Check if session is still valid before calling
@@ -123,7 +146,11 @@ class ToolService:
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": tool_call.function.name,
-                        "content": json.dumps({"error": error_msg}),
+                        "content": json.dumps(
+                            {"error": error_msg},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     }
 
                 span.set_attribute("args", str(args))
@@ -154,7 +181,11 @@ class ToolService:
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": tool_call.function.name,
-                        "content": json.dumps({"error": error_content}),
+                        "content": json.dumps(
+                            {"error": error_content},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     }
 
                 # Format successful result
@@ -163,7 +194,11 @@ class ToolService:
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {result.structuredContent}"
                     )
-                    content = json.dumps(result.structuredContent)
+                    content = json.dumps(
+                        result.structuredContent,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
                 elif hasattr(result, "content") and result.content:
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
@@ -189,13 +224,19 @@ class ToolService:
                                     )
                                 }
                                 for item in result.content
-                            ]
+                            ],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
                         )
                 else:
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
                     )
-                    content = json.dumps({"result": str(result)})
+                    content = json.dumps(
+                        {"result": str(result)},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
 
                 self.logger.debug(
                     f"[ToolService] Tool '{tool_call.function.name}' executed successfully"
@@ -312,7 +353,7 @@ class ToolService:
                 formatted_messages.append(
                     f"An error occurred: '{message}'\n"
                     f"Make sure you have correctly formatted the json, didn't put any data in strings, or failed to escape special characters. The following message should help you to identify the problem:\n"
-                    f"Error details: {json.dumps(error, indent=2)}"
+                    f"Error details: {json.dumps(error, ensure_ascii=False, separators=(',', ':'))}"
                 )
 
         return "\n\n".join(formatted_messages)
@@ -334,7 +375,9 @@ class ToolService:
             text_content = content
         else:
             try:
-                text_content = json.dumps(content)
+                text_content = _compact_text(
+                    json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+                )
             except Exception:
                 text_content = str(content)
 
@@ -360,6 +403,9 @@ class ToolService:
             # Ensure the content used in the Message is a string
             if not isinstance(content, str):
                 content = text_content
+
+        if isinstance(content, str):
+            content = _compact_text(content)
 
         if format == ToolCallFormat.OPENAI_JSON:
             logger.debug(
@@ -394,19 +440,29 @@ class ToolService:
     async def execute_tool_calls(
         self,
         session: MCPSessionBase,
-        tool_calls: List[Tuple[ToolCall, ToolCallFormat]],
+        tool_calls: Union[List[Tuple[ToolCall, ToolCallFormat]], List[ToolCall]],
         access_token: Optional[str],
         parent_span,
+        *,
+        available_tools: Optional[List[dict]] = None,
     ) -> Tuple[List[Message], bool]:
         """Execute multiple tool calls and return tool result messages."""
         tool_results = []
         success = True
-        # Part of the todo to verify arguments before calling the tool
-        available_tools = map_tools(await session.list_tools())
+        mapped_tools = available_tools or map_tools(await session.list_tools())
 
-        for tool_call, tool_call_format in tool_calls:
+        def _coerce_tool_calls():
+            # Allow legacy callers to pass just ToolCall objects
+            if not tool_calls:
+                return []
+            first = tool_calls[0]
+            if isinstance(first, tuple):
+                return tool_calls
+            return [(call, ToolCallFormat.OPENAI_JSON) for call in tool_calls]
+
+        for tool_call, tool_call_format in _coerce_tool_calls():
             try:
-                tool_call = fix_tool_arguments(tool_call, available_tools)
+                tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
                 content_check = result.get("content")
@@ -435,12 +491,17 @@ class ToolService:
                 if tool_call_format != ToolCallFormat.CLAUDE_XML:
                     user_asks_for_correction = Message(
                         role=MessageRole.USER,
+                        name="mcp_tool_retry_hint",
                         content=(
                             self._format_errors(parsed_errors)
                             if parsed_errors
                             else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {getattr(tool_call.function, 'name', 'unknown')} with the corrected arguments again."
                         ),
                     )
+                    if user_asks_for_correction.content:
+                        user_asks_for_correction.content = _compact_text(
+                            user_asks_for_correction.content
+                        )
                     tool_results.append(user_asks_for_correction)
                 success = False
                 break
@@ -467,10 +528,11 @@ def process_tool_arguments(arguments_str):
         for key, value in data.items():
             if isinstance(value, str) and is_json_string(value):
                 data[key] = json.loads(value)
+        compact = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         logger.debug(
-            f"[ToolService] Processed tool arguments: {arguments_str} -> {json.dumps(data)}"
+            f"[ToolService] Processed tool arguments: {arguments_str} -> {compact}"
         )
-        return json.dumps(data)
+        return compact
 
     except json.JSONDecodeError as e:
         logger.warning(f"[ToolService] Error decoding top-level JSON: {e}")

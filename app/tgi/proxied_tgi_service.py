@@ -249,7 +249,11 @@ class ProxiedTGIService:
                                 id=parsed_call.id,
                                 function=ToolCallFunction(
                                     name=parsed_call.name,
-                                    arguments=json.dumps(parsed_call.arguments),
+                                    arguments=json.dumps(
+                                        parsed_call.arguments,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    ),
                                 ),
                             )
                             tool_calls_to_execute.append(
@@ -284,6 +288,7 @@ class ProxiedTGIService:
                                 tool_calls_to_execute,
                                 access_token,
                                 parent_span,
+                                available_tools=available_tools,
                             )
                         )
 
@@ -292,6 +297,7 @@ class ProxiedTGIService:
                         )
 
                         messages_history.extend(tool_results)
+                        self._deduplicate_retry_hints(messages_history)
 
                         # If we didn't fail, this should repeat the cycle
                         if success:
@@ -323,6 +329,17 @@ class ProxiedTGIService:
         )
 
         yield "data: [DONE]\n\n"
+
+    def _deduplicate_retry_hints(self, messages: List[Message]) -> None:
+        """Keep only the most recent retry instruction to prevent payload bloat."""
+        seen_hint = False
+        for idx in range(len(messages) - 1, -1, -1):
+            msg = messages[idx]
+            if getattr(msg, "name", None) == "mcp_tool_retry_hint":
+                if seen_hint:
+                    del messages[idx]
+                else:
+                    seen_hint = True
 
     async def _non_stream_chat_with_tools(
         self,
@@ -377,6 +394,7 @@ class ProxiedTGIService:
                     response.choices[0].message.tool_calls,
                     access_token,
                     parent_span,
+                    available_tools=available_tools,
                 )
 
                 # Add tool results to history

@@ -307,6 +307,28 @@ async def test_streaming_content_only():
     assert any("[DONE]" in c for c in result_chunks)
 
 
+def test_deduplicate_retry_hints_keeps_latest():
+    service = ProxiedTGIService()
+    messages = [
+        Message(role=MessageRole.USER, content="original"),
+        Message(
+            role=MessageRole.USER,
+            name="mcp_tool_retry_hint",
+            content="Please retry",
+        ),
+        Message(
+            role=MessageRole.USER,
+            name="mcp_tool_retry_hint",
+            content="Please retry",
+        ),
+    ]
+
+    service._deduplicate_retry_hints(messages)
+
+    retry_hints = [m for m in messages if m.name == "mcp_tool_retry_hint"]
+    assert len(retry_hints) == 1
+
+
 @pytest.mark.asyncio
 async def test_streaming_tool_call_chunked_arguments():
     service = ProxiedTGIService()

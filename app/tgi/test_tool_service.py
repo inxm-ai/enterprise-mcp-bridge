@@ -1,3 +1,4 @@
+import json
 import pytest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -286,7 +287,7 @@ def test_process_tool_arguments_valid_simple_json():
     """Test processing valid simple JSON."""
     input_str = '{"key": "value"}'
     result = process_tool_arguments(input_str)
-    expected = '{"key": "value"}'
+    expected = '{"key":"value"}'
     assert result == expected
 
 
@@ -294,7 +295,7 @@ def test_process_tool_arguments_nested_json_string():
     """Test processing JSON with nested JSON string that gets parsed."""
     input_str = '{"key": "{\\"nested\\": \\"value\\"}"}'
     result = process_tool_arguments(input_str)
-    expected = '{"key": {"nested": "value"}}'
+    expected = '{"key":{"nested":"value"}}'
     assert result == expected
 
 
@@ -302,7 +303,7 @@ def test_process_tool_arguments_multiple_nested():
     """Test processing JSON with multiple nested JSON strings."""
     input_str = '{"arg1": "{\\"a\\": 1}", "arg2": "{\\"b\\": 2}"}'
     result = process_tool_arguments(input_str)
-    expected = '{"arg1": {"a": 1}, "arg2": {"b": 2}}'
+    expected = '{"arg1":{"a":1},"arg2":{"b":2}}'
     assert result == expected
 
 
@@ -325,7 +326,7 @@ def test_process_tool_arguments_non_string_nested():
     input_str = '{"key": 123}'
     result = process_tool_arguments(input_str)
     expected = '{"key": 123}'
-    assert result == expected
+    assert json.loads(result) == json.loads(expected)
 
 
 def test_process_tool_arguments_mixed_types():
@@ -333,7 +334,7 @@ def test_process_tool_arguments_mixed_types():
     input_str = '{"str": "value", "num": 42, "nested": "{\\"inner\\": \\"data\\"}"}'
     result = process_tool_arguments(input_str)
     expected = '{"str": "value", "num": 42, "nested": {"inner": "data"}}'
-    assert result == expected
+    assert json.loads(result) == json.loads(expected)
 
 
 def test_parse_and_clean_tool_call_valid_dict():
@@ -341,7 +342,7 @@ def test_parse_and_clean_tool_call_valid_dict():
     tool_call = {"function": {"arguments": '{"param": "{\\"nested\\": \\"value\\"}"}'}}
     result = parse_and_clean_tool_call(tool_call)
     expected_arguments = '{"param": {"nested": "value"}}'
-    assert result["function"]["arguments"] == expected_arguments
+    assert json.loads(result["function"]["arguments"]) == json.loads(expected_arguments)
 
 
 def test_parse_and_clean_tool_call_missing_function():
@@ -363,7 +364,7 @@ def test_parse_and_clean_tool_call_with_llama_failure_example():
     }
     result = parse_and_clean_tool_call(tool_call)
     expected_arguments = '{"entities": [{"entityType": "Person", "name": "Matthias", "observations": []}, {"entityType": "Department", "name": "HR", "observations": []}]}'
-    assert result["function"]["arguments"] == expected_arguments
+    assert json.loads(result["function"]["arguments"]) == json.loads(expected_arguments)
 
 
 def test_parse_and_clean_tool_call_missing_arguments():
@@ -402,7 +403,17 @@ def test_extract_tool_call_from_streamed_content_valid_tool_call():
 
 def test_extract_tool_call_from_streamed_content_with_nested_arguments():
     """Test extracting tool call with nested JSON in arguments."""
-    content = '{"id": "call_2", "index": 1, "type": "function", "function": {"name": "nested_tool", "arguments": "{\\"param\\": \\"{\\\\\\"inner\\\\\\": \\\\\\"value\\\\\\"}\\"}"}}'
+    nested_arguments = json.dumps({"param": json.dumps({"inner": "value"})})
+    tool_call = {
+        "id": "call_2",
+        "index": 1,
+        "type": "function",
+        "function": {
+            "name": "nested_tool",
+            "arguments": nested_arguments,
+        },
+    }
+    content = json.dumps(tool_call)
     result = extract_tool_call_from_streamed_content(content)
     expected = {
         "id": "call_2",
@@ -410,10 +421,17 @@ def test_extract_tool_call_from_streamed_content_with_nested_arguments():
         "type": "function",
         "function": {
             "name": "nested_tool",
-            "arguments": '{"param": {"inner": "value"}}',
+            "arguments": json.dumps({"param": {"inner": "value"}}),
         },
     }
-    assert result == expected
+    assert result is not None
+    assert result["id"] == expected["id"]
+    assert result["index"] == expected["index"]
+    assert result["type"] == expected["type"]
+    assert result["function"]["name"] == expected["function"]["name"]
+    assert json.loads(result["function"]["arguments"]) == json.loads(
+        expected["function"]["arguments"]
+    )
 
 
 def test_extract_tool_call_from_streamed_content_multiple_json_first_valid():
@@ -431,15 +449,26 @@ def test_extract_tool_call_from_streamed_content_multiple_json_first_valid():
 
 def test_extract_tool_call_from_streamed_content_multiple_json_second_valid():
     """Test extracting from content with multiple JSON objects, second is valid."""
-    content = '{"invalid": "json"} {"id": "call_4", "index": 1, "type": "function", "function": {"name": "second_tool", "arguments": "{\\"key\\": \\"value\\"}"}}'
-    result = extract_tool_call_from_streamed_content(content)
-    expected = {
+    tool_call = {
         "id": "call_4",
         "index": 1,
         "type": "function",
-        "function": {"name": "second_tool", "arguments": '{"key": "value"}'},
+        "function": {
+            "name": "second_tool",
+            "arguments": json.dumps({"key": "value"}),
+        },
     }
-    assert result == expected
+    content = json.dumps({"invalid": "json"}) + " " + json.dumps(tool_call)
+    result = extract_tool_call_from_streamed_content(content)
+    expected = tool_call
+    assert result is not None
+    assert result["id"] == expected["id"]
+    assert result["index"] == expected["index"]
+    assert result["type"] == expected["type"]
+    assert result["function"]["name"] == expected["function"]["name"]
+    assert json.loads(result["function"]["arguments"]) == json.loads(
+        expected["function"]["arguments"]
+    )
 
 
 def test_extract_tool_call_from_streamed_content_no_valid_json():

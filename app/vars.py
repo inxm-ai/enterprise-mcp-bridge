@@ -17,6 +17,8 @@ TOOL_INJECTION_MODE = os.getenv("TOOL_INJECTION_MODE", "openai")
 TOOL_CHUNK_SIZE = int(os.getenv("TOOL_CHUNK_SIZE", "10000"))
 AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 
+LLM_MAX_PAYLOAD_BYTES = int(os.getenv("LLM_MAX_PAYLOAD_BYTES", "120000"))
+
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT")
 OTLP_HEADERS = os.getenv("OTLP_HEADERS", "")
 

@@ -7,9 +7,9 @@ import logging
 import os
 import time
 import uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List
 import aiohttp
-from app.vars import TOOL_INJECTION_MODE
+from app.vars import TOOL_INJECTION_MODE, LLM_MAX_PAYLOAD_BYTES, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
 from app.tgi.models import (
@@ -66,6 +66,170 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {access_token}"
 
         return headers
+
+    @staticmethod
+    def _compact_text(text: str) -> str:
+        """Trim whitespace and minify JSON-like payloads."""
+        if not isinstance(text, str):
+            return text
+        compact = text.strip()
+        if not compact:
+            return compact
+        if compact[0] in ("{", "["):
+            try:
+                compact = json.dumps(
+                    json.loads(compact),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        return compact
+
+    def _serialize_payload(self, payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _payload_size(self, serialized_payload: str) -> int:
+        return len(serialized_payload.encode("utf-8"))
+
+    def _minify_messages_for_payload(self, request: ChatCompletionRequest) -> None:
+        for message in request.messages or []:
+            if message.content:
+                message.content = self._compact_text(message.content)
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    if getattr(tool_call, "function", None) and getattr(
+                        tool_call.function, "arguments", None
+                    ):
+                        tool_call.function.arguments = self._compact_text(
+                            tool_call.function.arguments
+                        )
+
+    def _truncate_messages_until_fit(
+        self, request: ChatCompletionRequest, limit: int
+    ) -> tuple[dict, str, int]:
+        """Iteratively truncate the largest assistant/tool messages."""
+        max_chars = TOOL_CHUNK_SIZE
+        candidates: List[Message] = [
+            message
+            for message in request.messages or []
+            if message.role in (MessageRole.TOOL, MessageRole.ASSISTANT)
+            and isinstance(message.content, str)
+        ]
+        candidates.sort(key=lambda msg: len(msg.content or ""), reverse=True)
+
+        payload = request.model_dump(exclude_none=True)
+        serialized = self._serialize_payload(payload)
+        size = self._payload_size(serialized)
+
+        for message in candidates:
+            if not message.content or len(message.content) <= max_chars:
+                continue
+            original_len = len(message.content)
+            message.content = f"{message.content[:max_chars]}...[truncated {original_len - max_chars} chars]"
+            payload = request.model_dump(exclude_none=True)
+            serialized = self._serialize_payload(payload)
+            size = self._payload_size(serialized)
+            self.logger.warning(
+                "[LLMClient] Truncated %s message to fit payload (removed %s chars)",
+                message.role,
+                original_len - max_chars,
+            )
+            if size <= limit:
+                break
+
+        return payload, serialized, size
+
+    def _find_oldest_droppable_message_index(
+        self, request: ChatCompletionRequest
+    ) -> int | None:
+        for idx, message in enumerate(request.messages or []):
+            if idx == 0:
+                continue  # keep first message (likely system)
+            if message.role == MessageRole.TOOL:
+                return idx
+        for idx, message in enumerate(request.messages or []):
+            if idx == 0:
+                continue
+            if message.role == MessageRole.ASSISTANT and bool(message.tool_calls):
+                return idx
+        for idx, message in enumerate(request.messages or []):
+            if idx == 0:
+                continue
+            if getattr(message, "name", None) == "mcp_tool_retry_hint":
+                return idx
+        return None
+
+    def _drop_messages_until_fit(
+        self, request: ChatCompletionRequest, limit: int
+    ) -> tuple[dict, str, int]:
+        payload = request.model_dump(exclude_none=True)
+        serialized = self._serialize_payload(payload)
+        size = self._payload_size(serialized)
+
+        while size > limit and len(request.messages) > 1:
+            drop_index = self._find_oldest_droppable_message_index(request)
+            if drop_index is None:
+                break
+            dropped = request.messages.pop(drop_index)
+            self.logger.warning(
+                "[LLMClient] Dropped message role=%s name=%s to reduce payload",
+                dropped.role,
+                getattr(dropped, "name", ""),
+            )
+            payload = request.model_dump(exclude_none=True)
+            serialized = self._serialize_payload(payload)
+            size = self._payload_size(serialized)
+
+        return payload, serialized, size
+
+    def _ensure_payload_size(
+        self, request: ChatCompletionRequest, payload: dict
+    ) -> tuple[dict, str, int]:
+        serialized = self._serialize_payload(payload)
+        size = self._payload_size(serialized)
+
+        if size <= LLM_MAX_PAYLOAD_BYTES:
+            return payload, serialized, size
+
+        self.logger.warning(
+            "[LLMClient] Payload size %s exceeds limit %s, applying compaction",
+            size,
+            LLM_MAX_PAYLOAD_BYTES,
+        )
+
+        # First pass: compact whitespace and JSON formatting
+        self._minify_messages_for_payload(request)
+        payload = request.model_dump(exclude_none=True)
+        serialized = self._serialize_payload(payload)
+        size = self._payload_size(serialized)
+
+        if size <= LLM_MAX_PAYLOAD_BYTES:
+            return payload, serialized, size
+
+        # Second pass: truncate largest assistant/tool messages
+        payload, serialized, size = self._truncate_messages_until_fit(
+            request, LLM_MAX_PAYLOAD_BYTES
+        )
+        if size <= LLM_MAX_PAYLOAD_BYTES:
+            return payload, serialized, size
+
+        # Final pass: drop oldest tool-related messages if still too large
+        payload, serialized, size = self._drop_messages_until_fit(
+            request, LLM_MAX_PAYLOAD_BYTES
+        )
+
+        if size > LLM_MAX_PAYLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="LLM payload size remains above configured limit after trimming",
+            )
+
+        return payload, serialized, size
+
+    def _prepare_payload(self, request: ChatCompletionRequest) -> tuple[dict, str, int]:
+        payload = self._generate_llm_payload(request)
+        return self._ensure_payload_size(request, payload)
 
     def _generate_llm_payload(self, request: ChatCompletionRequest) -> dict:
         """Generate the payload for the LLM API request."""
@@ -134,14 +298,19 @@ class LLMClient:
         """Stream completion from the actual LLM."""
         # Remove all tracing to avoid context cleanup issues with async generators
         try:
-            # Convert request to dict for JSON serialization
-            payload = self._generate_llm_payload(request)
+            # Prepare payload with size-aware compaction
+            payload, serialized_payload, payload_size = self._prepare_payload(request)
+            self.logger.debug(
+                "[LLMClient] Prepared streaming payload (bytes=%s, messages=%s)",
+                payload_size,
+                len(payload.get("messages", [])),
+            )
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.tgi_url}/chat/completions",
                     headers=self._get_headers(access_token),
-                    json=payload,
+                    data=serialized_payload,
                 ) as response:
 
                     if not response.ok:
@@ -230,14 +399,21 @@ class LLMClient:
 
             try:
                 # Convert request to dict for JSON serialization, ensure stream=False
-                payload = self._generate_llm_payload(request)
-                payload["stream"] = False
+                request.stream = False
+                payload, serialized_payload, payload_size = self._prepare_payload(
+                    request
+                )
+                self.logger.debug(
+                    "[LLMClient] Prepared non-stream payload (bytes=%s, messages=%s)",
+                    payload_size,
+                    len(payload.get("messages", [])),
+                )
 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         f"{self.tgi_url}/chat/completions",
                         headers=self._get_headers(access_token),
-                        json=payload,
+                        data=serialized_payload,
                     ) as response:
 
                         if not response.ok:
