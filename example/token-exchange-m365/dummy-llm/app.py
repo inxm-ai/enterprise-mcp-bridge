@@ -48,7 +48,7 @@ def mirror_request(path):
                 }
                 yield f"data: {json.dumps(event_data)}\n\n"
                 yield "data: [DONE]\n\n"
-            elif len(json_data["messages"]) == 1:
+            elif sum(1 for msg in json_data["messages"] if msg.get("role") == "user") == 1:
                 # If the JSON message has one entry, reply with an OpenAI-compatible tool call
                 tool_call = [
                     {
@@ -86,7 +86,7 @@ def mirror_request(path):
                     "choices": [
                         {
                             "index": 0,
-                            "delta": {"content": json_data},
+                            "delta": {"content": json.dumps(json_data)},
                             "finish_reason": "stop",
                         }
                     ],

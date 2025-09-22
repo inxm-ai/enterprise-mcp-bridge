@@ -159,12 +159,81 @@
         import { otelFetch } from "./otelFetch.js";
         import { TGI } from "./chat.js";
         import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
+        // Generic tag replacement pipeline that preserves all non-tag text
+        function replaceTags(tag, map) { return { tag, map }; }
+
+        function parseTagSegments(text, tag) {
+            const OPEN = `<${tag}>`;
+            const CLOSE = `</${tag}>`;
+            const segments = [];
+            let i = 0;
+            while (i < text.length) {
+                const start = text.indexOf(OPEN, i);
+                if (start === -1) {
+                    const tail = text.slice(i);
+                    if (tail) segments.push({ type: 'text', value: tail });
+                    break;
+                }
+                if (start > i) {
+                    const normal = text.slice(i, start);
+                    if (normal) segments.push({ type: 'text', value: normal });
+                }
+                const afterOpen = start + OPEN.length;
+                const end = text.indexOf(CLOSE, afterOpen);
+                if (end === -1) {
+                    // No closing tag: treat the rest as text (including the literal OPEN)
+                    segments.push({ type: 'text', value: text.slice(start) });
+                    break;
+                }
+                const inner = text.slice(afterOpen, end);
+                segments.push({ type: 'tag', tag, inner });
+                i = end + CLOSE.length;
+            }
+            return segments;
+        }
+
+        function applyTransforms(nodes, transforms) {
+            if (!transforms || transforms.length === 0) return nodes;
+            const [current, ...rest] = transforms;
+            const out = [];
+            for (const node of nodes) {
+                if (typeof node !== 'string') {
+                    // Non-string nodes are passed through; apply rest to them is not supported (opaque)
+                    out.push(html.span(node));
+                    continue;
+                }
+                const parts = parseTagSegments(node, current.tag);
+                for (const part of parts) {
+                    if (part.type === 'text') {
+                        out.push(part.value);
+                    } else {
+                        // Recursively apply remaining transforms to the inner content
+                        const children = applyTransforms([part.inner], rest);
+                        out.push(current.map(children));
+                    }
+                }
+            }
+            // After applying current transform, apply remaining transforms to any stray strings
+            return rest.length ? applyTransforms(out, rest) : out;
+        }
+
+        function renderRichContent(content) {
+            if (content == null) return [];
+            const transforms = [
+                replaceTags('think', children => html.p(html.i(...children))),
+                replaceTags('code', children => html.code(...children)),
+            ];
+            return applyTransforms([String(content)], transforms);
+        }
         function keepLastThinkTag(streaming) {
-            const thinkTags = [...streaming.matchAll(/<think>[\s\S]*?(?=<think>|$)/g)];
-            if (thinkTags.length === 0) return streaming;
-            // Get up to 5 most recent <think> tags
-            const lastThinks = thinkTags.slice(-5).map(t => t[0]).join('');
-            const withoutThinks = streaming.replace(/<think>[\s\S]*?(?=<think>|$)/g, '');
+            // Keep only complete <think>...</think> blocks; remove all think blocks from the rest
+            const completeThink = /<think>[\s\S]*?<\/think>/g;
+            const allBlocks = streaming.match(completeThink) || [];
+            const lastThinks = allBlocks.slice(-5).join('');
+            // Remove all complete think blocks from the rest
+            let withoutThinks = streaming.replace(completeThink, '');
+            // Also strip any stray opening/closing tags that might appear mid-stream
+            withoutThinks = withoutThinks.replace(/<\/?think>/g, '');
             return lastThinks + withoutThinks;
         }
         pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true }, (state, trigger) => [
@@ -173,7 +242,7 @@
                 state.availableTools = await otelFetch('/api/mcp/m365/tools', { credentials: 'include' }).then(r => r.json());
                 state.loading = false;
             }),
-            html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, m.content))),
+            html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, ...renderRichContent(m.content)))),
             html.form({
                 id: 'chat-form', submit: async e => {
                     e.preventDefault();
