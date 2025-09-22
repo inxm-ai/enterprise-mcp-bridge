@@ -197,9 +197,10 @@
             const [current, ...rest] = transforms;
             const out = [];
             for (const node of nodes) {
+                console.log('Processing node:', node);
                 if (typeof node !== 'string') {
                     // Non-string nodes are passed through; apply rest to them is not supported (opaque)
-                    out.push(html.span(node));
+                    out.push(node);
                     continue;
                 }
                 const parts = parseTagSegments(node, current.tag);
@@ -219,22 +220,15 @@
 
         function renderRichContent(content) {
             if (content == null) return [];
+            console.log('Rendering rich content for:', content);
             const transforms = [
                 replaceTags('think', children => html.p(html.i(...children))),
                 replaceTags('code', children => html.code(...children)),
             ];
-            return applyTransforms([String(content)], transforms);
-        }
-        function keepLastThinkTag(streaming) {
-            // Keep only complete <think>...</think> blocks; remove all think blocks from the rest
-            const completeThink = /<think>[\s\S]*?<\/think>/g;
-            const allBlocks = streaming.match(completeThink) || [];
-            const lastThinks = allBlocks.slice(-5).join('');
-            // Remove all complete think blocks from the rest
-            let withoutThinks = streaming.replace(completeThink, '');
-            // Also strip any stray opening/closing tags that might appear mid-stream
-            withoutThinks = withoutThinks.replace(/<\/?think>/g, '');
-            return lastThinks + withoutThinks;
+            const result = applyTransforms([String(content)], transforms)
+                .map(node => typeof node !== 'string' ? node : html.div(node));
+            console.log('Rendered result:', result);
+            return result;
         }
         pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true }, (state, trigger) => [
             script(async () => {
@@ -266,7 +260,7 @@
                             toolChoice,
                             chunk => {
                                 state.streaming += chunk;
-                                state.messages = [...originalState, { role: 'assistant', content: keepLastThinkTag(state.streaming) }];
+                                state.messages = [...originalState, { role: 'assistant', content: state.streaming }];
                             }
                         );
                         // Remove streaming preview, add final assistant message

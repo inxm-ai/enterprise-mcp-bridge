@@ -1,21 +1,34 @@
 services:
 
-  jaeger:
-    image: cr.jaegertracing.io/jaegertracing/jaeger:latest
-    container_name: ops.jaeger
-    ports:
-      - "16686:16686"
-      - "14250:14250"
-      - "4317:4317"
-      - "4318:4318"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-      - COLLECTOR_OTLP_HTTP_ENABLED=true
-    networks:
-      - private
-    command: "--set extensions.jaeger_query.base_path=/ops/jaeger"
 
-  keycloak:
+  ingress:
+    container_name: ingress
+    image: nginx:latest
+    volumes:
+      - ./nginx/ingress-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dev-local-certs/auth.inxm.local.crt:/etc/nginx/certs/auth.inxm.local.crt:ro
+      - ./dev-local-certs/auth.inxm.local.key:/etc/nginx/certs/auth.inxm.local.key:ro
+      - ./dev-local-certs/inxm.local.crt:/etc/nginx/certs/inxm.local.crt:ro
+      - ./dev-local-certs/inxm.local.key:/etc/nginx/certs/inxm.local.key:ro
+    ports:
+      - "443:443"
+    depends_on:
+      auth-keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k --resolve auth.inxm.local:443:127.0.0.1 https://auth.inxm.local:443/realms/inxm || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    networks:
+      default: {}
+      private:
+        aliases:
+          - inxm.local
+          - auth.inxm.local
+
+  auth-keycloak:
     image: quay.io/keycloak/keycloak:25.0.2
     container_name: auth.keycloak
     command: >
@@ -38,7 +51,7 @@ services:
     networks:
       - private
 
-  oauth2-proxy:
+  auth-oauth2-proxy:
     container_name: auth.oauth2-proxy
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
     environment:
@@ -53,7 +66,7 @@ services:
       OAUTH2_PROXY_EMAIL_DOMAINS: "*"
       OAUTH2_PROXY_OIDC_ISSUER_URL: "https://auth.inxm.local/realms/inxm"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
-      OAUTH2_PROXY_REDIS_CONNECTION_URL: "redis://redis:6379"
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: "redis://auth-redis:6379"
       OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
       OAUTH2_PROXY_PASS_USER_HEADERS: "true"
       OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
@@ -70,17 +83,25 @@ services:
     ports:
       - "3098:3098"
     depends_on:
-      keycloak:
+      auth-keycloak:
         condition: service_healthy
       app-nginx:
         condition: service_healthy
       ingress:
         condition: service_healthy
-      redis:
+      auth-redis:
         condition: service_started
 
     networks:
       - private
+  auth-redis:
+    container_name: auth.redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - private
+
 
   app-nginx:
     container_name: app.ingress
@@ -143,7 +164,7 @@ services:
       MCP_BASE_PATH: /api/mcp/m365
       EXCLUDE_TOOLS: login,logout,verify-login
       INCLUDE_TOOLS: "*mail*"
-      OTLP_ENDPOINT: http://jaeger:4317
+      OTLP_ENDPOINT: http://ops-jaeger:4317
       TGI_URL: ${OAI_BASE_URL}
       TGI_TOKEN: ${OAI_API_TOKEN}
       DEFAULT_MODEL: ${OAI_MODEL_NAME}
@@ -161,9 +182,9 @@ services:
           }
         ]
     depends_on:
-      keycloak:
+      auth-keycloak:
         condition: service_healthy
-      jaeger:
+      ops-jaeger:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/mcp/m365/.well-known/agent.json || exit 1"]
@@ -178,42 +199,8 @@ services:
     networks:
       - private
 
-  ingress:
-    container_name: ingress
-    image: nginx:latest
-    volumes:
-      - ./nginx/ingress-nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./dev-local-certs/auth.inxm.local.crt:/etc/nginx/certs/auth.inxm.local.crt:ro
-      - ./dev-local-certs/auth.inxm.local.key:/etc/nginx/certs/auth.inxm.local.key:ro
-      - ./dev-local-certs/inxm.local.crt:/etc/nginx/certs/inxm.local.crt:ro
-      - ./dev-local-certs/inxm.local.key:/etc/nginx/certs/inxm.local.key:ro
-    ports:
-      - "443:443"
-    depends_on:
-      keycloak:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -k --resolve auth.inxm.local:443:127.0.0.1 https://auth.inxm.local:443/realms/inxm || exit 1"]
-      interval: 1m30s
-      timeout: 30s
-      retries: 5
-      start_period: 30s
-    networks:
-      default: {}
-      private:
-        aliases:
-          - inxm.local
-          - auth.inxm.local
 
-  redis:
-    container_name: auth.redis
-    image: redis:latest
-    ports:
-      - "6379:6379"
-    networks:
-      - private
-
-  dummy-llm:
+  app-dummy-llm:
     container_name: dummy.llm
     build:
       context: ./dummy-llm
@@ -223,7 +210,7 @@ services:
     networks:
       - private
 
-  grafana:
+  ops-grafana:
     container_name: ops.grafana
     image: grafana/grafana:latest
     ports:
@@ -237,12 +224,12 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      prometheus:
+      ops-prometheus:
         condition: service_started
     networks:
       - private
 
-  prometheus:
+  ops-prometheus:
     container_name: ops.prometheus
     image: prom/prometheus:latest
     ports:
@@ -253,6 +240,20 @@ services:
     networks:
       - private
 
+  ops-jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:latest
+    container_name: ops.jaeger
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_HTTP_ENABLED=true
+    networks:
+      - private
+    command: "--set extensions.jaeger_query.base_path=/ops/jaeger"
 networks:
   default:
     name: mcp-rest-demo-net
