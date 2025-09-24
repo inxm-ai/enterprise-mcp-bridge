@@ -30,6 +30,9 @@ tracer = trace.get_tracer(__name__)
 
 if MCP_BASE_PATH:
     router.prefix = MCP_BASE_PATH
+    logger.info(f"Using MCP_BASE_PATH: {MCP_BASE_PATH}")
+else:
+    logger.info("No MCP_BASE_PATH set, using root path")
 
 
 @router.get("/prompts")
@@ -112,6 +115,58 @@ async def list_tools(
     except UserLoggedOutException as e:
         logger.warning(f"[Tools] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
+
+
+@router.get("/tools/{tool_name}")
+async def get_tool_details(
+    tool_name: str,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
+):
+    try:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            access_token,
+        )
+        with traced_request(
+            tracer,
+            operation="get_tool_details",
+            session_value=x_inxm_mcp_session,
+            group=group,
+            start_message=f"[Tool-Details] Getting tool details. Session: {x_inxm_mcp_session}, Group: {group}",
+        ):
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                result = await session.list_tools()
+                # find the tool with the given name
+                result = next(
+                    (tool for tool in result if tool.get("name") == tool_name), None
+                )
+                logger.debug(
+                    mask_token(
+                        f"[Tool-Details] Tool details retrieved. Session: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
+                )
+                if result is None:
+                    raise HTTPException(status_code=404, detail="Tool not found")
+                return result
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Tool-Details] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        log_exception_with_details(logger, "[Tool-Details]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/tools/{tool_name}")

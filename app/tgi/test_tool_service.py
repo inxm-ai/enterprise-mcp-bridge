@@ -1,5 +1,4 @@
 import json
-import json
 import pytest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -309,7 +308,6 @@ def test_process_tool_arguments_multiple_nested():
     result = process_tool_arguments(input_str)
     expected = '{"arg1":{"a":1},"arg2":{"b":2}}'
     assert result == expected
-
 
     def test_process_tool_arguments_invalid_json():
         """Test processing invalid JSON returns original string."""
