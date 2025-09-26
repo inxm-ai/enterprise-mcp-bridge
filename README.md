@@ -46,16 +46,6 @@ This project directly addresses these gaps. It's designed for enterprise product
 ---
 
 
-## Core Concepts
-
-1. **Ad-hoc (stateless) tool calls**: POST to `/tools/{tool_name}` with arguments. A temporary MCP connection is created and torn down.
-2. **Managed sessions**: Start with `/session/start`, receive a session ID cookie (`x-inxm-mcp-session`). Subsequent tool calls reuse a persistent MCP process context.
-3. **Multi-user separation**: If an OAuth token is present (default cookie `_oauth2_proxy`) it is appended internally to the session identifier to avoid collisions and enforce per-user isolation.
-4. **Automatic OAuth token propagation**: When a tool declares an `oauth_token` property in its JSON schema, the server injects a validated token value; clients need not send it explicitly.
-5. **Token exchange**: Incoming Keycloak token can be exchanged for a provider (e.g., Microsoft) token using `TokenRetrieverFactory` and exported into the MCP subprocess environment variable defined by `OAUTH_ENV`.
-
----
-
 ## Quick Start
 
 ```bash
@@ -67,132 +57,109 @@ uvicorn app.server:app --reload
 
 Open: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-## Session vs Stateless Calls
+---
 
-| Mode      | How                                      | When to use                     |
-|-----------|-----------------------------------------|----------------------------------|
-| Stateless | `POST /tools/{tool}` (no session header)| Simple one-off tool execution   |
-| Stateful  | `POST /session/start` then include header/cookie | Conversations, multi-step pipelines |
+## Using MCPs
 
-### Session Management
+### Local development workflow
+1. Clone or copy your MCP server into the `mcp/` folder so it ships with the bridge.
+2. When no override is supplied, the bridge runs `mcp/server.py` bundled with the repo.
+3. Set `ENV=dev` when using the published Docker image to auto-install dependencies declared in `requirements.txt` or `pyproject.toml` within your MCP directory.
 
-- **Start a Session**:
-  ```bash
-  curl -X POST http://localhost:8000/session/start -c cookies.txt
-  ```
-  The response sets `x-inxm-mcp-session` cookie.
-
-- **Start a Group-Specific Session**:
-  ```bash
-  curl -X POST "http://localhost:8000/session/start?group=team-alpha" -c cookies.txt
-  ```
-  Creates a session with access to group-specific data (user must be member of the group).
-
-- **Use the Session**:
-  ```bash
-  curl -b cookies.txt -X POST http://localhost:8000/tools/add -H 'Content-Type: application/json' -d '{"a":2,"b":3}'
-  ```
-
-- **Close the Session**:
-  ```bash
-  curl -b cookies.txt -X POST http://localhost:8000/session/close
-  ```
-
-## Group-Based Data Access
-
-The Enterprise MCP Bridge supports secure, group-based data access through OAuth token validation. This feature allows different users to access different data sources based on their group memberships, without exposing file paths or risking path traversal attacks.
-
-### How It Works
-
-1. **User Authentication**: Users authenticate via OAuth (e.g., Keycloak) and receive a token containing group memberships.
-2. **Group Validation**: When requesting group-specific access, the server validates the user's membership in the requested group.
-3. **Dynamic Path Resolution**: Based on group membership, the server resolves secure data paths:
-   - User-specific: `/data/u/{sanitized_user_id}.json`
-   - Group-specific: `/data/g/{sanitized_group_name}.json`
-4. **Template Processing**: The `MCP_SERVER_COMMAND` template is processed with the resolved data path.
-
-### Security Features
-
-- **No Path Exposure**: Clients never specify file paths directly
-- **Group Membership Validation**: Access is granted only to authorized group members
-- **Path Sanitization**: All path components are sanitized to prevent traversal attacks
-- **OAuth-Based Authorization**: Leverages existing identity and access management systems
-
-### Usage Examples
-
-**Sessionless Group Access:**
+**Example**
 ```bash
-# Access group-specific data (user must be member of 'finance' group)
-curl -H "Authorization: Bearer $TOKEN" \
-     -X POST "http://localhost:8000/tools/search?group=finance" \
-     -H 'Content-Type: application/json' \
-     -d '{"query": "budget reports"}'
+# clone the repo you want to run
+git clone https://github.com/modelcontextprotocol/servers.git mcp
+# run it in docker
+docker run -p 8000:8000 -e ENV=dev -v $PWD/mcp/src/fetch:/mcp -it ghcr.io/inxm-ai/enterprise-mcp-bridge:latest python -m mcp_server_fetch
 ```
 
-**Session-Based Group Access:**
-```bash
-# Start session with group access
-curl -H "Authorization: Bearer $TOKEN" \
-     -X POST "http://localhost:8000/session/start?group=marketing" \
-     -c cookies.txt
+For production, create a dedicated Docker image from `ghcr.io/inxm-ai/enterprise-mcp-bridge` that bundles your MCP server and its dependencies.
 
-# Use the session (automatically uses group-specific data)
-curl -b cookies.txt \
-     -X POST http://localhost:8000/tools/create_memory \
-     -H 'Content-Type: application/json' \
-     -d '{"content": "Campaign ideas for Q4"}'
-```
+If you have specific requirements (e.g. different python version, additional system packages), use the `Dockerfile` in this repo as a starting point.
 
-### Configuration
-
-Configure your MCP command template to use dynamic data paths:
+### Running custom commands with `MCP_SERVER_COMMAND`
+Set `MCP_SERVER_COMMAND` to the exact command you want the bridge to launch. The value is shell-split, so quoting works as expected, and it can include placeholders such as `{data_path}`, `{user_id}`, and `{group_id}` that are resolved per request.
 
 ```bash
-# Memory server with group/user-specific data
-export MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory {data_path}"
-
-# Custom server with additional parameters
-export MCP_SERVER_COMMAND="python custom_mcp.py --data-file {data_path} --user {user_id}"
+export MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory"
+uvicorn app.server:app --host 0.0.0.0 --port 8000
 ```
 
-### Data Directory Structure
+Precedence:
+1. `MCP_SERVER_COMMAND` if present.
+2. Command-line arguments passed after `--` when starting `uvicorn`.
+3. The default `mcp/server.py`.
 
-```
-/data/
-├── u/           # User-specific data
-│   ├── user123.json
-│   ├── alice_smith.json
-│   └── ...
-├── g/           # Group-specific data
-│   ├── finance.json
-│   ├── marketing.json
-│   ├── engineering.json
-│   └── ...
-└── shared/      # Shared resources (future)
-    └── ...
-```
+### Connecting to remote MCP servers
+Set `MCP_REMOTE_SERVER` to switch the bridge into remote mode and forward every request to a hosted MCP endpoint over HTTPS. Leave `MCP_SERVER_COMMAND` unset to avoid conflicting strategies.
 
-## OAuth Token Exchange & Injection
-
-1. Set `OAUTH_ENV=MS_TOKEN` when starting the REST server.
-2. Provide a Keycloak user token (via cookie `_oauth2_proxy` or CLI argument).
-3. The `TokenRetrieverFactory` exchanges the Keycloak token for the provider (e.g., Microsoft) token.
-4. The resulting provider token is exported into the MCP subprocess environment (`MS_TOKEN`).
-5. Tools with `oauth_token` in their schema automatically receive the token.
-
-**Example**:
 ```bash
-export OAUTH_ENV=MS_TOKEN
-uvicorn app.server:app --reload
+export MCP_REMOTE_SERVER="https://mcp.example.com"
+export MCP_REMOTE_SCOPE="offline_access api.read"
+export MCP_REMOTE_REDIRECT_URI="https://bridge.example.com/oauth/callback"
+export MCP_REMOTE_CLIENT_ID="bridge-client"
+export MCP_REMOTE_CLIENT_SECRET="change-me"
+# Optional shortcut token:
+# export MCP_REMOTE_BEARER_TOKEN="service-token-123"
+
+uvicorn app.server:app --host 0.0.0.0 --port 8000
 ```
 
-### Adding a Custom Provider
+Authentication hierarchy:
+1. Exchange the incoming OAuth token using `TokenRetrieverFactory` (if configured).
+2. Use `MCP_REMOTE_BEARER_TOKEN` when it is provided.
+3. Fall back to forwarding the caller’s token. Anonymous calls rely on step 2 or 3.
 
-1. Implement a new retriever in `oauth/token_exchange.py`.
-2. Register it in `TokenRetrieverFactory.get()`.
+## Deploying to Production
 
-## Environment Variables
+### Container image
+Run the published image and mount your MCP server or data as volumes.
 
+```bash
+docker run -it -p 8000:8000 \
+  -e MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/memory.json" \
+  -v $(pwd)/data:/data \
+  ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+```
+
+Set `ENV=dev` to auto-install dependencies found in mounted MCP directories.
+
+### Kubernetes/Helm
+Embed the bridge into your platform by defining the command and volumes in your pod spec.
+
+```yaml
+containers:
+  - name: enterprise-mcp-bridge
+    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    env:
+      - name: MCP_SERVER_COMMAND
+        value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"
+      - name: MCP_BASE_PATH
+        value: "/api/mcp"
+    volumeMounts:
+      - name: data
+        mountPath: /data
+volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: mcp-data
+```
+
+### Reference deployments
+- `example/minimal-example` – tiny starter with the default memory server.
+- `example/memory-group-access` – demonstrates group-aware data routing.
+- `example/token-exchange-m365` – complete token-exchange stack with monitoring and tracing.
+
+### Security checklist
+- Terminate TLS and place an auth proxy in front of the bridge (expects `_oauth2_proxy` or the `X-Auth-Request-Access-Token` header).
+- Scope Keycloak broker roles minimally (requires `broker.read-token` only).
+- Rotate sensitive values such as `MCP_SERVER_COMMAND` secrets and OAuth credentials outside the container image.
+- Monitor request volume and errors using your preferred logging/metrics stack.
+
+## Full Configuration Guidelines
+
+### Environment variables
 | Variable                  | Purpose                                                   | Default                |
 | ------------------------- | --------------------------------------------------------- | ---------------------- |
 | `MCP_SERVER_COMMAND`      | Full command to launch MCP server (supports placeholders) | (unset)                |
@@ -214,58 +181,19 @@ uvicorn app.server:app --reload
 | `MCP_REMOTE_CLIENT_ID`    | Pre-registered OAuth client id for the remote server       | ""                     |
 | `MCP_REMOTE_CLIENT_SECRET`| Client secret for the remote OAuth client (if required)    | ""                     |
 | `MCP_REMOTE_BEARER_TOKEN` | Static bearer token to send if OAuth negotiation is skipped | ""                    |
-| `SYSTEM_DEFINED_PROMPTS`  | <a href="#system-defined-prompts">JSON array of built-in prompts available to all users</a> | "[]"                    |
-| `MCP_ENV_*`               | Those will be passed to the MCP server process            |                        |
-| `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [Data Resource Templates](#data-resource-templates) for details. | `{*}/{placeholder}` |
+| `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
+| `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
+| `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
 
-## Remote MCP Servers
+### Data resource templates
+| Template                           | Default value          | Description                                     |
+| ---------------------------------- | ---------------------- | ----------------------------------------------- |
+| `MCP_GROUP_DATA_ACCESS_TEMPLATE`   | `g/{group_id}`         | Group-specific resource path template           |
+| `MCP_USER_DATA_ACCESS_TEMPLATE`    | `u/{user_id}`          | User-specific resource path template            |
+| `MCP_SHARED_DATA_ACCESS_TEMPLATE`  | `shared/{resource_id}` | Shared resource path template                   |
 
-The bridge can proxy requests to MCP deployments that run outside the container. Remote connectivity is enabled whenever `MCP_REMOTE_SERVER` is configured, allowing you to share a centrally managed MCP instance across multiple REST bridge replicas.
-
-### Strategy selection
-
-1. **Remote only** – Set `MCP_REMOTE_SERVER` to the HTTPS base URL of the remote MCP endpoint (for example `https://mcp.company.tld/api`).
-2. **Mutual exclusivity** – Leave `MCP_SERVER_COMMAND` unset. If both remote and local options are provided the bridge aborts startup with a configuration error to avoid ambiguous routing.
-3. **Automatic wiring** – All REST entry points (`/tools/*`, `/session/*`, `/prompts`, `/well-known`) reuse the same strategy selection logic. Once remote mode is active, calls open a streaming HTTP session to the remote server while preserving tracing, masking, and include/exclude filters.
-
-### Authentication flow
-
-When remote mode is active the bridge prepares the `Authorization` header in priority order:
-
-* **OAuth token exchange** – If `TokenRetrieverFactory` is configured, the incoming user token is exchanged for a remote-specific token. Optional environment variables (`MCP_REMOTE_SCOPE`, `MCP_REMOTE_REDIRECT_URI`, `MCP_REMOTE_CLIENT_ID`, `MCP_REMOTE_CLIENT_SECRET`) provide metadata for dynamic client registration and refresh support.
-* **Configured bearer token** – If `MCP_REMOTE_BEARER_TOKEN` is set, the token is used directly.
-* **Passthrough token** – As a fallback the original request token is forwarded as-is.
-
-Anonymous flows (such as `/session/start` without OAuth context) skip the exchange and rely on the configured bearer token or passthrough mode.
-
-### Minimal configuration
-
-```bash
-export MCP_REMOTE_SERVER="https://mcp.example.com"
-export MCP_REMOTE_SCOPE="offline_access api.read"
-export MCP_REMOTE_REDIRECT_URI="https://bridge.example.com/oauth/callback"
-export MCP_REMOTE_CLIENT_ID="bridge-client"
-export MCP_REMOTE_CLIENT_SECRET="change-me"
-
-# Optional if the remote server trusts this bridge without OAuth exchange
-# export MCP_REMOTE_BEARER_TOKEN="service-token-123"
-
-uvicorn app.server:app --host 0.0.0.0 --port 8000
-```
-
-With these variables set every tool invocation and managed session runs against the remote MCP deployment while retaining local filtering rules, prompt catalog, and OAuth-based data access safeguards.
-
----
-
-## System Defined Prompts
-
-### SYSTEM_DEFINED_PROMPTS
-
-The `SYSTEM_DEFINED_PROMPTS` environment variable allows you to inject a list of built-in prompts that are available to all users, regardless of the underlying MCP server. This is useful for providing default or global prompt templates (such as greetings, onboarding, or FAQ responses) that do not depend on the MCP toolset.
-
-**Format:**
-
-Set `SYSTEM_DEFINED_PROMPTS` to a JSON array of prompt objects, each with the following fields:
+### System-defined prompts
+Provide curated prompts to every user by setting `SYSTEM_DEFINED_PROMPTS` to a JSON array. Each prompt includes a `name`, `title`, `description`, optional `arguments`, and a `template`.
 
 ```json
 [
@@ -279,610 +207,147 @@ Set `SYSTEM_DEFINED_PROMPTS` to a JSON array of prompt objects, each with the fo
 ]
 ```
 
-**Fields:**
-- `name`: Unique identifier for the prompt
-- `title`: Display name
-- `description`: Short explanation of the prompt's purpose
-- `arguments`: List of argument definitions (name, type, etc.)
-- `template`: String template with placeholders for arguments
-
-These prompts are merged into the `/prompts` endpoint and can be invoked by name using the standard API. See [prompt_helper.py](app/session_manager/prompt_helper.py) for implementation details.
-
----
-### MCP_SERVER_COMMAND Template Placeholders
-
-The `MCP_SERVER_COMMAND` environment variable supports template placeholders that are dynamically resolved based on the user's OAuth token and requested access:
-
-| Placeholder  | Description                                           | Example Resolution     |
-|-------------|-------------------------------------------------------|------------------------|
-| `{data_path}` | Resolves to user or group-specific data path        | `/data/u/user123.json` or `/data/g/team-alpha.json` |
-| `{user_id}`   | User identifier extracted from OAuth token          | `user123` or `john.doe@company.com` |
-| `{group_id}`  | Requested group identifier (if group access)        | `team-alpha` or `finance` |
-
-**Examples:**
-```bash
-# Memory server with dynamic user/group data
-export MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory {data_path}"
-
-# Custom server with user-specific configuration
-export MCP_SERVER_COMMAND="python /app/custom_server.py --user {user_id} --data {data_path}"
-
-# Database connection with group-based access
-export MCP_SERVER_COMMAND="psql-mcp-server --database group_{group_id} --user {user_id}"
-```
-
-## Extending Session Management
-
-To add a backend:
-
-1. Implement a subclass of `SessionManagerBase`.
-2. Expose it in `session_manager/session_manager.py` globals.
-3. Set `MCP_SESSION_MANAGER=<YourClassName>`.
-
-## Security Considerations
-
-- Do not expose this service publicly without an auth proxy placing user tokens in `_oauth2_proxy` cookie.
-- Ensure TLS termination at ingress.
-- Carefully scope Keycloak broker roles (needs `broker.read-token`).
-- Consider rotating `MCP_SERVER_COMMAND` secrets outside image (ConfigMap / Secret).
-
-## Roadmap
-
-- Celery/Redis/Postgres session manager
-- Other Auth providers
-- Rate limiting / quota per user
-- Externally extensible auth providers in `TokenRetrieverFactory` and `SessionManagerBase`
-- WebSocket streaming/Long Polling for long-running tools
-- Easy mcp client support (ie Claude, Cursor, Windsurf, VSCode...)
-
-Find more ideas in our [GitHub issues](https://github.com/inxm-ai/enterprise-mcp-bridge/issues).
-
----
-
-## Running your own MCP App
-
-### Start the REST API Server
-
-By default, the app will use the Demo MCP server at `../mcp/server.py`.
-
-```bash
-uvicorn app.server:app --reload
-```
-
-- The API will be available at: `http://localhost:8000`
-- The OpenAPI docs are at: `http://localhost:8000/docs`
-
-and will serve the default mcp app in the /mcp folder.
-
-You can call the mcp functions over rest by sending requests to the API endpoints defined in the FastAPI app, or by using your favorite client.
-
-```sh
-❯ curl -X 'POST' \
-  'http://127.0.0.1:8000/tools/add' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "a": 2,
-  "b": 1
-}'
-{"isError":false,"content":[{"text":"3","structuredContent":null}],"structuredContent":{"result":3}}
-```
-
-### Try the fully blown example
-
-Go to [example/token-exchange-m365](https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/token-exchange-m365) and try out our full example
-
-#### What it Provides
-
-* Keycloak with token-exchange feature and ingress
-* Automated Entra (Azure AD) app registration
-* Enterprise MCP Bridge launched with `npx -y @softeria/ms-365-mcp-server --org-mode`
-* Minimal chat frontend
-* Tracing via Jaeger
-* Monitoring via Prometheus/Grafana
-
-
-#### Custom MCP Server (in mcp folder)
-
-If you are developing or testing with a custom MCP server, you can easily mount it in the `mcp` folder and run the REST server with docker ie like this:
-
-```bash
-docker run -it -e ENV=dev -v $(pwd)/mcp:/mcp -p 8000:8000 inxm-ai/enterprise-mcp-bridge python /mcp/subfoldered_mcp_server/server.py
-```
-
-Setting the `ENV` variable to `dev` will check if there is a requirements.txt or pyproject.toml file in the mounted directory and install the dependencies in the docker container.
-
-#### Custom MCP Server (Parameter Forwarding & Environment Variable)
-
-You can start the REST server with a custom MCP server command in two ways:
-
-**1. Using the command forwarding (with Docker):**
-
-```bash
-docker build -t inxm-ai/enterprise-mcp-bridge .
-docker run -it -p 8000:8000 inxm-ai/enterprise-mcp-bridge npx -y @modelcontextprotocol/server-memory /data/memory.json
-```
-
-**2. Using the `MCP_SERVER_COMMAND` environment variable (recommended for Docker/Kubernetes):**
-
-Set the environment variable to the full command you want to run as the MCP server. This takes precedence over any arguments passed via `--`.
-
-```bash
-docker run -it -p 8000:8000 -e MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/memory.json" inxm-ai/enterprise-mcp-bridge
-```
-
-Or in Kubernetes YAML:
-
-```yaml
-containers:
-  - name: enterprise-mcp-bridge
-    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
-    env:
-      - name: MCP_SERVER_COMMAND
-        value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"
-    volumeMounts:
-      - name: data
-        mountPath: /data
-volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: my-mcp-memory-pvc
-```
-
-**Precedence:**
-- If `MCP_SERVER_COMMAND` is set, it is used (split shell-style, so quoting works as expected).
-- Otherwise, if `--` is present in the command line, those arguments are used.
-- Otherwise, the default Python MCP server is started.
-
----
-
-#### Kubernetes/Helm
-
-- The image exposes `/data` and `/config` as volumes for persistent storage and configuration.
-- You can mount volumes and override the in your deployment YAML or Helm chart.
-- You can use the `MCP_SERVER_COMMAND` environment variable to specify the MCP server command.
-- And you can use the `MCP_BASE_PATH` environment variable to set a custom base path for the API to match your ingress configuration.
-- Example (Kubernetes):
-  ```yaml
-  containers:
-    - name: enterprise-mcp-bridge
-      image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
-      env:
-        - name: MCP_SERVER_COMMAND
-          value: "npx -y @modelcontextprotocol/server-memory /data/memory.json"
-        - name: MCP_BASE_PATH
-          value: "/api/mcp-memory-server"
-      volumeMounts:
-        - name: data
-          mountPath: /data
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: my-mcp-data-pvc
-  ```
-
-#### Extending the image
-
-- You can add further MCP servers or dependencies by extending the Dockerfile or mounting additional volumes.
-- The entrypoint and CMD are designed to be flexible for most use cases.
-
-## API Usage
-
-### List Tools
-
-```http
-GET /tools
-```
-
-- Returns a list of available tools from the MCP server.
-
-### Run a Tool
-
-```http
-POST /tools/{tool_name}
-```
-
-- Body: JSON with tool arguments
-- Header: `x-inxm-mcp-session` (optional, for session-based calls)
-
-### Session Management
-- **Start a session:** `POST /session/start` → returns a session ID
-- **Use the session**: `POST /tools/{tool_name}` with header `x-inxm-mcp-session`
-- **Close a session:** `POST /session/close` with header `x-inxm-mcp-session`
-
-## Example: List Tools
-
-```bash
-curl http://localhost:8000/tools
-```
-
-## Example: Run a Tool
-
-```bash
-curl -X POST http://localhost:8000/tools/<tool_name> -H 'Content-Type: application/json' -d '{"arg1": "value"}'
-```
-
-## Examples
-
-This project includes several examples to help you get started with different use cases. Below is a summary of the examples and their purposes, along with links to their respective README sections for more details:
-
-### 1. **Minimal Example**
-A lightweight example to quickly get started with the Enterprise MCP Bridge. It provides:
-- A simple script to start the server.
-- Minimal dependencies and configuration.
-
-Check the [Minimal Example README](example/minimal-example/README.md) for more details.
-
-### 2. **Memory Group Access**
-This example demonstrates how to manage group-based data access using OAuth tokens. It includes:
-- Group-specific and user-specific data files.
-- Scripts to start and stop the example environment.
-- Integration with Keycloak for authentication.
-
-Refer to the [Memory Group Access README](example/memory-group-access/README.md) for setup and usage instructions.
-
-### 3. **Token Exchange with Microsoft 365**
-This example showcases the token exchange feature with Microsoft 365. It includes:
-- Dockerized setup for Keycloak and the MCP Bridge.
-- Integration with Microsoft Azure AD for token exchange.
-- Monitoring and tracing with Prometheus, Grafana, and Jaeger.
-
-See the [Token Exchange README](example/token-exchange-m365/README.md) for a comprehensive guide.
-
-Each example is designed to highlight specific features of the Enterprise MCP Bridge, making it easier to understand and integrate into your workflows.
-
----
-
-## Group-Based Data Access
-
-The Enterprise MCP Bridge supports dynamic data source resolution based on OAuth token group membership. This allows secure, group-based access to data without exposing sensitive file paths, database connection strings, or table names to clients.
-
-### Overview
-
-When using group-based data access, the server:
-
-1. **Extracts user and group information** from OAuth tokens (JWT payload)
-2. **Validates group membership** against requested group access
-3. **Dynamically resolves data sources** using configurable templates
-4. **Prevents unauthorized access** through automatic permission checking
-
-### Configuration
-
-#### MCP_SERVER_COMMAND Template
-
-Use placeholders in your `MCP_SERVER_COMMAND` or `MCP_ENV_` environment variable:
-
-```bash
-# For file-based MCP servers (e.g., memory server)
-MCP_SERVER_COMMAND="npx -y @modelcontextprotocol/server-memory /data/{data_path}.json"
-MCP_ENV_MEMORY_FILE_PATH="/data/{data_path}.json"
-
-# For database-based MCP servers
-MCP_SERVER_COMMAND="python db-mcp-server.py --table {data_path}"
-
-# Multiple placeholders supported
-MCP_SERVER_COMMAND="my-mcp-server --user {user_id} --group {group_id} --resource {data_path}"
-```
-
-#### Supported Placeholders
-
-- `{data_path}`: Resolves to group-specific (`g/groupname`) or user-specific (`u/userid`) resource identifier
-- `{user_id}`: User identifier from OAuth token
-- `{group_id}`: Requested group identifier (if accessing group data)
-
-### Usage
-
-#### Session-Based Group Access
-
-Start a session with group-specific data access:
-
-```bash
-# Start session for 'finance' group data
-curl -X POST "http://localhost:8000/session/start?group=finance" \
-  -H "X-Auth-Request-Access-Token: <your-oauth-token>"
-
-# Use session for tool calls
-curl -X POST "http://localhost:8000/tools/read_memory" \
-  -H "x-inxm-mcp-session: <session-id>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "recent transactions"}'
-```
-
-#### Sessionless Group Access
-
-Make direct tool calls with group specification:
-
-```bash
-# Access finance group data without session
-curl -X POST "http://localhost:8000/tools/read_memory?group=finance" \
-  -H "X-Auth-Request-Access-Token: <your-oauth-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "budget reports"}'
-```
-
-#### User-Specific Data Access
-
-Access user-specific data (default behavior):
-
-```bash
-# Access user's personal data
-curl -X POST "http://localhost:8000/tools/read_memory" \
-  -H "X-Auth-Request-Access-Token: <your-oauth-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "my notes"}'
-```
-
-### Security Model
-
-#### Group Membership Validation
-
-The server extracts groups from multiple JWT token claims:
-- `groups`: Direct group membership
-- `realm_access.roles`: Keycloak realm roles
-- `resource_access`: Keycloak client roles
-- `roles`: Generic roles claim
-
-#### Permission Checking
-
-- Users can only access groups they are members of
-- Unauthorized group access returns HTTP 403 Forbidden
-- Invalid tokens return HTTP 401 Unauthorized
-- Resource identifiers are automatically sanitized
-
-#### Resource Identifier Sanitization
-
-All resource identifiers are sanitized to prevent security issues:
-- Dangerous characters are removed or replaced
-- Length is limited to reasonable bounds
-- Path traversal attempts are neutralized
-
-### Example: Memory Server with Groups
-
-See the complete example in `example/memory-group-access/`:
-
-```yaml
-# docker-compose.yml
-services:
-  app-mcp-rest:
-    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
-    environment:
-      MCP_SERVER_COMMAND: npx -y @modelcontextprotocol/server-memory /data/{data_path}.json
-      AUTH_PROVIDER: keycloak
-      AUTH_BASE_URL: https://auth.example.com
-      KEYCLOAK_REALM: company
-    volumes:
-      - ./data:/data
-```
-
-Directory structure:
-```
-data/
-├── g/                    # Group-specific data
-│   ├── finance.json      # Finance team data
-│   ├── marketing.json    # Marketing team data
-│   └── hr.json          # HR team data
-└── u/                    # User-specific data
-    ├── alice.json        # Alice's personal data
-    └── bob.json         # Bob's personal data
-```
-
-### Token Claims Example
-
-The server extracts user information from JWT tokens like this:
-
-```json
-{
-  "sub": "alice",
-  "email": "alice@company.com",
-  "groups": ["finance", "employees"],
-  "realm_access": {
-    "roles": ["user", "finance-analyst"]
-  },
-  "resource_access": {
-    "frontend-client": {
-      "roles": ["admin"]
-    }
-  }
-}
-```
-
-This user can access:
-- Their personal data: `u/alice`
-- Finance group data: `g/finance` 
-- Employee group data: `g/employees`
-- Admin data through client role: `g/admin`
-
----
-
-## OAuth Token Integration
-
-### Getting a Microsoft Token from Keycloak
-
-To inject a Microsoft token obtained via your Keycloak provider into the MCP server environment, set the `OAUTH_ENV` environment variable to the desired environment variable name (e.g., `MS_TOKEN`). When starting the REST server, provide your Keycloak-issued OAuth token as a parameter. The server will use the `TokenRetrieverFactory` to exchange the Keycloak token for a Microsoft token and inject it into the MCP subprocess environment.
-
-**Example:**
+Prompts are merged with prompts returned by the MCP server and are available through `/prompts`.
+
+## API Docs
+- Interactive Swagger UI: `http://localhost:8000/docs`
+- ReDoc rendering: `http://localhost:8000/redoc`
+- Key operations:
+  - `GET /tools` – list available tools.
+  - `POST /tools/{tool_name}` – invoke a tool (stateless unless a session header is provided).
+  - `POST /session/start` and `POST /session/close` – manage stateful sessions.
+  - `GET /.well-known/agent.json` – discover agent metadata when agent mode is enabled.
+
+## OAuth Token Exchange & Extension
+1. Set `OAUTH_ENV` to the environment variable that should receive the downstream provider token.
+2. Supply an OAuth token via cookie (`_oauth2_proxy`) or the `X-Auth-Request-Access-Token` header.
+3. `TokenRetrieverFactory` exchanges the token (e.g., Keycloak → Microsoft) and injects it into the MCP subprocess.
 
 ```bash
 export OAUTH_ENV=MS_TOKEN
-uvicorn server:app --reload -- <your_keycloak_token>
+uvicorn app.server:app --reload
 ```
 
-This will set `MS_TOKEN` in the MCP server environment with the retrieved Microsoft token.
-
-### General Approach
-
-- The REST server supports dynamic token retrieval and injection using the `TokenRetrieverFactory`.
-- When `OAUTH_ENV` is set, the server expects an OAuth token as input.
-- The token retriever exchanges the provided token for the required provider token (e.g., Microsoft).
-- The resulting token is injected into the MCP server environment for use by downstream tools.
-
-### Implementing Custom Token Providers
-
-To add your own token provider:
-1. Create a new class in `oauth/token_exchange.py` that implements a `retrieve_token` method.
-2. Register your provider in the `TokenRetrieverFactory`.
-3. The factory will select the appropriate retriever based on configuration or environment.
-
-**Example Skeleton:**
+### Adding a custom provider
+Implement your own retriever in `oauth/token_exchange.py` and register it with `TokenRetrieverFactory`.
 
 ```python
-# oauth/token_exchange.py
-
 class MyCustomTokenRetriever:
-    def retrieve_token(self, input_token):
-        # Exchange input_token for your provider's token
-        return {"access_token": "<your_provider_token>"}
+    def retrieve_token(self, input_token: str) -> dict:
+        return {"access_token": exchange_token_somewhere(input_token)}
 
-class TokenRetrieverFactory:
-    def get(self):
-        # Return the appropriate retriever based on config/env
-        return MyCustomTokenRetriever()
+TokenRetrieverFactory.register("my-provider", MyCustomTokenRetriever)
 ```
 
-**Usage:**
-- Set `OAUTH_ENV` and provide the input token when starting the server.
-- The custom retriever will handle token exchange and injection.
+Select the retriever via configuration or environment variables and the bridge will handle injection automatically.
 
-### Data Resource Templates
+## Session Management & Extension
 
-The `DataAccessManager` class in the `app.oauth.user_info` module provides configurable templates for resolving data resources based on user or group access. These templates are defined as environment variables:
+### Core behaviors
+- Stateless tool calls (`POST /tools/{tool}`) spin up a short-lived MCP connection.
+- Stateful sessions (`/session/start`) reuse the MCP process and share context until closed.
+- Session identifiers are namespaced by OAuth identity to prevent collisions.
+- Tokens flagged as `oauth_token` in tool schemas are injected automatically.
+- Token exchange output is exposed to the MCP process via `OAUTH_ENV`.
 
-| Template Name                     | Default Value               | Description                                      |
-|-----------------------------------|-----------------------------|--------------------------------------------------|
-| `MCP_GROUP_DATA_ACCESS_TEMPLATE` | `g/{group_id}`             | Template for group-specific data resources      |
-| `MCP_USER_DATA_ACCESS_TEMPLATE`  | `u/{user_id}`              | Template for user-specific data resources       |
-| `MCP_SHARED_DATA_ACCESS_TEMPLATE`| `shared/{resource_id}`     | Template for shared data resources              |
+### Stateless vs stateful requests
+| Mode      | How                                            | When to use                     |
+|-----------|------------------------------------------------|---------------------------------|
+| Stateless | `POST /tools/{tool}` (no session header)       | One-off execution, low latency  |
+| Stateful  | `POST /session/start` then include session id  | Conversations or long workflows |
 
-These templates are dynamically resolved based on the user's OAuth token and requested access. For example, a group-specific data resource might resolve to `g/finance` for the `finance` group.
-
----
-
-## Use as Agents
-
-As soon as you add the following environment variables to the deployed application, the enterprise mcp bridge will expose endpoints allowing you to use it as an agent:
-
-* TGI_API_URL: The api to your OpenAI API compatible endpoint (ie https://api.openai.com/v1, https://router.huggingface.co/v1)
-* TGI_API_TOKEN (optional): <your_api_token> If required by the service, add the API Token
-* TGI_MODEL_NAME: <your_model_name> The model to use for requests.
-
-Note: Using the mcp with agent capabilities will create significant token consumption on your LLM deployment. Dynamically generated elements, like the agent card and tool invocations, will incur costs based on the underlying LLM usage. Based on the number of tools used and the complexity of the tasks, this could lead to vastly increased usage and associated costs.
-
-#### `.well-known/agent.json`
-This file contains metadata about the agent, including its capabilities and configuration options.
-
-#### `/tgi/v1/chat/completions`
-This endpoint provides OpenAI-compatible chat completions with MCP integration. It supports both streaming and non-streaming responses.
-
-- **Method**: `POST`
-- **Path**: `/tgi/v1/chat/completions`
-- **Headers**:
-  - `X-Auth-Request-Access-Token`: OAuth token for authentication.
-  - `x-inxm-mcp-session`: Session header for stateful calls (optional).
-- **Query Parameters**:
-  - `prompt`: Specific prompt name to use (optional).
-  - `group`: Group name for sessionless group-specific data access (optional).
-- **Request Body**:
-  - JSON payload conforming to the `ChatCompletionRequest` schema. You can specify your tool choice with the openai api `tool_choice` parameter.
-- **Response**:
-  - Streaming: `text/event-stream` with incremental updates.
-  - Non-streaming: JSON response with the full completion.
-
-**Example**:
+### Common operations
 ```bash
-curl -X POST \
+# Start a session and store cookies locally
+curl -X POST http://localhost:8000/session/start -c cookies.txt
+
+# Invoke a tool within the session
+curl -b cookies.txt -X POST http://localhost:8000/tools/add \
+     -H 'Content-Type: application/json' \
+     -d '{"a":2,"b":3}'
+
+# Close the session when it is no longer needed
+curl -b cookies.txt -X POST http://localhost:8000/session/close
+```
+
+### Extending the session manager
+1. Subclass `SessionManagerBase` to back sessions with Redis, SQL, or another store.
+2. Export the class from `session_manager/session_manager.py`.
+3. Set `MCP_SESSION_MANAGER=<YourClassName>`.
+
+## User and Group Management
+
+### How it works
+1. Users authenticate via OAuth and receive a token containing identifiers and groups.
+2. Requested group access is validated against token claims.
+3. Resource paths are resolved using the templates described above.
+4. Sanitized identifiers prevent traversal or injection attacks.
+
+### Usage patterns
+
+**Sessionless group access**
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -X POST "http://localhost:8000/tools/search?group=finance" \
+     -d '{"query": "budget reports"}'
+```
+
+**Session-based group access**
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -X POST "http://localhost:8000/session/start?group=marketing" \
+     -c cookies.txt
+
+curl -b cookies.txt \
+     -H "Content-Type: application/json" \
+     -X POST http://localhost:8000/tools/create_memory \
+     -d '{"content": "Campaign ideas for Q4"}'
+```
+
+### Security features
+- Group membership is derived from token claims such as `groups`, `realm_access.roles`, and `resource_access`.
+- Unauthorized group access returns HTTP 403; invalid tokens return HTTP 401.
+- All identifiers are sanitized and length-limited before being used.
+- Data paths can separate user (`u/`), group (`g/`), and shared (`shared/`) resources.
+
+### Directory layout example
+```
+/data/
+├── u/
+│   ├── user123.json
+│   └── alice_smith.json
+├── g/
+│   ├── finance.json
+│   ├── marketing.json
+│   └── engineering.json
+└── shared/
+    └── knowledge-base.json
+```
+
+## Deploying as Agent
+
+### Enable agent endpoints
+Set the following environment variables to expose OpenAI-compatible agent endpoints:
+
+- `TGI_API_URL` – Base URL of your OpenAI-compatible endpoint.
+- `TGI_API_TOKEN` – Optional API token if the provider requires authentication.
+- `TGI_MODEL_NAME` – Default model name used for completions.
+
+### Endpoints
+- `POST /tgi/v1/chat/completions` – Streaming or non-streaming chat completions with automatic MCP tool invocation.
+- `POST /tgi/v1/a2a` – A2A JSON-RPC wrapper around the same capability for clients that speak the A2A protocol.
+- `GET /.well-known/agent.json` – Agent metadata describing available tools.
+
+### System prompts
+`SYSTEM_DEFINED_PROMPTS` can include prompts with `role: "system"` content. When no system message is supplied in the request, the bridge automatically prepends the configured system prompt, ensuring consistent agent behavior.
+
+### Example call
+```bash
+curl -X POST http://localhost:8000/tgi/v1/chat/completions \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"messages": [{"role": "user", "content": "Hello!"}], "model": "gpt-4"}' \
-     http://localhost:8000/tgi/v1/chat/completions
+     -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-#### `/tgi/v1/a2a`
-This endpoint maps A2A JSON-RPC requests to internal OpenAI-compatible chat completions. It is designed for interoperability with A2A-compliant clients.
-
-- **Method**: `POST`
-- **Path**: `/tgi/v1/a2a`
-- **Headers**:
-  - `X-Auth-Request-Access-Token`: OAuth token for authentication.
-  - `x-inxm-mcp-session`: Session header for stateful calls (optional).
-- **Request Body**:
-  - JSON payload conforming to the `A2ARequest` schema. As method you can choose:
-    - `$SERVICE_NAME`: This will delegate the tool usage to the agent, and you will have to provide a prompt param.
-    - `mcp-tool`: You can specify one of the mcp tools available.
-- **Response**:
-  - Streaming: `text/event-stream` with incremental updates.
-  - Non-streaming: JSON response with the full completion.
-
-**Example**:
-```bash
-curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc": "2.0", "method": "enterprise-mcp-bridge", "params": {"prompt": "Hello!"}, "id": "1"}' \
-     http://localhost:8000/tgi/v1/a2a
-```
-
-### Key Features
-- **Automatic Tool Invocation**: Both endpoints automatically call tools from the MCP or a selected MCP instance.
-- **Streaming Support**: Real-time updates for streaming requests.
-- **Error Handling**: Structured error responses for invalid requests or server errors.
-- **Group-Based Data Access**: Dynamically resolves data sources based on group memberships.
-
----
-
-## Automatic System Prompt Usage for Agents
-
-The Enterprise MCP Bridge includes functionality to automatically use system prompts or prompt templates during interactions with the Agent. This feature ensures that predefined prompts are seamlessly integrated into the conversation flow.
-
-#### How It Works
-
-1. **Prompt Discovery**:
-   - The server searches for a specific prompt by name if provided.
-   - If no name is specified, it looks for a default `system` prompt or a prompt with a `role=system` description.
-   - If no such prompt exists, the first available prompt is used as a fallback.
-
-2. **Prompt Content Retrieval**:
-   - Once a prompt is identified, its content is fetched by executing the prompt on the MCP server.
-   - The content is then used to initialize or guide the conversation.
-
-3. **Message Preparation**:
-   - The system prompt is prepended to the user-provided messages if no `system` message already exists.
-   - This ensures that the conversation starts with the appropriate context.
-
-#### Example Configuration
-
-The `SYSTEM_DEFINED_PROMPTS` environment variable can be used to define global prompts available to all users. These prompts are merged with the prompts provided by the MCP server.
-
-```json
-        [
-          {
-            "name": "system",
-            "title": "Specialized M365 Agent",
-            "description": "Acts as a specialized Microsoft 365 agent. Always try to reply with tool_calls unless delivering the final response.",
-            "arguments": [],
-            "template": {
-              "role": "system",
-              "content": "You are a highly specialized Microsoft 365 agent. Your primary function is to respond to user requests by identifying and executing the correct Microsoft Graph API tool calls.\n\nYour workflow is strictly as follows:\n1.  **Analyze the user's request.** Determine the user's intent and identify which of your available tools are required.\n2.  **Generate a tool call.** Based on your analysis, construct the appropriate tool call. All values must adhere strictly to the Microsoft Graph API specifications.\n3.  **Strictly adhere to these rules:**\n    * **Prioritize tool calls:** Always respond with a tool call unless you have sufficient information to provide a final, complete answer to the user.\n    * **Use simple requests:** Only provide the minimum required parameters for a tool call. Do not guess or add unnecessary values.\n    * **Correct data types:** If a parameter requires a boolean, use `true` or `false`, not a string. If a parameter requires a number, use a number, not a string.\n    * **If you are failing to call the tool successfully,** review the error message and adjust your request accordingly. Try to remove failing parameters to simplify the request, and expand them in a second pass if they are successful and you know more.\n    * **Final response:** Only provide a final human-readable response when the user's request is fully resolved and no further tool calls are needed.\n\nIf a tool call fails, you will receive an error message. Use this information to correct the tool call in your next turn. Do not generate conversational text or explanations during the tool-calling process; the only exceptions are in a final, complete response or if you are specifically asked to \"think.\"\n\n\n\nExample of a simple, correct tool call:\n{\"name\": \"get-user-profile\", \"parameters\": {\"userId\": \"adeleV@M365x123456.onmicrosoft.com\"}}\n"
-            }
-          }
-        ]
-```
-
-#### Example Usage
-
-**Session-Based Prompt Usage**:
-```bash
-curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"messages": [{"role": "user", "content": "Summarize my emails by folder"}], "model": "gpt-5"}' \
-     http://localhost:8000/tgi/v1/chat/completions?prompt=system
-```
-
-**Sessionless Prompt Usage**:
-```bash
-curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc": "2.0", "method": "enterprise-mcp-bridge", "params": {"prompt": "Summarize my emails by folder"}, "id": "1"}' \
-     http://localhost:8000/tgi/v1/a2a?prompt=system
-```
+Agent mode can generate significant LLM traffic; monitor costs and apply tool filters (`INCLUDE_TOOLS`/`EXCLUDE_TOOLS`) as needed.

@@ -233,9 +233,13 @@ def build_mcp_client_strategy(
     if remote_server:
         mcp_command = os.environ.get("MCP_SERVER_COMMAND", "").strip()
         if mcp_command:
+            logger.error(
+                "[ClientStrategy] MCP_REMOTE_SERVER and MCP_SERVER_COMMAND are both set; cannot use both"
+            )
             raise ValueError(
                 "MCP_REMOTE_SERVER cannot be used together with MCP_SERVER_COMMAND"
             )
+        logger.info(f"Using remote MCP server at {remote_server}")
         return RemoteMCPClientStrategy(
             remote_server,
             access_token=access_token,
