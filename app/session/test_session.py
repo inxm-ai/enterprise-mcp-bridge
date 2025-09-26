@@ -1,11 +1,13 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
+from contextlib import asynccontextmanager
 from app.session.session import (
     try_get_session_id,
     session_id,
     MCPSessionBase,
     MCPLocalSessionTask,
 )
+from app.session.client_strategy import MCPClientStrategy
 import logging
 
 logging.basicConfig(level=logging.DEBUG)
@@ -34,6 +36,11 @@ def test_session_id():
 async def test_mcpsessionbase():
     logger.debug("[test_mcpsessionbase] Starting test.")
 
+    class DummyStrategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            yield None
+
     class TestSession(MCPSessionBase):
         async def run(self):
             logger.debug("[TestSession] Run method started.")
@@ -46,7 +53,7 @@ async def test_mcpsessionbase():
                 await self.response_queue.put(f"processed: {req}")
 
     logger.debug("[test_mcpsessionbase] Creating TestSession instance.")
-    session = TestSession(server_params=None)
+    session = TestSession(DummyStrategy())
     session.start()
 
     logger.debug("[test_mcpsessionbase] Sending test_request.")
@@ -60,12 +67,15 @@ async def test_mcpsessionbase():
 
 # Test for MCPLocalSessionTask
 @pytest.mark.asyncio
-@patch("app.session.session.mcp_session")
-async def test_mcplocalsessiontask(mock_mcp_session):
+async def test_mcplocalsessiontask():
     mock_session = AsyncMock()
-    mock_mcp_session.return_value.__aenter__.return_value = mock_session
 
-    task = MCPLocalSessionTask(server_params=None)
+    class DummyStrategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            yield mock_session
+
+    task = MCPLocalSessionTask(DummyStrategy())
     task.start()
 
     # Test ping

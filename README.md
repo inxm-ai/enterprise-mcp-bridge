@@ -208,10 +208,52 @@ uvicorn app.server:app --reload
 | `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
 | `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
 | `LLM_MAX_PAYLOAD_BYTES`   | Maximum serialized payload size sent to the backing LLM; large histories are compacted or truncated to stay below this limit | 120000                |
+| `MCP_REMOTE_SERVER`       | HTTPS endpoint of a remote MCP server (enables remote mode) | ""                   |
+| `MCP_REMOTE_SCOPE`        | OAuth scope to request when exchanging tokens              | ""                     |
+| `MCP_REMOTE_REDIRECT_URI` | Redirect URI used during dynamic OAuth client registration | `https://localhost/unused-callback` |
+| `MCP_REMOTE_CLIENT_ID`    | Pre-registered OAuth client id for the remote server       | ""                     |
+| `MCP_REMOTE_CLIENT_SECRET`| Client secret for the remote OAuth client (if required)    | ""                     |
+| `MCP_REMOTE_BEARER_TOKEN` | Static bearer token to send if OAuth negotiation is skipped | ""                    |
 | `SYSTEM_DEFINED_PROMPTS`  | <a href="#system-defined-prompts">JSON array of built-in prompts available to all users</a> | "[]"                    |
 | `MCP_ENV_*`               | Those will be passed to the MCP server process            |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [Data Resource Templates](#data-resource-templates) for details. | `{*}/{placeholder}` |
 
+## Remote MCP Servers
+
+The bridge can proxy requests to MCP deployments that run outside the container. Remote connectivity is enabled whenever `MCP_REMOTE_SERVER` is configured, allowing you to share a centrally managed MCP instance across multiple REST bridge replicas.
+
+### Strategy selection
+
+1. **Remote only** – Set `MCP_REMOTE_SERVER` to the HTTPS base URL of the remote MCP endpoint (for example `https://mcp.company.tld/api`).
+2. **Mutual exclusivity** – Leave `MCP_SERVER_COMMAND` unset. If both remote and local options are provided the bridge aborts startup with a configuration error to avoid ambiguous routing.
+3. **Automatic wiring** – All REST entry points (`/tools/*`, `/session/*`, `/prompts`, `/well-known`) reuse the same strategy selection logic. Once remote mode is active, calls open a streaming HTTP session to the remote server while preserving tracing, masking, and include/exclude filters.
+
+### Authentication flow
+
+When remote mode is active the bridge prepares the `Authorization` header in priority order:
+
+* **OAuth token exchange** – If `TokenRetrieverFactory` is configured, the incoming user token is exchanged for a remote-specific token. Optional environment variables (`MCP_REMOTE_SCOPE`, `MCP_REMOTE_REDIRECT_URI`, `MCP_REMOTE_CLIENT_ID`, `MCP_REMOTE_CLIENT_SECRET`) provide metadata for dynamic client registration and refresh support.
+* **Configured bearer token** – If `MCP_REMOTE_BEARER_TOKEN` is set, the token is used directly.
+* **Passthrough token** – As a fallback the original request token is forwarded as-is.
+
+Anonymous flows (such as `/session/start` without OAuth context) skip the exchange and rely on the configured bearer token or passthrough mode.
+
+### Minimal configuration
+
+```bash
+export MCP_REMOTE_SERVER="https://mcp.example.com"
+export MCP_REMOTE_SCOPE="offline_access api.read"
+export MCP_REMOTE_REDIRECT_URI="https://bridge.example.com/oauth/callback"
+export MCP_REMOTE_CLIENT_ID="bridge-client"
+export MCP_REMOTE_CLIENT_SECRET="change-me"
+
+# Optional if the remote server trusts this bridge without OAuth exchange
+# export MCP_REMOTE_BEARER_TOKEN="service-token-123"
+
+uvicorn app.server:app --host 0.0.0.0 --port 8000
+```
+
+With these variables set every tool invocation and managed session runs against the remote MCP deployment while retaining local filtering rules, prompt catalog, and OAuth-based data access safeguards.
 
 ---
 

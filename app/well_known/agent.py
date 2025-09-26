@@ -1,4 +1,3 @@
-from app.mcp_server.server_params import get_server_params
 from app.session.session import mcp_session
 from app.session_manager.session_context import map_tools
 from app.tgi.models import ChatCompletionRequest
@@ -117,7 +116,7 @@ async def get_agent_card():
 
         llm = LLMClient()
 
-        async with mcp_session(get_server_params(anon=True)) as session:
+        async with mcp_session(anon=True) as session:
             tools = map_tools(await session.list_tools())
 
             tools_descriptions = [tool["description"] for tool in tools]
