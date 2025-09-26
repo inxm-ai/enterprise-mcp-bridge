@@ -74,7 +74,9 @@ async def test_get_prompt_content_from_call_result():
             self.content = DummyContent(text=text)
 
     prompt = {"name": "dynamic"}
-    result = types.SimpleNamespace(isError=False, messages=[DummyMessage("hello"), DummyMessage("world")])
+    result = types.SimpleNamespace(
+        isError=False, messages=[DummyMessage("hello"), DummyMessage("world")]
+    )
     session = StubSession(prompt_result=result)
     service = PromptService()
 
@@ -87,7 +89,11 @@ async def test_get_prompt_content_from_call_result():
 @pytest.mark.asyncio
 async def test_get_prompt_content_skips_missing_argument_errors():
     prompt = {"name": "needs_args", "template": {"content": ""}}
-    session = StubSession(call_exception=HTTPException(status_code=400, detail="Missing required arguments"))
+    session = StubSession(
+        call_exception=HTTPException(
+            status_code=400, detail="Missing required arguments"
+        )
+    )
     service = PromptService()
 
     content = await service.get_prompt_content(session, prompt)
@@ -98,7 +104,12 @@ async def test_get_prompt_content_skips_missing_argument_errors():
 @pytest.mark.asyncio
 async def test_prepare_messages_appends_system_prompt(monkeypatch):
     prompts = [
-        {"name": "system", "description": "role=system", "arguments": None, "template": {"content": "context"}},
+        {
+            "name": "system",
+            "description": "role=system",
+            "arguments": None,
+            "template": {"content": "context"},
+        },
     ]
     session = StubSession(prompts=prompts)
     service = PromptService()

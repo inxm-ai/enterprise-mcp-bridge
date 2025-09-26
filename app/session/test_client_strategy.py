@@ -1,4 +1,3 @@
-import contextlib
 from contextlib import asynccontextmanager
 
 import pytest
@@ -58,8 +57,12 @@ async def test_remote_strategy_uses_token_exchange(monkeypatch):
         yield object(), object(), lambda: "remote-session-id"
 
     monkeypatch.setattr(client_strategy, "OAuthClientProvider", DummyAuthProvider)
-    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", lambda: DummyFactory())
-    monkeypatch.setattr(client_strategy, "streamablehttp_client", fake_streamable_client)
+    monkeypatch.setattr(
+        client_strategy, "TokenRetrieverFactory", lambda: DummyFactory()
+    )
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
 
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
@@ -99,7 +102,9 @@ async def test_remote_strategy_anon_prefers_bearer_token(monkeypatch):
         headers_seen["auth"] = auth
         yield object(), object(), lambda: None
 
-    monkeypatch.setattr(client_strategy, "streamablehttp_client", fake_streamable_client)
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -126,7 +131,9 @@ def test_remote_strategy_conflicting_env(monkeypatch):
     monkeypatch.setenv("MCP_SERVER_COMMAND", "python server.py")
 
     with pytest.raises(ValueError):
-        client_strategy.build_mcp_client_strategy(access_token=None, requested_group=None)
+        client_strategy.build_mcp_client_strategy(
+            access_token=None, requested_group=None
+        )
 
 
 @pytest.mark.asyncio
@@ -140,7 +147,9 @@ async def test_remote_strategy_anon_uses_access_token_header(monkeypatch):
         headers_seen["auth"] = auth
         yield object(), object(), lambda: None
 
-    monkeypatch.setattr(client_strategy, "streamablehttp_client", fake_streamable_client)
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")

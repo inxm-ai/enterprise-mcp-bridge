@@ -122,7 +122,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     def _prepare_auth(self) -> None:
         if self.anon:
-            logger.info("[RemoteMCP] Anonymous remote session requested; skipping OAuth setup")
+            logger.info(
+                "[RemoteMCP] Anonymous remote session requested; skipping OAuth setup"
+            )
             self._prepare_fallback_headers()
             return
 
@@ -159,10 +161,14 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         if token_value:
             oauth_token = OAuthToken(
                 access_token=token_value,
-                token_type=(token_result.get("token_type") if token_result else "Bearer"),
+                token_type=(
+                    token_result.get("token_type") if token_result else "Bearer"
+                ),
                 expires_in=(token_result.get("expires_in") if token_result else None),
                 scope=(token_result.get("scope") if token_result else None),
-                refresh_token=(token_result.get("refresh_token") if token_result else None),
+                refresh_token=(
+                    token_result.get("refresh_token") if token_result else None
+                ),
             )
             client_info = self._initial_client_info()
             self._token_storage = _EphemeralTokenStorage(oauth_token, client_info)
@@ -179,10 +185,14 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
     def _prepare_fallback_headers(self) -> None:
         if MCP_REMOTE_BEARER_TOKEN and "Authorization" not in self.headers:
             self.headers["Authorization"] = f"Bearer {MCP_REMOTE_BEARER_TOKEN}"
-            logger.info("[RemoteMCP] Using MCP_REMOTE_BEARER_TOKEN for Authorization header")
+            logger.info(
+                "[RemoteMCP] Using MCP_REMOTE_BEARER_TOKEN for Authorization header"
+            )
         elif self.access_token and "Authorization" not in self.headers:
             self.headers["Authorization"] = f"Bearer {self.access_token}"
-            logger.info("[RemoteMCP] Using incoming access token for Authorization header")
+            logger.info(
+                "[RemoteMCP] Using incoming access token for Authorization header"
+            )
 
     @staticmethod
     async def _redirect_handler(url: str) -> None:  # pragma: no cover - defensive
@@ -193,7 +203,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         raise RuntimeError("Interactive OAuth redirect unsupported in server mode")
 
     @staticmethod
-    async def _callback_handler() -> tuple[str, Optional[str]]:  # pragma: no cover - defensive
+    async def _callback_handler() -> (
+        tuple[str, Optional[str]]
+    ):  # pragma: no cover - defensive
         raise RuntimeError("Interactive OAuth callback unsupported in server mode")
 
     @asynccontextmanager
