@@ -182,6 +182,18 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         else:
             self._prepare_fallback_headers()
 
+        self._add_env_headers()
+
+    def _add_env_headers(self) -> None:
+        for key, value in os.environ.items():
+            if key.startswith("MCP_REMOTE_HEADER_"):
+                header_name = key[len("MCP_REMOTE_HEADER_"):].replace("_", "-")
+                if header_name and value:
+                    self.headers[header_name] = value
+                    logger.info(
+                        f"[RemoteMCP] Adding custom header from environment: {header_name}"
+                    )
+
     def _prepare_fallback_headers(self) -> None:
         if MCP_REMOTE_BEARER_TOKEN and "Authorization" not in self.headers:
             self.headers["Authorization"] = f"Bearer {MCP_REMOTE_BEARER_TOKEN}"

@@ -103,6 +103,12 @@ export MCP_REMOTE_CLIENT_SECRET="change-me"
 # Optional shortcut token:
 # export MCP_REMOTE_BEARER_TOKEN="service-token-123"
 
+# Set any additional MCP env vars here:
+# export MCP_ENV_API_KEY="supersecret"
+
+# Set any additional MCP Header vars here:
+# export MCP_REMOTE_HEADER_X_CUSTOM="custom-value"
+
 uvicorn app.server:app --host 0.0.0.0 --port 8000
 ```
 
@@ -181,6 +187,7 @@ volumes:
 | `MCP_REMOTE_CLIENT_ID`    | Pre-registered OAuth client id for the remote server       | ""                     |
 | `MCP_REMOTE_CLIENT_SECRET`| Client secret for the remote OAuth client (if required)    | ""                     |
 | `MCP_REMOTE_BEARER_TOKEN` | Static bearer token to send if OAuth negotiation is skipped | ""                    |
+| `MCP_REMOTE_HEADER_*`     | Any additional headers to send to the remote MCP server   |                        |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
