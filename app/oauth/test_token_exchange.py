@@ -98,11 +98,30 @@ def test_token_needs_refresh_valid(monkeypatch, retriever):
 
 def test_token_needs_refresh_no_exp(monkeypatch, retriever):
     token = make_token()
-    assert retriever._token_needs_refresh({"access_token": token}) is True
+    assert retriever._token_needs_refresh({"access_token": token}) is False
 
 
 def test_token_needs_refresh_invalid_token(monkeypatch, retriever):
-    assert retriever._token_needs_refresh({"access_token": "notajwt"}) is True
+    assert retriever._token_needs_refresh({"access_token": "notajwt"}) is False
+
+
+def test_token_needs_refresh_invalid_token_with_refresh(monkeypatch, retriever):
+    assert (
+        retriever._token_needs_refresh(
+            {"access_token": "notajwt", "refresh_token": "refresh"}
+        )
+        is True
+    )
+
+
+def test_token_needs_refresh_no_exp_with_refresh_token(monkeypatch, retriever):
+    token = make_token()
+    assert (
+        retriever._token_needs_refresh(
+            {"access_token": token, "refresh_token": "refresh"}
+        )
+        is True
+    )
 
 
 def test_refresh_provider_token_success(monkeypatch, retriever):
