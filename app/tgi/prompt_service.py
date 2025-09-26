@@ -3,7 +3,7 @@ Prompt service module for handling MCP prompt operations.
 """
 
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterable
 from opentelemetry import trace
 from fastapi import HTTPException
 
@@ -39,14 +39,15 @@ class PromptService:
             try:
                 # Get all available prompts
                 prompts_result = await session.list_prompts()
-                if not prompts_result or not prompts_result["prompts"]:
+                prompts = self._extract_prompts(prompts_result)
+
+                if not prompts:
                     self.logger.debug(
                         f"[PromptService] No prompts available from MCP server: {prompts_result}"
                     )
                     span.set_attribute("prompt.found", False)
                     return None
 
-                prompts = prompts_result["prompts"]
                 self.logger.debug(
                     f"[PromptService] Found {len(prompts)} prompts available"
                 )
@@ -139,6 +140,94 @@ class PromptService:
                 span.set_attribute("error", True)
                 span.set_attribute("error.message", str(e))
                 raise
+
+    def _extract_prompts(self, prompts_result: Any) -> List[Dict[str, Any]]:
+        """Normalize various list_prompts return types into a list of dictionaries."""
+
+        if prompts_result is None:
+            return []
+
+        if isinstance(prompts_result, dict):
+            raw_prompts = prompts_result.get("prompts", [])
+        elif hasattr(prompts_result, "prompts"):
+            raw_prompts = getattr(prompts_result, "prompts")
+        else:
+            raw_prompts = prompts_result
+
+        if raw_prompts is None:
+            return []
+
+        if isinstance(raw_prompts, dict):
+            raw_prompts = raw_prompts.values()
+
+        if not isinstance(raw_prompts, Iterable) or isinstance(
+            raw_prompts, (str, bytes)
+        ):
+            raw_prompts = [raw_prompts]
+
+        normalized: List[Dict[str, Any]] = []
+        for prompt in raw_prompts:
+            normalized_prompt = self._normalize_prompt_entry(prompt)
+            if normalized_prompt:
+                normalized.append(normalized_prompt)
+        return normalized
+
+    def _normalize_prompt_entry(self, prompt: Any) -> Optional[Dict[str, Any]]:
+        if prompt is None:
+            return None
+
+        if isinstance(prompt, dict):
+            return prompt
+
+        if hasattr(prompt, "to_dict") and callable(getattr(prompt, "to_dict")):
+            try:
+                return prompt.to_dict()
+            except Exception:
+                pass
+
+        if hasattr(prompt, "model_dump") and callable(getattr(prompt, "model_dump")):
+            try:
+                return prompt.model_dump()
+            except Exception:
+                pass
+
+        if hasattr(prompt, "dict") and callable(getattr(prompt, "dict")):
+            try:
+                return prompt.dict()
+            except Exception:
+                pass
+
+        if hasattr(prompt, "__dataclass_fields__"):
+            try:
+                return {
+                    field: getattr(prompt, field, None)
+                    for field in prompt.__dataclass_fields__
+                }
+            except Exception:
+                pass
+
+        if hasattr(prompt, "__dict__"):
+            data = {
+                key: value
+                for key, value in vars(prompt).items()
+                if not key.startswith("_")
+            }
+            if data:
+                return data
+
+        # Fallback: attempt to build dict from known attributes
+        known_keys = [
+            "name",
+            "title",
+            "description",
+            "arguments",
+            "template",
+            "metadata",
+        ]
+        constructed = {
+            key: getattr(prompt, key) for key in known_keys if hasattr(prompt, key)
+        }
+        return constructed or None
 
     async def get_prompt_content(
         self, session: MCPSessionBase, prompt: Dict[str, Any]

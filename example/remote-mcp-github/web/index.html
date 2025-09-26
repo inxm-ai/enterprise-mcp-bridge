@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>GitHub Remote MCP Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0c0e;
+            --surface-color: #111319;
+            --card-bg-color: #14171d;
+            --text-color: #EEEDE8;
+            --muted-text-color: #B8BEC6;
+            --heading-color: #FAFAF8;
+            --border-color: #2b313a;
+            --accent: #ff7a1a;
+            --accent-strong: #ff5a00;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(255, 122, 26, 0.10), transparent 40%),
+                linear-gradient(180deg, #0b0c0e 0%, #0a0b0c 100%);
+            color: var(--text-color);
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image: radial-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+            background-size: 3px 3px;
+            opacity: .6;
+            mix-blend-mode: soft-light;
+        }
+
+        .theme-surface {
+            background-color: var(--surface-color) !important;
+            border-color: var(--border-color) !important;
+        }
+
+        .theme-card {
+            background-color: var(--card-bg-color) !important;
+            border-color: var(--border-color) !important;
+            position: relative;
+        }
+
+        .theme-card:not(.hero)::before {
+            content: "";
+            position: absolute;
+            left: 10px;
+            right: 10px;
+            top: 0;
+            height: 2px;
+            border-radius: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255, 122, 26, .45) 20%, rgba(255, 90, 0, .35) 60%, transparent);
+            opacity: .8;
+        }
+
+        .theme-border {
+            border-color: var(--border-color) !important;
+        }
+
+        .theme-heading {
+            color: var(--heading-color) !important;
+        }
+
+        .theme-muted {
+            color: var(--muted-text-color) !important;
+        }
+
+        header.glass {
+            background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .02)) !important;
+            border: 1px solid rgba(255, 255, 255, .10);
+            box-shadow: 0 8px 28px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .08);
+            backdrop-filter: blur(10px) saturate(120%);
+            -webkit-backdrop-filter: blur(10px) saturate(120%);
+        }
+
+        .btn-accent {
+            background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+            color: #111;
+            border: 1px solid rgba(255, 255, 255, .12);
+        }
+
+        .btn-accent:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 24px rgba(255, 90, 0, .25);
+        }
+
+        .chat-with-mcp {
+            background-color: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, .25);
+        }
+
+        .chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .chat-message {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            line-height: 1.35;
+            white-space: pre-wrap;
+        }
+
+        .chat-message.user {
+            background-color: rgba(255, 122, 26, 0.16);
+            border: 1px solid rgba(255, 122, 26, 0.35);
+            align-self: flex-end;
+            color: var(--heading-color);
+        }
+
+        .chat-message.assistant {
+            background-color: var(--card-bg-color);
+            border: 1px solid var(--border-color);
+        }
+
+        .chat-message.tool {
+            background-color: #171b21;
+            border: 1px solid var(--border-color);
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: var(--muted-text-color);
+        }
+
+        .chat-input-form {
+            display: flex;
+            gap: 0.5rem;
+            padding: 1rem;
+            background: var(--card-bg-color);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .chat-input-field {
+            flex: 1;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        select,
+        button {
+            padding: 0.6rem 0.75rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--card-bg-color);
+            color: var(--text-color);
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background: #2c3848;
+            cursor: not-allowed;
+        }
+
+        #chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        #chat-form {
+            display: flex;
+            gap: 0.5rem;
+            padding: 1rem;
+            background: var(--card-bg-color);
+            border-top: none;
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+            position: relative;
+        }
+
+        #chat-form::before {
+            content: "";
+            position: absolute;
+            left: 12px;
+            right: 12px;
+            top: 0;
+            height: 2px;
+            border-radius: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255, 122, 26, .45) 20%, rgba(255, 90, 0, .35) 60%, transparent);
+        }
+
+        #chat-input {
+            flex: 1;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        #tool-choice {
+            border-radius: 0;
+            padding: 0.6rem 0.75rem;
+            border-top-left-radius: 6px;
+            border-bottom-left-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--card-bg-color);
+            color: var(--text-color);
+        }
+
+        #submit {
+            color: var(--heading-color);
+            margin-left: -8px;
+            background: linear-gradient(180deg, #f08a3a 0%, #cf6018 100%);
+            border: 1px solid rgba(255, 255, 255, .08);
+            padding: 0.65rem 1rem;
+            border-radius: 0px;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 0 1px rgba(255, 122, 26, .18) inset, 0 6px 16px rgba(255, 90, 0, .18);
+            transition: transform .12s ease, box-shadow .2s ease, filter .2s ease;
+        }
+
+        #submit:hover {
+            transform: translateY(-0.5px);
+            box-shadow: 0 0 0 1px rgba(255, 122, 26, .22) inset, 0 8px 20px rgba(255, 90, 0, .2);
+        }
+
+        #submit:active {
+            transform: translateY(0);
+            box-shadow: 0 0 0 1px rgba(255, 122, 26, .24) inset, 0 5px 14px rgba(255, 90, 0, .18);
+        }
+
+        #submit:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(255, 122, 26, .22), 0 6px 18px rgba(255, 90, 0, .18);
+        }
+    </style>
+</head>
+
+<body class="p-4 sm:p-8">
+    <div class="container mx-auto max-w-7xl">
+        <header
+            class="backdrop-blur-sm sticky top-4 z-50 p-4 rounded-xl shadow-lg border flex items-center justify-between theme-surface theme-border glass">
+            <img src="logo.svg" alt="enterprise-mcp-bridge Logo" class="inline-block w-12 h-12 mr-2">
+            <h1 class="text-2xl font-bold text-white tracking-tight">Enterprise MCP Bridge + Keycloak + GitHub Demo</h1>
+        </header>
+
+        <main class="mt-8">
+            <chat-with-mcp inject-styles="style"
+                class="chat-with-mcp rounded-xl p-6 shadow-md border flex flex-col h-[80vh] mx-auto theme-card">
+                <div id="chat-history" class="chat-history flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+                </div>
+                <form id="chat-form" class="chat-input-form flex rounded-xl gap-4 p-4">
+                    <input id="chat-input" name="chat-input" class="chat-input-field flex-1" type="text"
+                        placeholder="Type message...">
+                    <select id="tool-choice" name="tool-choice">
+                        <option value="none">Select tool</option>
+                    </select>
+                    <button id="submit" type="submit" class="btn-accent rounded-lg">Send</button>
+                </form>
+            </chat-with-mcp>
+        </main>
+    </div>
+
+    <script type="module">
+        import { otelFetch } from "./otelFetch.js";
+        import { TGI } from "./chat.js";
+        import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
+
+        function replaceTags(tag, map) { return { tag, map }; }
+
+        function parseTagSegments(text, tag) {
+            const OPEN = `<${tag}>`;
+            const CLOSE = `</${tag}>`;
+            const segments = [];
+            let i = 0;
+            while (i < text.length) {
+                const start = text.indexOf(OPEN, i);
+                if (start === -1) {
+                    const tail = text.slice(i);
+                    if (tail) segments.push({ type: 'text', value: tail });
+                    break;
+                }
+                if (start > i) {
+                    const normal = text.slice(i, start);
+                    if (normal) segments.push({ type: 'text', value: normal });
+                }
+                const afterOpen = start + OPEN.length;
+                const end = text.indexOf(CLOSE, afterOpen);
+                if (end === -1) {
+                    segments.push({ type: 'text', value: text.slice(start) });
+                    break;
+                }
+                const inner = text.slice(afterOpen, end);
+                segments.push({ type: 'tag', tag, inner });
+                i = end + CLOSE.length;
+            }
+            return segments;
+        }
+
+        function applyTransforms(nodes, transforms) {
+            if (!transforms || transforms.length === 0) return nodes;
+            const [current, ...rest] = transforms;
+            const out = [];
+            for (const node of nodes) {
+                if (typeof node !== 'string') {
+                    out.push(node);
+                    continue;
+                }
+                const parts = parseTagSegments(node, current.tag);
+                for (const part of parts) {
+                    if (part.type === 'text') {
+                        out.push(part.value);
+                    } else {
+                        const children = applyTransforms([part.inner], rest);
+                        out.push(current.map(children));
+                    }
+                }
+            }
+            return rest.length ? applyTransforms(out, rest) : out;
+        }
+
+        function renderRichContent(content) {
+            if (content == null) return [];
+            const transforms = [
+                replaceTags('think', children => html.p(html.i(...children))),
+                replaceTags('code', children => html.code(...children)),
+            ];
+            const result = applyTransforms([String(content)], transforms)
+                .map(node => typeof node !== 'string' ? node : html.div(node));
+            return result;
+        }
+
+        pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true }, (state, trigger) => [
+            script(async () => {
+                state.model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
+                state.availableTools = await otelFetch('/api/mcp/github/tools', { credentials: 'include' }).then(r => r.json());
+                state.loading = false;
+            }),
+            html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, ...renderRichContent(m.content)))),
+            html.form({
+                id: 'chat-form', submit: async e => {
+                    e.preventDefault();
+                    if (state.loading) return;
+                    const formData = new FormData(e.target);
+                    const input = formData.get('chat-input')?.trim() || "";
+                    let toolChoice = formData.get('tool-choice') || 'auto';
+                    if (toolChoice === 'none') toolChoice = 'auto';
+                    if (!input) return;
+                    e.target.querySelector('input[name="chat-input"]').value = "";
+                    state.loading = true;
+                    state.streaming = "";
+                    state.messages = [...state.messages, { role: 'user', content: input }];
+                    const originalState = [...state.messages];
+                    try {
+                        const tgiInstance = new TGI(state.availableTools, state.model);
+                        await tgiInstance.send(
+                            input,
+                            toolChoice,
+                            chunk => {
+                                state.streaming += chunk;
+                                state.messages = [...originalState, { role: 'assistant', content: state.streaming }];
+                            }
+                        );
+                        state.streaming = "";
+                    } catch (err) {
+                        state.messages = [...state.messages, { role: 'assistant', content: `Error: ${err.message}` }];
+                        state.streaming = "";
+                    }
+                    state.loading = false;
+                }
+            },
+                html.input({ id: 'chat-input', placeholder: 'Type message...' }),
+                html.select({ id: 'tool-choice', name: 'tool-choice' },
+                    html.option({ value: 'none' }, 'Select tool'),
+                    ...state.availableTools.map(t => html.option({ value: t.name }, t.name))
+                ),
+                html.button({ id: 'submit', type: 'submit', disabled: state.loading }, state.loading ? 'Working...' : 'Send')
+            )
+        ]);
+    </script>
+</body>
+
+</html>

@@ -7,13 +7,22 @@ from app.tgi.models import Message, MessageRole
 
 
 class StubSession:
-    def __init__(self, prompts=None, prompt_result=None, call_exception=None):
+    def __init__(
+        self,
+        prompts=None,
+        prompt_result=None,
+        call_exception=None,
+        list_prompts_override=None,
+    ):
         self._prompts = prompts or []
         self._prompt_result = prompt_result
         self._call_exception = call_exception
+        self._list_prompts_override = list_prompts_override
         self.calls = []
 
     async def list_prompts(self):
+        if self._list_prompts_override is not None:
+            return self._list_prompts_override
         return {"prompts": list(self._prompts)}
 
     async def call_prompt(self, name, args):
@@ -44,6 +53,35 @@ async def test_find_prompt_prefers_system_prompt():
         {"name": "system", "description": "role=system", "arguments": None},
     ]
     session = StubSession(prompts=prompts)
+    service = PromptService()
+
+    prompt = await service.find_prompt_by_name_or_role(session)
+
+    assert prompt["name"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_find_prompt_supports_list_prompts_result_objects():
+    class PromptObject:
+        def __init__(self, name, description):
+            self.name = name
+            self.description = description
+            self.arguments = []
+
+        def model_dump(self):
+            return {
+                "name": self.name,
+                "description": self.description,
+                "arguments": self.arguments,
+                "template": None,
+            }
+
+    class ListPromptsResult:
+        def __init__(self, prompts):
+            self.prompts = prompts
+
+    prompts = [PromptObject("alpha", "first"), PromptObject("system", "role=system")]
+    session = StubSession(list_prompts_override=ListPromptsResult(prompts))
     service = PromptService()
 
     prompt = await service.find_prompt_by_name_or_role(session)

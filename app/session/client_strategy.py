@@ -16,6 +16,7 @@ from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutExcepti
 from app.utils import mask_token
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
+    MCP_REMOTE_ANON_BEARER_TOKEN,
     MCP_REMOTE_BEARER_TOKEN,
     MCP_REMOTE_CLIENT_ID,
     MCP_REMOTE_CLIENT_SECRET,
@@ -125,7 +126,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             logger.info(
                 "[RemoteMCP] Anonymous remote session requested; skipping OAuth setup"
             )
-            self._prepare_fallback_headers()
+            self._prepare_fallback_headers(anon=True)
+            self._add_env_headers()
             return
 
         token_value: Optional[str] = None
@@ -187,14 +189,25 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
     def _add_env_headers(self) -> None:
         for key, value in os.environ.items():
             if key.startswith("MCP_REMOTE_HEADER_"):
-                header_name = key[len("MCP_REMOTE_HEADER_"):].replace("_", "-")
+                header_name = key[len("MCP_REMOTE_HEADER_") :].replace("_", "-")
                 if header_name and value:
                     self.headers[header_name] = value
                     logger.info(
                         f"[RemoteMCP] Adding custom header from environment: {header_name}"
                     )
 
-    def _prepare_fallback_headers(self) -> None:
+    def _prepare_fallback_headers(self, *, anon: bool = False) -> None:
+        if (
+            anon
+            and MCP_REMOTE_ANON_BEARER_TOKEN
+            and "Authorization" not in self.headers
+        ):
+            self.headers["Authorization"] = f"Bearer {MCP_REMOTE_ANON_BEARER_TOKEN}"
+            logger.info(
+                "[RemoteMCP] Using MCP_REMOTE_ANON_BEARER_TOKEN for Authorization header"
+            )
+            return
+
         if MCP_REMOTE_BEARER_TOKEN and "Authorization" not in self.headers:
             self.headers["Authorization"] = f"Bearer {MCP_REMOTE_BEARER_TOKEN}"
             logger.info(

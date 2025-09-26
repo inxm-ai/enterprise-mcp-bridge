@@ -4,6 +4,9 @@
 import os
 import sys
 import pytest
+from app.utils_tests.token_retriever_mock import (
+    DummyTokenRetrieverFactory,
+)
 
 SERVICE_ROOT = os.path.dirname(__file__)
 APP_DIR = os.path.join(SERVICE_ROOT, "app")
@@ -13,23 +16,6 @@ APP_DIR = os.path.join(SERVICE_ROOT, "app")
 for p in (SERVICE_ROOT, APP_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-
-class DummyTokenRetriever:
-    def __init__(self, token_value="dummy_token"):
-        self.token_value = token_value
-
-    def retrieve_token(self, token):
-        # Return the input token as the access_token (pass-through behavior for tests)
-        return {"access_token": token}
-
-
-class DummyTokenRetrieverFactory:
-    def __init__(self, token_value="dummy_token"):
-        self.token_value = token_value
-
-    def get(self, *args, **kwargs):
-        return DummyTokenRetriever(self.token_value)
 
 
 @pytest.fixture

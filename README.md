@@ -102,6 +102,8 @@ export MCP_REMOTE_CLIENT_ID="bridge-client"
 export MCP_REMOTE_CLIENT_SECRET="change-me"
 # Optional shortcut token:
 # export MCP_REMOTE_BEARER_TOKEN="service-token-123"
+# Optional read-only token for anonymous flows (agent card, health checks):
+# export MCP_REMOTE_ANON_BEARER_TOKEN="read-only-service-token"
 
 # Set any additional MCP env vars here:
 # export MCP_ENV_API_KEY="supersecret"
@@ -115,7 +117,8 @@ uvicorn app.server:app --host 0.0.0.0 --port 8000
 Authentication hierarchy:
 1. Exchange the incoming OAuth token using `TokenRetrieverFactory` (if configured).
 2. Use `MCP_REMOTE_BEARER_TOKEN` when it is provided.
-3. Fall back to forwarding the caller’s token. Anonymous calls rely on step 2 or 3.
+3. Anonymous requests first use `MCP_REMOTE_ANON_BEARER_TOKEN` (if set).
+4. Fall back to forwarding the caller’s token.
 
 ## Deploying to Production
 
@@ -156,6 +159,7 @@ volumes:
 - `example/minimal-example` – tiny starter with the default memory server.
 - `example/memory-group-access` – demonstrates group-aware data routing.
 - `example/token-exchange-m365` – complete token-exchange stack with monitoring and tracing.
+- `example/remote-mcp-github` – Use the remote github mcp server with integrated token exchange.
 
 ### Security checklist
 - Terminate TLS and place an auth proxy in front of the bridge (expects `_oauth2_proxy` or the `X-Auth-Request-Access-Token` header).
@@ -187,6 +191,7 @@ volumes:
 | `MCP_REMOTE_CLIENT_ID`    | Pre-registered OAuth client id for the remote server       | ""                     |
 | `MCP_REMOTE_CLIENT_SECRET`| Client secret for the remote OAuth client (if required)    | ""                     |
 | `MCP_REMOTE_BEARER_TOKEN` | Static bearer token to send if OAuth negotiation is skipped | ""                    |
+| `MCP_REMOTE_ANON_BEARER_TOKEN` | Static bearer token used for anonymous remote calls (e.g., agent card generation) | "" |
 | `MCP_REMOTE_HEADER_*`     | Any additional headers to send to the remote MCP server   |                        |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
