@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, Any
+from json import JSONDecodeError
+from urllib.parse import parse_qsl
 
 from app.vars import (
     AUTH_ALLOW_UNSAFE_CERT,
@@ -10,6 +12,7 @@ from app.vars import (
     KEYCLOAK_REALM,
 )
 import jwt
+from jwt import DecodeError, InvalidTokenError
 
 import requests
 
@@ -119,7 +122,31 @@ class KeyCloakTokenRetriever(TokenRetriever):
             f"Requesting {self.provider_alias} token from Keycloak: {response.status_code}"
         )
         if response.status_code == 200:
-            return response.json()
+            try:
+                return response.json()
+            except JSONDecodeError:
+                text = response.text or ""
+                parsed_token = dict(parse_qsl(text)) if text else {}
+                if parsed_token:
+                    self.logger.info(
+                        f"Received form-encoded token response for {self.provider_alias}; converting to JSON."
+                    )
+                    # Normalize keys to align with JSON expectation
+                    normalized = {
+                        "access_token": parsed_token.get("access_token"),
+                        "refresh_token": parsed_token.get("refresh_token"),
+                        "token_type": parsed_token.get("token_type", "Bearer"),
+                        "expires_in": parsed_token.get("expires_in"),
+                        "scope": parsed_token.get("scope"),
+                    }
+                    return {k: v for k, v in normalized.items() if v is not None}
+                self.logger.error(
+                    mask_token(
+                        f"Unable to parse token response for {self.provider_alias}: {text}",
+                        keycloak_token,
+                    )
+                )
+                raise
         elif response.status_code == 401:
             self.logger.warning(
                 "Unauthorized access to Keycloak broker endpoint - User may not have broker.read-token role"
@@ -142,21 +169,45 @@ class KeyCloakTokenRetriever(TokenRetriever):
     def _token_needs_refresh(self, token_data: Dict[str, Any]) -> bool:
         """Check if the access token needs to be refreshed"""
         access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+
         if not access_token:
             return True
+
         try:
             payload = jwt.decode(
-                access_token, options={"verify_signature": False}, algorithms=["HS256"]
+                access_token,
+                options={"verify_signature": False, "verify_exp": False},
             )
-            exp_timestamp = payload.get("exp")
-            if exp_timestamp:
-                exp_time = datetime.fromtimestamp(exp_timestamp)
-                return exp_time <= datetime.now() + timedelta(seconds=60)
-            else:
+        except (InvalidTokenError, DecodeError) as exc:
+            if refresh_token:
+                self.logger.info(
+                    "Access token could not be decoded (%s); attempting refresh using refresh token.",
+                    str(exc),
+                )
                 return True
-        except Exception as e:
-            self.logger.error(f"Failed to decode access token: {str(e)}")
-            return True
+            self.logger.debug(
+                "Access token appears opaque and no refresh token is available; assuming still valid."
+            )
+            return False
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self.logger.error(f"Failed to decode access token: {str(exc)}")
+            return bool(refresh_token)
+
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp is None:
+            return bool(refresh_token)
+
+        try:
+            exp_time = datetime.fromtimestamp(int(exp_timestamp))
+        except (TypeError, ValueError):
+            self.logger.debug(
+                "Access token exp claim is not an int (%s); falling back to refresh token presence.",
+                str(exp_timestamp),
+            )
+            return bool(refresh_token)
+
+        return exp_time <= datetime.now() + timedelta(seconds=60)
 
     def _refresh_provider_token(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh provider token using Keycloak's token refresh endpoint"""

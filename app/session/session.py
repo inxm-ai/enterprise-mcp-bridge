@@ -2,11 +2,17 @@ import asyncio
 import datetime
 import logging
 from contextlib import asynccontextmanager
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Union
+
+from mcp import StdioServerParameters
+
 from ..utils.exception_logging import log_exception_with_details
+from .client_strategy import (
+    MCPClientStrategy,
+    LocalMCPClientStrategy,
+    build_mcp_client_strategy,
+)
 
 
 def try_get_session_id(
@@ -32,19 +38,36 @@ def session_id(base_id: str, oauth_token: Optional[str] = None) -> str:
 
 
 @asynccontextmanager
-async def mcp_session(server_params: StdioServerParameters):
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+async def mcp_session(
+    strategy_or_params: Union[MCPClientStrategy, StdioServerParameters, None] = None,
+    *,
+    access_token: Optional[str] = None,
+    requested_group: Optional[str] = None,
+    anon: bool = False,
+):
+    if isinstance(strategy_or_params, MCPClientStrategy):
+        strategy = strategy_or_params
+    elif isinstance(strategy_or_params, StdioServerParameters):
+        strategy = LocalMCPClientStrategy(strategy_or_params)
+    elif strategy_or_params is None:
+        strategy = build_mcp_client_strategy(
+            access_token=access_token,
+            requested_group=requested_group,
+            anon=anon,
+        )
+    else:  # pragma: no cover - defensive branch
+        raise TypeError("Unsupported strategy configuration for mcp_session")
+
+    async with strategy.session() as session:
+        yield session
 
 
 logger = logging.getLogger("uvicorn.error")
 
 
 class MCPSessionBase(ABC):
-    def __init__(self, server_params):
-        self.server_params = server_params
+    def __init__(self, client_strategy: MCPClientStrategy):
+        self.client_strategy = client_strategy
         self.request_queue = asyncio.Queue()
         self.response_queue = asyncio.Queue()
         self._task = None
@@ -90,11 +113,20 @@ class MCPSessionBase(ABC):
 
 
 class MCPLocalSessionTask(MCPSessionBase):
+    def __init__(
+        self, client_strategy: Union[MCPClientStrategy, StdioServerParameters]
+    ) -> None:
+        if isinstance(client_strategy, StdioServerParameters):
+            strategy = LocalMCPClientStrategy(client_strategy)
+        else:
+            strategy = client_strategy
+        super().__init__(strategy)
+
     async def run(self):
         logger.info("[MCPLocalSessionTask] Session task started.")
         last_trigger = datetime.datetime.now()
         try:
-            async with mcp_session(self.server_params) as session:
+            async with self.client_strategy.session() as session:
                 logger.info("[MCPLocalSessionTask] MCP session established.")
                 while True:
                     req = await self.request_queue.get()

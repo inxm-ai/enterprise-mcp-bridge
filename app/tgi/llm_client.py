@@ -7,9 +7,9 @@ import logging
 import os
 import time
 import uuid
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, List, Optional
 import aiohttp
-from app.vars import TOOL_INJECTION_MODE, LLM_MAX_PAYLOAD_BYTES, TOOL_CHUNK_SIZE
+from app.vars import LLM_MAX_PAYLOAD_BYTES, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
 from app.tgi.models import (
@@ -20,11 +20,12 @@ from app.tgi.models import (
     DeltaMessage,
     Message,
     MessageRole,
-    Tool,
     Usage,
 )
 from app.utils import mask_token
 from fastapi import HTTPException
+
+from app.tgi.model_formats import BaseModelFormat, get_model_format_for
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -33,10 +34,11 @@ tracer = trace.get_tracer(__name__)
 class LLMClient:
     """Client for communicating with the LLM API."""
 
-    def __init__(self):
+    def __init__(self, model_format: Optional[BaseModelFormat] = None):
         self.logger = logger
         self.tgi_url = os.environ.get("TGI_URL", "")
         self.tgi_token = os.environ.get("TGI_TOKEN", "")
+        self.model_format = model_format or get_model_format_for()
 
         # Ensure TGI_URL doesn't end with slash for consistent URL building
         if self.tgi_url.endswith("/"):
@@ -234,43 +236,7 @@ class LLMClient:
     def _generate_llm_payload(self, request: ChatCompletionRequest) -> dict:
         """Generate the payload for the LLM API request."""
 
-        def _claude_tool_format(tool: Tool) -> str:
-            return f"<{tool.function.name}>{json.dumps(tool.function.parameters, separators=(',', ':'))}</{tool.function.name}>"
-
-        if TOOL_INJECTION_MODE == "claude":
-            logger.debug("[LLMClient] Using Claude-style tool injection")
-            tools = (
-                [_claude_tool_format(tool) for tool in request.tools]
-                if request.tools
-                else []
-            )
-            if tools is None or len(tools) == 0:
-                logger.warning(
-                    "[LLMClient] No tools available for Claude tool injection, result will be limited"
-                )
-            tool_descriptions = "\n".join(tools)
-
-            # Find or create system message
-
-            messages = request.messages[:]
-            system_msg = next(
-                (msg for msg in messages if msg.role == MessageRole.SYSTEM), None
-            )
-            if tools is not None and len(tools) > 0:
-                if system_msg:
-                    system_msg.content += f"\n\nYou have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>."
-                else:
-                    system_msg = Message(
-                        role=MessageRole.SYSTEM,
-                        content=f"You have access to the following tools:\n{tool_descriptions}\nEnd each of your tool calls, and only tool calls, with <stop/>.",
-                    )
-                    messages.insert(0, system_msg)
-
-            request.messages = messages
-            # Anthropic would require stop_sequences, but this is handled in the TG-Core for INXM
-            # think about a way to pass this through if needed
-            request.stop = (request.stop or []) + ["<stop/>"]
-            request.tools = []
+        self.model_format.prepare_request(request)
 
         payload = request.model_dump(exclude_none=True)
         return payload

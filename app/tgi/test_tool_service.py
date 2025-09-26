@@ -12,6 +12,7 @@ from app.tgi.tool_service import (
     parse_and_clean_tool_call,
     extract_tool_call_from_streamed_content,
 )
+from app.tgi.model_formats import ChatGPTModelFormat, ClaudeModelFormat
 
 
 class DummySession:
@@ -86,7 +87,7 @@ def make_tool_call(name="list-files", args='{"path": "bar"}', id="call_1"):
 @pytest.fixture
 def tool_service():
     """Create ToolService instance."""
-    return ToolService()
+    return ToolService(model_format=ChatGPTModelFormat())
 
 
 class TestToolService:
@@ -555,7 +556,7 @@ async def test_describe_tool_unknown_name(tool_service):
 
 @pytest.mark.asyncio
 async def test_create_result_message_basic():
-    service = ToolService()
+    service = ToolService(model_format=ChatGPTModelFormat())
     tool_result = {
         "content": "result content",
         "tool_call_id": "abc123",
@@ -571,7 +572,7 @@ async def test_create_result_message_basic():
 
 @pytest.mark.asyncio
 async def test_create_result_message_claude_xml():
-    service = ToolService()
+    service = ToolService(model_format=ClaudeModelFormat())
     tool_result = {
         "content": "42",
         "tool_call_id": "id789",
@@ -587,7 +588,7 @@ async def test_create_result_message_claude_xml():
 
 @pytest.mark.asyncio
 async def test_create_result_message_claude_xml_missing_fields():
-    service = ToolService()
+    service = ToolService(model_format=ClaudeModelFormat())
     tool_result = {}
     msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
     assert msg.role == MessageRole.ASSISTANT
@@ -598,7 +599,7 @@ async def test_create_result_message_claude_xml_missing_fields():
 
 @pytest.mark.asyncio
 async def test_create_result_message_missing_fields():
-    service = ToolService()
+    service = ToolService(model_format=ChatGPTModelFormat())
     tool_result = {}
     msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
     assert msg.content == ""
@@ -608,7 +609,7 @@ async def test_create_result_message_missing_fields():
 
 @pytest.mark.asyncio
 async def test_create_result_message_with_extra_fields():
-    service = ToolService()
+    service = ToolService(model_format=ChatGPTModelFormat())
     tool_result = {
         "content": "extra content",
         "tool_call_id": "id456",
@@ -623,7 +624,7 @@ async def test_create_result_message_with_extra_fields():
 
 @pytest.mark.asyncio
 async def test_create_result_message_summarizes_long_content(monkeypatch):
-    service = ToolService()
+    service = ToolService(model_format=ChatGPTModelFormat())
     long_text = "a" * 12000
     tool_result = {
         "content": long_text,

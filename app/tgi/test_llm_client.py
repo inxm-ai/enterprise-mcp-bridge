@@ -12,6 +12,7 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
+from app.tgi.model_formats import ChatGPTModelFormat, ClaudeModelFormat
 
 
 @pytest.fixture
@@ -300,15 +301,14 @@ def make_tool(name, params):
     return Tool(function=FunctionDefinition(name=name, parameters=params))
 
 
-def test_no_injection_keeps_tools(monkeypatch):
-    """When TOOL_INJECTION_MODE is not 'claude', the request should be unchanged."""
-    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "none")
-
+def test_no_injection_keeps_tools():
+    """ChatGPT format leaves tools untouched in payload."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
     tool = make_tool("fn", {"a": 1})
     messages = [Message(role=MessageRole.USER, content="hi")]
     req = ChatCompletionRequest(messages=messages, tools=[tool], model="m")
 
-    payload = llm.LLMClient()._generate_llm_payload(req)
+    payload = client._generate_llm_payload(req)
 
     # tools should be present and unchanged
     assert "tools" in payload
@@ -319,10 +319,9 @@ def test_no_injection_keeps_tools(monkeypatch):
     assert payload["messages"][0]["content"] == "hi"
 
 
-def test_claude_with_existing_system_appends(monkeypatch):
-    """When TOOL_INJECTION_MODE is 'claude' and a system message exists, tools are injected into it."""
-    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
-
+def test_claude_with_existing_system_appends():
+    """Claude format injects tool descriptors into existing system prompts."""
+    client = llm.LLMClient(model_format=ClaudeModelFormat())
     tool = make_tool("doThing", {"x": 1})
     # place system message not at index 0 to ensure position is preserved
     messages = [
@@ -331,7 +330,7 @@ def test_claude_with_existing_system_appends(monkeypatch):
     ]
     req = ChatCompletionRequest(messages=messages, tools=[tool])
 
-    payload = llm.LLMClient()._generate_llm_payload(req)
+    payload = client._generate_llm_payload(req)
 
     # tools should be emptied (injected into system prompt)
     assert payload.get("tools") == []
@@ -344,15 +343,14 @@ def test_claude_with_existing_system_appends(monkeypatch):
     assert '{"x":1}' in sys_msg["content"]
 
 
-def test_claude_without_system_inserts_at_start(monkeypatch):
-    """When no system message exists, a new system message is inserted at the start."""
-    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
-
+def test_claude_without_system_inserts_at_start():
+    """Claude format adds a system message when none exists."""
+    client = llm.LLMClient(model_format=ClaudeModelFormat())
     tool1 = make_tool("t1", {"a": "b"})
     messages = [Message(role=MessageRole.USER, content="u1")]
     req = ChatCompletionRequest(messages=messages, tools=[tool1])
 
-    payload = llm.LLMClient()._generate_llm_payload(req)
+    payload = client._generate_llm_payload(req)
 
     assert payload.get("tools") == []
 
@@ -365,10 +363,9 @@ def test_claude_without_system_inserts_at_start(monkeypatch):
     assert '{"a":"b"}' in first["content"]
 
 
-def test_claude_preserves_system_position(monkeypatch):
-    """If a system message exists not at index 0, its position should be preserved."""
-    monkeypatch.setattr(llm, "TOOL_INJECTION_MODE", "claude")
-
+def test_claude_preserves_system_position():
+    """Claude format does not reorder existing system messages."""
+    client = llm.LLMClient(model_format=ClaudeModelFormat())
     tool = make_tool("fn", {"n": 2})
     messages = [
         Message(role=MessageRole.USER, content="u"),
@@ -377,7 +374,7 @@ def test_claude_preserves_system_position(monkeypatch):
     ]
     req = ChatCompletionRequest(messages=messages, tools=[tool])
 
-    payload = llm.LLMClient()._generate_llm_payload(req)
+    payload = client._generate_llm_payload(req)
 
     roles = [m["role"] for m in payload["messages"]]
     assert roles == [MessageRole.USER, MessageRole.SYSTEM, MessageRole.ASSISTANT]

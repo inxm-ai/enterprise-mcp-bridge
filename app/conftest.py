@@ -1,26 +1,13 @@
 import pytest
 
-
-class DummyTokenRetriever:
-    def __init__(self, token_value="dummy_token"):
-        self.token_value = token_value
-
-    def retrieve_token(self, token):
-        return {"access_token": token or self.token_value}
-
-
-class DummyTokenRetrieverFactory:
-    def __init__(self, token_value="dummy_token"):
-        self.token_value = token_value
-
-    def get(self, *args, **kwargs):
-        return DummyTokenRetriever(self.token_value)
+from app.utils_tests.token_retriever_mock import (
+    DummyTokenRetrieverFactory,
+)
 
 
 @pytest.fixture
 def mock_token_retriever_factory(monkeypatch):
-    """Fixture compatible with legacy tests importing from utils_tests."""
-
+    """Provide a mocked TokenRetrieverFactory for app-layer tests."""
     factory = DummyTokenRetrieverFactory("test_access_token")
 
     from app.oauth import token_exchange

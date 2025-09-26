@@ -17,6 +17,7 @@ from app.session import MCPSessionBase
 from app.tgi.tool_argument_fixer_service import fix_tool_arguments
 from app.tgi.tool_resolution import ToolCallFormat
 from app.tgi.tools_map import map_tools, inline_schema
+from app.tgi.model_formats import BaseModelFormat, get_model_format_for
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -44,11 +45,17 @@ def _compact_text(text: str) -> str:
 class ToolService:
     """Service for handling MCP tool operations."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        model_format: Optional[BaseModelFormat] = None,
+        llm_client: Optional[LLMClient] = None,
+    ):
         self.logger = logger
+        self.model_format = model_format or get_model_format_for()
         # llm client used for optional summarization of large tool outputs
         try:
-            self.llm_client = LLMClient()
+            self.llm_client = llm_client or LLMClient(self.model_format)
         except Exception:
             # Keep ToolService usable in tests/environments where LLMClient
             # may not initialize cleanly
@@ -431,35 +438,13 @@ class ToolService:
         if isinstance(content, str):
             content = _compact_text(content)
 
-        if format == ToolCallFormat.OPENAI_JSON:
-            logger.debug(
-                f"[ToolService] Creating OPENAI_JSON tool result message: {content}"
-            )
-            return Message(
-                role=MessageRole.TOOL,
-                content=content,
-                tool_call_id=tool_result.get("tool_call_id"),
-                name=tool_result.get("name"),
-            )
-        elif format == ToolCallFormat.CLAUDE_XML:
-            logger.debug(
-                f"[ToolService] Creating CLAUDE_XML tool result message: {content}"
-            )
-            name = tool_result.get("name")
-            xml_tag = f"<{name}_result>{content}</{name}_result><stop/>"
-            return Message(
-                role=MessageRole.ASSISTANT,
-                content=xml_tag,
-                tool_call_id=tool_result.get("tool_call_id"),
-                name=name,
-            )
-        logger.debug(f"[ToolService] Creating default tool result message: {content}")
-        return Message(
-            role=MessageRole.TOOL,
-            content=content,
-            tool_call_id=tool_result.get("tool_call_id"),
-            name=tool_result.get("name"),
+        message = self.model_format.build_tool_message(format, tool_result, content)
+        logger.debug(
+            "[ToolService] Created tool result message role=%s content=%s",
+            message.role,
+            message.content,
         )
+        return message
 
     async def execute_tool_calls(
         self,

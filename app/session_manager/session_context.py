@@ -8,7 +8,6 @@ from app.session import mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
 from app.session_manager.session_manager import SessionManagerBase
 from app.models import RunPromptResult, RunToolsResult
-from app.mcp_server import get_server_params
 from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import get_data_access_manager
@@ -80,38 +79,46 @@ async def mcp_session_context(
                 logger.warning(f"Group access denied: {str(e)}")
                 raise HTTPException(status_code=403, detail=str(e))
 
-        async with mcp_session(get_server_params(access_token, group)) as session:
+        try:
+            async with mcp_session(
+                access_token=access_token, requested_group=group
+            ) as session:
 
-            class SessionDelegate:
-                async def list_prompts(self):
-                    return await list_prompts(session.list_prompts)
+                class SessionDelegate:
+                    async def list_prompts(self):
+                        return await list_prompts(session.list_prompts)
 
-                async def list_tools(self):
-                    tools = await session.list_tools()
-                    return map_tools(tools)
+                    async def list_tools(self):
+                        tools = await session.list_tools()
+                        return map_tools(tools)
 
-                async def call_tool(
-                    self,
-                    tool_name: str,
-                    args: Optional[Dict],
-                    access_token_inner: Optional[str],
-                ):
-                    tools = await session.list_tools()
-                    decorated_args = await decorate_args_with_oauth_token(
-                        tools, tool_name, args, access_token_inner
-                    )
-                    result = await session.call_tool(tool_name, decorated_args)
-                    return RunToolsResult(result)
+                    async def call_tool(
+                        self,
+                        tool_name: str,
+                        args: Optional[Dict],
+                        access_token_inner: Optional[str],
+                    ):
+                        tools = await session.list_tools()
+                        decorated_args = await decorate_args_with_oauth_token(
+                            tools, tool_name, args, access_token_inner
+                        )
+                        result = await session.call_tool(tool_name, decorated_args)
+                        return RunToolsResult(result)
 
-                async def call_prompt(
-                    self,
-                    prompt_name: str,
-                    args: Optional[Dict],
-                ):
-                    result = await call_prompt(session.get_prompt, prompt_name, args)
-                    return RunPromptResult(result)
+                    async def call_prompt(
+                        self,
+                        prompt_name: str,
+                        args: Optional[Dict],
+                    ):
+                        result = await call_prompt(
+                            session.get_prompt, prompt_name, args
+                        )
+                        return RunPromptResult(result)
 
-            yield SessionDelegate()
+                yield SessionDelegate()
+        except ValueError as exc:
+            logger.error(f"[MCP] Failed to create session: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc))
         return
 
     # Sessionful path: reuse existing task, but surface a common delegate API

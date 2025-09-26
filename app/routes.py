@@ -7,9 +7,13 @@ import uuid
 import os
 
 from app.utils.traced_requests import traced_request
-from app.session import MCPLocalSessionTask, try_get_session_id, session_id
+from app.session import (
+    MCPLocalSessionTask,
+    try_get_session_id,
+    session_id,
+    build_mcp_client_strategy,
+)
 from app.session_manager import mcp_session_context, session_manager
-from .mcp_server import get_server_params
 from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
@@ -331,7 +335,15 @@ async def start_session(
                         detail=f"Access denied to group '{group}': {str(e)}",
                     )
 
-            mcp_task = MCPLocalSessionTask(get_server_params(access_token, group))
+            try:
+                strategy = build_mcp_client_strategy(
+                    access_token=access_token, requested_group=group
+                )
+            except ValueError as exc:
+                logger.error(f"[Session] Invalid MCP configuration: {exc}")
+                raise HTTPException(status_code=400, detail=str(exc))
+
+            mcp_task = MCPLocalSessionTask(strategy)
             mcp_task.start()
             sessions.set(x_inxm_mcp_session, mcp_task)
 

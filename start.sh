@@ -6,6 +6,7 @@ fi
 
 # for development purposes another pip install can be triggered in the /mcp directory
 if [ "$ENV" == "dev" ]; then
+  echo "Development mode: checking for /mcp directory"
   if [ -d "/mcp" ]; then
     if [ -f "/mcp/install.sh" ]; then
       echo "Running /mcp/install.sh"

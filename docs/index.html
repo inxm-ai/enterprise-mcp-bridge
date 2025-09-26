@@ -280,6 +280,7 @@ uvicorn app.server:app --reload</code></pre>
                     <div class="mt-4 mb-6 flex flex-wrap gap-2">
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg active" data-tab="minimal" onclick="showExampleTab('minimal')">Minimal Example</button>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="memory-group" onclick="showExampleTab('memory-group')">Memory Group Access</button>
+                        <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="github-remote" onclick="showExampleTab('github-remote')">Remote GitHub MCP</button>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="token-exchange" onclick="showExampleTab('token-exchange')">Token Exchange (M365)</button>
                     </div>
 
@@ -481,6 +482,31 @@ Calling the add tool with {"a": 2, "b": 1}
                         <div class="flex justify-center items-center mt-4">
                             <img class="rounded-lg" src="mcp-memory-access-denied.png" alt="Memory Access Denied" />
                         </div>
+                    </div>
+
+                    <!-- Tab: Remote GitHub MCP -->
+                    <div class="example-content hidden" data-tab="github-remote">
+                        <h3 class="text-xl font-bold text-white mb-4">Remote GitHub MCP Bridge</h3>
+                        <p class="text-gray-400 mb-4">This scenario lives in <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/remote-mcp-github" title="Remote GitHub MCP example">example/remote-mcp-github</a>. It spins up a remote-ready bridge that proxies an MCP server talking to the GitHub REST APIs, so your browsers and agents can collaborate on repository tasks without handling secrets directly.</p>
+                        <p class="text-gray-400 mb-4">Why it's awesome:</p>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                            <li><strong>GitHub over MCP, remotely:</strong> Serve the GitHub MCP server from a central cluster and let clients connect via plain HTTP.</li>
+                            <li><strong>Token brokerage built-in:</strong> Keycloak + OAuth2 Proxy exchange the user's GitHub OAuth token and inject it into downstream tool calls automatically.</li>
+                            <li><strong>Ops ready:</strong> Includes Grafana/Jaeger wiring and pre-built dashboards so you can observe latency, tool usage, and auth handshakes in real time.</li>
+                        </ul>
+                        <p class="text-gray-400 mt-4">How it makes your life easier:</p>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                            <li>Centralized policy enforcement—no passing PATs around or duplicating GitHub app setup for every client.</li>
+                            <li>Consistent REST surface for GitHub tooling, so any HTTP-capable automation can call MCP tools.</li>
+                            <li>Drop-in local dev experience: launch, log in with GitHub, and start issuing repository tasks from your browser or Copilot Chat.</li>
+                        </ul>
+                        <h4 class="text-lg font-bold text-white mb-2 mt-6">Run the stack</h4>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/remote-mcp-github
+./start.sh</code></pre>
+                        <p class="text-gray-400 mt-4">Opening <a href="https://inxm.local" class="hover:underline">https://inxm.local</a> guides you through the GitHub OAuth consent screen. Once signed in, you can list repositories, create issues, or trigger workflows through MCP tools—all secured via the bridge.</p>
+                        <h4 class="text-lg font-bold text-white mb-2 mt-6">Clean up</h4>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
+                        <p class="text-gray-400 mt-2">Stops the containers and removes the GitHub-specific resources created for the demo.</p>
                     </div>
                 </div>
             </section>

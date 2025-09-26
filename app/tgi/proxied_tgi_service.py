@@ -17,8 +17,8 @@ from app.tgi.prompt_service import PromptService
 from app.tgi.tool_service import (
     ToolService,
 )
-from app.tgi.tool_resolution import ToolResolutionStrategy
 from app.tgi.llm_client import LLMClient
+from app.tgi.model_formats import BaseModelFormat, get_model_format_for
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -27,12 +27,15 @@ tracer = trace.get_tracer(__name__)
 class ProxiedTGIService:
     """Service that orchestrates chat completions with tool support."""
 
-    def __init__(self):
+    def __init__(self, model_format: Optional[BaseModelFormat] = None):
         self.logger = logger
+        self.model_format = model_format or get_model_format_for()
         self.prompt_service = PromptService()
-        self.tool_service = ToolService()
-        self.tool_resolution = ToolResolutionStrategy()
-        self.llm_client = LLMClient()
+        self.llm_client = LLMClient(self.model_format)
+        self.tool_service = ToolService(
+            model_format=self.model_format, llm_client=self.llm_client
+        )
+        self.tool_resolution = self.model_format.create_tool_resolution_strategy()
 
     async def chat_completion(
         self,

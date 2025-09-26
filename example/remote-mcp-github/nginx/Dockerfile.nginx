@@ -1,0 +1,10 @@
+FROM nginx:1.25-alpine
+
+RUN apk add --no-cache bash gettext
+
+COPY app-nginx.conf /etc/nginx/templates/app-nginx.conf.template
+RUN echo '{ "OAI_MODEL_NAME": "${OAI_MODEL_NAME}" }' > /tmp/settings.json.template
+
+CMD envsubst < /tmp/settings.json.template > /tmp/settings.json \
+    && envsubst '${OAI_BASE_URL} ${OAI_API_TOKEN} ${OAI_HOST}' < /etc/nginx/templates/app-nginx.conf.template > /etc/nginx/nginx.conf \
+    && nginx -g 'daemon off;'

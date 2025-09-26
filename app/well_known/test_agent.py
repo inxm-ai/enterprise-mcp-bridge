@@ -79,14 +79,6 @@ def mock_mcp_session():
 
 
 @pytest.fixture
-def mock_get_server_params():
-    # Avoid executing real get_server_params
-    with patch("app.well_known.agent.get_server_params", autospec=True) as mock_gsp:
-        mock_gsp.return_value = object()
-        yield mock_gsp
-
-
-@pytest.fixture
 def ensure_default_model():
     # Ensure DEFAULT_MODEL is truthy for tests that need it
     with patch("app.well_known.agent.DEFAULT_MODEL", "test-model"):
@@ -126,7 +118,7 @@ def test_get_as_list():
 
 @pytest.mark.asyncio
 async def test_get_agent_card_happy_case(
-    mock_llm_client, mock_mcp_session, mock_get_server_params, ensure_default_model
+    mock_llm_client, mock_mcp_session, ensure_default_model
 ):
     # Configure the fake session to return two tools
     mock_mcp_session.set_tools(
@@ -177,7 +169,7 @@ async def test_get_agent_card_cache_hit(
 
 @pytest.mark.asyncio
 async def test_get_agent_card_empty_tools(
-    mock_llm_client, mock_mcp_session, mock_get_server_params, ensure_default_model
+    mock_llm_client, mock_mcp_session, ensure_default_model
 ):
     agent_module._agent_card_cache = None
 
@@ -195,7 +187,7 @@ async def test_get_agent_card_empty_tools(
 
 @pytest.mark.asyncio
 async def test_get_agent_card_tool_with_schemas(
-    mock_llm_client, mock_mcp_session, mock_get_server_params, ensure_default_model
+    mock_llm_client, mock_mcp_session, ensure_default_model
 ):
     # Verify inputModes/outputModes and parameter_schema when tool has schemas
     tools = [

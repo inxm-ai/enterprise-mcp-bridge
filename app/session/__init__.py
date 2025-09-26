@@ -5,6 +5,7 @@ from .session import (
     try_get_session_id,
     session_id,
 )
+from .client_strategy import build_mcp_client_strategy
 
 __all__ = [
     "MCPSessionBase",
@@ -12,4 +13,5 @@ __all__ = [
     "MCPLocalSessionTask",
     "try_get_session_id",
     "session_id",
+    "build_mcp_client_strategy",
 ]
