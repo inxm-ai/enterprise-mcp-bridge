@@ -266,7 +266,7 @@ EOF
 
   echo "" >> "$ENV_FILE"
   echo "⚠️ This demo optionally connects to an OpenAI-compatible LLM."
-  read -p "Enter the base url for your OpenAI-compatible service (leave empty for bundled dummy LLM): " BASE_URL
+  read -p "Enter the base url for your OpenAI-compatible service (ie. https://api.openai.com/v1/, leave empty for bundled dummy LLM): " BASE_URL
   if [ -z "$BASE_URL" ]; then
     BASE_URL="http://inxm.dummy-llm:8765/v1"
     cat >> "$ENV_FILE" <<EOF
