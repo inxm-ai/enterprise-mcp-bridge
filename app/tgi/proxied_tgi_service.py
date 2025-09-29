@@ -268,15 +268,15 @@ class ProxiedTGIService:
                                 f"[ProxiedTGI] Resolved {parsed_call.format.value} tool call: {parsed_call.name}"
                             )
 
-                        # Add content message
-                        if content_message.strip():
-                            messages_history.append(
-                                Message(
-                                    role=MessageRole.ASSISTANT,
-                                    content=content_message,
-                                    tool_calls=[tc for tc, _ in tool_calls_to_execute],
-                                )
+                        messages_history.append(
+                            Message(
+                                role=MessageRole.ASSISTANT,
+                                content=(
+                                    content_message if content_message.strip() else None
+                                ),
+                                tool_calls=[tc for tc, _ in tool_calls_to_execute],
                             )
+                        )
 
                         tool_span.set_attribute(
                             "tool_calls.execute_count", len(tool_calls_to_execute)

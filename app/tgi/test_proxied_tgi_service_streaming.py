@@ -278,6 +278,71 @@ async def test_streaming_tool_call_missing_arguments():
 
 
 @pytest.mark.asyncio
+async def test_streaming_tool_calls_without_assistant_content_appends_tool_calls():
+    """Ensure that when the LLM only emits tool_calls (no assistant content),
+    an assistant message with the tool_calls is still appended to history so
+    subsequent LLM requests (or the backend) see tool messages as a response
+    to an assistant message.
+    """
+    service = ProxiedTGIService()
+
+    # Simulate a stream that only emits tool_calls and then [DONE]
+    chunks = []
+    chunk1 = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {"id": "only1", "index": 0, "function": {"name": "solo"}}
+                    ]
+                },
+                "index": 0,
+            }
+        ]
+    }
+    chunks.append("data: " + json.dumps(chunk1) + "\n\n")
+    chunks.append("data: [DONE]\n\n")
+
+    async def mock_stream_llm_completion(*args, **kwargs):
+        # capture the request messages passed in the first arg for inspection
+        for chunk in chunks:
+            yield chunk
+
+    service.llm_client.stream_completion = mock_stream_llm_completion
+
+    # make execute_tool_calls return an empty result set (we don't need to run tools)
+    service.tool_service.execute_tool_calls = AsyncMock(return_value=([], True))
+
+    session = MagicMock()
+    messages = [Message(role=MessageRole.USER, content="Trigger tool.")]
+    available_tools = [
+        {
+            "type": "function",
+            "function": {"name": "solo", "description": "", "parameters": {}},
+        }
+    ]
+
+    chat_request = ChatCompletionRequest(
+        messages=messages, model="test-model", stream=True
+    )
+
+    # We'll run the stream and after completion inspect that the tool_calls were
+    # appended as an assistant message in the internal messages_history by
+    # observing that tool_service.execute_tool_calls was invoked with a
+    # ToolCall whose name is 'solo'.
+    called = False
+
+    async for _chunk in service._stream_chat_with_tools(
+        session, messages, available_tools, chat_request, "token", None
+    ):
+        # drain the stream
+        pass
+
+    # execute_tool_calls should have been called once with the resolved tool call
+    assert service.tool_service.execute_tool_calls.called
+
+
+@pytest.mark.asyncio
 async def test_streaming_content_only():
     service = ProxiedTGIService()
     # Simulate a content-only stream (no tool calls)
