@@ -57,8 +57,22 @@ class ChatGPTModelFormat(BaseModelFormat):
     name = "chat-gpt/v1"
 
     def prepare_request(self, request: ChatCompletionRequest) -> None:  # noqa: D401
-        # Default OpenAI-style format does not require additional changes.
-        return
+        if not getattr(request, "tool_choice", None):
+            return
+
+        # map simple string values into the object format
+        if isinstance(request.tool_choice, str):
+            tc = request.tool_choice.strip()
+            if tc.lower() in ("auto", "none", "required"):
+                # /lowercased for consistency
+                request.tool_choice = tc.lower()
+                return
+
+            request.tool_choice = {
+                "type": "function",
+                "function": {"name": tc},
+            }
+            return
 
 
 @register_model_format
