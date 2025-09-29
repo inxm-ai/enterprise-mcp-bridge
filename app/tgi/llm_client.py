@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import AsyncGenerator, List, Optional
 import aiohttp
-from app.vars import LLM_MAX_PAYLOAD_BYTES, TOOL_CHUNK_SIZE
+from app.vars import LLM_MAX_PAYLOAD_BYTES, TGI_MODEL_NAME, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
 from app.tgi.models import (
@@ -288,7 +288,7 @@ class LLMClient:
                         error_chunk = ChatCompletionChunk(
                             id=self.create_completion_id(),
                             created=int(time.time()),
-                            model=request.model or "unknown",
+                            model=request.model or TGI_MODEL_NAME,
                             choices=[
                                 Choice(
                                     index=0,
@@ -338,7 +338,7 @@ class LLMClient:
             error_chunk = ChatCompletionChunk(
                 id=self.create_completion_id(),
                 created=int(time.time()),
-                model=request.model or "unknown",
+                model=request.model or TGI_MODEL_NAME,
                 choices=[
                     Choice(
                         index=0,
@@ -361,7 +361,7 @@ class LLMClient:
         """Get non-streaming completion from the actual LLM."""
         with tracer.start_as_current_span("non_stream_llm_completion") as span:
             span.set_attribute("llm.url", self.tgi_url)
-            span.set_attribute("llm.model", request.model or "unknown")
+            span.set_attribute("llm.model", request.model or TGI_MODEL_NAME)
 
             try:
                 # Convert request to dict for JSON serialization, ensure stream=False

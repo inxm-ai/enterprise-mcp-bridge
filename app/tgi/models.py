@@ -2,6 +2,8 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List, Union, Any
 from enum import Enum
 
+from app.vars import TGI_MODEL_NAME
+
 
 class MessageRole(str, Enum):
     SYSTEM = "system"
@@ -47,7 +49,7 @@ class ToolChoice(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     messages: List[Message]
-    model: Optional[str] = "default"
+    model: Optional[str] = TGI_MODEL_NAME
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Union[str, ToolChoice]] = "auto"
     stream: bool = False
