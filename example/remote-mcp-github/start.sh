@@ -74,7 +74,10 @@ github_device_flow() {
   fi
 
   local device_code user_code verification_uri interval
-  readarray -t _device_data < <(JSON_RESPONSE="$device_response" "$PYTHON_BIN" - <<'PY'
+  _device_data=()
+  while IFS= read -r line; do
+    _device_data+=("$line")
+  done < <(JSON_RESPONSE="$device_response" "$PYTHON_BIN" - <<'PY'
 import json, os
 data = json.loads(os.environ["JSON_RESPONSE"])
 print(data.get("device_code", ""))
@@ -117,7 +120,10 @@ PY
     fi
 
     local access_token error_code error_description
-    readarray -t _token_data < <(JSON_RESPONSE="$token_response" "$PYTHON_BIN" - <<'PY'
+    _token_data=()
+    while IFS= read -r line; do
+      _token_data+=("$line")
+    done < <(JSON_RESPONSE="$token_response" "$PYTHON_BIN" - <<'PY'
 import json, os
 data = json.loads(os.environ["JSON_RESPONSE"])
 print(data.get("access_token", ""))
@@ -214,7 +220,7 @@ This setup will guide you through configuring a local Keycloak realm that delega
 that identity to the GitHub Remote MCP service (https://api.githubcopilot.com/mcp/).
 
 You'll need a GitHub OAuth App (classic) with the following settings:
-  • Authorization callback URL: https://inxm.local/oauth2/callback
+  • Authorization callback URL: https://auth.inxm.local/realms/inxm/broker/github/endpoint
   • Suggested scopes: read:user, user:email, repo (adjust to your needs)
   • Device flow enabled
 
