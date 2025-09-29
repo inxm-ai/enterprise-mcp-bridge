@@ -17,7 +17,6 @@ class RunToolResultContent(BaseModel):
     structuredContent: Optional[Dict]
 
     def __init__(self, resultEntry):
-        print(f"[RunToolResultContent] Initializing with resultEntry: {resultEntry}")
         super().__init__(
             text=resultEntry.text,
             structuredContent=(
@@ -85,7 +84,6 @@ class RunPromptResult(BaseModel):
         )
 
     def __init__(self, result):
-        print(f"[RunPromptResult] Initializing with result: {result}")
         try:
             super().__init__(
                 isError=False,
@@ -100,7 +98,6 @@ class RunPromptResult(BaseModel):
                 ),
             )
         except Exception as e:
-            print(f"[RunPromptResult] Error during initialization: {e}")
             super().__init__(
                 isError=True,
                 meta=None,

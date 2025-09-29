@@ -326,12 +326,6 @@ async def test_streaming_tool_calls_without_assistant_content_appends_tool_calls
         messages=messages, model="test-model", stream=True
     )
 
-    # We'll run the stream and after completion inspect that the tool_calls were
-    # appended as an assistant message in the internal messages_history by
-    # observing that tool_service.execute_tool_calls was invoked with a
-    # ToolCall whose name is 'solo'.
-    called = False
-
     async for _chunk in service._stream_chat_with_tools(
         session, messages, available_tools, chat_request, "token", None
     ):

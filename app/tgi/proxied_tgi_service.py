@@ -19,6 +19,7 @@ from app.tgi.tool_service import (
 )
 from app.tgi.llm_client import LLMClient
 from app.tgi.model_formats import BaseModelFormat, get_model_format_for
+from app.vars import TGI_MODEL_NAME
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -98,7 +99,7 @@ class ProxiedTGIService:
 
                 llm_request = ChatCompletionRequest(
                     messages=messages_history,
-                    model=chat_request.model,
+                    model=chat_request.model or TGI_MODEL_NAME,
                     tools=available_tools if available_tools else chat_request.tools,
                     tool_choice=chat_request.tool_choice,
                     stream=True,
@@ -368,7 +369,7 @@ class ProxiedTGIService:
             # Create request for LLM
             llm_request = ChatCompletionRequest(
                 messages=messages_history,
-                model=chat_request.model,
+                model=chat_request.model or TGI_MODEL_NAME,
                 tools=available_tools if available_tools else None,
                 tool_choice=chat_request.tool_choice,
                 stream=False,
@@ -411,7 +412,7 @@ class ProxiedTGIService:
             id=self.llm_client.create_completion_id(),
             object="chat.completion",
             created=int(time.time()),
-            model=chat_request.model or "unknown",
+            model=chat_request.model or TGI_MODEL_NAME,
             choices=[
                 Choice(
                     index=0,

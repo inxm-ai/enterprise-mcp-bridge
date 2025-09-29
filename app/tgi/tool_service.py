@@ -6,7 +6,7 @@ import json
 import copy
 import logging
 from typing import List, Optional, Dict, Any, Tuple, Union
-from app.vars import TOOL_CHUNK_SIZE
+from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
 from app.models import RunToolResultContent
@@ -416,7 +416,7 @@ class ToolService:
         if len(text_content) > TOOL_CHUNK_SIZE and getattr(self, "llm_client", None):
             try:
                 # Create a minimal ChatCompletionRequest to allow summarize_text
-                base_request = ChatCompletionRequest(messages=[], model=None)
+                base_request = ChatCompletionRequest(messages=[], model=TGI_MODEL_NAME)
                 # ask the LLM client to summarize the large content
                 summary = await self.llm_client.summarize_text(
                     base_request, text_content, None, None
