@@ -280,7 +280,8 @@ class WellPlannedOrchestrator:
 
                 try:
                     logger.info(f"[WellPlanned] Processing todo {todo.id}")
-                    result = await self._non_stream_chat_with_tools(
+
+                    stream_gen = self._stream_chat_with_tools(
                         session,
                         focused_messages,
                         filtered_tools,
@@ -288,11 +289,89 @@ class WellPlannedOrchestrator:
                         access_token,
                         span,
                     )
+
+                    aggregated = ""
+
+                    async for chunk in stream_gen:
+                        # Forward the chunk as-is to the caller
+                        yield chunk
+
+                        # TODO for tomorrow:
+                        # Try to extract the user-facing content from the chunk.
+                        # We expect the chunk to be an SSE 'data: {...}\n\n' or
+                        # the final 'data: [DONE]\n\n'. For JSON payloads we
+                        # attempt to parse and append the 'choices[0].delta.content'
+                        # or for non-JSON text append raw chunk text.
+                        try:
+                            # Strip the leading 'data: ' and trailing newlines
+                            payload = chunk.strip()
+                            if payload.startswith("data:"):
+                                payload = payload[len("data:"):].strip()
+
+                            if payload == "[DONE]":
+                                aggregated += "[DONE]"
+                                continue
+
+                            parsed = json.loads(payload)
+                            # Navigate into the chunk structure
+                            if isinstance(parsed, dict):
+                                choices = parsed.get("choices") or []
+                                if choices:
+                                    delta = choices[0].get("delta") or {}
+                                    content = delta.get("content")
+                                    if content:
+                                        aggregated += content
+                                    else:
+                                        # maybe final message present under message
+                                        msg = choices[0].get("message")
+                                        if msg and isinstance(msg, dict):
+                                            c = msg.get("content")
+                                            if c:
+                                                aggregated += c
+                        except Exception:
+                            # If parsing fails, append the raw chunk minus SSE prefix
+                            try:
+                                # remove leading 'data:' if present
+                                raw = chunk
+                                if raw.startswith("data:"):
+                                    raw = raw[len("data:"):]
+                                aggregated += raw
+                            except Exception:
+                                # give up on this chunk
+                                pass
+
+                    # Once the stream completes, turn the aggregated content into
+                    # a stored result. If no content was aggregated, mark an error.
+                    if aggregated:
+                        # Create a ChatCompletionResponse-like wrapper when
+                        # possible by calling into the non-stream helper to
+                        # attempt to parse the aggregated as JSON response, but
+                        # keep fallback to raw string.
+                        try:
+                            # Attempt to interpret aggregated as a ChatCompletionResponse JSON
+                            parsed_resp = None
+                            try:
+                                parsed_obj = json.loads(aggregated)
+                                # If this looks like a chat completion dict,
+                                # create a ChatCompletionResponse via llm_client
+                                # helpers is not guaranteed, so store raw dict.
+                                parsed_resp = parsed_obj
+                            except Exception:
+                                parsed_resp = aggregated
+
+                            result = parsed_resp
+                        except Exception as exc:
+                            result = {"error": str(exc)}
+
                 except Exception as exc:
                     result = {"error": str(exc)}
 
+                # Finish the todo with whatever we aggregated as the result
                 todo_manager.finish_todo(todo.id, result)
 
+                # Also yield a summary chunk for this todo so clients can see
+                # a concise representation in the stream (the aggregated
+                # string may be very large; we stringify safely).
                 yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", self._stringify_result(result))
 
             yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
