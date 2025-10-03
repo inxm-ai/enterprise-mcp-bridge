@@ -198,6 +198,8 @@ services:
       - "oauth2-proxy.enable=true"
     networks:
       - private
+    volumes:
+      - ./tmp:/tmp
 
 
   app-dummy-llm:

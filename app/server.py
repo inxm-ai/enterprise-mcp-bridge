@@ -3,10 +3,11 @@ from fastapi import FastAPI
 from .routes import router
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from typing import Sequence
 
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Info
@@ -15,6 +16,32 @@ app = FastAPI()
 instrumentator = Instrumentator()
 
 instrumentator.instrument(app).expose(app)
+
+
+class FilteringSpanExporter(SpanExporter):
+    """
+    Wrapper exporter that filters out noisy ASGI body spans from streaming responses.
+    This prevents hundreds of tiny spans from cluttering traces.
+    """
+    def __init__(self, exporter: SpanExporter):
+        self.exporter = exporter
+    
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        # Filter out http.response.body spans that clutter streaming traces
+        filtered_spans = [
+            span for span in spans
+            if not (span.attributes and span.attributes.get('asgi.event.type') == 'http.response.body')
+        ]
+        if filtered_spans:
+            return self.exporter.export(filtered_spans)
+        return SpanExportResult.SUCCESS
+    
+    def shutdown(self):
+        return self.exporter.shutdown()
+    
+    def force_flush(self, timeout_millis: int = 30000):
+        return self.exporter.force_flush(timeout_millis)
+
 
 # Configure the tracer provider for OTLP
 trace.set_tracer_provider(
@@ -26,10 +53,19 @@ if OTLP_ENDPOINT:
         endpoint=OTLP_ENDPOINT,
         headers=((OTLP_HEADERS).split(",") if OTLP_HEADERS else None),
     )
-
-    span_processor = BatchSpanProcessor(otlp_exporter)
+    
+    # Wrap exporter with filtering to remove noisy ASGI body spans
+    filtering_exporter = FilteringSpanExporter(otlp_exporter)
+    span_processor = BatchSpanProcessor(filtering_exporter)
     tracer_provider.add_span_processor(span_processor)
-FastAPIInstrumentor.instrument_app(app)
+
+# Instrument FastAPI
+FastAPIInstrumentor.instrument_app(
+    app,
+    excluded_urls="",  # We handle URL exclusion elsewhere
+    server_request_hook=None,
+    client_request_hook=None,
+)
 
 # Add app_name to the metrics
 app_info = Info("fastapi_app_info", "Application Info")

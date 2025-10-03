@@ -55,7 +55,9 @@ async def test_a2a_chat_completion_streaming(monkeypatch):
     response_chunks = response.text.split("\n")
     assert any("Hello" in chunk for chunk in response_chunks)
     assert any("World!" in chunk for chunk in response_chunks)
-    assert any("[DONE]" in chunk for chunk in response_chunks)
+    # A2A format doesn't have [DONE] marker - it just ends the stream
+    # Check for JSON-RPC structure instead
+    assert any('"jsonrpc"' in chunk and '"result"' in chunk for chunk in response_chunks)
 
 
 @pytest.mark.asyncio

@@ -199,25 +199,73 @@ class TestLLMClient:
     async def test_stream_completion_success(self, llm_client):
         """Test successful streaming completion."""
         request = ChatCompletionRequest(
-            messages=[Message(role=MessageRole.USER, content="Hello")],
+            messages=[Message(role=MessageRole.USER, content="test")],
             model="test-model",
             stream=True,
         )
 
-        class MockStream:
-            async def __aiter__(self):
-                yield 'data: {"choices":[{"delta":{"content":"Hello"}}]}'
-                yield "data: [DONE]"
+        # Mock aiohttp response
+        class MockResponse:
+            ok = True
 
-        with patch.object(LLMClient, "stream_completion", return_value=MockStream()):
-            result = ""
+            class MockContent:
+                def __init__(self):
+                    # Simulate chunks that might be split across network boundaries
+                    self.chunks = [
+                        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
+                        b"data: [DONE]\n",
+                    ]
+                    self.index = 0
+
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    if self.index < len(self.chunks):
+                        chunk = self.chunks[self.index]
+                        self.index += 1
+                        return chunk
+                    raise StopAsyncIteration
+
+            content = MockContent()
+            
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class MockSession:
+            def __init__(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            def post(self, *args, **kwargs):
+                return MockResponse()
+
+        class MockSessionContext:
+            async def __aenter__(self):
+                return MockSession()
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        with patch("aiohttp.ClientSession", return_value=MockSessionContext()):
+            chunks = []
             async for chunk in llm_client.stream_completion(
                 request, "test-token", None
             ):
-                result += chunk
+                chunks.append(chunk)
 
-            # Extract content from streamed data
-            assert "Hello" in result
+            assert len(chunks) == 2
+            # SSE format requires proper \n\n endings
+            assert chunks[0] == 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+            assert chunks[1] == "data: [DONE]\n\n"
 
     @pytest.mark.asyncio
     async def test_stream_completion_error_handling(self, llm_client):
@@ -317,6 +365,65 @@ def test_no_injection_keeps_tools():
 
     # messages unchanged
     assert payload["messages"][0]["content"] == "hi"
+
+
+def test_tool_choice_excluded_when_no_tools():
+    """tool_choice should not be in payload when tools is None or empty."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    
+    # Test with tools=None
+    req = ChatCompletionRequest(messages=messages, tools=None, model="m")
+    payload = client._generate_llm_payload(req)
+    assert "tool_choice" not in payload, "tool_choice should not be present when tools is None"
+    
+    # Test with tools=[]
+    req = ChatCompletionRequest(messages=messages, tools=[], model="m")
+    payload = client._generate_llm_payload(req)
+    assert "tool_choice" not in payload, "tool_choice should not be present when tools is empty"
+
+
+def test_tool_choice_included_when_tools_present():
+    """tool_choice should be in payload when tools are specified."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    tool = make_tool("fn", {"a": 1})
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    
+    # Test with explicit tool_choice
+    req = ChatCompletionRequest(messages=messages, tools=[tool], tool_choice="auto", model="m")
+    payload = client._generate_llm_payload(req)
+    assert "tool_choice" in payload
+    assert payload["tool_choice"] == "auto"
+    
+    # Test with default tool_choice
+    req = ChatCompletionRequest(messages=messages, tools=[tool], model="m")
+    payload = client._generate_llm_payload(req)
+    assert "tool_choice" in payload
+
+
+def test_model_parameter_required_not_empty_string():
+    """Model parameter should not be present if empty string, to avoid 'you must provide a model parameter' error."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    
+    # Test with empty string model (simulates TGI_MODEL_NAME="" env var)
+    req = ChatCompletionRequest(messages=messages, model="")
+    payload = client._generate_llm_payload(req)
+    # Empty model should be excluded from payload since it's invalid
+    assert "model" not in payload or payload["model"] != "", \
+        "Empty model string should not be sent to API"
+    
+    # Test with None model
+    req = ChatCompletionRequest(messages=messages, model=None)
+    payload = client._generate_llm_payload(req)
+    # None model should be excluded by exclude_none=True
+    assert "model" not in payload, "None model should not be in payload"
+    
+    # Test with valid model
+    req = ChatCompletionRequest(messages=messages, model="valid-model")
+    payload = client._generate_llm_payload(req)
+    assert "model" in payload
+    assert payload["model"] == "valid-model"
 
 
 def test_claude_with_existing_system_appends():

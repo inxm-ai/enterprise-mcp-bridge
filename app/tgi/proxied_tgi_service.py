@@ -19,6 +19,7 @@ from app.tgi.tool_service import (
 )
 from app.tgi.llm_client import LLMClient
 from app.tgi.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.chunk_reader import chunk_reader
 from app.vars import TGI_MODEL_NAME
 
 logger = logging.getLogger("uvicorn.error")
@@ -117,9 +118,8 @@ class ProxiedTGIService:
                 self.logger.debug(f"ChatCompletionRequest: {llm_request_log}")
 
                 # Tool call chunk accumulator: {id: {index, name, arguments}}
-                tool_call_chunks = {}
-                tool_call_ready = set()
-
+                # Now handled by chunk_reader
+                
                 self.logger.debug(
                     f"[ProxiedTGI] Creating LLM stream for iteration {iteration}"
                 )
@@ -132,103 +132,67 @@ class ProxiedTGIService:
                 )
                 finish_reason = "no reason given"
                 content_message = ""
-                async for raw_chunk in llm_stream_generator:
-                    # Remove chunk span to avoid context issues
-                    with tracer.start_as_current_span(
-                        "process_stream_chunk"
-                    ) as chunk_span:
-                        # Parse chunk JSON
-                        try:
-                            if raw_chunk.startswith("data: "):
-                                chunk_data = raw_chunk[len("data: ") :].strip()
-                                if chunk_data == "[DONE]":
-                                    if finish_reason:
-                                        self.logger.debug(
-                                            f"[ProxiedTGI] Finish reason: {finish_reason}"
-                                        )
-                                    chunk_span.set_attribute("stream_chat.done", True)
-                                    # yield raw_chunk
-                                    self.logger.debug(
-                                        f"[ProxiedTGI] Received [DONE] chunk, breaking stream for iteration {iteration}"
-                                    )
-                                    break
-                                chunk_span.set_attribute("stream_chat.done", False)
-                                chunk = json.loads(chunk_data)
-                            else:
-                                yield raw_chunk
-                                continue
-                        except Exception as e:
-                            self.logger.error(
-                                f"[ProxiedTGI] Error parsing streamed chunk: {e}"
+                
+                async with chunk_reader(llm_stream_generator) as reader:
+                    async for parsed in reader.as_parsed():
+                        if parsed.is_done:
+                            if finish_reason:
+                                self.logger.debug(
+                                    f"[ProxiedTGI] Finish reason: {finish_reason}"
+                                )
+                            self.logger.debug(
+                                f"[ProxiedTGI] Received [DONE] chunk, breaking stream for iteration {iteration}"
                             )
+                            break
+                        
+                        # Handle chunks with no valid parsed data
+                        if not parsed.parsed:
+                            # Ensure proper SSE format with \n\n terminator
+                            raw_chunk = parsed.raw if parsed.raw.endswith('\n\n') else f"{parsed.raw}\n\n"
                             yield raw_chunk
                             continue
-
-                        # OpenAI compatible chunk: check for choices[0].delta.tool_calls or content
+                        
+                        chunk = parsed.parsed
                         choices = chunk.get("choices", [])
                         if not choices:
+                            # Ensure proper SSE format with \n\n terminator
+                            raw_chunk = parsed.raw if parsed.raw.endswith('\n\n') else f"{parsed.raw}\n\n"
                             yield raw_chunk
                             continue
 
                         choice = choices[0]
-                        delta = choice.get("delta", {})
                         finish_reason = choice.get("finish_reason")
-                        # We need to build this over multiple chunks, jieij...
-                        if "tool_calls" in delta and delta["tool_calls"]:
-                            chunk_span.set_attribute(
-                                "stream_chat.tool_call_chunk", True
-                            )
-                            for tc in delta["tool_calls"]:
-                                tc_id = tc.get("id")
+                        
+                        # Handle tool calls - now using chunk_reader's accumulation
+                        if parsed.tool_calls:
+                            for tc in parsed.tool_calls:
                                 tc_index = tc.get("index")
                                 tc_func = tc.get("function", {})
                                 logger.debug(
                                     f"[ProxiedTGI] Tool call chunk for index {tc_index} detected: {str(tc)}"
                                 )
-                                chunk_span.set_attribute(
-                                    "tool_call.index", tc_index or "unknown"
-                                )
-                                if tc_index not in tool_call_chunks:
-                                    tool_call_chunks[tc_index] = {
-                                        "index": tc_index,
-                                        "name": "",
-                                        "arguments": "",
-                                    }
+                                
+                                # Check if this is a new tool call
+                                if tc_index not in parsed.accumulated_tool_calls or not parsed.accumulated_tool_calls[tc_index].get("name"):
                                     content = "<think>I need to call a tool. Preparing tools to call...</think>\n\n"
-                                    # Be nice, inform them we are still awake
                                     yield f"data: {json.dumps({'choices':[{'delta':{'content':content},'index':tc_index}]})}\n\n"
-                                if "id" in tc and tc["id"]:
-                                    tool_call_chunks[tc_index]["id"] = tc["id"]
+                                
+                                # If we just got the name, announce it
                                 if "name" in tc_func and tc_func["name"]:
-                                    tool_call_chunks[tc_index]["name"] = tc_func["name"]
                                     status_str = f"<think>{tc_index + 1}. I will run <code>{tc_func['name']}</code></think>\n\n"
-                                    # still nice, yielding more spam
                                     yield f"data: {json.dumps({'choices':[{'delta':{'content': status_str},'index': tc_index}]})}\n\n"
-                                if "arguments" in tc_func and tc_func["arguments"]:
-                                    tool_call_chunks[tc_index]["arguments"] += tc_func[
-                                        "arguments"
-                                    ]
-
-                                chunk_span.set_attribute(
-                                    "tool_call.id", tc_id or "unknown"
-                                )
-                                # If both name and arguments are present, mark as ready
-                                if (
-                                    tool_call_chunks[tc_index]["name"]
-                                    and tool_call_chunks[tc_index]["arguments"]
-                                    and tc_index not in tool_call_ready
-                                ):
-                                    chunk_span.set_attribute("tool_call.ready", True)
-                                    tool_call_ready.add(tc_index)
-                                else:
-                                    chunk_span.set_attribute("tool_call.ready", False)
-                        if "content" in delta and delta["content"]:
-                            # If content is present, just yield
-                            chunk_span.set_attribute("stream_chat.content_chunk", True)
-                            content_message += delta["content"]
+                        
+                        # Handle content
+                        if parsed.content:
+                            content_message += parsed.content
+                            # Ensure proper SSE format with \n\n terminator
+                            raw_chunk = parsed.raw if parsed.raw.endswith('\n\n') else f"{parsed.raw}\n\n"
                             yield raw_chunk
 
                 with tracer.start_as_current_span("execute_tool_calls") as tool_span:
+                    # Get accumulated tool calls from the reader
+                    tool_call_chunks = reader.get_accumulated_tool_calls()
+                    
                     parsed_tool_calls, resolution_success = (
                         self.tool_resolution.resolve_tool_calls(
                             content_message, tool_call_chunks
