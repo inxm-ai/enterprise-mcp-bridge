@@ -46,6 +46,7 @@ class TestProxiedTGIServiceRefactored:
             messages=[Message(role=MessageRole.USER, content="Hello")],
             model="test-model",
             stream=False,
+            tool_choice=None,
         )
 
         # Mock the service methods
@@ -81,6 +82,7 @@ class TestProxiedTGIServiceRefactored:
             messages=[Message(role=MessageRole.USER, content="Hello")],
             model="test-model",
             stream=True,
+            tool_choice=None,
         )
 
         # Mock the service methods

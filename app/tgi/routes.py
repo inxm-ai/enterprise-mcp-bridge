@@ -158,11 +158,14 @@ async def _handle_chat_completion(
             )
 
             # If the service returned an async-iterable (stream), forward chunks
+            # while the mcp_session_context is still active. This ensures
+            # any cancel scopes, ContextVars and session state created by the
+            # session context remain valid for the lifetime of the stream.
             if hasattr(result, "__aiter__"):
                 async for chunk in result:
                     yield chunk
             else:
-                # Non-streaming dict result: wrap in a one-shot async generator
+                # Non-streaming dict result: yield once inside the context
                 async def _single():
                     yield result
 
@@ -363,12 +366,29 @@ async def a2a_chat_completion(
                     group,
                     prompt,
                 )
-                # Use chunk_reader but don't use it as a context manager
-                # The stream cleanup will be handled by FastAPI's StreamingResponse
+                # Iterate the ChunkReader without using its async context manager
+                # so we can control when the underlying async generator is
+                # closed and ensure it happens in this same task. Setting
+                # _entered=True allows using the reader's async iterators.
                 reader = chunk_reader(stream_gen)
-                reader._entered = True  # Manually mark as entered to allow iteration
-                async for chunk in reader.as_json(ChunkFormat.A2A, request_id=a2a_request.id):
-                    yield chunk
+                reader._entered = True
+                try:
+                    async for chunk in reader.as_json(ChunkFormat.A2A, request_id=a2a_request.id):
+                        yield chunk
+                finally:
+                    # Close the underlying stream generator in this task and
+                    # suppress any GeneratorExit/RuntimeError that can occur
+                    # from cross-task cancel scopes in some test environments.
+                    try:
+                        if hasattr(stream_gen, "aclose"):
+                            await stream_gen.aclose()
+                    except BaseException as e:
+                        # Catch BaseException (including ExceptionGroup) here because
+                        # closing an async generator during context teardown can
+                        # raise exception groups originating from other task/cancel
+                        # scope interactions. These are expected in some test
+                        # environments and safe to ignore for stream cleanup.
+                        logger.debug(f"Ignoring base error closing stream_gen: {e}")
 
             return StreamingResponse(
                 a2a_streaming_response(),
