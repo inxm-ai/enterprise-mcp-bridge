@@ -26,8 +26,10 @@ Usage:
 import json
 import logging
 from enum import Enum
+import time
 from typing import AsyncGenerator, Optional, Any, Union, Dict, Set
 from contextlib import asynccontextmanager
+from app.vars import TGI_MODEL_NAME
 from opentelemetry import trace
 
 # NOTE: OpenTelemetry context detachment warnings may appear in logs when async generators
@@ -578,3 +580,22 @@ async def collect_parsed_chunks(source: AsyncGenerator[Any, None]) -> list[Parse
             if not parsed.is_done:
                 result.append(parsed)
     return result
+
+
+def create_response_chunk(id: str, content: str) -> str:
+    if content == "[DONE]":
+        return "data: [DONE]\n\n"
+    chunk_dict = {
+        'id': id,
+        'model': TGI_MODEL_NAME,
+        'created': int(time.time()),
+        'object': 'chat.completion.chunk',
+        'choices': [
+            {
+                'index': 0,
+                'delta': {'content': content},
+                'finish_reason': None,
+            }
+        ]
+    }
+    return f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"

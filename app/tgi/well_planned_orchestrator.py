@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 from typing import Any, List, Optional, AsyncGenerator, Tuple
+from app.tgi.think_helper import ThinkExtractor
 from opentelemetry import trace
 
 from app.tgi.todo_manager import TodoItem, TodoManager
@@ -13,29 +14,27 @@ from app.tgi.models import (
     Message,
     MessageRole,
 )
-from app.tgi.chunk_reader import chunk_reader, ParsedChunk
+from app.tgi.chunk_reader import chunk_reader, ParsedChunk, create_response_chunk
 from app.vars import TGI_MODEL_NAME
 
 tracer = trace.get_tracer(__name__)
 
-def create_response_chunk(id: str, content: str) -> str:
-    if content == "[DONE]":
-        return "data: [DONE]\n\n"
-    chunk_dict = {
-        'id': id,
-        'model': TGI_MODEL_NAME,
-        'created': int(time.time()),
-        'object': 'chat.completion.chunk',
-        'choices': [
-            {
-                'index': 0,
-                'delta': {'content': content},
-                'finish_reason': None,
-            }
-        ]
-    }
-    return f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"
-        
+
+async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
+    """
+    Lightweight helper that consumes an async stream of raw SSE/TGI chunks
+    and yields the same ParsedChunk objects that `chunk_reader.as_parsed()`
+    would produce. This is a small, well-tested utility used by the
+    orchestrator tests.
+
+    The function accepts any async generator yielding raw strings/bytes/dicts
+    and yields ParsedChunk instances. It stops when a DONE marker is seen.
+    """
+    # Reuse chunk_reader to get normalized ParsedChunk objects
+    async with chunk_reader(stream_gen, enable_tracing=False) as reader:
+        async for parsed in reader.as_parsed():
+            # Forward parsed chunks directly
+            yield parsed
 
 class WellPlannedOrchestrator:
     """Encapsulates the well-planned orchestration for chat completions.
@@ -291,89 +290,33 @@ class WellPlannedOrchestrator:
                     )
 
                     aggregated = ""
+                    think_extractor = ThinkExtractor()
 
-                    async for chunk in stream_gen:
-                        # Forward the chunk as-is to the caller
-                        yield chunk
-
-                        # TODO for tomorrow:
-                        # Try to extract the user-facing content from the chunk.
-                        # We expect the chunk to be an SSE 'data: {...}\n\n' or
-                        # the final 'data: [DONE]\n\n'. For JSON payloads we
-                        # attempt to parse and append the 'choices[0].delta.content'
-                        # or for non-JSON text append raw chunk text.
-                        try:
-                            # Strip the leading 'data: ' and trailing newlines
-                            payload = chunk.strip()
-                            if payload.startswith("data:"):
-                                payload = payload[len("data:"):].strip()
-
-                            if payload == "[DONE]":
-                                aggregated += "[DONE]"
-                                continue
-
-                            parsed = json.loads(payload)
-                            # Navigate into the chunk structure
-                            if isinstance(parsed, dict):
-                                choices = parsed.get("choices") or []
-                                if choices:
-                                    delta = choices[0].get("delta") or {}
-                                    content = delta.get("content")
-                                    if content:
-                                        aggregated += content
-                                    else:
-                                        # maybe final message present under message
-                                        msg = choices[0].get("message")
-                                        if msg and isinstance(msg, dict):
-                                            c = msg.get("content")
-                                            if c:
-                                                aggregated += c
-                        except Exception:
-                            # If parsing fails, append the raw chunk minus SSE prefix
-                            try:
-                                # remove leading 'data:' if present
-                                raw = chunk
-                                if raw.startswith("data:"):
-                                    raw = raw[len("data:"):]
-                                aggregated += raw
-                            except Exception:
-                                # give up on this chunk
-                                pass
+                    async for parsed in read_todo_stream(stream_gen):
+                        yield think_extractor.feed(parsed.content or "")
+                        aggregated += parsed.content or ""
 
                     # Once the stream completes, turn the aggregated content into
                     # a stored result. If no content was aggregated, mark an error.
                     if aggregated:
-                        # Create a ChatCompletionResponse-like wrapper when
-                        # possible by calling into the non-stream helper to
-                        # attempt to parse the aggregated as JSON response, but
-                        # keep fallback to raw string.
                         try:
-                            # Attempt to interpret aggregated as a ChatCompletionResponse JSON
-                            parsed_resp = None
+                            # Attempt to interpret aggregated as a JSON
                             try:
-                                parsed_obj = json.loads(aggregated)
-                                # If this looks like a chat completion dict,
-                                # create a ChatCompletionResponse via llm_client
-                                # helpers is not guaranteed, so store raw dict.
-                                parsed_resp = parsed_obj
+                                result = json.loads(aggregated)
                             except Exception:
-                                parsed_resp = aggregated
-
-                            result = parsed_resp
+                                result = aggregated
                         except Exception as exc:
                             result = {"error": str(exc)}
-
                 except Exception as exc:
                     result = {"error": str(exc)}
 
-                # Finish the todo with whatever we aggregated as the result
                 todo_manager.finish_todo(todo.id, result)
+                summary = f"<think>I have completed the todo '{todo.name}'.</think>"
+                yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", summary)
 
-                # Also yield a summary chunk for this todo so clients can see
-                # a concise representation in the stream (the aggregated
-                # string may be very large; we stringify safely).
-                yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", self._stringify_result(result))
-
+            # yield the result of the final todo as a last chunk
+            final_result = todo_manager.list_todos()[-1].result if todo_manager.list_todos() else "No todos were processed."
+            yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", final_result)
             yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
 
         return _generator()
@@ -476,7 +419,9 @@ class WellPlannedOrchestrator:
 
         todo_prompt = (
             "You are an assistant that turns the user's conversation into a short, "
-            "ordered todo list. Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
+            "ordered todo list. Make sure that at the end of all todos, the user's "
+            "original goal is achieved, and that the todos are as specific as possible. "
+            "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
             + json.dumps(response_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
             + "\n".join([f"{m.role}: {m.content}" for m in messages])

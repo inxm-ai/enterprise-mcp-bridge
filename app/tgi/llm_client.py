@@ -491,7 +491,7 @@ class LLMClient:
 
         llm_request = ChatCompletionRequest(
             messages=messages_history,
-            model=base_request.model,
+            model=base_request.model or TGI_MODEL_NAME,
             stream=True,
             temperature=base_request.temperature,
             max_tokens=base_request.max_tokens,
