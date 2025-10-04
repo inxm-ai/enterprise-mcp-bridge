@@ -249,7 +249,7 @@ class LLMClient:
         # model parameter must not be empty string
         # OpenAI API returns 400 error "you must provide a model parameter"
         if payload.get("model") == "":
-            payload.pop("model", None)
+            payload["model"] = TGI_MODEL_NAME
         
         return payload
 
@@ -421,7 +421,7 @@ class LLMClient:
                 raise
             except Exception as e:
                 error_msg = f"Error calling LLM: {str(e)}"
-                self.logger.error(f"[LLMClient] {error_msg}")
+                self.logger.error(f"[LLMClient] {error_msg}", exc_info=True)
                 span.set_attribute("error", True)
                 span.set_attribute("error.message", str(e))
                 raise HTTPException(status_code=500, detail=error_msg)
