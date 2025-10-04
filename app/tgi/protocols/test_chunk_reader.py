@@ -13,7 +13,7 @@ import json
 import pytest
 from typing import AsyncGenerator, List
 
-from app.tgi.chunk_reader import (
+from app.tgi.protocols.chunk_reader import (
     chunk_reader,
     ChunkFormat,
     ParsedChunk,

@@ -2,8 +2,8 @@ import json
 import pytest
 from typing import AsyncGenerator, List
 
-from app.tgi.well_planned_orchestrator import read_todo_stream, create_response_chunk
-from app.tgi.chunk_reader import ParsedChunk
+from app.tgi.behaviours.well_planned_orchestrator import read_todo_stream, create_response_chunk
+from app.tgi.protocols.chunk_reader import ParsedChunk
 
 
 async def sse_json_stream() -> AsyncGenerator[str, None]:

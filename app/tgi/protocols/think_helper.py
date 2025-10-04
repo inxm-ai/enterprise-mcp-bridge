@@ -1,7 +1,7 @@
 from typing import Callable, Optional
 import uuid
 
-from app.tgi.chunk_reader import create_response_chunk
+from app.tgi.protocols.chunk_reader import create_response_chunk
 
 
 class ThinkExtractor:

@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from app.tgi.proxied_tgi_service import ProxiedTGIService
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 
 

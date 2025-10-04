@@ -7,7 +7,7 @@ Tests cover various formats, edge cases, and error conditions for tool call reso
 import pytest
 from unittest.mock import patch
 
-from app.tgi.tool_resolution import (
+from app.tgi.services.tools.tool_resolution import (
     ToolResolutionStrategy,
     ToolCallFormat,
 )

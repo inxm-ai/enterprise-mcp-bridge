@@ -25,8 +25,8 @@ from app.tgi.models import (
 from app.utils import mask_token
 from fastapi import HTTPException
 
-from app.tgi.model_formats import BaseModelFormat, get_model_format_for
-from app.tgi.chunk_reader import chunk_reader
+from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.protocols.chunk_reader import chunk_reader
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -248,7 +248,7 @@ class LLMClient:
         
         # model parameter must not be empty string
         # OpenAI API returns 400 error "you must provide a model parameter"
-        if payload.get("model") == "":
+        if payload.get("model") == "" or payload.get("model") is None:
             payload["model"] = TGI_MODEL_NAME
         
         return payload

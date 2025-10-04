@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import patch
 
 from app.tgi import llm_client as llm
-from app.tgi.llm_client import LLMClient
+from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
@@ -12,7 +12,8 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
-from app.tgi.model_formats import ChatGPTModelFormat, ClaudeModelFormat
+from app.tgi.models.model_formats import ChatGPTModelFormat, ClaudeModelFormat
+from app.vars import TGI_MODEL_NAME
 
 
 @pytest.fixture
@@ -409,15 +410,16 @@ def test_model_parameter_required_not_empty_string():
     # Test with empty string model (simulates TGI_MODEL_NAME="" env var)
     req = ChatCompletionRequest(messages=messages, model="")
     payload = client._generate_llm_payload(req)
-    # Empty model should be excluded from payload since it's invalid
-    assert "model" not in payload or payload["model"] != "", \
+    # Empty model will be changed to default model to avoid API error
+    assert "model" in payload and payload["model"] == TGI_MODEL_NAME, \
         "Empty model string should not be sent to API"
     
     # Test with None model
     req = ChatCompletionRequest(messages=messages, model=None)
     payload = client._generate_llm_payload(req)
-    # None model should be excluded by exclude_none=True
-    assert "model" not in payload, "None model should not be in payload"
+    # None model should be replaced with default model
+    assert "model" in payload and payload["model"] == TGI_MODEL_NAME, \
+        "None model should not be in payload"
     
     # Test with valid model
     req = ChatCompletionRequest(messages=messages, model="valid-model")

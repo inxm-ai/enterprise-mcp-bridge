@@ -12,7 +12,7 @@ from app.tgi.models import (
     Choice,
     Usage,
 )
-from app.tgi.proxied_tgi_service import ProxiedTGIService
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 
 
 class MockMCPSession:

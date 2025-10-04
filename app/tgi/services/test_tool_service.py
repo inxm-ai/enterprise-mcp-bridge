@@ -3,16 +3,16 @@ import pytest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
-from app.tgi.tool_service import ToolService
 from app.tgi.models import Message, MessageRole
-from app.tgi.tool_resolution import ToolCallFormat
+from app.tgi.services.tools.tool_resolution import ToolCallFormat
 from app.tgi.models import ToolCall, ToolCallFunction
-from app.tgi.tool_service import (
+from app.tgi.services.tool_service import (
+    ToolService,
     process_tool_arguments,
     parse_and_clean_tool_call,
     extract_tool_call_from_streamed_content,
 )
-from app.tgi.model_formats import ChatGPTModelFormat, ClaudeModelFormat
+from app.tgi.models.model_formats import ChatGPTModelFormat, ClaudeModelFormat
 
 
 class DummySession:
@@ -97,7 +97,7 @@ class TestToolService:
     async def test_get_all_mcp_tools(self, tool_service):
         """Test getting all MCP tools in OpenAI format."""
         session = DummySession()
-        with patch("app.tgi.tool_service.map_tools") as mock_map_tools:
+        with patch("app.tgi.services.tool_service.map_tools") as mock_map_tools:
             mock_map_tools.return_value = [
                 {"type": "function", "function": {"name": "list-files"}},
                 {"type": "function", "function": {"name": "read-file"}},
@@ -117,7 +117,7 @@ class TestToolService:
     async def test_get_all_mcp_tools_no_tools(self, tool_service):
         """Test get_all_mcp_tools when no tools are available."""
         session = ErrorSession()
-        with patch("app.tgi.tool_service.map_tools") as mock_map_tools:
+        with patch("app.tgi.services.tool_service.map_tools") as mock_map_tools:
             mock_map_tools.return_value = []
 
             tools = await tool_service.get_all_mcp_tools(session)

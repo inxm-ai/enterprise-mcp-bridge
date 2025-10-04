@@ -1,6 +1,6 @@
 import pytest
 
-from app.tgi.todo_manager import TodoManager, TodoItem, TodoState
+from app.tgi.behaviours.todos.todo_manager import TodoManager, TodoItem, TodoState
 
 
 def test_add_and_list_todos():

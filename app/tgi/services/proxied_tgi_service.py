@@ -16,17 +16,17 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
-from app.tgi.todo_manager import TodoItem, TodoManager
+from app.tgi.behaviours.todos.todo_manager import TodoItem, TodoManager
 from app.session import MCPSessionBase
-from app.tgi.prompt_service import PromptService
-from app.tgi.tool_service import (
+from app.tgi.services.prompt_service import PromptService
+from app.tgi.services.tool_service import (
     ToolService,
 )
-from app.tgi.llm_client import LLMClient
-from app.tgi.model_formats import BaseModelFormat, get_model_format_for
-from app.tgi.chunk_reader import chunk_reader
+from app.tgi.clients.llm_client import LLMClient
+from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.protocols.chunk_reader import chunk_reader
 from app.vars import TGI_MODEL_NAME
-from app.tgi.well_planned_orchestrator import WellPlannedOrchestrator
+from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)

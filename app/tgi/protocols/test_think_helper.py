@@ -1,5 +1,5 @@
-from app.tgi.chunk_reader import create_response_chunk
-from app.tgi.think_helper import ThinkExtractor
+from app.tgi.protocols.chunk_reader import create_response_chunk
+from app.tgi.protocols.think_helper import ThinkExtractor
 
 
 def test_example_sequence():

@@ -3,10 +3,10 @@ import logging
 import time
 import uuid
 from typing import Any, List, Optional, AsyncGenerator, Tuple
-from app.tgi.think_helper import ThinkExtractor
+from app.tgi.protocols.think_helper import ThinkExtractor
 from opentelemetry import trace
 
-from app.tgi.todo_manager import TodoItem, TodoManager
+from app.tgi.behaviours.todos.todo_manager import TodoItem, TodoManager
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -14,7 +14,7 @@ from app.tgi.models import (
     Message,
     MessageRole,
 )
-from app.tgi.chunk_reader import chunk_reader, ParsedChunk, create_response_chunk
+from app.tgi.protocols.chunk_reader import chunk_reader, ParsedChunk, create_response_chunk
 from app.vars import TGI_MODEL_NAME
 
 tracer = trace.get_tracer(__name__)

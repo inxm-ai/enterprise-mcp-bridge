@@ -20,8 +20,8 @@ from app.utils.exception_logging import (
 from app.tgi.models import (
     ChatCompletionRequest,
 )
-from app.tgi.proxied_tgi_service import ProxiedTGIService
-from app.tgi.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+from app.tgi.protocols.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
 from app.vars import DEFAULT_MODEL, TOKEN_NAME, SESSION_FIELD_NAME, SERVICE_NAME
 
 # Initialize components

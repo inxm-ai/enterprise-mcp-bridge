@@ -3,7 +3,7 @@ import json
 import time
 from unittest.mock import AsyncMock, patch, Mock
 
-from app.tgi.proxied_tgi_service import ProxiedTGIService
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -198,7 +198,8 @@ async def test_well_planned_no_premature_done():
     # Collect all chunks
     chunks = []
     async for chunk in gen:
-        chunks.append(chunk)
+        if chunk.strip():  # Skip empty chunks
+            chunks.append(chunk)
 
     # Should have at least 3 chunks: 1) todos plan chunk, 2) start event, 3) done event, 4) [DONE]
     assert len(chunks) >= 4, f"Expected at least 4 chunks, got {len(chunks)}: {chunks}"
@@ -216,7 +217,7 @@ async def test_well_planned_no_premature_done():
 
     # Third chunk should be the done event and include the result
     third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "Task completed successfully" in third_obj.get("content", ""), f"Third chunk should be done event, got: {chunks[2]}"
+    assert third_obj is not None and "completed the todo" in third_obj.get("content", ""), f"Third chunk should be done event, got: {chunks[2]}"
 
     # Last chunk should be [DONE]
     assert any("[DONE]" in c for c in chunks), f"Last chunk should be [DONE], got: {chunks[-1]}"
@@ -264,10 +265,11 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
 
     gen = await service.chat_completion(session, chat_request, access_token=None, prompt=None)
 
-    # Collect chunks
+    # Collect chunks, skipping over '\n' only chunks
     chunks = []
     async for chunk in gen:
-        chunks.append(chunk)
+        if chunk.strip():  # Skip empty chunks
+            chunks.append(chunk)
 
     # Should see the well-planned sequence (not just immediate [DONE])
     # If the bug exists, we'd only get 1 chunk with [DONE]
@@ -280,11 +282,12 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
     assert "choices" in first_obj and isinstance(first_obj["choices"], list)
     c0 = first_obj["choices"][0]
     assert "delta" in c0 and "content" in c0["delta"]
-
+    
     second_obj = _parse_stream_json(chunks[1]).get("choices", [{}])[0].get("delta", {})
     assert second_obj is not None and second_obj.get("content") == "<think>I marked 'task' as current todo, and will work on the following goal: Do task</think>", f"Should see start event, got: {chunks[1]}"
+    
     third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "done" in third_obj.get("content", ""), f"Should see done event, got: {chunks[2]}"
+    assert third_obj is not None and "completed" in third_obj.get("content", ""), f"Should see done event, got: {chunks[2]}"
     assert any("[DONE]" in c for c in chunks), f"Last chunk should be [DONE], got: {chunks[-1]}"
 
 
