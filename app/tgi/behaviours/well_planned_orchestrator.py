@@ -1,5 +1,4 @@
 import json
-import logging
 import time
 import uuid
 from typing import Any, List, Optional, AsyncGenerator, Tuple
@@ -14,7 +13,11 @@ from app.tgi.models import (
     Message,
     MessageRole,
 )
-from app.tgi.protocols.chunk_reader import chunk_reader, ParsedChunk, create_response_chunk
+from app.tgi.protocols.chunk_reader import (
+    chunk_reader,
+    ParsedChunk,
+    create_response_chunk,
+)
 from app.vars import TGI_MODEL_NAME
 
 tracer = trace.get_tracer(__name__)
@@ -35,6 +38,7 @@ async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
         async for parsed in reader.as_parsed():
             # Forward parsed chunks directly
             yield parsed
+
 
 class WellPlannedOrchestrator:
     """Encapsulates the well-planned orchestration for chat completions.
@@ -73,7 +77,9 @@ class WellPlannedOrchestrator:
     ) -> Tuple[Optional[list], Optional[str]]:
         plan_text = ""
         try:
-            plan_stream = self.llm_client.stream_completion(request, access_token or "", span)
+            plan_stream = self.llm_client.stream_completion(
+                request, access_token or "", span
+            )
             async with chunk_reader(plan_stream) as reader:
                 async for parsed in reader.as_parsed():
                     if parsed.is_done:
@@ -256,21 +262,24 @@ class WellPlannedOrchestrator:
     ) -> AsyncGenerator[str, None]:
         async def _generator():
             id = f"mcp-{str(uuid.uuid4())}"
-            names = '\n - '.join([t.name for t in todo_manager.list_todos()])
-            message = f"<think>I have planned the following todos:\n - {names}\n</think>"
+            names = "\n - ".join([t.name for t in todo_manager.list_todos()])
+            message = (
+                f"<think>I have planned the following todos:\n - {names}\n</think>"
+            )
 
             yield create_response_chunk(id, message)
 
             for todo in todo_manager.list_todos():
                 todo_manager.start_todo(todo.id)
-                yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", f"<think>I marked '{todo.name}' as current todo, and will work on the following goal: {todo.goal}</think>")
+                yield create_response_chunk(
+                    f"mcp-{str(uuid.uuid4())}",
+                    f"<think>I marked '{todo.name}' as current todo, and will work on the following goal: {todo.goal}</think>",
+                )
 
                 focused_messages, focused_request = self._build_focused_request(
                     todo_manager, todo, request
                 )
-                filtered_tools = self._select_tools_for_todo(
-                    todo, available_tools
-                )
+                filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
                     logger.warning(
                         f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools} in the available tools {available_tools}. Passing all tools as fallback."
@@ -315,7 +324,11 @@ class WellPlannedOrchestrator:
                 yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", summary)
 
             # yield the result of the final todo as a last chunk
-            final_result = todo_manager.list_todos()[-1].result if todo_manager.list_todos() else "No todos were processed."
+            final_result = (
+                todo_manager.list_todos()[-1].result
+                if todo_manager.list_todos()
+                else "No todos were processed."
+            )
             yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", final_result)
             yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
 
@@ -455,9 +468,7 @@ class WellPlannedOrchestrator:
         todo_manager = self._create_todo_manager(todos_json)
 
         if span:
-            span.set_attribute(
-                "chat.todos_count", len(todo_manager.list_todos())
-            )
+            span.set_attribute("chat.todos_count", len(todo_manager.list_todos()))
 
         if request.stream:
             return self._well_planned_streaming(

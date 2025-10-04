@@ -23,6 +23,7 @@ try:
     )
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
     _OTEL_AVAILABLE = True
 except ImportError:  # pragma: no cover - fallback when OTEL not installed
     Resource = TracerProvider = ReadableSpan = BatchSpanProcessor = SpanExporter = SpanExportResult = None  # type: ignore
@@ -35,22 +36,27 @@ class FilteringSpanExporter(SpanExporter if _OTEL_AVAILABLE else object):
     Wrapper exporter that filters out noisy ASGI body spans from streaming responses.
     This prevents hundreds of tiny spans from cluttering traces.
     """
+
     def __init__(self, exporter: SpanExporter):
         self.exporter = exporter
-    
+
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         # Filter out http.response.body spans that clutter streaming traces
         filtered_spans = [
-            span for span in spans
-            if not (span.attributes and span.attributes.get('asgi.event.type') == 'http.response.body')
+            span
+            for span in spans
+            if not (
+                span.attributes
+                and span.attributes.get("asgi.event.type") == "http.response.body"
+            )
         ]
         if filtered_spans:
             return self.exporter.export(filtered_spans)
         return SpanExportResult.SUCCESS
-    
+
     def shutdown(self):
         return self.exporter.shutdown()
-    
+
     def force_flush(self, timeout_millis: int = 30000):
         return self.exporter.force_flush(timeout_millis)
 

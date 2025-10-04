@@ -229,7 +229,7 @@ class TestLLMClient:
                     raise StopAsyncIteration
 
             content = MockContent()
-            
+
             async def __aenter__(self):
                 return self
 
@@ -372,16 +372,20 @@ def test_tool_choice_excluded_when_no_tools():
     """tool_choice should not be in payload when tools is None or empty."""
     client = llm.LLMClient(model_format=ChatGPTModelFormat())
     messages = [Message(role=MessageRole.USER, content="hi")]
-    
+
     # Test with tools=None
     req = ChatCompletionRequest(messages=messages, tools=None, model="m")
     payload = client._generate_llm_payload(req)
-    assert "tool_choice" not in payload, "tool_choice should not be present when tools is None"
-    
+    assert (
+        "tool_choice" not in payload
+    ), "tool_choice should not be present when tools is None"
+
     # Test with tools=[]
     req = ChatCompletionRequest(messages=messages, tools=[], model="m")
     payload = client._generate_llm_payload(req)
-    assert "tool_choice" not in payload, "tool_choice should not be present when tools is empty"
+    assert (
+        "tool_choice" not in payload
+    ), "tool_choice should not be present when tools is empty"
 
 
 def test_tool_choice_included_when_tools_present():
@@ -389,13 +393,15 @@ def test_tool_choice_included_when_tools_present():
     client = llm.LLMClient(model_format=ChatGPTModelFormat())
     tool = make_tool("fn", {"a": 1})
     messages = [Message(role=MessageRole.USER, content="hi")]
-    
+
     # Test with explicit tool_choice
-    req = ChatCompletionRequest(messages=messages, tools=[tool], tool_choice="auto", model="m")
+    req = ChatCompletionRequest(
+        messages=messages, tools=[tool], tool_choice="auto", model="m"
+    )
     payload = client._generate_llm_payload(req)
     assert "tool_choice" in payload
     assert payload["tool_choice"] == "auto"
-    
+
     # Test with default tool_choice
     req = ChatCompletionRequest(messages=messages, tools=[tool], model="m")
     payload = client._generate_llm_payload(req)
@@ -406,21 +412,23 @@ def test_model_parameter_required_not_empty_string():
     """Model parameter should not be present if empty string, to avoid 'you must provide a model parameter' error."""
     client = llm.LLMClient(model_format=ChatGPTModelFormat())
     messages = [Message(role=MessageRole.USER, content="hi")]
-    
+
     # Test with empty string model (simulates TGI_MODEL_NAME="" env var)
     req = ChatCompletionRequest(messages=messages, model="")
     payload = client._generate_llm_payload(req)
     # Empty model will be changed to default model to avoid API error
-    assert "model" in payload and payload["model"] == TGI_MODEL_NAME, \
-        "Empty model string should not be sent to API"
-    
+    assert (
+        "model" in payload and payload["model"] == TGI_MODEL_NAME
+    ), "Empty model string should not be sent to API"
+
     # Test with None model
     req = ChatCompletionRequest(messages=messages, model=None)
     payload = client._generate_llm_payload(req)
     # None model should be replaced with default model
-    assert "model" in payload and payload["model"] == TGI_MODEL_NAME, \
-        "None model should not be in payload"
-    
+    assert (
+        "model" in payload and payload["model"] == TGI_MODEL_NAME
+    ), "None model should not be in payload"
+
     # Test with valid model
     req = ChatCompletionRequest(messages=messages, model="valid-model")
     payload = client._generate_llm_payload(req)

@@ -1,7 +1,7 @@
 import pytest
 import json
 import time
-from unittest.mock import AsyncMock, patch, Mock
+from unittest.mock import AsyncMock, Mock
 
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
@@ -67,9 +67,9 @@ class DummyResponse:
 
 def configure_plan_stream(service, todos, stream_calls=None):
     todos_payload = json.dumps(todos, ensure_ascii=False)
-    chunk_payload = json.dumps({
-        'choices': [{'delta': {'content': todos_payload}, 'index': 0}]
-    })
+    chunk_payload = json.dumps(
+        {"choices": [{"delta": {"content": todos_payload}, "index": 0}]}
+    )
     plan_chunks = [
         f"data: {chunk_payload}" + "\n\n",
         "data: [DONE]" + "\n\n",
@@ -102,7 +102,7 @@ def _parse_stream_json(chunk: str):
     s = chunk.strip()
     # Typical SSE style prefix used in tests
     if s.startswith("data:"):
-        payload = s[len("data:"):].strip()
+        payload = s[len("data:") :].strip()
     else:
         payload = s
     if payload == "[DONE]":
@@ -119,8 +119,20 @@ async def test_well_planned_streaming_flow():
 
     # Craft a todo list JSON with two items
     todos = [
-        {"id": "t1", "name": "step1", "goal": "Do step one", "needed_info": "none", "tools": []},
-        {"id": "t2", "name": "step2", "goal": "Do step two", "needed_info": "none", "tools": []},
+        {
+            "id": "t1",
+            "name": "step1",
+            "goal": "Do step one",
+            "needed_info": "none",
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "step2",
+            "goal": "Do step two",
+            "needed_info": "none",
+            "tools": [],
+        },
     ]
 
     configure_plan_stream(service, todos)
@@ -128,7 +140,7 @@ async def test_well_planned_streaming_flow():
     # Patch _non_stream_chat_with_tools to return a predictable result per todo
     async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
         # simulate a typical helper returning a dict with messages
-        return {"ok": True, "messages": [getattr(m, 'content', m) for m in messages]}
+        return {"ok": True, "messages": [getattr(m, "content", m) for m in messages]}
 
     service._non_stream_chat_with_tools = fake_non_stream_chat
 
@@ -140,17 +152,22 @@ async def test_well_planned_streaming_flow():
             return []
 
     session = DummySession()
-    chat_request = ChatCompletionRequest(messages=[Message(role=MessageRole.USER, content="Please do X")], model="test-model", stream=True, tool_choice="auto")
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Please do X")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
 
-    gen = await service.well_planned_chat_completion(session, chat_request, access_token=None, prompt=None, span=None)
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
 
     # gen should be an async generator
     chunks = []
     async for chunk in gen:
         chunks.append(chunk)
 
-    # Expect at least the todos list, two start and two done, and final [DONE]
-    all_text = "".join(chunks)
     # The first chunk should be a streaming plan chunk containing a JSON with choices->0->delta->content
     first_obj = _parse_stream_json(chunks[0])
     assert first_obj is not None, f"Expected JSON in first chunk, got: {chunks[0]}"
@@ -158,7 +175,7 @@ async def test_well_planned_streaming_flow():
     assert isinstance(first_obj["choices"], list) and len(first_obj["choices"]) > 0
     choice0 = first_obj["choices"][0]
     assert "delta" in choice0
-    assert "content" in choice0["delta"]    
+    assert "content" in choice0["delta"]
 
 
 @pytest.mark.asyncio
@@ -168,7 +185,13 @@ async def test_well_planned_no_premature_done():
 
     # Create a todo list with at least one item
     todos = [
-        {"id": "t1", "name": "analyze", "goal": "Analyze the data", "needed_info": None, "tools": ["tool_a"]},
+        {
+            "id": "t1",
+            "name": "analyze",
+            "goal": "Analyze the data",
+            "needed_info": None,
+            "tools": ["tool_a"],
+        },
     ]
     configure_plan_stream(service, todos)
 
@@ -193,7 +216,9 @@ async def test_well_planned_no_premature_done():
         tool_choice="auto",
     )
 
-    gen = await service.well_planned_chat_completion(session, chat_request, access_token=None, prompt=None, span=None)
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
 
     # Collect all chunks
     chunks = []
@@ -213,28 +238,43 @@ async def test_well_planned_no_premature_done():
 
     # Second chunk should be the start event (parse and inspect)
     second_obj = _parse_stream_json(chunks[1]).get("choices", [{}])[0].get("delta", {})
-    assert second_obj is not None and second_obj.get("content") == "<think>I marked 'analyze' as current todo, and will work on the following goal: Analyze the data</think>", f"Second chunk should be start event, got: {chunks[1]}"
+    assert (
+        second_obj is not None
+        and second_obj.get("content")
+        == "<think>I marked 'analyze' as current todo, and will work on the following goal: Analyze the data</think>"
+    ), f"Second chunk should be start event, got: {chunks[1]}"
 
     # Third chunk should be the done event and include the result
     third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "completed the todo" in third_obj.get("content", ""), f"Third chunk should be done event, got: {chunks[2]}"
+    assert third_obj is not None and "completed the todo" in third_obj.get(
+        "content", ""
+    ), f"Third chunk should be done event, got: {chunks[2]}"
 
     # Last chunk should be [DONE]
-    assert any("[DONE]" in c for c in chunks), f"Last chunk should be [DONE], got: {chunks[-1]}"
+    assert any(
+        "[DONE]" in c for c in chunks
+    ), f"Last chunk should be [DONE], got: {chunks[-1]}"
 
 
 @pytest.mark.asyncio
 async def test_chat_completion_routes_to_well_planned_for_streaming():
     """Test that chat_completion routes to well_planned when tool_choice is set and stream=True.
-    
-    This reproduces the bug where streaming requests with tool_choice='required' 
+
+    This reproduces the bug where streaming requests with tool_choice='required'
     were incorrectly routed to one_off_chat_completion instead of well_planned_chat_completion.
     """
     service = ProxiedTGIService()
 
     # Create a todo list
-    todos = [{"id": "t1", "name": "task", "goal": "Do task", "needed_info": None, "tools": []}]
-    llm_raw = json.dumps(todos)
+    todos = [
+        {
+            "id": "t1",
+            "name": "task",
+            "goal": "Do task",
+            "needed_info": None,
+            "tools": [],
+        }
+    ]
 
     stream_calls = []
     configure_plan_stream(service, todos, stream_calls=stream_calls)
@@ -252,7 +292,7 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
             return []
 
     session = DummySession()
-    
+
     # Make a streaming request with tool_choice set (not auto)
     # Before the fix, this would route to one_off_chat_completion and immediately send [DONE]
     # After the fix, this should route to well_planned_chat_completion
@@ -260,10 +300,12 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
         messages=[Message(role=MessageRole.USER, content="Do task")],
         model="test-model",
         stream=True,
-        tool_choice="auto"  # This should trigger well-planned path
+        tool_choice="auto",  # This should trigger well-planned path
     )
 
-    gen = await service.chat_completion(session, chat_request, access_token=None, prompt=None)
+    gen = await service.chat_completion(
+        session, chat_request, access_token=None, prompt=None
+    )
 
     # Collect chunks, skipping over '\n' only chunks
     chunks = []
@@ -274,21 +316,33 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
     # Should see the well-planned sequence (not just immediate [DONE])
     # If the bug exists, we'd only get 1 chunk with [DONE]
     # After fix, we should get: plan chunk (choices->delta->content), start event, done event, [DONE]
-    assert stream_calls, "well-planned path should invoke stream_completion for todo plan"
-    assert len(chunks) >= 4, f"Expected at least 4 chunks from well-planned, got {len(chunks)}: {chunks}"
+    assert (
+        stream_calls
+    ), "well-planned path should invoke stream_completion for todo plan"
+    assert (
+        len(chunks) >= 4
+    ), f"Expected at least 4 chunks from well-planned, got {len(chunks)}: {chunks}"
     # Validate the plan chunk shape
     first_obj = _parse_stream_json(chunks[0])
     assert first_obj is not None, f"Expected JSON in first chunk, got: {chunks[0]}"
     assert "choices" in first_obj and isinstance(first_obj["choices"], list)
     c0 = first_obj["choices"][0]
     assert "delta" in c0 and "content" in c0["delta"]
-    
+
     second_obj = _parse_stream_json(chunks[1]).get("choices", [{}])[0].get("delta", {})
-    assert second_obj is not None and second_obj.get("content") == "<think>I marked 'task' as current todo, and will work on the following goal: Do task</think>", f"Should see start event, got: {chunks[1]}"
-    
+    assert (
+        second_obj is not None
+        and second_obj.get("content")
+        == "<think>I marked 'task' as current todo, and will work on the following goal: Do task</think>"
+    ), f"Should see start event, got: {chunks[1]}"
+
     third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "completed" in third_obj.get("content", ""), f"Should see done event, got: {chunks[2]}"
-    assert any("[DONE]" in c for c in chunks), f"Last chunk should be [DONE], got: {chunks[-1]}"
+    assert third_obj is not None and "completed" in third_obj.get(
+        "content", ""
+    ), f"Should see done event, got: {chunks[2]}"
+    assert any(
+        "[DONE]" in c for c in chunks
+    ), f"Last chunk should be [DONE], got: {chunks[-1]}"
 
 
 @pytest.mark.asyncio
@@ -307,7 +361,8 @@ async def test_well_planned_streaming_uses_stream_completion_for_plan():
     ]
     todos_payload = json.dumps(todos, ensure_ascii=False)
     plan_chunks = [
-        f"data: {json.dumps({'choices': [{'delta': {'content': todos_payload}, 'index': 0, 'finish_reason': 'stop'}]})}" + "\n\n",
+        f"data: {json.dumps({'choices': [{'delta': {'content': todos_payload}, 'index': 0, 'finish_reason': 'stop'}]})}"
+        + "\n\n",
         "data: [DONE]" + "\n\n",
     ]
 

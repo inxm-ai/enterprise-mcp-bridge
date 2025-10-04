@@ -1,4 +1,5 @@
 """Minimal trace API stub used for unit testing."""
+
 from __future__ import annotations
 from typing import Any
 

@@ -1,9 +1,8 @@
 import json
 import logging
 import time
-from typing import Any, List, Optional, Union, AsyncGenerator
+from typing import List, Optional, Union, AsyncGenerator
 from opentelemetry import trace
-import uuid
 
 
 from app.tgi.models import (
@@ -16,7 +15,6 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
-from app.tgi.behaviours.todos.todo_manager import TodoItem, TodoManager
 from app.session import MCPSessionBase
 from app.tgi.services.prompt_service import PromptService
 from app.tgi.services.tool_service import (
@@ -126,7 +124,7 @@ class ProxiedTGIService:
 
             # Route to well-planned orchestrator when tool_choice is explicitly set to
             # "auto". This is the orchestrator trigger used by the well-planned flow.
-            use_well_planned = (request.tool_choice and request.tool_choice == "auto")
+            use_well_planned = request.tool_choice and request.tool_choice == "auto"
 
             # Always await the chosen handler so that it performs any
             # necessary synchronous setup (prepare messages, tool discovery)
@@ -259,7 +257,9 @@ class ProxiedTGIService:
                             # Check if this is a new tool call
                             if (
                                 tc_index not in parsed.accumulated_tool_calls
-                                or not parsed.accumulated_tool_calls[tc_index].get("name")
+                                or not parsed.accumulated_tool_calls[tc_index].get(
+                                    "name"
+                                )
                             ):
                                 content = "<think>I need to call a tool. Preparing tools to call...</think>\n\n"
                                 yield f"data: {json.dumps({'choices':[{'delta':{'content':content},'index':tc_index}]})}\n\n"
@@ -314,9 +314,7 @@ class ProxiedTGIService:
                                 ),
                             ),
                         )
-                        tool_calls_to_execute.append(
-                            (tool_call, parsed_call.format)
-                        )
+                        tool_calls_to_execute.append((tool_call, parsed_call.format))
 
                         # Log the format detected for each tool call
                         self.logger.debug(
@@ -340,14 +338,12 @@ class ProxiedTGIService:
                     self.logger.debug(
                         f"[ProxiedTGI] Executing {len(tool_calls_to_execute)} tool calls"
                     )
-                    tool_results, success = (
-                        await self.tool_service.execute_tool_calls(
-                            session,
-                            tool_calls_to_execute,
-                            access_token,
-                            parent_span,
-                            available_tools=available_tools,
-                        )
+                    tool_results, success = await self.tool_service.execute_tool_calls(
+                        session,
+                        tool_calls_to_execute,
+                        access_token,
+                        parent_span,
+                        available_tools=available_tools,
                     )
 
                     tool_span.set_attribute(
@@ -409,8 +405,7 @@ class ProxiedTGIService:
         parent_span,
     ) -> ChatCompletionResponse:
         """Non-streaming chat completion with tool handling."""
-        from app.tgi.models import ChatCompletionResponse, Choice
-        import time
+        from app.tgi.models import ChatCompletionResponse
 
         messages_history = messages.copy()
         max_iterations = 10

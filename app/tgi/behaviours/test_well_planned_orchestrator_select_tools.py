@@ -1,4 +1,3 @@
-import pytest
 
 from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
 from app.tgi.behaviours.todos.todo_manager import TodoItem
@@ -59,7 +58,13 @@ def test_select_tools_for_todo_matches_by_name():
         },
     ]
 
-    todo = TodoItem(id="1", name="group and summarize", goal="process inbox", needed_info=None, tools=["group-emails-by-reason", "summarize-emails"])
+    todo = TodoItem(
+        id="1",
+        name="group and summarize",
+        goal="process inbox",
+        needed_info=None,
+        tools=["group-emails-by-reason", "summarize-emails"],
+    )
 
     selected = orchestrator._select_tools_for_todo(todo, available_tools)
 

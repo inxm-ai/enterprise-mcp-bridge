@@ -27,8 +27,7 @@ import json
 import logging
 from enum import Enum
 import time
-from typing import AsyncGenerator, Optional, Any, Union, Dict, Set
-from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Optional, Any, Dict, Set
 from app.vars import TGI_MODEL_NAME
 from opentelemetry import trace
 
@@ -43,6 +42,7 @@ tracer = trace.get_tracer(__name__)
 
 class ChunkFormat(Enum):
     """Supported chunk formats."""
+
     OPENAI = "openai"
     A2A = "a2a"
     TGI = "tgi"
@@ -80,7 +80,7 @@ class ParsedChunk:
 class ChunkReader:
     """
     A context manager for reading streaming LLM responses.
-    
+
     Provides pythonic interfaces for different consumption patterns:
     - as_json(format): Convert chunks to specific format
     - as_str(): Extract content strings only
@@ -91,7 +91,7 @@ class ChunkReader:
     def __init__(self, source: AsyncGenerator[Any, None], enable_tracing: bool = True):
         """
         Initialize the chunk reader.
-        
+
         Args:
             source: An async generator yielding raw chunks (str, bytes, or dict)
             enable_tracing: Whether to enable OpenTelemetry tracing (default: True)
@@ -112,7 +112,7 @@ class ChunkReader:
         """Exit the async context."""
         self._entered = False  # Mark as exited
         # Clean up if needed, but suppress GeneratorExit
-        if hasattr(self.source, 'aclose'):
+        if hasattr(self.source, "aclose"):
             try:
                 await self.source.aclose()
             except GeneratorExit:
@@ -125,36 +125,36 @@ class ChunkReader:
     def _accumulate_tool_calls(self, tool_calls: Optional[list]) -> None:
         """
         Accumulate tool call chunks across multiple parsed chunks.
-        
+
         Args:
             tool_calls: List of tool call delta chunks from the current parsed chunk
         """
         if not tool_calls:
             return
-        
+
         for tc in tool_calls:
             tc_index = tc.get("index")
             if tc_index is None:
                 continue
-            
+
             if tc_index not in self._tool_call_chunks:
                 self._tool_call_chunks[tc_index] = {
                     "index": tc_index,
                     "name": "",
                     "arguments": "",
                 }
-            
+
             # Accumulate ID (only set once, not concatenated)
             if "id" in tc and tc["id"]:
                 self._tool_call_chunks[tc_index]["id"] = tc["id"]
-            
+
             # Accumulate function name and arguments (concatenate for streaming)
             tc_func = tc.get("function", {})
             if "name" in tc_func and tc_func["name"]:
                 self._tool_call_chunks[tc_index]["name"] += tc_func["name"]
             if "arguments" in tc_func and tc_func["arguments"]:
                 self._tool_call_chunks[tc_index]["arguments"] += tc_func["arguments"]
-            
+
             # Mark as ready if we have both name and arguments
             if (
                 self._tool_call_chunks[tc_index]["name"]
@@ -166,7 +166,7 @@ class ChunkReader:
     def get_accumulated_tool_calls(self) -> Dict[int, dict]:
         """
         Get the currently accumulated tool calls.
-        
+
         Returns:
             Dictionary mapping tool call index to accumulated tool call data
         """
@@ -175,7 +175,7 @@ class ChunkReader:
     def get_ready_tool_calls(self) -> Set[int]:
         """
         Get the set of tool call indices that are ready (have both name and arguments).
-        
+
         Returns:
             Set of ready tool call indices
         """
@@ -189,15 +189,15 @@ class ChunkReader:
     def _normalize_chunk(self, raw_chunk: Any) -> str:
         """
         Normalize a chunk to a string.
-        
+
         Args:
             raw_chunk: Raw chunk (str, bytes, bytearray, or dict)
-            
+
         Returns:
             Normalized string representation
         """
         if isinstance(raw_chunk, (bytes, bytearray)):
-            return raw_chunk.decode('utf-8')
+            return raw_chunk.decode("utf-8")
         elif isinstance(raw_chunk, dict):
             return json.dumps(raw_chunk)
         else:
@@ -206,53 +206,53 @@ class ChunkReader:
     def _parse_sse_chunk(self, chunk_str: str) -> Optional[ParsedChunk]:
         """
         Parse a Server-Sent Events (SSE) chunk.
-        
+
         Args:
             chunk_str: Raw chunk string
-            
+
         Returns:
             ParsedChunk or None if not parseable
         """
         chunk_str = chunk_str.strip()
-        
+
         # Check for [DONE] marker
         if chunk_str == "data: [DONE]" or chunk_str == "[DONE]":
             return ParsedChunk(raw=chunk_str, is_done=True)
-        
+
         # Extract JSON from SSE format
         if chunk_str.startswith("data: "):
             json_str = chunk_str[6:].strip()
         else:
             json_str = chunk_str
-        
+
         # Try to parse as JSON
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError:
             # Not valid JSON, treat as raw content (use json_str without "data: " prefix)
             return ParsedChunk(raw=chunk_str, content=json_str)
-        
+
         # Extract common fields
         content = None
         tool_calls = None
         finish_reason = None
-        
+
         # OpenAI format
         choices = parsed.get("choices", [])
         if choices:
             choice = choices[0]
             delta = choice.get("delta", {})
             message = choice.get("message", {})
-            
+
             # Try delta.content first (streaming)
             content = delta.get("content") or message.get("content")
-            
+
             # Try tool_calls
             tool_calls = delta.get("tool_calls") or message.get("tool_calls")
-            
+
             # Finish reason
             finish_reason = choice.get("finish_reason")
-        
+
         # A2A format
         if "result" in parsed:
             result = parsed.get("result", {})
@@ -260,7 +260,7 @@ class ChunkReader:
                 content = result.get("completion")
             elif isinstance(result, str):
                 content = result
-        
+
         return ParsedChunk(
             raw=chunk_str,
             parsed=parsed,
@@ -274,13 +274,13 @@ class ChunkReader:
         """
         Yield parsed chunks with unified access to common fields.
         Automatically accumulates tool calls across chunks.
-        
+
         Yields:
             ParsedChunk objects with accumulated tool call state
         """
         if not self._entered:
             raise RuntimeError("ChunkReader must be used as async context manager")
-        
+
         span_name = "chunk_reader.as_parsed"
         if self.enable_tracing:
             # Manually manage span to avoid context detachment issues in async generators
@@ -298,19 +298,25 @@ class ChunkReader:
                         if parsed.tool_calls:
                             self._accumulate_tool_calls(parsed.tool_calls)
                             chunks_with_tools += 1
-                        
+
                         # Add accumulated state to parsed chunk
-                        parsed.accumulated_tool_calls = self.get_accumulated_tool_calls()
-                        
+                        parsed.accumulated_tool_calls = (
+                            self.get_accumulated_tool_calls()
+                        )
+
                         if parsed.content:
                             chunks_with_content += 1
-                        
+
                         yield parsed
-                
+
                 span.set_attribute("chunk_reader.total_chunks", chunk_count)
-                span.set_attribute("chunk_reader.chunks_with_content", chunks_with_content)
+                span.set_attribute(
+                    "chunk_reader.chunks_with_content", chunks_with_content
+                )
                 span.set_attribute("chunk_reader.chunks_with_tools", chunks_with_tools)
-                span.set_attribute("chunk_reader.tool_calls_accumulated", len(self._tool_call_chunks))
+                span.set_attribute(
+                    "chunk_reader.tool_calls_accumulated", len(self._tool_call_chunks)
+                )
             except GeneratorExit:
                 # Generator closed early (normal for streaming)
                 span.set_attribute("chunk_reader.early_exit", True)
@@ -326,16 +332,16 @@ class ChunkReader:
                     # Accumulate tool calls
                     if parsed.tool_calls:
                         self._accumulate_tool_calls(parsed.tool_calls)
-                    
+
                     # Add accumulated state to parsed chunk
                     parsed.accumulated_tool_calls = self.get_accumulated_tool_calls()
-                    
+
                     yield parsed
 
     async def as_str(self) -> AsyncGenerator[str, None]:
         """
         Yield only content strings from chunks.
-        
+
         Yields:
             Content strings (empty strings are filtered out)
         """
@@ -350,7 +356,7 @@ class ChunkReader:
                     if parsed.content:
                         content_chunks += 1
                         yield parsed.content
-                
+
                 span.set_attribute("chunk_reader.content_chunks", content_chunks)
             except GeneratorExit:
                 span.set_attribute("chunk_reader.early_exit", True)
@@ -367,13 +373,13 @@ class ChunkReader:
     async def as_raw(self) -> AsyncGenerator[str, None]:
         """
         Yield raw chunk strings (passthrough mode).
-        
+
         Yields:
             Raw chunk strings
         """
         if not self._entered:
             raise RuntimeError("ChunkReader must be used as async context manager")
-        
+
         span_name = "chunk_reader.as_raw"
         if self.enable_tracing:
             span = tracer.start_span(span_name)
@@ -382,7 +388,7 @@ class ChunkReader:
                 async for raw_chunk in self.source:
                     raw_chunk_count += 1
                     yield self._normalize_chunk(raw_chunk)
-                
+
                 span.set_attribute("chunk_reader.raw_chunks", raw_chunk_count)
             except GeneratorExit:
                 span.set_attribute("chunk_reader.early_exit", True)
@@ -393,14 +399,16 @@ class ChunkReader:
             async for raw_chunk in self.source:
                 yield self._normalize_chunk(raw_chunk)
 
-    async def as_json(self, output_format: ChunkFormat, request_id: str = "unknown") -> AsyncGenerator[str, None]:
+    async def as_json(
+        self, output_format: ChunkFormat, request_id: str = "unknown"
+    ) -> AsyncGenerator[str, None]:
         """
         Convert chunks to a specific JSON format.
-        
+
         Args:
             output_format: Target format (OPENAI, A2A, TGI)
             request_id: Request ID for A2A format
-            
+
         Yields:
             Formatted JSON strings
         """
@@ -410,17 +418,20 @@ class ChunkReader:
             span.set_attribute("chunk_reader.output_format", output_format.value)
             span.set_attribute("chunk_reader.request_id", request_id)
             converted_chunks = 0
-            
+
             try:
                 async for parsed in self.as_parsed():
                     if parsed.is_done:
-                        if output_format == ChunkFormat.OPENAI or output_format == ChunkFormat.TGI:
+                        if (
+                            output_format == ChunkFormat.OPENAI
+                            or output_format == ChunkFormat.TGI
+                        ):
                             yield "data: [DONE]\n\n"
                         elif output_format == ChunkFormat.A2A:
                             # A2A doesn't have a [DONE] marker in streaming
                             pass
                         break
-                    
+
                     converted_chunks += 1
                     if output_format == ChunkFormat.OPENAI:
                         yield self._to_openai_format(parsed)
@@ -430,7 +441,7 @@ class ChunkReader:
                         yield self._to_tgi_format(parsed)
                     elif output_format == ChunkFormat.RAW:
                         yield parsed.raw
-                
+
                 span.set_attribute("chunk_reader.converted_chunks", converted_chunks)
             except GeneratorExit:
                 span.set_attribute("chunk_reader.early_exit", True)
@@ -440,13 +451,16 @@ class ChunkReader:
         else:
             async for parsed in self.as_parsed():
                 if parsed.is_done:
-                    if output_format == ChunkFormat.OPENAI or output_format == ChunkFormat.TGI:
+                    if (
+                        output_format == ChunkFormat.OPENAI
+                        or output_format == ChunkFormat.TGI
+                    ):
                         yield "data: [DONE]\n\n"
                     elif output_format == ChunkFormat.A2A:
                         # A2A doesn't have a [DONE] marker in streaming
                         pass
                     break
-                
+
                 if output_format == ChunkFormat.OPENAI:
                     yield self._to_openai_format(parsed)
                 elif output_format == ChunkFormat.A2A:
@@ -459,17 +473,17 @@ class ChunkReader:
     def _to_openai_format(self, parsed: ParsedChunk) -> str:
         """
         Convert parsed chunk to OpenAI SSE format.
-        
+
         Args:
             parsed: ParsedChunk to convert
-            
+
         Returns:
             SSE formatted string
         """
         # If already in OpenAI format, return as-is
         if parsed.raw.startswith("data: "):
             return parsed.raw if parsed.raw.endswith("\n\n") else f"{parsed.raw}\n\n"
-        
+
         # Build OpenAI format chunk
         chunk_dict = {
             "choices": [
@@ -480,23 +494,23 @@ class ChunkReader:
                 }
             ]
         }
-        
+
         if parsed.content:
             chunk_dict["choices"][0]["delta"]["content"] = parsed.content
-        
+
         if parsed.tool_calls:
             chunk_dict["choices"][0]["delta"]["tool_calls"] = parsed.tool_calls
-        
+
         return f"data: {json.dumps(chunk_dict)}\n\n"
 
     def _to_a2a_format(self, parsed: ParsedChunk, request_id: str) -> str:
         """
         Convert parsed chunk to A2A JSON-RPC format.
-        
+
         Args:
             parsed: ParsedChunk to convert
             request_id: Request ID for the response
-            
+
         Returns:
             A2A formatted JSON string with newline
         """
@@ -505,16 +519,16 @@ class ChunkReader:
             "result": {"completion": parsed.content or ""},
             "id": request_id,
         }
-        
+
         return f"{json.dumps(a2a_dict)}\n"
 
     def _to_tgi_format(self, parsed: ParsedChunk) -> str:
         """
         Convert parsed chunk to TGI format.
-        
+
         Args:
             parsed: ParsedChunk to convert
-            
+
         Returns:
             TGI formatted string
         """
@@ -522,17 +536,19 @@ class ChunkReader:
         return self._to_openai_format(parsed)
 
 
-def chunk_reader(source: AsyncGenerator[Any, None], enable_tracing: bool = True) -> ChunkReader:
+def chunk_reader(
+    source: AsyncGenerator[Any, None], enable_tracing: bool = True
+) -> ChunkReader:
     """
     Create a ChunkReader context manager.
-    
+
     Args:
         source: An async generator yielding raw chunks
         enable_tracing: Whether to enable OpenTelemetry tracing (default: True)
-        
+
     Returns:
         ChunkReader instance
-        
+
     Example:
         async with chunk_reader(stream_generator) as reader:
             async for content in reader.as_str():
@@ -544,13 +560,13 @@ def chunk_reader(source: AsyncGenerator[Any, None], enable_tracing: bool = True)
 async def accumulate_content(source: AsyncGenerator[Any, None]) -> str:
     """
     Accumulate all content from a streaming source into a single string.
-    
+
     Args:
         source: An async generator yielding raw chunks
-        
+
     Returns:
         Accumulated content string
-        
+
     Example:
         content = await accumulate_content(stream_generator)
     """
@@ -564,13 +580,13 @@ async def accumulate_content(source: AsyncGenerator[Any, None]) -> str:
 async def collect_parsed_chunks(source: AsyncGenerator[Any, None]) -> list[ParsedChunk]:
     """
     Collect all parsed chunks into a list.
-    
+
     Args:
         source: An async generator yielding raw chunks
-        
+
     Returns:
         List of ParsedChunk objects
-        
+
     Example:
         chunks = await collect_parsed_chunks(stream_generator)
     """
@@ -586,16 +602,16 @@ def create_response_chunk(id: str, content: str) -> str:
     if content == "[DONE]":
         return "data: [DONE]\n\n"
     chunk_dict = {
-        'id': id,
-        'model': TGI_MODEL_NAME,
-        'created': int(time.time()),
-        'object': 'chat.completion.chunk',
-        'choices': [
+        "id": id,
+        "model": TGI_MODEL_NAME,
+        "created": int(time.time()),
+        "object": "chat.completion.chunk",
+        "choices": [
             {
-                'index': 0,
-                'delta': {'content': content},
-                'finish_reason': None,
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": None,
             }
-        ]
+        ],
     }
     return f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"

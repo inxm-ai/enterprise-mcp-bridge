@@ -600,7 +600,7 @@ async def test_tool_call_accumulation():
     async with chunk_reader(tool_call_stream_with_accumulation()) as reader:
         chunks_with_tool_calls = 0
         final_accumulated = {}
-        
+
         async for parsed in reader.as_parsed():
             if parsed.is_done:
                 break
@@ -611,15 +611,15 @@ async def test_tool_call_accumulation():
 
     # Should have seen 5 chunks with tool calls
     assert chunks_with_tool_calls == 5
-    
+
     # Check accumulated tool calls
     assert len(final_accumulated) == 2
-    
+
     # First tool call should be complete
     assert final_accumulated[0]["id"] == "call_abc123"
     assert final_accumulated[0]["name"] == "get_weather"
     assert final_accumulated[0]["arguments"] == '{"location":"NYC"}'
-    
+
     # Second tool call should be complete
     assert final_accumulated[1]["id"] == "call_def456"
     assert final_accumulated[1]["name"] == "get_time"
@@ -670,13 +670,13 @@ async def test_tool_call_ready_detection():
     """Test that get_ready_tool_calls identifies complete tool calls."""
     async with chunk_reader(tool_call_stream_with_accumulation()) as reader:
         ready_at_each_step = []
-        
+
         async for parsed in reader.as_parsed():
             if parsed.is_done:
                 break
             ready = reader.get_ready_tool_calls()
             ready_at_each_step.append(len(ready))
-        
+
         # Should have 0, 0, 0, 1 (first complete), 2 (both complete)
         assert ready_at_each_step[-1] == 2  # Both tool calls ready at the end
         assert 1 in ready_at_each_step  # First tool call became ready at some point
@@ -686,12 +686,12 @@ async def test_tool_call_ready_detection():
 async def test_tracing_disabled():
     """Test that tracing can be disabled."""
     chunks: List[str] = []
-    
+
     # Create reader with tracing disabled
     async with chunk_reader(openai_stream_generator(), enable_tracing=False) as reader:
         async for content in reader.as_str():
             chunks.append(content)
-    
+
     # Should still work the same way
     assert chunks == ["Hello", " world", "!"]
 
@@ -699,7 +699,7 @@ async def test_tracing_disabled():
 @pytest.mark.asyncio
 async def test_mixed_content_and_tool_calls_accumulation():
     """Test handling chunks with both content and tool calls."""
-    
+
     async def mixed_stream():
         yield 'data: {"choices":[{"delta":{"content":"Calling tool...","tool_calls":[{"index":0,"id":"call_1","function":{"name":"test"}}]},"index":0}]}\n\n'
         yield 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"a\\":1}"}}]},"index":0}]}\n\n'
@@ -707,13 +707,13 @@ async def test_mixed_content_and_tool_calls_accumulation():
 
     content_parts = []
     final_accumulated = {}
-    
+
     async with chunk_reader(mixed_stream()) as reader:
         async for parsed in reader.as_parsed():
             if parsed.content:
                 content_parts.append(parsed.content)
             final_accumulated = parsed.accumulated_tool_calls
-    
+
     # Should have both content and accumulated tool calls
     assert "".join(content_parts) == "Calling tool... Done!"
     assert len(final_accumulated) == 1
@@ -723,13 +723,13 @@ async def test_mixed_content_and_tool_calls_accumulation():
 @pytest.mark.asyncio
 async def test_early_generator_exit_with_tracing():
     """Test that early generator exit doesn't cause OpenTelemetry errors."""
-    
+
     async def long_stream():
         """Generate many chunks to simulate a long stream."""
         for i in range(100):
             yield f'data: {{"choices":[{{"delta":{{"content":"chunk{i}"}},"index":0}}]}}\n\n'
         yield "data: [DONE]\n\n"
-    
+
     # Exit after reading only 3 chunks (simulates client disconnect or break)
     chunks_read = 0
     async with chunk_reader(long_stream(), enable_tracing=True) as reader:
@@ -738,6 +738,6 @@ async def test_early_generator_exit_with_tracing():
                 chunks_read += 1
                 if chunks_read == 3:
                     break  # Early exit - this triggers GeneratorExit
-    
+
     # Should have read exactly 3 chunks without errors
     assert chunks_read == 3

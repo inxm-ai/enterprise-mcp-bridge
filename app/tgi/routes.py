@@ -373,7 +373,9 @@ async def a2a_chat_completion(
                 reader = chunk_reader(stream_gen)
                 reader._entered = True
                 try:
-                    async for chunk in reader.as_json(ChunkFormat.A2A, request_id=a2a_request.id):
+                    async for chunk in reader.as_json(
+                        ChunkFormat.A2A, request_id=a2a_request.id
+                    ):
                         yield chunk
                 finally:
                     # Close the underlying stream generator in this task and

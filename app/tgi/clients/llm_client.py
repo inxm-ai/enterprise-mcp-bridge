@@ -240,17 +240,17 @@ class LLMClient:
         self.model_format.prepare_request(request)
 
         payload = request.model_dump(exclude_none=True)
-        
+
         # tool_choice is only valid when tools are specified
         # OpenAI API returns 400 error if tool_choice is sent without tools
         if not payload.get("tools"):
             payload.pop("tool_choice", None)
-        
+
         # model parameter must not be empty string
         # OpenAI API returns 400 error "you must provide a model parameter"
         if payload.get("model") == "" or payload.get("model") is None:
             payload["model"] = TGI_MODEL_NAME
-        
+
         return payload
 
     def create_completion_id(self) -> str:
@@ -319,18 +319,18 @@ class LLMClient:
                     self.logger.debug(
                         f"[LLMClient] Response OK, starting to stream (model={request.model}, content={response.content})"
                     )
-                    
+
                     async for chunk in response.content:
                         chunk_str = chunk.decode("utf-8")
                         if chunk_str:
                             chunk_count += 1
                             # Ensure proper SSE format with \n\n terminator
                             # Most chunks will end with \n, so we add one more \n
-                            if not chunk_str.endswith('\n\n'):
-                                if chunk_str.endswith('\n'):
-                                    chunk_str += '\n'
+                            if not chunk_str.endswith("\n\n"):
+                                if chunk_str.endswith("\n"):
+                                    chunk_str += "\n"
                                 else:
-                                    chunk_str += '\n\n'
+                                    chunk_str += "\n\n"
                             yield chunk_str
 
                     self.logger.debug(
@@ -506,5 +506,5 @@ class LLMClient:
         async with chunk_reader(llm_stream_generator) as reader:
             async for content_piece in reader.as_str():
                 result += content_piece
-        
+
         return result

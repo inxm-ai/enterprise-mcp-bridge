@@ -1,4 +1,3 @@
-import pytest
 
 from app.tgi.behaviours.todos.todo_manager import TodoManager, TodoItem, TodoState
 

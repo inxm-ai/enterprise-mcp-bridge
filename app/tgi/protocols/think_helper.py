@@ -35,7 +35,11 @@ class ThinkExtractor:
         if first_open == -1:
             # If this call began with an empty buffer and the provided chunk is a
             # prefix of the OPEN tag, return "" (special-case test expectation).
-            if prior_buf_empty and 0 < len(chunk) < len(self.OPEN) and self.OPEN.startswith(chunk):
+            if (
+                prior_buf_empty
+                and 0 < len(chunk) < len(self.OPEN)
+                and self.OPEN.startswith(chunk)
+            ):
                 # keep the partial chunk in buffer for later completion
                 return ""
 
