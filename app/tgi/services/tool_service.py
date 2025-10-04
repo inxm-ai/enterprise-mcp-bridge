@@ -11,13 +11,13 @@ from opentelemetry import trace
 
 from app.models import RunToolResultContent
 from app.tgi.models import Message, MessageRole, Tool, ToolCall
-from app.tgi.llm_client import LLMClient
+from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models import ChatCompletionRequest
 from app.session import MCPSessionBase
-from app.tgi.tool_argument_fixer_service import fix_tool_arguments
-from app.tgi.tool_resolution import ToolCallFormat
-from app.tgi.tools_map import map_tools, inline_schema
-from app.tgi.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.services.tools.tool_argument_fixer_service import fix_tool_arguments
+from app.tgi.services.tools.tool_resolution import ToolCallFormat
+from app.tgi.services.tools.tools_map import map_tools, inline_schema
+from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)

@@ -2,7 +2,7 @@ import types
 import pytest
 from fastapi import HTTPException
 
-from app.tgi.prompt_service import PromptService
+from app.tgi.services.prompt_service import PromptService
 from app.tgi.models import Message, MessageRole
 
 

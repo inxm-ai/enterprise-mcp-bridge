@@ -6,7 +6,10 @@ from abc import ABC
 from typing import Any, Dict, Optional, Type
 
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
-from app.tgi.tool_resolution import ToolCallFormat, ToolResolutionStrategy
+from app.tgi.services.tools.tool_resolution import (
+    ToolCallFormat,
+    ToolResolutionStrategy,
+)
 from app.vars import TGI_MODEL_FORMAT, TOOL_INJECTION_MODE
 
 logger = logging.getLogger("uvicorn.error")

@@ -1,5 +1,5 @@
 import json
-from app.tgi.tool_argument_fixer_service import fix_tool_arguments
+from app.tgi.services.tools.tool_argument_fixer_service import fix_tool_arguments
 from app.tgi.models import ToolCall, ToolCallFunction
 
 

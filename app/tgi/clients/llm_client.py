@@ -25,7 +25,8 @@ from app.tgi.models import (
 from app.utils import mask_token
 from fastapi import HTTPException
 
-from app.tgi.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
+from app.tgi.protocols.chunk_reader import chunk_reader
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -239,6 +240,17 @@ class LLMClient:
         self.model_format.prepare_request(request)
 
         payload = request.model_dump(exclude_none=True)
+
+        # tool_choice is only valid when tools are specified
+        # OpenAI API returns 400 error if tool_choice is sent without tools
+        if not payload.get("tools"):
+            payload.pop("tool_choice", None)
+
+        # model parameter must not be empty string
+        # OpenAI API returns 400 error "you must provide a model parameter"
+        if payload.get("model") == "" or payload.get("model") is None:
+            payload["model"] = TGI_MODEL_NAME
+
         return payload
 
     def create_completion_id(self) -> str:
@@ -301,19 +313,28 @@ class LLMClient:
                         yield "data: [DONE]\n\n"
                         return
 
-                    # Count streamed lines for observability (without tracing)
-                    line_count = 0
+                    # Stream chunks immediately without buffering
+                    # Ensure proper SSE format by adding \n if not already present
+                    chunk_count = 0
                     self.logger.debug(
                         f"[LLMClient] Response OK, starting to stream (model={request.model}, content={response.content})"
                     )
-                    async for line in response.content:
-                        line_str = line.decode("utf-8").strip()
-                        if line_str:
-                            line_count += 1
-                            yield f"{line_str}\n"
+
+                    async for chunk in response.content:
+                        chunk_str = chunk.decode("utf-8")
+                        if chunk_str:
+                            chunk_count += 1
+                            # Ensure proper SSE format with \n\n terminator
+                            # Most chunks will end with \n, so we add one more \n
+                            if not chunk_str.endswith("\n\n"):
+                                if chunk_str.endswith("\n"):
+                                    chunk_str += "\n"
+                                else:
+                                    chunk_str += "\n\n"
+                            yield chunk_str
 
                     self.logger.debug(
-                        f"[LLMClient] Streamed {line_count} lines from LLM"
+                        f"[LLMClient] Streamed {chunk_count} chunks from LLM"
                     )
 
         except GeneratorExit:
@@ -400,7 +421,7 @@ class LLMClient:
                 raise
             except Exception as e:
                 error_msg = f"Error calling LLM: {str(e)}"
-                self.logger.error(f"[LLMClient] {error_msg}")
+                self.logger.error(f"[LLMClient] {error_msg}", exc_info=True)
                 span.set_attribute("error", True)
                 span.set_attribute("error.message", str(e))
                 raise HTTPException(status_code=500, detail=error_msg)
@@ -470,7 +491,7 @@ class LLMClient:
 
         llm_request = ChatCompletionRequest(
             messages=messages_history,
-            model=base_request.model,
+            model=base_request.model or TGI_MODEL_NAME,
             stream=True,
             temperature=base_request.temperature,
             max_tokens=base_request.max_tokens,
@@ -482,31 +503,8 @@ class LLMClient:
         )
 
         result = ""
+        async with chunk_reader(llm_stream_generator) as reader:
+            async for content_piece in reader.as_str():
+                result += content_piece
 
-        async for raw_chunk in llm_stream_generator:
-            with tracer.start_as_current_span("process_stream_chunk") as chunk_span:
-                try:
-                    if raw_chunk.startswith("data: "):
-                        chunk_data = raw_chunk[len("data: ") :].strip()
-                        if chunk_data == "[DONE]":
-                            chunk_span.set_attribute("stream.done", True)
-                            break
-                        chunk_span.set_attribute("stream.done", False)
-                        chunk = json.loads(chunk_data)
-                    else:
-                        continue
-                except Exception as e:
-                    self.logger.error(f"[LLMClient] Error parsing streamed chunk: {e}")
-                    continue
-
-                # OpenAI compatible chunk: check for choices[0].delta.content
-                choices = chunk.get("choices", [])
-                if not choices:
-                    # weird, let's ignore
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                if "content" in delta and delta["content"]:
-                    result += delta["content"]
-                    continue
         return result

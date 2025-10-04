@@ -2,7 +2,7 @@ from app.session.session import mcp_session
 from app.session_manager.session_context import map_tools
 from app.tgi.models import ChatCompletionRequest
 from opentelemetry import trace
-from app.tgi.llm_client import LLMClient
+from app.tgi.clients.llm_client import LLMClient
 from app.vars import (
     HOST,
     MCP_BASE_PATH,

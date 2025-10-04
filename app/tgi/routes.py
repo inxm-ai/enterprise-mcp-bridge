@@ -20,7 +20,8 @@ from app.utils.exception_logging import (
 from app.tgi.models import (
     ChatCompletionRequest,
 )
-from app.tgi.proxied_tgi_service import ProxiedTGIService
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+from app.tgi.protocols.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
 from app.vars import DEFAULT_MODEL, TOKEN_NAME, SESSION_FIELD_NAME, SERVICE_NAME
 
 # Initialize components
@@ -157,11 +158,14 @@ async def _handle_chat_completion(
             )
 
             # If the service returned an async-iterable (stream), forward chunks
+            # while the mcp_session_context is still active. This ensures
+            # any cancel scopes, ContextVars and session state created by the
+            # session context remain valid for the lifetime of the stream.
             if hasattr(result, "__aiter__"):
                 async for chunk in result:
                     yield chunk
             else:
-                # Non-streaming dict result: wrap in a one-shot async generator
+                # Non-streaming dict result: yield once inside the context
                 async def _single():
                     yield result
 
@@ -238,48 +242,8 @@ async def chat_completions(
 
                 if _is_async_iterable(result):
                     # Rare case: service streamed despite non-stream request.
-                    # Consume and aggregate minimal content.
-                    full_content = ""
-                    last_full_response: Optional[dict[str, Any]] = None
-
-                    async for chunk in result:  # type: ignore[func-returns-value]
-                        # chunk may be an SSE string ("data: {...}\n\n") or a dict
-                        if isinstance(chunk, (bytes, str)):
-                            s = chunk.decode() if isinstance(chunk, bytes) else chunk
-                            s = s.strip()
-                            if s == "data: [DONE]":
-                                continue
-                            if s.startswith("data: "):
-                                try:
-                                    obj = json.loads(s[6:])
-                                except json.JSONDecodeError:
-                                    continue
-                            else:
-                                # Not a recognized chunk format
-                                continue
-                        elif isinstance(chunk, dict):
-                            obj = chunk
-                        else:
-                            continue
-
-                        if isinstance(obj, dict):
-                            last_full_response = obj
-                            choices = obj.get("choices") or []
-                            if choices:
-                                ch0 = choices[0]
-                                delta = ch0.get("delta") or {}
-                                if isinstance(delta, dict) and delta.get("content"):
-                                    full_content += delta.get("content", "")
-                                if ch0.get("message") and ch0["message"].get("content"):
-                                    # Prefer full message content when available
-                                    full_content = ch0["message"]["content"]
-
-                    # Prefer returning the last full response if it already matches a non-stream payload
-                    if (
-                        last_full_response
-                        and last_full_response.get("object") == "chat.completion"
-                    ):
-                        return JSONResponse(content=last_full_response)
+                    # Use chunk_reader to accumulate content cleanly.
+                    full_content = await accumulate_content(result)  # type: ignore[arg-type]
 
                     return JSONResponse(
                         content={"choices": [{"message": {"content": full_content}}]}
@@ -394,54 +358,39 @@ async def a2a_chat_completion(
             chat_request.stream = True
 
             async def a2a_streaming_response():
-                async for chunk_string in _handle_chat_completion(
+                stream_gen = _handle_chat_completion(
                     request,
                     chat_request,
                     access_token,
                     x_inxm_mcp_session,
                     group,
                     prompt,
-                ):
-                    # Ensure we operate on strings
-                    s = (
-                        chunk_string.decode()
-                        if isinstance(chunk_string, (bytes, bytearray))
-                        else str(chunk_string)
-                    )
-                    s = s.strip()
-
-                    if s == "data: [DONE]":
-                        yield "data: [DONE]\n\n"
-                        continue
-
-                    payload = ""
-                    if not s.startswith("data: "):
-                        # Not an SSE JSON chunk; treat as potential json for now
-                        logger.warning(f"Non-SSE chunk in streaming A2A: {s}")
-                        payload = s
-                    else:
-                        payload = s[6:]
+                )
+                # Iterate the ChunkReader without using its async context manager
+                # so we can control when the underlying async generator is
+                # closed and ensure it happens in this same task. Setting
+                # _entered=True allows using the reader's async iterators.
+                reader = chunk_reader(stream_gen)
+                reader._entered = True
+                try:
+                    async for chunk in reader.as_json(
+                        ChunkFormat.A2A, request_id=a2a_request.id
+                    ):
+                        yield chunk
+                finally:
+                    # Close the underlying stream generator in this task and
+                    # suppress any GeneratorExit/RuntimeError that can occur
+                    # from cross-task cancel scopes in some test environments.
                     try:
-                        chunk = json.loads(payload)
-                    except json.JSONDecodeError:
-                        # Skip malformed JSON but do not break the stream
-                        logger.error(f"Failed to decode JSON chunk: {s}")
-                        continue
-
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-
-                    choice0 = choices[0]
-                    delta = choice0.get("delta") or {}
-                    content_piece = delta.get("content")
-                    if content_piece:
-                        a2a_chunk = {
-                            "jsonrpc": "2.0",
-                            "result": {"completion": content_piece},
-                            "id": a2a_request.id,
-                        }
-                        yield json.dumps(a2a_chunk) + "\n"
+                        if hasattr(stream_gen, "aclose"):
+                            await stream_gen.aclose()
+                    except BaseException as e:
+                        # Catch BaseException (including ExceptionGroup) here because
+                        # closing an async generator during context teardown can
+                        # raise exception groups originating from other task/cancel
+                        # scope interactions. These are expected in some test
+                        # environments and safe to ignore for stream cleanup.
+                        logger.debug(f"Ignoring base error closing stream_gen: {e}")
 
             return StreamingResponse(
                 a2a_streaming_response(),
@@ -456,77 +405,15 @@ async def a2a_chat_completion(
             )
         else:
             chat_request.stream = False
-            full_response = ""
-            async for chunk in _handle_chat_completion(
+            stream_gen = _handle_chat_completion(
                 request,
                 chat_request,
                 access_token,
                 x_inxm_mcp_session,
                 group,
                 prompt,
-            ):
-                # Support both streamed-like dict chunks and full non-stream responses
-                if isinstance(chunk, (bytes, bytearray, str)):
-                    s = (
-                        chunk.decode()
-                        if isinstance(chunk, (bytes, bytearray))
-                        else str(chunk)
-                    )
-                    s = s.strip()
-                    if s.startswith("data: ") and not s.endswith("[DONE]"):
-                        try:
-                            obj = json.loads(s[6:])
-                        except json.JSONDecodeError:
-                            continue
-                    else:
-                        # Like above, not an SSE chunk; try to parse JSON dict if possible
-                        try:
-                            obj = json.loads(s)
-                        except Exception:
-                            continue
-                elif isinstance(chunk, dict):
-                    obj = chunk
-                elif isinstance(chunk, list):
-                    # I don't think that should happen, but handle it gracefully
-                    items = chunk
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        choices = item.get("choices") or []
-                        if not choices:
-                            continue
-                        choice0 = choices[0]
-                        message = choice0.get("message") or {}
-                        if isinstance(message, dict) and message.get("content"):
-                            full_response += message.get("content", "")
-                            continue
-                        delta = choice0.get("delta") or {}
-                        if isinstance(delta, dict) and delta.get("content"):
-                            full_response += delta.get("content", "")
-                    continue
-                elif hasattr(chunk, "model_dump"):
-                    try:
-                        obj = chunk.model_dump()
-                    except Exception:
-                        continue
-                else:
-                    continue
-
-                if not isinstance(obj, dict):
-                    continue
-                choices = obj.get("choices") or []
-                if not choices:
-                    continue
-                choice0 = choices[0]
-                # Prefer full message content when present
-                message = choice0.get("message") or {}
-                if isinstance(message, dict) and message.get("content"):
-                    full_response += message.get("content", "")
-                    continue
-                # Fallback to delta content
-                delta = choice0.get("delta") or {}
-                if isinstance(delta, dict) and delta.get("content"):
-                    full_response += delta.get("content", "")
+            )
+            full_response = await accumulate_content(stream_gen)
 
             return JSONResponse(
                 content=_create_a2a_response(

@@ -10,7 +10,7 @@ from app.tgi.models import (
     ToolCallFunction,
     FunctionDefinition,
 )
-from app.tgi.service import TGIService
+from app.tgi.services.service import TGIService
 
 
 class MockMCPSession:

@@ -1,7 +1,7 @@
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock
-from app.tgi.proxied_tgi_service import ProxiedTGIService
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,

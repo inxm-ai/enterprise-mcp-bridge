@@ -1,7 +1,7 @@
 import pytest
 
 from app.tgi import model_formats
-from app.tgi.model_formats import (
+from app.tgi.models.model_formats import (
     ChatGPTModelFormat,
     ClaudeModelFormat,
     get_model_format_for,
