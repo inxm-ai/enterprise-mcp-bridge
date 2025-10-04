@@ -67,8 +67,9 @@ async def list_prompts(list_prompts: any):
                 raise HTTPException(status_code=404, detail="Method not found")
             else:
                 logger.info(
-                    f"[PromptHelper] Returning system prompts: {system_prompts}"
+                    f"[PromptHelper] Returning system prompts"
                 )
+                logger.debug(f"[PromptHelper] System prompts: {system_prompts}")
                 prompts = default_prompt_list_result(system_prompts)
         else:
             raise HTTPException(status_code=500, detail="Loading prompts failed")

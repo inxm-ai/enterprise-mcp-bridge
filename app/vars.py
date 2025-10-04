@@ -11,7 +11,7 @@ OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
 HOST = os.environ.get("HOSTNAME", "")
 PORT = os.environ.get("PORT", "")
 
-TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", "")
+TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", os.environ.get("DEFAULT_MODEL", ""))
 TGI_MODEL_FORMAT = os.getenv("TGI_MODEL_FORMAT", "")
 
 TOOL_INJECTION_MODE = os.getenv("TOOL_INJECTION_MODE", "openai")

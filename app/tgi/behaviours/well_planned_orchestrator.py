@@ -421,6 +421,14 @@ class WellPlannedOrchestrator:
             "You are an assistant that turns the user's conversation into a short, "
             "ordered todo list. Make sure that at the end of all todos, the user's "
             "original goal is achieved, and that the todos are as specific as possible. "
+            "Also ensure that the todos will get progressively closer to the user's goal, "
+            "using the data from previous todos where possible. "
+            "won't have to call the same tool multiple times, and that each todo is "
+            "achievable with the tools available. If the user has already provided "
+            "information that is needed for a todo, do not include that information "
+            "in the todo's needed_info field. "
+            "In the reply, in the tools array, only include the exact names of tools "
+            "that are available to you. If no tools are needed, use an empty array. "
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
             + json.dumps(response_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
@@ -432,6 +440,7 @@ class WellPlannedOrchestrator:
             messages=[Message(role=MessageRole.SYSTEM, content=todo_prompt)],
             model=request.model or self.model_name,
             stream=True,
+            tools=available_tools,
         )
 
         todos_json, plan_error = await self._stream_todo_plan_json(
