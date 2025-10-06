@@ -17,8 +17,11 @@ tracer = trace.get_tracer(__name__)
 class PromptService:
     """Service for handling MCP prompt operations."""
 
+    prompt_cache = {}
+
     def __init__(self):
         self.logger = logger
+        self.prompt_cache = {}
 
     async def find_prompt_by_name_or_role(
         self, session: MCPSessionBase, prompt_name: Optional[str] = None
@@ -36,6 +39,14 @@ class PromptService:
         with tracer.start_as_current_span("find_prompt") as span:
             span.set_attribute("prompt.requested_name", prompt_name or "")
 
+            if prompt_name in self.prompt_cache:
+                span.set_attribute("prompt.found_name", prompt_name)
+                span.set_attribute("prompt.found", True)
+                span.set_attribute("prompt.cache.found", True)
+                self.logger.debug(f"[PromptService] Found cached prompt: {prompt_name}")
+                return self.prompt_cache[prompt_name]
+
+            span.set_attribute("prompt.cache.found", False)
             try:
                 # Get all available prompts
                 prompts_result = await session.list_prompts()
@@ -61,6 +72,7 @@ class PromptService:
                             self.logger.debug(
                                 f"[PromptService] Found requested prompt: {prompt_name}"
                             )
+                            self.prompt_cache[prompt_name] = prompt
                             return prompt
 
                     # Prompt not found
@@ -76,6 +88,7 @@ class PromptService:
                         span.set_attribute("prompt.found_name", prompt["name"])
                         span.set_attribute("prompt.found", True)
                         self.logger.debug("[PromptService] Found 'system' prompt")
+                        self.prompt_cache[prompt["name"]] = prompt
                         return prompt
 
                 # Look for any prompt with role information
@@ -90,6 +103,7 @@ class PromptService:
                             self.logger.debug(
                                 f"[PromptService] Found system-role prompt: {prompt['name']}"
                             )
+                            self.prompt_cache[prompt["name"]] = prompt
                             return prompt
 
                 # Prefer prompts that don't require arguments as fallback
@@ -120,6 +134,7 @@ class PromptService:
                     self.logger.debug(
                         f"[PromptService] Using first available no-arg prompt: {chosen.get('name', 'unknown')}"
                     )
+                    self.prompt_cache[chosen.get("name", "unknown")] = chosen
                     return chosen
 
                 # As a last resort, return the first prompt
@@ -130,6 +145,7 @@ class PromptService:
                     self.logger.debug(
                         f"[PromptService] Using first available prompt (may require args): {first_prompt['name']}"
                     )
+                    self.prompt_cache[first_prompt["name"]] = first_prompt
                     return first_prompt
 
                 span.set_attribute("prompt.found", False)

@@ -1,4 +1,3 @@
-
 from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
 from app.tgi.behaviours.todos.todo_manager import TodoItem
 
