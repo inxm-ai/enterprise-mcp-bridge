@@ -115,7 +115,8 @@ class ClaudeModelFormat(BaseModelFormat):
             messages[system_index] = system_message
 
         request.messages = messages
-        request.tools = []
+        request.tools = None
+        request.tool_choice = None
         stops = list(request.stop or [])
         if "<stop/>" not in stops:
             stops.append("<stop/>")
@@ -149,8 +150,14 @@ def _guess_by_model_name(model_name: Optional[str]) -> Optional[str]:
         return None
     lowered = model_name.lower()
     if "claude" in lowered:
+        logger.debug(
+            "Model name '%s' indicates Claude; assuming claude format", model_name
+        )
         return ClaudeModelFormat.name
     if "gpt" in lowered or "chat" in lowered:
+        logger.debug(
+            "Model name '%s' indicates ChatGPT; assuming chat-gpt format", model_name
+        )
         return ChatGPTModelFormat.name
     return None
 
@@ -179,6 +186,7 @@ def get_model_format_for(
                 key = key.lower()
 
     fmt_cls = _FORMAT_REGISTRY.get(key)
+    logger.debug("Resolved model format '%s' for key '%s'", fmt_cls, key)
     if not fmt_cls:
         logger.warning("Unknown TGI_MODEL_FORMAT '%s'; defaulting to chat-gpt/v1", key)
         fmt_cls = _FORMAT_REGISTRY[ChatGPTModelFormat.name.lower()]

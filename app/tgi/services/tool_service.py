@@ -223,7 +223,7 @@ class ToolService:
                 content = ""
                 if hasattr(result, "structuredContent") and result.structuredContent:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {result.structuredContent}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {str(result.structuredContent)[1000:]}"
                     )
                     content = json.dumps(
                         result.structuredContent,
@@ -232,7 +232,7 @@ class ToolService:
                     )
                 elif hasattr(result, "content") and result.content:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(result.content)[1000:]}"
                     )
 
                     if isinstance(result.content, RunToolResultContent):
@@ -261,7 +261,7 @@ class ToolService:
                         )
                 else:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {result.content}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(result.content)[1000:] if result.content else str(result)[1000:]}"
                     )
                     content = json.dumps(
                         {"result": str(result)},

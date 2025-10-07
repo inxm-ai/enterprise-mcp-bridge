@@ -279,6 +279,9 @@ class ProxiedTGIService:
                         )
                         yield raw_chunk
 
+                    # yield empty chunks to keep the connection alive
+                    yield "\n\n"
+
             with tracer.start_as_current_span("execute_tool_calls") as tool_span:
                 # Get accumulated tool calls from the reader
                 tool_call_chunks = reader.get_accumulated_tool_calls()

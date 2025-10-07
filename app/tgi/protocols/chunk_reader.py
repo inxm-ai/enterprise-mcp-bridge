@@ -243,6 +243,8 @@ class ChunkReader:
             choice = choices[0]
             delta = choice.get("delta", {})
             message = choice.get("message", {})
+            if not message:
+                message = {}
 
             # Try delta.content first (streaming)
             content = delta.get("content") or message.get("content")
@@ -308,6 +310,9 @@ class ChunkReader:
                             chunks_with_content += 1
 
                         yield parsed
+                    else:
+                        logger.debug(f"[ChunkReader] Unparseable chunk: {chunk_str!r}")
+                        yield {"raw": chunk_str, "content": chunk_str, "is_done": False}
 
                 span.set_attribute("chunk_reader.total_chunks", chunk_count)
                 span.set_attribute(

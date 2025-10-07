@@ -450,7 +450,7 @@ def test_claude_with_existing_system_appends():
     payload = client._generate_llm_payload(req)
 
     # tools should be emptied (injected into system prompt)
-    assert payload.get("tools") == []
+    assert "tools" not in payload
 
     # find system message and verify injection
     sys_msg = next(m for m in payload["messages"] if m["role"] == MessageRole.SYSTEM)
@@ -469,7 +469,7 @@ def test_claude_without_system_inserts_at_start():
 
     payload = client._generate_llm_payload(req)
 
-    assert payload.get("tools") == []
+    assert "tools" not in payload
 
     # first message must be the injected system message
     first = payload["messages"][0]

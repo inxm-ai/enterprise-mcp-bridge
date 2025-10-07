@@ -129,6 +129,7 @@ class LLMClient:
             if not message.content or len(message.content) <= max_chars:
                 continue
             original_len = len(message.content)
+            # TODO: that's a naive truncation, consider smarter approaches
             message.content = f"{message.content[:max_chars]}...[truncated {original_len - max_chars} chars]"
             payload = request.model_dump(exclude_none=True)
             serialized = self._serialize_payload(payload)
@@ -295,6 +296,9 @@ class LLMClient:
                         error_text = await response.text()
                         error_msg = f"LLM API error: {response.status} {error_text}"
                         self.logger.error(f"[LLMClient] {error_msg}")
+                        self.logger.debug(f"[LLMClient] Payload: {serialized_payload}")
+                        parent_span.set_attribute("error", True)
+                        parent_span.set_attribute("error.message", error_msg)
 
                         # Return error as streaming response
                         error_chunk = ChatCompletionChunk(

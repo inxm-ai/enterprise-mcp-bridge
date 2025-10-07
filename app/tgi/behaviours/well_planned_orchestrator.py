@@ -89,6 +89,7 @@ class WellPlannedOrchestrator:
         except Exception as exc:
             if logger:
                 logger.error(f"[WellPlanned] Error streaming todo plan: {exc}")
+                logger.debug(exc, exc_info=True)
             return None, str(exc)
 
         plan_text = plan_text.strip()
@@ -207,14 +208,6 @@ class WellPlannedOrchestrator:
             Message(role=MessageRole.SYSTEM, content=f"Goal: {todo.goal}")
         ]
 
-        if todo.needed_info:
-            focused_messages.append(
-                Message(
-                    role=MessageRole.USER,
-                    content=f"Needed info: {todo.needed_info}",
-                )
-            )
-
         for hist in todo_manager.history():
             if hist.get("event") == "finish":
                 focused_messages.append(
@@ -223,6 +216,21 @@ class WellPlannedOrchestrator:
                         content=str(hist.get("result")),
                     )
                 )
+
+        if todo.needed_info:
+            focused_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=f"Needed info: {todo.needed_info}",
+                )
+            )
+        else:
+            focused_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content="Achieve the goal.",
+                )
+            )
 
         focused_request = ChatCompletionRequest(
             messages=focused_messages,
@@ -450,7 +458,10 @@ class WellPlannedOrchestrator:
         )
 
         plan_request = ChatCompletionRequest(
-            messages=[Message(role=MessageRole.SYSTEM, content=todo_prompt)],
+            messages=[
+                Message(role=MessageRole.SYSTEM, content=todo_prompt),
+                Message(role=MessageRole.USER, content=messages[-1].content or "Do it"),
+            ],
             model=request.model or self.model_name,
             stream=True,
             tools=available_tools,
