@@ -355,6 +355,7 @@ class ProxiedTGIService:
 
                     messages_history.extend(tool_results)
                     self._deduplicate_retry_hints(messages_history)
+                    # TODO summarize the first few messages to avoid hitting token limits
 
                     # If we didn't fail, this should repeat the cycle
                     if success:

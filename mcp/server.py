@@ -42,10 +42,18 @@ def greeting(name: str) -> str:
     return f"Hello, {name}!"
 
 
-@mcp.resource("greeting://{name}")
+# resource templates
+@mcp.resource("greeting://greet/{name}")
 def get_greeting(name: str) -> str:
     """Get a personalized greeting"""
     return f"Hello, {name}!"
+
+
+# resources
+@mcp.resource("html://index", mime_type="text/html")
+def get_html_index() -> str:
+    """Get the HTML index page"""
+    return "<html><head><title>Index</title></head><body><h1>Index</h1></body></html>"
 
 
 if __name__ == "__main__":

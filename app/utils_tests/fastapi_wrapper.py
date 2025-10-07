@@ -307,3 +307,18 @@ class FastAPIWrapper:
         assert r.status_code in [
             200
         ], f"Unexpected status code: {r.status_code}, {r.text}"
+
+    def test_call_list_resources(self):
+        r = self.client.get(f"{self.base_url}/resources")
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
+        resources = r.json()
+        resource_names = [res["name"] for res in resources.get("resources", [])]
+        assert len(resource_names) > 0, "No resources found"
+        assert (
+            resource_names[0] == "get_html_index"
+        ), f"'get_html_index' not in resources: {resource_names}"
+        assert (
+            resources.get("resources")[0].get("uri") == "html://index"
+        ), f"First resource uri is not 'html://index': {resources.get('resources')[0].get('uri')}"

@@ -1,3 +1,4 @@
+import json
 import logging
 from fastapi import HTTPException
 from typing import Optional, Dict
@@ -61,6 +62,31 @@ def map_tools(tools):
     return filtered_tools
 
 
+async def list_resources(list_resources: any):
+    system_resources = json.loads(os.environ.get("SYSTEM_DEFINED_RESOURCES", "[]"))
+    try:
+        resources = await list_resources()
+        resources.resources += system_resources
+    except Exception as e:
+        logger.warning(f"[ResourcesHelper] Error listing resources: {str(e)}")
+        # Not every MCP has list_resources, so deal with it friendly
+        if (
+            hasattr(e, "__class__")
+            and e.__class__.__name__ == "McpError"
+            and "Method not found" in str(e)
+        ):
+            if len(system_resources) < 1:
+                logger.info("[ResourcesHelper] No system resources available")
+                raise HTTPException(status_code=404, detail="Method not found")
+            else:
+                logger.info("[ResourcesHelper] Returning system resources")
+                logger.debug(f"[ResourcesHelper] System resources: {system_resources}")
+                resources = {"resources": system_resources}
+        else:
+            raise HTTPException(status_code=500, detail="Loading resources failed")
+    return resources
+
+
 @asynccontextmanager
 async def mcp_session_context(
     sessions: SessionManagerBase,
@@ -87,6 +113,12 @@ async def mcp_session_context(
                 class SessionDelegate:
                     async def list_prompts(self):
                         return await list_prompts(session.list_prompts)
+
+                    async def list_resources(self):
+                        return await list_resources(session.list_resources)
+
+                    async def read_resource(self, resource_name: str):
+                        return await session.read_resource(resource_name)
 
                     async def list_tools(self):
                         tools = await session.list_tools()
@@ -160,6 +192,17 @@ async def mcp_session_context(
                 return await mcp_task.request("list_prompts")
 
             return await list_prompts(request)
+
+        async def list_resources(self):
+            async def request():
+                return await mcp_task.request("list_resources")
+
+            return await list_resources(request)
+
+        async def read_resource(self, resource_name: str):
+            return await mcp_task.request(
+                {"action": "read_resource", "resource_name": resource_name}
+            )
 
         async def call_prompt(
             self,

@@ -123,3 +123,8 @@ def test_start_session_with_group_and_no_token(test_client):
 def test_start_session_with_invalid_token(test_client):
     suite = FastAPIWrapper(test_client)
     suite.test_start_session_with_invalid_token()
+
+
+def test_call_list_resources(test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_call_list_resources()

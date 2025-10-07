@@ -1,7 +1,14 @@
 import logging
+import io
 from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    StreamingResponse,
+    FileResponse,
+    HTMLResponse,
+    Response,
+)
 from typing import Optional, Dict
 import uuid
 import os
@@ -37,6 +44,133 @@ if MCP_BASE_PATH:
     logger.info(f"Using MCP_BASE_PATH: {MCP_BASE_PATH}")
 else:
     logger.info("No MCP_BASE_PATH set, using root path")
+
+
+@router.get("/resources")
+async def list_resources(
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
+):
+    try:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            access_token,
+        )
+        with traced_request(
+            tracer,
+            operation="list_resources",
+            session_value=x_inxm_mcp_session,
+            group=group,
+            start_message=f"[Resources] Listing resources. Session: {x_inxm_mcp_session}, Group: {group}",
+        ):
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                result = await session.list_resources()
+                logger.debug(
+                    mask_token(
+                        f"[Resources] Resources listed. Session: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
+                )
+                return result
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Resources] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        log_exception_with_details(logger, "[Session]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/resources/{resource_name}")
+async def get_resource_details(
+    resource_name: str,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    group: Optional[str] = Query(
+        None, description="Group name for sessionless group-specific data access"
+    ),
+):
+    try:
+        x_inxm_mcp_session = session_id(
+            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
+            access_token,
+        )
+        with traced_request(
+            tracer,
+            operation="get_resource_details",
+            session_value=x_inxm_mcp_session,
+            group=group,
+            start_message=f"[Resource-Details] Getting resource details. Session: {x_inxm_mcp_session}, Group: {group}",
+        ):
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                result = await session.list_resources()
+                # find the resource with the given name
+                logger.debug(f"Looking for resource: {resource_name} in {result}")
+                result = next(
+                    (res for res in result.resources if res.name == resource_name), None
+                )
+                logger.debug(
+                    mask_token(
+                        f"[Resource-Details] Resource details retrieved. Session: {x_inxm_mcp_session}",
+                        x_inxm_mcp_session,
+                    )
+                )
+                if result is None:
+                    raise HTTPException(status_code=404, detail="Resource not found")
+                resource = await session.read_resource(result.uri)
+                if resource is None:
+                    raise HTTPException(status_code=404, detail="Resource not found")
+                if resource.contents is None:
+                    raise HTTPException(status_code=404, detail="Resource is empty")
+                resource = resource.contents[0]
+                logger.info(f"Resource retrieved: {resource}")
+                mime_type = resource.mimeType or "text/plain"
+                if hasattr(resource, "blob"):
+                    blob = resource.blob
+                else:
+                    blob = None
+                if hasattr(resource, "text"):
+                    text = resource.text or ""
+                else:
+                    text = ""
+                if blob:
+                    # If blob is bytes, wrap in BytesIO; if file-like, use directly
+                    if isinstance(blob, bytes):
+                        stream = io.BytesIO(blob)
+                    else:
+                        stream = blob
+                    return StreamingResponse(stream, media_type=mime_type)
+                elif mime_type == "text/html":
+                    return HTMLResponse(content=text, media_type=mime_type)
+                elif text:
+                    return FileResponse(content=text, media_type=mime_type)
+                else:
+                    return Response(status_code=204)
+
+    except HTTPException as e:
+        raise e
+    except UserLoggedOutException as e:
+        logger.warning(f"[Resource-Details] Unauthorized access: {str(e)}")
+        raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        log_exception_with_details(logger, "[Resource-Details]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/prompts")
