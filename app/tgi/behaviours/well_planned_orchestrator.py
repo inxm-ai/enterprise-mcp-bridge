@@ -22,6 +22,29 @@ from app.vars import TGI_MODEL_NAME
 
 tracer = trace.get_tracer(__name__)
 
+todo_response_schema = {
+    "type": "object",
+    "properties": {
+        "todos": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "needed_info": {"type": ["string", "null"]},
+                    "tools": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "name", "goal", "tools"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["todos"],
+    "additionalProperties": False
+}
+
 
 async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
     """
@@ -76,6 +99,7 @@ class WellPlannedOrchestrator:
         span,
     ) -> Tuple[Optional[list], Optional[str]]:
         plan_text = ""
+        request.response_format = {"type": "json_schema", "value": todo_response_schema}
         try:
             plan_stream = self.llm_client.stream_completion(
                 request, access_token or "", span
@@ -107,7 +131,7 @@ class WellPlannedOrchestrator:
                 logger.debug(
                     f"[WellPlanned] Trailing data after todos JSON (len={len(remaining)}), ignoring."
                 )
-            todos_json = todos_json_obj
+            todos_json = todos_json_obj.get("todos", [])
         except Exception as exc:
             if logger:
                 logger.error(f"[WellPlanned] Failed to parse todo plan JSON: {exc}")
@@ -422,22 +446,6 @@ class WellPlannedOrchestrator:
 
         available_tools = await self.tool_service.get_all_mcp_tools(session, span)
 
-        response_schema = {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "needed_info": {"type": ["string", "null"]},
-                    "tools": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["id", "name", "goal", "tools"],
-                "additionalProperties": False,
-            },
-        }
-
         todo_prompt = (
             "You are an assistant that turns the user's conversation into a short, "
             "ordered todo list. Make sure that at the end of all todos, the user's "
@@ -451,7 +459,7 @@ class WellPlannedOrchestrator:
             "In the reply, in the tools array, only include the exact names of tools "
             "that are available to you. If no tools are needed, use an empty array. "
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
-            + json.dumps(response_schema, ensure_ascii=False)
+            + json.dumps(todo_response_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
             + "\n".join([f"{m.role}: {m.content}" for m in messages])
             + "\n\nReturn only the JSON array that matches the schema above."

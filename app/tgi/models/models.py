@@ -57,6 +57,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
     stop: Optional[List[str]] = None
+    response_format: Optional[Any] = None
 
 
 class DeltaMessage(BaseModel):
