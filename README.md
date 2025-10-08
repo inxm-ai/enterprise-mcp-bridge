@@ -197,12 +197,12 @@ volumes:
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
 
-### Data resource templates
+### Data access templates
 | Template                           | Default value          | Description                                     |
 | ---------------------------------- | ---------------------- | ----------------------------------------------- |
-| `MCP_GROUP_DATA_ACCESS_TEMPLATE`   | `g/{group_id}`         | Group-specific resource path template           |
-| `MCP_USER_DATA_ACCESS_TEMPLATE`    | `u/{user_id}`          | User-specific resource path template            |
-| `MCP_SHARED_DATA_ACCESS_TEMPLATE`  | `shared/{resource_id}` | Shared resource path template                   |
+| `MCP_GROUP_DATA_ACCESS_TEMPLATE`   | `g/{group_id}`         | Group-specific access path template           |
+| `MCP_USER_DATA_ACCESS_TEMPLATE`    | `u/{user_id}`          | User-specific access path template            |
+| `MCP_SHARED_DATA_ACCESS_TEMPLATE`  | `shared/{resource_id}` | Shared access path template                   |
 
 ### System-defined prompts
 Provide curated prompts to every user by setting `SYSTEM_DEFINED_PROMPTS` to a JSON array. Each prompt includes a `name`, `title`, `description`, optional `arguments`, and a `template`.
@@ -226,7 +226,11 @@ Prompts are merged with prompts returned by the MCP server and are available thr
 - ReDoc rendering: `http://localhost:8000/redoc`
 - Key operations:
   - `GET /tools` – list available tools.
+  - `GET /tools/{tool_name}` – retrieve a tool's details.
   - `POST /tools/{tool_name}` – invoke a tool (stateless unless a session header is provided).
+  - `GET /prompts` – list available prompts (including system-defined).
+  - `GET /resource` – list available resources.
+  - `GET /resource/{resource_id}` – access resources. If the resource is html/text, it is rendered directly.
   - `POST /session/start` and `POST /session/close` – manage stateful sessions.
   - `GET /.well-known/agent.json` – discover agent metadata when agent mode is enabled.
 
@@ -363,3 +367,17 @@ curl -X POST http://localhost:8000/tgi/v1/chat/completions \
 ```
 
 Agent mode can generate significant LLM traffic; monitor costs and apply tool filters (`INCLUDE_TOOLS`/`EXCLUDE_TOOLS`) as needed.
+
+## Using resources
+
+The `/resources` endpoint provides a way to list and retrieve details about resources managed by the MCP server. This endpoint supports both session-based and sessionless access, making it flexible for various use cases.
+
+### Listing Resources
+
+To list all available resources, send a `GET` request to `/resources`.
+
+### Retrieving Resource Details
+
+To retrieve details about a specific resource, send a `GET` request to `/resources/{resource_name}`.
+
+Resources can have different MIME types, such as `text/plain`, `text/html`, or `application/json`. The server will return the appropriate content type based on the resource's MIME type, and render it accordingly. Thus, it allows you to directly serve HTML content or plain text as needed.
