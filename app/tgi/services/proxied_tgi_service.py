@@ -20,6 +20,7 @@ from app.tgi.services.prompt_service import PromptService
 from app.tgi.services.tool_service import (
     ToolService,
 )
+from app.tgi.services.message_summarization_service import MessageSummarizationService
 from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
 from app.tgi.protocols.chunk_reader import chunk_reader
@@ -40,6 +41,9 @@ class ProxiedTGIService:
         self.llm_client = LLMClient(self.model_format)
         self.tool_service = ToolService(
             model_format=self.model_format, llm_client=self.llm_client
+        )
+        self.message_summarization_service = MessageSummarizationService(
+            llm_client=self.llm_client
         )
         self.tool_resolution = self.model_format.create_tool_resolution_strategy()
         # pass a lambda that looks up the current _non_stream_chat_with_tools
@@ -341,6 +345,25 @@ class ProxiedTGIService:
                     self.logger.debug(
                         f"[ProxiedTGI] Executing {len(tool_calls_to_execute)} tool calls"
                     )
+
+                    def tool_arguments(tc):
+                        try:
+                            args = json.loads(tc.function.arguments)
+                            return ",".join(f"{k}='{v}'" for k, v in args.items())
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[ProxiedTGI] Failed to parse tool arguments for {tc.function.name}: {str(e)}"
+                            )
+                            return ""
+
+                    tools_summary = "\n" + "\n".join(
+                        [
+                            f"- {tc.function.name}({tool_arguments(tc)})"
+                            for tc, _ in tool_calls_to_execute
+                        ]
+                    )
+                    yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Executing the following tools{tools_summary}</think>'},'index':0}]})}\n\n"
+
                     tool_results, success = await self.tool_service.execute_tool_calls(
                         session,
                         tool_calls_to_execute,
@@ -355,7 +378,22 @@ class ProxiedTGIService:
 
                     messages_history.extend(tool_results)
                     self._deduplicate_retry_hints(messages_history)
-                    # TODO summarize the first few messages to avoid hitting token limits
+
+                    # Summarize messages if history is getting too long
+                    if self.message_summarization_service.should_summarize(
+                        messages_history
+                    ):
+                        self.logger.info(
+                            f"[ProxiedTGI] Summarizing {len(messages_history)} messages to avoid token limits"
+                        )
+                        messages_history = (
+                            await self.message_summarization_service.summarize_messages(
+                                messages_history, access_token, outer_span
+                            )
+                        )
+                        self.logger.info(
+                            f"[ProxiedTGI] Message history reduced to {len(messages_history)} messages"
+                        )
 
                     # If we didn't fail, this should repeat the cycle
                     if success:
@@ -368,6 +406,9 @@ class ProxiedTGIService:
                         failure_report = "<think>The tool call failed. I will try to adjust my approach</think>"
                         self.logger.info(
                             "[ProxiedTGI] Tool execution failed, asking the llm to fix the tool call"
+                        )
+                        self.logger.debug(
+                            f"[ProxiedTGI] Tool execution failure details: {tool_results}"
                         )
                         yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\n\n"
                         tool_span.set_attribute("tool_calls.success", False)
@@ -456,6 +497,22 @@ class ProxiedTGIService:
 
                 # Add tool results to history
                 messages_history.extend(tool_results)
+
+                # Summarize messages if history is getting too long
+                if self.message_summarization_service.should_summarize(
+                    messages_history
+                ):
+                    self.logger.info(
+                        f"[ProxiedTGI] Summarizing {len(messages_history)} messages to avoid token limits"
+                    )
+                    messages_history = (
+                        await self.message_summarization_service.summarize_messages(
+                            messages_history, access_token, parent_span
+                        )
+                    )
+                    self.logger.info(
+                        f"[ProxiedTGI] Message history reduced to {len(messages_history)} messages"
+                    )
             else:
                 # No tool calls, return final response
                 return response

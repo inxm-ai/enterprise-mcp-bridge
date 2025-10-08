@@ -481,8 +481,16 @@ class ToolService:
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
+                if "isError" in result and result["isError"]:
+                    success = False
+                if "success" in result and not result["success"]:
+                    success = False
+
+                # Its very brittle, but if the tool content contains "ERROR",
+                # we assume the tool call failed in some way. Unforuntately, not
+                # all MCP servers return isError=true on tool call failures.
                 content_check = result.get("content")
-                if isinstance(content_check, str) and "error" in content_check:
+                if isinstance(content_check, str) and "ERROR" in content_check:
                     success = False
 
                 tool_message = await self.create_result_message(

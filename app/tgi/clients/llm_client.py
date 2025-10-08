@@ -108,8 +108,10 @@ class LLMClient:
                             tool_call.function.arguments
                         )
 
-    def _truncate_messages_until_fit(
-        self, request: ChatCompletionRequest, limit: int
+    async def _truncate_messages_until_fit(
+        self,
+        request: ChatCompletionRequest,
+        limit: int,
     ) -> tuple[dict, str, int]:
         """Iteratively truncate the largest assistant/tool messages."""
         max_chars = TOOL_CHUNK_SIZE
@@ -129,11 +131,18 @@ class LLMClient:
             if not message.content or len(message.content) <= max_chars:
                 continue
             original_len = len(message.content)
-            # TODO: that's a naive truncation, consider smarter approaches
-            message.content = f"{message.content[:max_chars]}...[truncated {original_len - max_chars} chars]"
+            span = tracer.start_span("truncate_message")
+            span.set_attribute("original_length", original_len)
+            message.content = await self.summarize_text(
+                base_request=request,
+                content=message.content,
+                access_token=self.tgi_token,
+                outer_span=span,
+            )
             payload = request.model_dump(exclude_none=True)
             serialized = self._serialize_payload(payload)
             size = self._payload_size(serialized)
+            span.set_attribute("new_length", len(message.content or ""))
             self.logger.warning(
                 "[LLMClient] Truncated %s message to fit payload (removed %s chars)",
                 message.role,
@@ -187,7 +196,7 @@ class LLMClient:
 
         return payload, serialized, size
 
-    def _ensure_payload_size(
+    async def _ensure_payload_size(
         self, request: ChatCompletionRequest, payload: dict
     ) -> tuple[dict, str, int]:
         serialized = self._serialize_payload(payload)
@@ -212,7 +221,7 @@ class LLMClient:
             return payload, serialized, size
 
         # Second pass: truncate largest assistant/tool messages
-        payload, serialized, size = self._truncate_messages_until_fit(
+        payload, serialized, size = await self._truncate_messages_until_fit(
             request, LLM_MAX_PAYLOAD_BYTES
         )
         if size <= LLM_MAX_PAYLOAD_BYTES:
@@ -231,9 +240,11 @@ class LLMClient:
 
         return payload, serialized, size
 
-    def _prepare_payload(self, request: ChatCompletionRequest) -> tuple[dict, str, int]:
+    async def _prepare_payload(
+        self, request: ChatCompletionRequest
+    ) -> tuple[dict, str, int]:
         payload = self._generate_llm_payload(request)
-        return self._ensure_payload_size(request, payload)
+        return await self._ensure_payload_size(request, payload)
 
     def _generate_llm_payload(self, request: ChatCompletionRequest) -> dict:
         """Generate the payload for the LLM API request."""
@@ -278,7 +289,9 @@ class LLMClient:
         # Remove all tracing to avoid context cleanup issues with async generators
         try:
             # Prepare payload with size-aware compaction
-            payload, serialized_payload, payload_size = self._prepare_payload(request)
+            payload, serialized_payload, payload_size = await self._prepare_payload(
+                request
+            )
             self.logger.debug(
                 "[LLMClient] Prepared streaming payload (bytes=%s, messages=%s)",
                 payload_size,
@@ -391,7 +404,7 @@ class LLMClient:
             try:
                 # Convert request to dict for JSON serialization, ensure stream=False
                 request.stream = False
-                payload, serialized_payload, payload_size = self._prepare_payload(
+                payload, serialized_payload, payload_size = await self._prepare_payload(
                     request
                 )
                 self.logger.debug(

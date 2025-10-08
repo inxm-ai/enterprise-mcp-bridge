@@ -502,7 +502,8 @@ if __name__ == "__main__":
 
 
 class TestPayloadCompaction:
-    def test_prepare_payload_compacts_messages_and_arguments(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_prepare_payload_compacts_messages_and_arguments(self, monkeypatch):
         client = llm.LLMClient()
         monkeypatch.setattr(llm, "LLM_MAX_PAYLOAD_BYTES", 360)
 
@@ -534,7 +535,7 @@ class TestPayloadCompaction:
             stream=True,
         )
 
-        payload, serialized, size = client._prepare_payload(request)
+        payload, serialized, size = await client._prepare_payload(request)
 
         assert size <= llm.LLM_MAX_PAYLOAD_BYTES
         system = payload["messages"][0]["content"]
@@ -543,7 +544,8 @@ class TestPayloadCompaction:
         assert assistant["content"] == '{"foo":"bar"}'
         assert assistant["tool_calls"][0]["function"]["arguments"] == '{"value":"xyz"}'
 
-    def test_prepare_payload_truncates_long_messages(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_prepare_payload_truncates_long_messages(self, monkeypatch):
         client = llm.LLMClient()
         monkeypatch.setattr(llm, "LLM_MAX_PAYLOAD_BYTES", 200)
         monkeypatch.setattr(llm, "TOOL_CHUNK_SIZE", 20)
@@ -558,7 +560,21 @@ class TestPayloadCompaction:
             stream=True,
         )
 
-        _, serialized, _ = client._prepare_payload(request)
+        # Mock the truncation behavior
+        async def mock_truncate_messages_until_fit(request, limit):
+            request.messages[1].content = (
+                "[truncated]" + request.messages[1].content[-20:]
+            )
+            payload = request.model_dump(exclude_none=True)
+            serialized = client._serialize_payload(payload)
+            size = client._payload_size(serialized)
+            return payload, serialized, size
+
+        monkeypatch.setattr(
+            client, "_truncate_messages_until_fit", mock_truncate_messages_until_fit
+        )
+
+        _, serialized, _ = await client._prepare_payload(request)
 
         truncated_content = request.messages[1].content
         assert "[truncated" in truncated_content

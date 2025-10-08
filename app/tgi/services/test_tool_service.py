@@ -50,7 +50,7 @@ class ErrorSession:
     async def call_tool(self, name, args, access_token):
         mock_result = Mock()
         mock_result.isError = True
-        mock_result.content = [Mock(text="Tool error!")]
+        mock_result.content = [Mock(text="ERROR")]
         mock_result.structuredContent = {}
         return mock_result
 

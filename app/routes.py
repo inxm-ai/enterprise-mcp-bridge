@@ -5,7 +5,6 @@ from fastapi import APIRouter, HTTPException, Header, Cookie, Query
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
-    FileResponse,
     HTMLResponse,
     Response,
 )
@@ -156,7 +155,7 @@ async def get_resource_details(
                 elif mime_type == "text/html":
                     return HTMLResponse(content=text, media_type=mime_type)
                 elif text:
-                    return FileResponse(content=text, media_type=mime_type)
+                    return Response(content=text, media_type=mime_type)
                 else:
                     return Response(status_code=204)
 
