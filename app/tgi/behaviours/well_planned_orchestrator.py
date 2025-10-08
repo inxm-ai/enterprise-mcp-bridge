@@ -42,7 +42,7 @@ todo_response_schema = {
         }
     },
     "required": ["todos"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
