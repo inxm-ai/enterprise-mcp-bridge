@@ -75,7 +75,7 @@ async def get_tool_dry_run_response(
             {"role": "system", "content": prompt},
             {
                 "role": "user",
-                "content": f"Provide a mock response for the tool '{tool.get('name', 'unknown')}' with the following input: {tool_input}. ",
+                "content": f"Provide a mock response for the tool '{tool.get('name', 'unknown')}'\nDescription: {tool.get('description', 'No description available')}\nInput:\n```json\n{tool_input}\n```\n",
             },
         ],
         stream=True,

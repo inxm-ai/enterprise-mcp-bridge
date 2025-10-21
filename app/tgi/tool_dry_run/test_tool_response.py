@@ -1,5 +1,4 @@
 import pytest
-from jsonschema import ValidationError
 from app.tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 
 session = None  # Placeholder for MCPSessionBase
@@ -146,7 +145,7 @@ async def test_uses_specific_prompt_when_available(monkeypatch):
     valid_input = {"foo": "bar"}
 
     # Call under test
-    result = await get_tool_dry_run_response(session, tool, valid_input)
+    await get_tool_dry_run_response(session, tool, valid_input)
 
     # Assertions
     client = DummyLLMClient.created_instance
@@ -174,7 +173,7 @@ async def test_uses_default_prompt_when_specific_missing(monkeypatch):
     tool = _make_tool()
     valid_input = {"foo": "bar"}
 
-    result = await get_tool_dry_run_response(session, tool, valid_input)
+    await get_tool_dry_run_response(session, tool, valid_input)
 
     client = DummyLLMClient.created_instance
     assert client is not None and client.stream_called
@@ -198,7 +197,7 @@ async def test_uses_hardcoded_prompt_when_none_available(monkeypatch):
     tool = _make_tool()
     valid_input = {"foo": "bar"}
 
-    result = await get_tool_dry_run_response(session, tool, valid_input)
+    await get_tool_dry_run_response(session, tool, valid_input)
 
     client = DummyLLMClient.created_instance
     assert client is not None and client.stream_called
