@@ -322,3 +322,43 @@ class FastAPIWrapper:
         assert (
             resources.get("resources")[0].get("uri") == "html://index"
         ), f"First resource uri is not 'html://index': {resources.get('resources')[0].get('uri')}"
+
+    def test_dry_run_uses_get_tool_dry_run_response(self, monkeypatch):
+        """Ensure that the dry-run header triggers the dry-run response path.
+
+        This method patches the router-level EFFECT_TOOLS and
+        get_tool_dry_run_response function and asserts that the fake
+        implementation is called with the expected arguments and that
+        the HTTP response contains the expected dry-run payload.
+        """
+        import app.routes as routes
+        from types import SimpleNamespace
+
+        called = []
+
+        def fake_get_tool_dry_run_response(tool_name, tool_input):
+            called.append((tool_name, tool_input))
+            r = SimpleNamespace()
+            r.isError = False
+            r.structuredContent = {"result": "dry-run"}
+            r.content = []
+            return r
+
+        # Ensure the route treats 'add' as an effecting tool
+        monkeypatch.setattr(routes, "EFFECT_TOOLS", ["add"])
+        monkeypatch.setattr(
+            routes, "get_tool_dry_run_response", fake_get_tool_dry_run_response
+        )
+
+        response = self.client.post(
+            f"{self.base_url}/tools/add",
+            headers={"X-Inxm-Dry-Run": "true"},
+            json={"a": 1, "b": 2},
+        )
+        assert called == [
+            ("add", {"a": 1, "b": 2})
+        ], f"get_tool_dry_run_response was not called correctly: {called}"
+        assert (
+            response.status_code == 200
+        ), f"Unexpected status code: {response.status_code}, body: {response.text}"
+        assert response.json()["structuredContent"]["result"] == "dry-run"

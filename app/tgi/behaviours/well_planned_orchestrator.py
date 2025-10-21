@@ -131,7 +131,17 @@ class WellPlannedOrchestrator:
                 logger.debug(
                     f"[WellPlanned] Trailing data after todos JSON (len={len(remaining)}), ignoring."
                 )
-            todos_json = todos_json_obj.get("todos", [])
+            # Accept either a top-level array (the tests provide this form)
+            # or an object with a "todos" key. Be resilient to both shapes.
+            if isinstance(todos_json_obj, dict):
+                todos_json = todos_json_obj.get("todos", [])
+            elif isinstance(todos_json_obj, list):
+                todos_json = todos_json_obj
+            else:
+                return (
+                    None,
+                    "todo plan must be a JSON array or an object with a 'todos' key",
+                )
         except Exception as exc:
             if logger:
                 logger.error(f"[WellPlanned] Failed to parse todo plan JSON: {exc}")

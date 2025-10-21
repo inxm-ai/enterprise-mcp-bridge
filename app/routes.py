@@ -1,6 +1,6 @@
 import logging
 import io
-from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
+from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query
 from fastapi.responses import (
     JSONResponse,
@@ -29,6 +29,7 @@ from .utils.exception_logging import (
     log_exception_with_details,
 )
 from .tgi.routes import router as tgi_router
+from .tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 from app.well_known.agent import router as agent_router
 
 router = APIRouter()
@@ -311,6 +312,7 @@ async def run_tool(
     tool_name: str,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    x_inxm_dry_run: Optional[str] = Header(None, alias="X-Inxm-Dry-Run"),
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
@@ -337,10 +339,17 @@ async def run_tool(
             start_message=f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
             extra_attrs={"tool.name": tool_name},
         ):
-            async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
-            ) as session:
-                result = await session.call_tool(tool_name, args, access_token)
+            if (
+                x_inxm_dry_run
+                and x_inxm_dry_run.lower() == "true"
+                and tool_name in EFFECT_TOOLS
+            ):
+                result = get_tool_dry_run_response(tool_name, args or {})
+            else:
+                async with mcp_session_context(
+                    sessions, x_inxm_mcp_session, access_token, group
+                ) as session:
+                    result = await session.call_tool(tool_name, args, access_token)
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
         if result.isError:
