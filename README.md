@@ -292,6 +292,61 @@ curl -b cookies.txt -X POST http://localhost:8000/session/close
 2. Export the class from `session_manager/session_manager.py`.
 3. Set `MCP_SESSION_MANAGER=<YourClassName>`.
 
+## Testing and Development
+
+### Dry-run (mock) mode for side-effect tools
+
+Some tools perform modifying operations or otherwise have side effects (for example: creating, deleting or updating data). To safely preview or test those tools without executing their side effects, the bridge supports a dry-run (mock) mode that synthesizes realistic responses using the configured LLM.
+
+How it works:
+
+- Mark which tools are allowed to be dry-run by listing their names (comma-separated) in the `EFFECT_TOOLS` environment variable. Example `export EFFECT_TOOLS="add,create_memory,delete"`
+
+- Trigger a dry-run by including the header `X-Inxm-Dry-Run: true` (case-insensitive) on a `POST /tools/{tool_name}` request. The dry-run path is taken only when the requested tool name is present in `EFFECT_TOOLS`; otherwise the tool executes normally.
+
+- The server validates the supplied arguments against the tool's `inputSchema` (if present). Invalid inputs return an error comparable to normal tool validation.
+
+- The bridge then asks the configured LLM to generate a mock response. The dry-run implementation:
+  - Requires an LLM endpoint to be configured (the code checks `TGI_URL` / LLM client settings). Calls will fail if no LLM URL is configured.
+  - If the tool declares an `outputSchema` the bridge requests JSON that conforms to that schema and attempts to parse the aggregated streamed output into structured JSON. When parsing succeeds the structured result is returned in the MCP-style `structuredContent` field. If parsing fails an error result is returned.
+  - If no `outputSchema` is declared, the aggregated LLM text is returned as a single entry in the `content` array (object with a `text` field).
+
+- Prompting: dry-run uses the same prompt service as the agent flow. You can provide a prompt named `dryrun_<tool_name>` to control a specific tool's mock output, or `dryrun_default` as a fallback. System-defined prompts (`SYSTEM_DEFINED_PROMPTS`) are merged with MCP-provided prompts and exposed via `GET /prompts`.
+
+Example
+
+```sh
+export EFFECT_TOOLS='add'
+export TGI_URL='https://api.example.com/v1'
+export TGI_API_TOKEN="your_api_token"
+uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
+curl -X POST http://localhost:8000/tools/add \
+  -H 'Content-Type: application/json' \
+  -H 'X-Inxm-Dry-Run: true' \
+  -d '{"a":2,"b":3}'
+```
+
+Possible response (tool with an output schema):
+
+```sh
+{
+  "isError": false,
+  "content": [],
+  "structuredContent": {"result": 5}
+}
+```
+
+Notes:
+
+- Dry-run is intentionally conservative: it only runs for tools explicitly listed in `EFFECT_TOOLS` to avoid accidentally mocking read-only tools.
+- You can extend the dry-run functionality by tailored prompts - for example, by creating a prompt named `dryrun_<tool_name>` to control the mock output for a specific tool. It will choose the prompt in the following order:
+  1. `dryrun_<tool_name>`
+  2. `dryrun_default`
+  3. fallback built-in prompt that asks for a reasonable mock response.
+- Because dry-run uses an LLM, it can incur costs and introduce latency; use it for testing, previews or UI previews rather than high-volume production traffic.
+
+
+
 ## User and Group Management
 
 ### How it works
