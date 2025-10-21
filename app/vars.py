@@ -6,6 +6,9 @@ SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
+# Tools that are modifying or notifying or similar
+EFFECT_TOOLS = [t for t in os.environ.get("EFFECT_TOOLS", "").split(",") if t]
+
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", os.environ.get("TGI_MODEL_NAME", ""))
 OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
 HOST = os.environ.get("HOSTNAME", "")

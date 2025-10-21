@@ -184,6 +184,7 @@ volumes:
 | `TOKEN_NAME`              | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
 | `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
 | `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
+| `EFFECT_TOOLS`            | Comma-separated list of tool name patterns that modify data or have side effects | ""          |
 | `LLM_MAX_PAYLOAD_BYTES`   | Maximum serialized payload size sent to the backing LLM; large histories are compacted or truncated to stay below this limit | 120000                |
 | `MCP_REMOTE_SERVER`       | HTTPS endpoint of a remote MCP server (enables remote mode) | ""                   |
 | `MCP_REMOTE_SCOPE`        | OAuth scope to request when exchanging tokens              | ""                     |
