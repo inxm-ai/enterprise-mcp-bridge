@@ -339,16 +339,20 @@ async def run_tool(
             start_message=f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
             extra_attrs={"tool.name": tool_name},
         ):
-            if (
-                x_inxm_dry_run
-                and x_inxm_dry_run.lower() == "true"
-                and tool_name in EFFECT_TOOLS
-            ):
-                result = get_tool_dry_run_response(tool_name, args or {})
-            else:
-                async with mcp_session_context(
-                    sessions, x_inxm_mcp_session, access_token, group
-                ) as session:
+            async with mcp_session_context(
+                sessions, x_inxm_mcp_session, access_token, group
+            ) as session:
+                if (
+                    x_inxm_dry_run
+                    and x_inxm_dry_run.lower() == "true"
+                    and tool_name in EFFECT_TOOLS
+                ):
+                    tools = await session.list_tools()
+                    tool = next(
+                        (tool for tool in tools if tool.get("name") == tool_name), None
+                    )
+                    result = get_tool_dry_run_response(tool, args or {})
+                else:
                     result = await session.call_tool(tool_name, args, access_token)
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
