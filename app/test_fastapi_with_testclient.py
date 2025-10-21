@@ -128,3 +128,8 @@ def test_start_session_with_invalid_token(test_client):
 def test_call_list_resources(test_client):
     suite = FastAPIWrapper(test_client)
     suite.test_call_list_resources()
+
+
+def test_dry_run_uses_get_tool_dry_run_response(monkeypatch, test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_dry_run_uses_get_tool_dry_run_response(monkeypatch)

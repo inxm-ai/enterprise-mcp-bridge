@@ -1,6 +1,6 @@
 import logging
 import io
-from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
+from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query
 from fastapi.responses import (
     JSONResponse,
@@ -11,6 +11,7 @@ from fastapi.responses import (
 from typing import Optional, Dict
 import uuid
 import os
+import asyncio
 
 from app.utils.traced_requests import traced_request
 from app.session import (
@@ -29,6 +30,7 @@ from .utils.exception_logging import (
     log_exception_with_details,
 )
 from .tgi.routes import router as tgi_router
+from .tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 from app.well_known.agent import router as agent_router
 
 router = APIRouter()
@@ -311,6 +313,7 @@ async def run_tool(
     tool_name: str,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    x_inxm_dry_run: Optional[str] = Header(None, alias="X-Inxm-Dry-Run"),
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
@@ -340,7 +343,25 @@ async def run_tool(
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group
             ) as session:
-                result = await session.call_tool(tool_name, args, access_token)
+                if (
+                    x_inxm_dry_run
+                    and x_inxm_dry_run.lower() == "true"
+                    and tool_name in EFFECT_TOOLS
+                ):
+                    tools = await session.list_tools()
+                    tool = next(
+                        (tool for tool in tools if tool.get("name") == tool_name), None
+                    )
+                    # get_tool_dry_run_response is async; but tests and other
+                    # callsites may patch it with a sync function. Support both
+                    # by detecting coroutine returns and awaiting when needed.
+                    maybe_result = get_tool_dry_run_response(session, tool, args or {})
+                    if asyncio.iscoroutine(maybe_result):
+                        result = await maybe_result
+                    else:
+                        result = maybe_result
+                else:
+                    result = await session.call_tool(tool_name, args, access_token)
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
         if result.isError:
