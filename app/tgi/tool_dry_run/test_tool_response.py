@@ -5,15 +5,16 @@ from app.tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 session = None  # Placeholder for MCPSessionBase
 
 
-def test_throws_if_tgi_url_unset(monkeypatch):
+@pytest.mark.asyncio
+async def test_throws_if_tgi_url_unset(monkeypatch):
     # ensure TGI_URL is not set in the environment
     monkeypatch.delenv("TGI_URL", raising=False)
-
     with pytest.raises(ValueError, match="TGI_URL environment variable is not set"):
-        get_tool_dry_run_response(session, "some_tool", {})
+        await get_tool_dry_run_response(session, "some_tool", {})
 
 
-def test_raises_on_invalid_tool_input(monkeypatch):
+@pytest.mark.asyncio
+async def test_raises_on_invalid_tool_input(monkeypatch):
     # set TGI_URL so the function proceeds to schema validation
     monkeypatch.setenv("TGI_URL", "http://example")
 
@@ -27,11 +28,18 @@ def test_raises_on_invalid_tool_input(monkeypatch):
 
     invalid_input = {}
 
-    with pytest.raises(ValidationError):
-        get_tool_dry_run_response(session, tool, invalid_input)
+    result = await get_tool_dry_run_response(session, tool, invalid_input)
+    assert result is not None
+    assert getattr(result, "isError", None) is True
+    assert isinstance(result.content, list)
+    assert (
+        "Failed to validate input against schema: 'name' is a required property"
+        in result.content[0].text
+    )
 
 
-def test_accepts_valid_tool_input(monkeypatch):
+@pytest.mark.asyncio
+async def test_accepts_valid_tool_input(monkeypatch):
     # set TGI_URL so the function proceeds to schema validation
     monkeypatch.setenv("TGI_URL", "http://example")
 
@@ -52,8 +60,14 @@ def test_accepts_valid_tool_input(monkeypatch):
     monkeypatch.setattr("app.tgi.tool_dry_run.tool_response.LLMClient", DummyLLMClient)
     MockPromptService.returns = {}
 
-    # Should not raise, and current implementation returns None
-    assert get_tool_dry_run_response(session, tool, valid_input) is None
+    # Should not raise, and current implementation returns an MCP-style result
+    result = await get_tool_dry_run_response(session, tool, valid_input)
+    assert result is not None
+    assert getattr(result, "isError", None) is False
+    # Since no outputSchema was provided, the aggregated stream should be
+    # available under content[0].text
+    assert isinstance(result.content, list)
+    assert "chunk" in result.content[0].text
 
 
 class DummyLLMClient:
@@ -71,7 +85,16 @@ class DummyLLMClient:
         # record that it was called and capture the request object
         self.stream_called = True
         self.last_request = request
-        return self.stream_return
+
+        stream_source = self.stream_return
+        if not hasattr(self.stream_return, "__aiter__"):
+            # Wrap sync iterable into async generator
+            async def _wrap_sync_iter(iterable):
+                for item in iterable:
+                    yield item
+
+            stream_source = _wrap_sync_iter(self.stream_return)
+        return stream_source
 
 
 class MockPromptService:
@@ -84,7 +107,8 @@ class MockPromptService:
         MockPromptService.last_instance = self
         self.calls = []
 
-    def find_prompt_by_name_or_role(self, session_arg, prompt_name=None):
+    async def find_prompt_by_name_or_role(self, session_arg, prompt_name=None):
+        # Async version to match the real PromptService API
         self.calls.append((session_arg, prompt_name))
         return MockPromptService.returns.get(prompt_name)
 
@@ -105,7 +129,8 @@ def _make_tool():
     }
 
 
-def test_uses_specific_prompt_when_available(monkeypatch):
+@pytest.mark.asyncio
+async def test_uses_specific_prompt_when_available(monkeypatch):
     monkeypatch.setenv("TGI_URL", "http://example")
 
     # Patch PromptService and LLMClient used inside the module under test
@@ -121,7 +146,7 @@ def test_uses_specific_prompt_when_available(monkeypatch):
     valid_input = {"foo": "bar"}
 
     # Call under test
-    get_tool_dry_run_response(session, tool, valid_input)
+    result = await get_tool_dry_run_response(session, tool, valid_input)
 
     # Assertions
     client = DummyLLMClient.created_instance
@@ -135,7 +160,8 @@ def test_uses_specific_prompt_when_available(monkeypatch):
     assert MockPromptService.last_instance.calls[0][1] == "dryrun_mytool"
 
 
-def test_uses_default_prompt_when_specific_missing(monkeypatch):
+@pytest.mark.asyncio
+async def test_uses_default_prompt_when_specific_missing(monkeypatch):
     monkeypatch.setenv("TGI_URL", "http://example")
     monkeypatch.setattr(
         "app.tgi.tool_dry_run.tool_response.PromptService", MockPromptService
@@ -148,7 +174,7 @@ def test_uses_default_prompt_when_specific_missing(monkeypatch):
     tool = _make_tool()
     valid_input = {"foo": "bar"}
 
-    get_tool_dry_run_response(session, tool, valid_input)
+    result = await get_tool_dry_run_response(session, tool, valid_input)
 
     client = DummyLLMClient.created_instance
     assert client is not None and client.stream_called
@@ -158,7 +184,8 @@ def test_uses_default_prompt_when_specific_missing(monkeypatch):
     assert client.last_request.messages[0].content == "Default prompt content"
 
 
-def test_uses_hardcoded_prompt_when_none_available(monkeypatch):
+@pytest.mark.asyncio
+async def test_uses_hardcoded_prompt_when_none_available(monkeypatch):
     monkeypatch.setenv("TGI_URL", "http://example")
     monkeypatch.setattr(
         "app.tgi.tool_dry_run.tool_response.PromptService", MockPromptService
@@ -171,7 +198,7 @@ def test_uses_hardcoded_prompt_when_none_available(monkeypatch):
     tool = _make_tool()
     valid_input = {"foo": "bar"}
 
-    get_tool_dry_run_response(session, tool, valid_input)
+    result = await get_tool_dry_run_response(session, tool, valid_input)
 
     client = DummyLLMClient.created_instance
     assert client is not None and client.stream_called

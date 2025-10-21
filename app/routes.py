@@ -11,6 +11,7 @@ from fastapi.responses import (
 from typing import Optional, Dict
 import uuid
 import os
+import asyncio
 
 from app.utils.traced_requests import traced_request
 from app.session import (
@@ -351,7 +352,14 @@ async def run_tool(
                     tool = next(
                         (tool for tool in tools if tool.get("name") == tool_name), None
                     )
-                    result = get_tool_dry_run_response(session, tool, args or {})
+                    # get_tool_dry_run_response is async; but tests and other
+                    # callsites may patch it with a sync function. Support both
+                    # by detecting coroutine returns and awaiting when needed.
+                    maybe_result = get_tool_dry_run_response(session, tool, args or {})
+                    if asyncio.iscoroutine(maybe_result):
+                        result = await maybe_result
+                    else:
+                        result = maybe_result
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
