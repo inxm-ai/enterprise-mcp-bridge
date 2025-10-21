@@ -336,8 +336,11 @@ class FastAPIWrapper:
 
         called = []
 
-        def fake_get_tool_dry_run_response(tool_name, tool_input):
-            called.append((tool_name, tool_input))
+        def fake_get_tool_dry_run_response(session, tool, tool_input):
+            # New get_tool_dry_run_response signature includes session, so
+            # extract the tool name for compatibility with older test expectations.
+            tname = tool.get("name") if isinstance(tool, dict) else tool
+            called.append((tname, tool_input))
             r = SimpleNamespace()
             r.isError = False
             r.structuredContent = {"result": "dry-run"}

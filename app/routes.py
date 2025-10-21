@@ -351,7 +351,7 @@ async def run_tool(
                     tool = next(
                         (tool for tool in tools if tool.get("name") == tool_name), None
                     )
-                    result = get_tool_dry_run_response(tool, args or {})
+                    result = get_tool_dry_run_response(session, tool, args or {})
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
