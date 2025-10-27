@@ -108,10 +108,36 @@ export MCP_REMOTE_CLIENT_SECRET="change-me"
 # Set any additional MCP env vars here:
 # export MCP_ENV_API_KEY="supersecret"
 
-# Set any additional MCP Header vars here:
+# Set any additional MCP Header vars here (static headers from environment):
 # export MCP_REMOTE_HEADER_X_CUSTOM="custom-value"
 
+# Configure which incoming request headers to forward to the remote MCP server:
+# export MCP_REMOTE_SERVER_FORWARD_HEADERS="X-Request-ID,X-Correlation-ID,User-Agent"
+
 uvicorn app.server:app --host 0.0.0.0 --port 8000
+```
+
+Authentication hierarchy:
+1. Exchange the incoming OAuth token using `TokenRetrieverFactory` (if configured).
+2. Use `MCP_REMOTE_BEARER_TOKEN` when it is provided.
+3. Anonymous requests first use `MCP_REMOTE_ANON_BEARER_TOKEN` (if set).
+4. Fall back to forwarding the caller's token.
+
+#### Header Forwarding
+When connecting to a remote MCP server, you can configure the bridge to forward specific headers from incoming requests:
+
+- **`MCP_REMOTE_HEADER_*`**: Set static headers from environment variables (e.g., `MCP_REMOTE_HEADER_X_API_KEY="secret123"`)
+- **`MCP_REMOTE_SERVER_FORWARD_HEADERS`**: Comma-separated list of incoming request header names to forward (e.g., `"X-Request-ID,X-Correlation-ID,User-Agent"`)
+
+Header forwarding is case-insensitive and only forwards headers that are explicitly configured. This is useful for:
+- Propagating request IDs and correlation IDs for distributed tracing
+- Forwarding user-agent information for analytics
+- Passing through custom application headers
+
+Example:
+```bash
+export MCP_REMOTE_SERVER_FORWARD_HEADERS="X-Request-ID,X-Correlation-ID"
+```
 ```
 
 Authentication hierarchy:
@@ -193,7 +219,8 @@ volumes:
 | `MCP_REMOTE_CLIENT_SECRET`| Client secret for the remote OAuth client (if required)    | ""                     |
 | `MCP_REMOTE_BEARER_TOKEN` | Static bearer token to send if OAuth negotiation is skipped | ""                    |
 | `MCP_REMOTE_ANON_BEARER_TOKEN` | Static bearer token used for anonymous remote calls (e.g., agent card generation) | "" |
-| `MCP_REMOTE_HEADER_*`     | Any additional headers to send to the remote MCP server   |                        |
+| `MCP_REMOTE_HEADER_*`     | Any additional static headers to send to the remote MCP server (e.g., `MCP_REMOTE_HEADER_X_API_KEY`) |                        |
+| `MCP_REMOTE_SERVER_FORWARD_HEADERS` | Comma-separated list of incoming request header names to forward to remote MCP server | "" |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |

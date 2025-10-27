@@ -93,6 +93,7 @@ async def mcp_session_context(
     x_inxm_mcp_session: Optional[str],
     access_token: Optional[str],
     group: Optional[str],
+    incoming_headers: Optional[dict[str, str]] = None,
 ):
     """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes."""
     # Sessionless path: validate group access (if present) and open a transient MCP session
@@ -107,7 +108,9 @@ async def mcp_session_context(
 
         try:
             async with mcp_session(
-                access_token=access_token, requested_group=group
+                access_token=access_token,
+                requested_group=group,
+                incoming_headers=incoming_headers,
             ) as session:
 
                 class SessionDelegate:

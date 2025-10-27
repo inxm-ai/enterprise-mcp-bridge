@@ -86,11 +86,13 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         access_token: Optional[str],
         requested_group: Optional[str],
         anon: bool,
+        incoming_headers: Optional[dict[str, str]] = None,
     ) -> None:
         self.url = url
         self.access_token = access_token
         self.requested_group = requested_group
         self.anon = anon
+        self.incoming_headers = incoming_headers or {}
         self.headers: dict[str, str] = {}
         self._auth_provider: Optional[OAuthClientProvider] = None
         self._token_storage: Optional[_EphemeralTokenStorage] = None
@@ -128,6 +130,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             )
             self._prepare_fallback_headers(anon=True)
             self._add_env_headers()
+            self._forward_allowed_headers()
             return
 
         token_value: Optional[str] = None
@@ -185,6 +188,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             self._prepare_fallback_headers()
 
         self._add_env_headers()
+        self._forward_allowed_headers()
 
     def _add_env_headers(self) -> None:
         for key, value in os.environ.items():
@@ -195,6 +199,20 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     logger.info(
                         f"[RemoteMCP] Adding custom header from environment: {header_name}"
                     )
+
+    def _forward_allowed_headers(self) -> None:
+        """Forward allowed incoming headers to the remote MCP server."""
+        from app.vars import MCP_REMOTE_SERVER_FORWARD_HEADERS
+
+        for header_name in MCP_REMOTE_SERVER_FORWARD_HEADERS:
+            # Case-insensitive header lookup
+            for key, value in self.incoming_headers.items():
+                if key.lower() == header_name.lower() and value:
+                    self.headers[header_name] = value
+                    logger.info(
+                        f"[RemoteMCP] Forwarding incoming header: {header_name}"
+                    )
+                    break
 
     def _prepare_fallback_headers(self, *, anon: bool = False) -> None:
         if (
@@ -253,6 +271,7 @@ def build_mcp_client_strategy(
     access_token: Optional[str],
     requested_group: Optional[str],
     anon: bool = False,
+    incoming_headers: Optional[dict[str, str]] = None,
 ) -> MCPClientStrategy:
     remote_server = (MCP_REMOTE_SERVER or "").strip()
     if remote_server:
@@ -270,6 +289,7 @@ def build_mcp_client_strategy(
             access_token=access_token,
             requested_group=requested_group,
             anon=anon,
+            incoming_headers=incoming_headers,
         )
 
     server_params = get_server_params(

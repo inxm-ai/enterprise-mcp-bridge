@@ -44,6 +44,7 @@ async def mcp_session(
     access_token: Optional[str] = None,
     requested_group: Optional[str] = None,
     anon: bool = False,
+    incoming_headers: Optional[dict[str, str]] = None,
 ):
     if isinstance(strategy_or_params, MCPClientStrategy):
         strategy = strategy_or_params
@@ -54,6 +55,7 @@ async def mcp_session(
             access_token=access_token,
             requested_group=requested_group,
             anon=anon,
+            incoming_headers=incoming_headers,
         )
     else:  # pragma: no cover - defensive branch
         raise TypeError("Unsupported strategy configuration for mcp_session")

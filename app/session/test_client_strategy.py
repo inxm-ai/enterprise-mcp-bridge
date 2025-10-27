@@ -203,3 +203,109 @@ async def test_local_strategy_session(monkeypatch):
         "anon": False,
     }
     assert isinstance(captured["params"], StdioServerParameters)
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_forwards_allowed_headers(monkeypatch):
+    """Test that RemoteMCPClientStrategy forwards headers configured in MCP_REMOTE_SERVER_FORWARD_HEADERS."""
+    captured = {"stream_headers": None}
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None):
+        captured["stream_headers"] = headers
+        yield object(), object(), lambda: "remote-session-id"
+
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    # Mock the vars module to set MCP_REMOTE_SERVER_FORWARD_HEADERS
+    import app.vars as vars_module
+
+    monkeypatch.setattr(
+        vars_module,
+        "MCP_REMOTE_SERVER_FORWARD_HEADERS",
+        ["X-Request-ID", "X-Correlation-ID"],
+    )
+
+    # Create incoming headers
+    incoming_headers = {
+        "X-Request-ID": "req-123",
+        "X-Correlation-ID": "corr-456",
+        "Authorization": "Bearer user-token",  # Should not be forwarded (not in allow list)
+        "User-Agent": "test-agent",  # Should not be forwarded (not in allow list)
+    }
+
+    strategy = client_strategy.RemoteMCPClientStrategy(
+        "https://remote.example",
+        access_token=None,
+        requested_group=None,
+        anon=False,
+        incoming_headers=incoming_headers,
+    )
+
+    async with strategy.session() as session:
+        assert isinstance(session, DummyClientSession)
+        assert session.initialized is True
+
+    # Check that only allowed headers were forwarded
+    assert captured["stream_headers"] is not None
+    assert "X-Request-ID" in captured["stream_headers"]
+    assert captured["stream_headers"]["X-Request-ID"] == "req-123"
+    assert "X-Correlation-ID" in captured["stream_headers"]
+    assert captured["stream_headers"]["X-Correlation-ID"] == "corr-456"
+    # Authorization header is NOT in the headers dict because it's handled via OAuth provider
+    # User-Agent should not be forwarded (not in allow list)
+    assert "User-Agent" not in captured["stream_headers"]
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_headers_case_insensitive(monkeypatch):
+    """Test that header forwarding is case-insensitive."""
+    captured = {"stream_headers": None}
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None):
+        captured["stream_headers"] = headers
+        yield object(), object(), lambda: "remote-session-id"
+
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    import app.vars as vars_module
+
+    monkeypatch.setattr(
+        vars_module,
+        "MCP_REMOTE_SERVER_FORWARD_HEADERS",
+        ["x-request-id"],  # lowercase in config
+    )
+
+    # Incoming headers with different case
+    incoming_headers = {
+        "X-Request-ID": "req-789",  # Different case
+    }
+
+    strategy = client_strategy.RemoteMCPClientStrategy(
+        "https://remote.example",
+        access_token=None,
+        requested_group=None,
+        anon=False,
+        incoming_headers=incoming_headers,
+    )
+
+    async with strategy.session() as session:
+        assert isinstance(session, DummyClientSession)
+
+    # Should match case-insensitively and forward
+    assert captured["stream_headers"] is not None
+    assert "x-request-id" in captured["stream_headers"]
+    assert captured["stream_headers"]["x-request-id"] == "req-789"

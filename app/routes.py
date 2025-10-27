@@ -1,7 +1,7 @@
 import logging
 import io
 from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
-from fastapi import APIRouter, HTTPException, Header, Cookie, Query
+from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
@@ -47,8 +47,14 @@ else:
     logger.info("No MCP_BASE_PATH set, using root path")
 
 
+def _extract_request_headers(request: Request) -> dict[str, str]:
+    """Extract headers from the incoming request as a dictionary."""
+    return dict(request.headers)
+
+
 @router.get("/resources")
 async def list_resources(
+    request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -61,6 +67,7 @@ async def list_resources(
             try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
             access_token,
         )
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer,
             operation="list_resources",
@@ -69,7 +76,7 @@ async def list_resources(
             start_message=f"[Resources] Listing resources. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_resources()
                 logger.debug(
@@ -95,6 +102,7 @@ async def list_resources(
 @router.get("/resources/{resource_name}")
 async def get_resource_details(
     resource_name: str,
+    request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -107,6 +115,7 @@ async def get_resource_details(
             try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
             access_token,
         )
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer,
             operation="get_resource_details",
@@ -115,7 +124,7 @@ async def get_resource_details(
             start_message=f"[Resource-Details] Getting resource details. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_resources()
                 # find the resource with the given name
@@ -176,6 +185,7 @@ async def get_resource_details(
 
 @router.get("/prompts")
 async def list_prompts(
+    request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -188,6 +198,7 @@ async def list_prompts(
             try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
             access_token,
         )
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer,
             operation="list_prompts",
@@ -196,7 +207,7 @@ async def list_prompts(
             start_message=f"[Prompts] Listing prompts. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_prompts()
                 logger.debug(
@@ -221,6 +232,7 @@ async def list_prompts(
 
 @router.get("/tools")
 async def list_tools(
+    request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -233,6 +245,7 @@ async def list_tools(
             try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
             access_token,
         )
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer,
             operation="list_tools",
@@ -241,7 +254,7 @@ async def list_tools(
             start_message=f"[Tools] Listing tools. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_tools()
                 logger.debug(
@@ -259,6 +272,7 @@ async def list_tools(
 @router.get("/tools/{tool_name}")
 async def get_tool_details(
     tool_name: str,
+    request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -271,6 +285,7 @@ async def get_tool_details(
             try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
             access_token,
         )
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer,
             operation="get_tool_details",
@@ -279,7 +294,7 @@ async def get_tool_details(
             start_message=f"[Tool-Details] Getting tool details. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_tools()
                 # find the tool with the given name
@@ -311,6 +326,7 @@ async def get_tool_details(
 @router.post("/tools/{tool_name}")
 async def run_tool(
     tool_name: str,
+    request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     x_inxm_dry_run: Optional[str] = Header(None, alias="X-Inxm-Dry-Run"),
@@ -332,6 +348,7 @@ async def run_tool(
         if args and "inxm-session" in args:
             args = dict(args)
             args.pop("inxm-session")
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer=tracer,
             operation="run_tool",
@@ -341,7 +358,7 @@ async def run_tool(
             extra_attrs={"tool.name": tool_name},
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 if (
                     x_inxm_dry_run
@@ -394,6 +411,7 @@ async def run_tool(
 @router.post("/prompts/{prompt_name}")
 async def run_prompt(
     prompt_name: str,
+    request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
@@ -414,6 +432,7 @@ async def run_prompt(
         if args and "inxm-session" in args:
             args = dict(args)
             args.pop("inxm-session")
+        incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer=tracer,
             operation="run_prompt",
@@ -423,7 +442,7 @@ async def run_prompt(
             extra_attrs={"prompt.name": prompt_name},
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.call_prompt(prompt_name, args)
 
