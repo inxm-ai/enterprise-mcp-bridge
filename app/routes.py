@@ -31,6 +31,7 @@ from .utils.exception_logging import (
 )
 from .tgi.routes import router as tgi_router
 from .tgi.tool_dry_run.tool_response import get_tool_dry_run_response
+from .app_proxy.route import router as app_proxy_router
 from app.well_known.agent import router as agent_router
 
 router = APIRouter()
@@ -608,3 +609,6 @@ router.include_router(tgi_router)
 
 # Include well-known agent router
 router.include_router(agent_router)
+
+# Include app proxy router
+router.include_router(app_proxy_router)

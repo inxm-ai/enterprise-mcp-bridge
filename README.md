@@ -464,3 +464,141 @@ To list all available resources, send a `GET` request to `/resources`.
 To retrieve details about a specific resource, send a `GET` request to `/resources/{resource_name}`.
 
 Resources can have different MIME types, such as `text/plain`, `text/html`, or `application/json`. The server will return the appropriate content type based on the resource's MIME type, and render it accordingly. Thus, it allows you to directly serve HTML content or plain text as needed.
+
+## Generic Web Application Proxy
+
+The bridge includes a production-ready reverse proxy at `/app/*` that can forward requests to any web application. This enables you to:
+
+- Run a web application on top of your MCP, and to for instance host dashboards, notebooks, or other UIs behind the same authentication layer as your MCP server.
+- Provide a unified entry point for multiple services
+- Handle HTTPS termination and header forwarding transparently
+- Automatically rewrite URLs in HTML, CSS, JavaScript, and JSON responses
+
+### Configuration
+
+Set the following environment variables to enable the proxy:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TARGET_SERVER_URL` | Yes | - | Backend server URL to proxy to (e.g., `http://internal-app:8080`) |
+| `PROXY_PREFIX` | No | `${MCP_BASE_PATH}/app` | URL prefix for proxy endpoints |
+| `PUBLIC_URL` | No | (auto-detected) | Public-facing URL for redirect rewriting |
+| `PROXY_TIMEOUT` | No | `300` | Request timeout in seconds |
+| `REWRITE_HTML_URLS` | No | `true` | Enable URL rewriting in HTML content |
+| `REWRITE_JSON_URLS` | No | `true` | Enable URL rewriting in JSON responses |
+| `REWRITE_CSS_URLS` | No | `true` | Enable URL rewriting in CSS files |
+| `REWRITE_JS_URLS` | No | `true` | Enable URL rewriting in JavaScript files |
+
+### Features
+
+**Header Management**
+- Automatically adds `X-Forwarded-*` headers (For, Host, Proto, Prefix)
+- Removes hop-by-hop headers that shouldn't be forwarded
+- Preserves all custom headers from clients
+
+**URL Rewriting**
+- Rewrites absolute and relative URLs in HTML (`href`, `src` attributes)
+- Rewrites `url()` functions and `@import` statements in CSS
+- Rewrites URL strings in JavaScript code
+- Rewrites URLs in JSON API responses
+- Prevents double-prefixing when URLs are already rewritten
+
+**Cookie & Redirect Handling**
+- Automatically adjusts cookie paths to match the proxy prefix
+- Rewrites `Location` headers in redirects to point to the proxy
+- Preserves all cookie attributes (HttpOnly, Secure, etc.)
+
+**Performance & Security**
+- Streams large responses for memory efficiency
+- Buffers only text content that needs URL rewriting
+- Handles compression (gzip, deflate) transparently
+- Proper error handling with appropriate HTTP status codes
+
+### Usage Examples
+
+**Basic proxying**
+```bash
+export TARGET_SERVER_URL="http://internal-dashboard:3000"
+export PROXY_PREFIX="/apps/dashboard"
+export PUBLIC_URL="https://portal.example.com"
+uvicorn app.server:app --host 0.0.0.0 --port 8000
+```
+
+Users can then access the dashboard at: `https://portal.example.com/apps/dashboard`
+
+**Multiple applications**
+Run multiple bridge instances with different prefixes to host multiple apps:
+
+```yaml
+# Application 1 - Grafana
+- name: grafana-proxy
+  env:
+    - name: TARGET_SERVER_URL
+      value: "http://grafana:3000"
+    - name: PROXY_PREFIX
+      value: "/apps/grafana"
+
+# Application 2 - Jupyter
+- name: jupyter-proxy
+  env:
+    - name: TARGET_SERVER_URL
+      value: "http://jupyter:8888"
+    - name: PROXY_PREFIX
+      value: "/apps/jupyter"
+```
+
+**Disable URL rewriting for specific content types**
+```bash
+# If your app handles paths correctly via X-Forwarded-Prefix
+export REWRITE_JS_URLS="false"
+export REWRITE_CSS_URLS="false"
+```
+
+### How It Works
+
+1. **Request arrives** at `/apps/myapp/resource`
+2. **Headers prepared**: Adds X-Forwarded-* headers, removes hop-by-hop headers
+3. **URL translated**: `/apps/myapp/resource` → `http://target/resource`
+4. **Request forwarded** to target server
+5. **Response processed**: Rewrites Location, Set-Cookie, and content URLs as needed
+6. **Response streamed** back to client
+
+### Common Use Cases
+
+**Hosting applications behind authentication**
+```bash
+export TARGET_SERVER_URL="http://grafana:3000"
+export PROXY_PREFIX="/monitoring/grafana"
+# Users authenticate to the bridge, then access Grafana seamlessly
+```
+
+**Development/staging environments**
+```bash
+export TARGET_SERVER_URL="http://localhost:3000"
+export PROXY_PREFIX="/dev"
+# Access local dev server through the proxy for testing
+```
+
+**HTTPS termination**
+The proxy handles HTTPS termination automatically:
+```
+[Client HTTPS] → [Bridge HTTPS] → [HTTP] → [Target App HTTP]
+```
+
+The target app receives `X-Forwarded-Proto: https` to generate correct URLs.
+
+### Troubleshooting
+
+**Assets returning 404**
+- Ensure URL rewriting is enabled for the content type
+- Check that `PROXY_PREFIX` matches your ingress configuration
+
+**Redirects pointing to internal URLs**
+- Set `PUBLIC_URL` to your public-facing domain
+- Verify the target app isn't hardcoding absolute URLs
+
+**Cookies not persisting**
+- Verify `PROXY_PREFIX` is set correctly
+- Check that cookie domains don't conflict with your setup
+
+For more details, see [`app/app_proxy/README.md`](app/app_proxy/README.md).
