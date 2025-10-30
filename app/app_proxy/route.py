@@ -269,6 +269,38 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
     if REWRITE_JS_URLS and (
         "javascript" in content_type or "application/json" in content_type
     ):
+        # Rewrite webpack public path variables (critical for Next.js chunk loading)
+        # Handles both full and minified webpack code: __webpack_require__.p or r.p or e.p
+        # Patterns like: r.p = "/_next/" or __webpack_require__.p = "/"
+        if proxy_prefix_pattern:
+            # Rewrite any variable.p assignments (catches minified webpack: r.p, e.p, etc.)
+            # Matches: someVar.p = "/" or someVar.p = "/_next/"
+            text = re.sub(
+                f"(\\b\\w+\\.p\\s*=\\s*[\"'])(?!{proxy_prefix_pattern})(/[^\"']*?)([\"'])",
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
+            # Rewrite webpack chunk URL functions like: return "/" + chunkId + ".js"
+            # or: __webpack_require__.u = function(chunkId) { return "/_next/static/..." }
+            text = re.sub(
+                f"(return\\s+[\"'])(?!{proxy_prefix_pattern})(/[^\"']+?)([\"'])",
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
+        else:
+            # Without proxy_prefix_pattern - match any .p assignments
+            text = re.sub(
+                r'(\b\w+\.p\s*=\s*["\'])(/[^"\']*?)(["\'"])',
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
+            # Rewrite webpack chunk URL return statements
+            text = re.sub(
+                r'(return\s+["\'])(/[^"\']+?)(["\'"])',
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
+
         # Rewrite absolute URLs in strings (both single and double quotes)
         text = re.sub(
             f"([\"'])({target_pattern})(/[^\"']+)([\"'])",
@@ -280,12 +312,25 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
         # and is not already prefixed
         if proxy_prefix_pattern:
             # Match paths but not already prefixed ones
+            # Enhanced pattern to better handle Next.js _next paths and webpack chunks
+            text = re.sub(
+                f"([\"'])(?!{proxy_prefix_pattern})(/(?:_next|static|api|v\\d+)/[^\"']+)([\"'])",
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
+            # Also match general file paths with extensions
             text = re.sub(
                 f"([\"'])(?!{proxy_prefix_pattern})(/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*(?:\\.[a-zA-Z0-9]+)?)([\"'])",
                 f"\\1{PROXY_PREFIX}\\2\\3",
                 text,
             )
         else:
+            # Without proxy_prefix_pattern, match Next.js paths and general file paths
+            text = re.sub(
+                r'(["\'])(/(?:_next|static|api|v\d+)/[^"\']+)(["\'])',
+                f"\\1{PROXY_PREFIX}\\2\\3",
+                text,
+            )
             text = re.sub(
                 r'(["\'](/(?:[a-zA-Z0-9_.-]+/)*[a-zA-Z0-9_.-]*\.[a-zA-Z0-9]+)["\'])',
                 lambda m: (
