@@ -385,6 +385,30 @@ class TestRewriteContentUrls:
         # Ensure no double slashes (e.g., /prefix//_next)
         assert f"{PROXY_PREFIX}//_next" not in result_str
 
+    def test_html_no_double_prefix(self):
+        """Test that URLs already containing the proxy prefix are not rewritten again."""
+        html = f"""
+        <html>
+            <a href="{PROXY_PREFIX}/dashboard">Already prefixed</a>
+            <a href="/api/auth">Not prefixed</a>
+            <script src="{PROXY_PREFIX}/_next/static/chunks/main.js"></script>
+        </html>
+        """
+
+        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+            result = rewrite_content_urls(html.encode("utf-8"), "text/html")
+            result_str = result.decode("utf-8")
+
+        # URLs already containing the prefix should not be rewritten
+        assert f'href="{PROXY_PREFIX}/dashboard"' in result_str
+        assert f'src="{PROXY_PREFIX}/_next/static/chunks/main.js"' in result_str
+
+        # URLs not containing the prefix should be rewritten
+        assert f'href="{PROXY_PREFIX}/api/auth"' in result_str
+
+        # Ensure no double-prefixing occurred
+        assert f"{PROXY_PREFIX}{PROXY_PREFIX}" not in result_str
+
     def test_html_single_quotes(self):
         """Test rewriting URLs with single quotes in HTML."""
         html = f"<a href='{TEST_TARGET_SERVER_URL}/path'>Link</a>"

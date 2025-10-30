@@ -209,11 +209,9 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
             f"(href|src)='({target_pattern})(/[^']*)'", f"\\1='{PROXY_PREFIX}\\3'", text
         )
         # Rewrite root-relative URLs (href="/path") but NOT if already prefixed
+        # The negative lookahead ensures we don't rewrite URLs that already start with the prefix
         if proxy_prefix_pattern:
-            # Match: href="/" but not href="/api/mcp-timesheet-server/app..."
-            # The negative lookahead checks if after "/" we DON'T have the prefix
-            # Capture group 2: "/" and everything after except the prefix part
-            # Capture group 3: the path after the "/"
+            # Protect against double-prefixing by checking if URL already starts with prefix
             text = re.sub(
                 f'(href|src)="(?!{proxy_prefix_pattern})(/[^"]*)"',
                 f'\\1="{PROXY_PREFIX}\\2"',
