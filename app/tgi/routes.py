@@ -118,6 +118,7 @@ async def _handle_chat_completion(
     x_inxm_mcp_session: Optional[str],
     group: Optional[str],
     prompt: Optional[str],
+    incoming_headers: Optional[dict[str, str]] = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Handles the core logic for chat completions.
@@ -151,7 +152,11 @@ async def _handle_chat_completion(
         },
     ):
         async with mcp_session_context(
-            sessions, x_inxm_mcp_session, access_token, group
+            sessions,
+            x_inxm_mcp_session,
+            access_token,
+            group,
+            incoming_headers,
         ) as session:
             result = await tgi_service.chat_completion(
                 session, chat_request, access_token, prompt
@@ -192,6 +197,7 @@ async def chat_completions(
     """
     OpenAI-compatible chat completions endpoint with MCP integration.
     """
+    incoming_headers = dict(request.headers)
     try:
         # Validate required environment
         if not os.environ.get("TGI_URL", None):
@@ -222,6 +228,7 @@ async def chat_completions(
                     x_inxm_mcp_session,
                     group,
                     prompt,
+                    incoming_headers,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -234,7 +241,11 @@ async def chat_completions(
         else:
             # Non-streaming: call the service and return JSON as-is when possible
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
             ) as session:
                 result = await tgi_service.chat_completion(
                     session, chat_request, access_token, prompt
@@ -318,6 +329,8 @@ async def a2a_chat_completion(
             raw_body.get("stream") or (raw_body.get("params") or {}).get("stream")
         )
 
+    incoming_headers = dict(request.headers)
+
     try:
         if a2a_request.method != SERVICE_NAME:
             return JSONResponse(
@@ -365,6 +378,7 @@ async def a2a_chat_completion(
                     x_inxm_mcp_session,
                     group,
                     prompt,
+                    incoming_headers,
                 )
                 # Iterate the ChunkReader without using its async context manager
                 # so we can control when the underlying async generator is
@@ -412,6 +426,7 @@ async def a2a_chat_completion(
                 x_inxm_mcp_session,
                 group,
                 prompt,
+                incoming_headers,
             )
             full_response = await accumulate_content(stream_gen)
 

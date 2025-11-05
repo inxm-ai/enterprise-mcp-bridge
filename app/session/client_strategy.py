@@ -135,6 +135,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
         token_value: Optional[str] = None
         token_result: Optional[dict[str, object]] = None
+        authorization_value: Optional[str] = None
 
         if self.access_token:
             try:
@@ -164,11 +165,12 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 logger.info("[RemoteMCP] Falling back to incoming access token")
 
         if token_value:
+            token_type = (
+                token_result.get("token_type") if token_result else "Bearer"
+            ) or "Bearer"
             oauth_token = OAuthToken(
                 access_token=token_value,
-                token_type=(
-                    token_result.get("token_type") if token_result else "Bearer"
-                ),
+                token_type=token_type,
                 expires_in=(token_result.get("expires_in") if token_result else None),
                 scope=(token_result.get("scope") if token_result else None),
                 refresh_token=(
@@ -177,18 +179,20 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             )
             client_info = self._initial_client_info()
             self._token_storage = _EphemeralTokenStorage(oauth_token, client_info)
-            self._auth_provider = OAuthClientProvider(
-                server_url=self.url,
-                client_metadata=self._client_metadata,
-                storage=self._token_storage,
-                redirect_handler=self._redirect_handler,
-                callback_handler=self._callback_handler,
-            )
+            authorization_value = f"{token_type} {token_value}"
         else:
             self._prepare_fallback_headers()
 
         self._add_env_headers()
         self._forward_allowed_headers()
+        if authorization_value:
+            self.headers["Authorization"] = authorization_value
+            logger.info(
+                mask_token(
+                    "[RemoteMCP] Using provider token for Authorization header",
+                    token_value,
+                )
+            )
 
     def _add_env_headers(self) -> None:
         for key, value in os.environ.items():
@@ -203,6 +207,31 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
     def _forward_allowed_headers(self) -> None:
         """Forward allowed incoming headers to the remote MCP server."""
         from app.vars import MCP_REMOTE_SERVER_FORWARD_HEADERS
+
+        if not MCP_REMOTE_SERVER_FORWARD_HEADERS:
+            return
+
+        if any(h == "*" for h in MCP_REMOTE_SERVER_FORWARD_HEADERS):
+            ignored = {
+                "content-length",
+                "connection",
+                "host",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "transfer-encoding",
+                "upgrade",
+            }
+            for key, value in self.incoming_headers.items():
+                if not value:
+                    continue
+                if key.lower() in ignored:
+                    continue
+                self.headers[key] = value
+                logger.info(f"[RemoteMCP] Forwarding incoming header: {key}")
+            return
 
         for header_name in MCP_REMOTE_SERVER_FORWARD_HEADERS:
             # Case-insensitive header lookup

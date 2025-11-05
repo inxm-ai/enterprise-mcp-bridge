@@ -1,5 +1,6 @@
 import os
 import json
+from contextlib import asynccontextmanager
 import pytest
 from fastapi.testclient import TestClient
 
@@ -115,3 +116,49 @@ async def test_a2a_chat_completion_minimal_payload(monkeypatch):
     assert response_json["error"] is None
     assert response_json["id"] != "unknown"
     assert "Hello Minimal!" in response_json["result"]["completion"]
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_forwards_request_headers(monkeypatch):
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_mcp_context(
+        sessions, x_inxm_mcp_session, access_token, group, incoming_headers=None
+    ):
+        captured["incoming_headers"] = incoming_headers or {}
+
+        class DummySession:
+            pass
+
+        yield DummySession()
+
+    class MockService:
+        async def chat_completion(self, *args, **kwargs):
+            return {
+                "choices": [
+                    {"delta": {"content": "Hello Headers!"}, "index": 0},
+                ]
+            }
+
+    monkeypatch.setattr("app.tgi.routes.mcp_session_context", fake_mcp_context)
+    monkeypatch.setattr("app.tgi.routes.tgi_service", MockService())
+
+    headers = {
+        "X-Test-Header": "test-value",
+        "X-Auth-Request-User": "demo@example.com",
+    }
+    payload = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Say hello"}],
+        "stream": False,
+    }
+
+    response = client.post("/tgi/v1/chat/completions", json=payload, headers=headers)
+
+    assert response.status_code == 200
+    response_json = response.json()
+    assert "Hello Headers!" in response_json["choices"][0]["delta"]["content"]
+    forwarded = captured["incoming_headers"]
+    assert forwarded.get("x-test-header") == "test-value"
+    assert forwarded.get("x-auth-request-user") == "demo@example.com"
