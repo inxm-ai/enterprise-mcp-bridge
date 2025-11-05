@@ -221,6 +221,7 @@ volumes:
 | `MCP_REMOTE_ANON_BEARER_TOKEN` | Static bearer token used for anonymous remote calls (e.g., agent card generation) | "" |
 | `MCP_REMOTE_HEADER_*`     | Any additional static headers to send to the remote MCP server (e.g., `MCP_REMOTE_HEADER_X_API_KEY`) |                        |
 | `MCP_REMOTE_SERVER_FORWARD_HEADERS` | Comma-separated list of incoming request header names to forward to remote MCP server | "" |
+| `MCP_MAP_HEADER_TO_INPUT` | Comma-separated list of mappings from tool input property to incoming HTTP header name, in the form `input=Header-Name` (e.g. `userId=x-auth-user-id,email=x-auth-user-email`). Mapped input properties are removed from tool input schemas and will be automatically filled from headers at call time. | "" |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
@@ -372,6 +373,29 @@ Notes:
   3. fallback built-in prompt that asks for a reasonable mock response.
 - Because dry-run uses an LLM, it can incur costs and introduce latency; use it for testing, previews or UI previews rather than high-volume production traffic.
 
+#### Header → Input mapping (MCP_MAP_HEADER_TO_INPUT)
+
+You can configure the bridge to map HTTP request headers directly into tool input arguments. This is useful for passing authenticated user identifiers, emails, or other per-request metadata into tools without exposing them as required fields in the public tool schema.
+
+Format
+
+Set `MCP_MAP_HEADER_TO_INPUT` to a comma-separated list of `input=Header-Name` entries. Example:
+
+```bash
+export MCP_MAP_HEADER_TO_INPUT="userId=x-auth-user-id,email=x-auth-user-email"
+```
+
+Behavior
+
+- When tools are listed (`GET /tools`), any input properties that appear on the left-hand side of a mapping (e.g. `userId`) are removed from the returned `inputSchema`. This prevents those fields from being shown as required inputs to callers.
+- When a tool is invoked (`POST /tools/{tool}`), if the tool declares an input property that matches a mapping and that argument is not supplied in the request body, the bridge will fill the argument from the incoming HTTP header value (case-insensitive header name matching). Existing explicit arguments provided in the request body are not overwritten.
+- Mapping values are used as-is (string). If a header is missing the argument remains unset and normal validation applies.
+
+Notes
+
+- Mapping matches input properties exactly (no nested path support yet). If you need nested or more advanced mappings, I can extend this behavior.
+- Mapped headers are looked up case-insensitively.
+- Because mapped properties are removed from the schema, ensure that callers understand which inputs are supplied by the infrastructure vs. the client.
 
 
 ## User and Group Management

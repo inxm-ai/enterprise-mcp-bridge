@@ -217,7 +217,7 @@ class MCPLocalSessionTask(MCPSessionBase):
                             f"[MCPLocalSessionTask] Running tool: {tool_name} with args: {args}"
                         )
                         try:
-                            result = await session.call_tool(tool_name, **args)
+                            result = await session.call_tool(tool_name, args)
                             await self.response_queue.put(result)
                         except Exception as e:
                             # Handle TaskGroup exceptions with multiple sub-exceptions

@@ -58,3 +58,25 @@ MCP_REMOTE_SERVER_FORWARD_HEADERS = [
     for h in os.getenv("MCP_REMOTE_SERVER_FORWARD_HEADERS", "").split(",")
     if h.strip()
 ]
+
+
+def _parse_map_header_to_input(raw: str) -> dict:
+    mapping: dict = {}
+    if not raw:
+        return mapping
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            key, val = entry.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if key and val:
+                mapping[key] = val
+    return mapping
+
+
+MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
+    os.getenv("MCP_MAP_HEADER_TO_INPUT", "")
+)

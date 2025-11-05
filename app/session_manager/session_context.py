@@ -13,6 +13,7 @@ from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import get_data_access_manager
 from app.utils import mask_token
+from app.vars import MCP_MAP_HEADER_TO_INPUT
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -46,12 +47,32 @@ def map_tools(tools):
         if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
             continue
 
+        input_schema = tool.inputSchema if getattr(tool, "inputSchema", None) else {}
+        # make a shallow deepcopy to avoid mutating original tool objects
+        try:
+            import copy
+
+            input_schema_copy = copy.deepcopy(input_schema)
+        except Exception:
+            input_schema_copy = input_schema
+
+        if isinstance(input_schema_copy, dict) and input_schema_copy.get("properties"):
+            props = input_schema_copy.get("properties", {})
+            for input_prop in list(props.keys()):
+                if input_prop in MCP_MAP_HEADER_TO_INPUT:
+                    props.pop(input_prop, None)
+                    required = input_schema_copy.get("required")
+                    if isinstance(required, list) and input_prop in required:
+                        input_schema_copy["required"] = [r for r in required if r != input_prop]
+            if not input_schema_copy.get("properties"):
+                input_schema_copy = {}
+
         filtered_tools.append(
             {
                 "name": tool.name,
                 "title": tool.title,
                 "description": tool.description,
-                "inputSchema": tool.inputSchema,
+                "inputSchema": input_schema_copy,
                 "outputSchema": tool.outputSchema,
                 "annotations": tool.annotations,
                 "meta": tool.meta,
@@ -60,6 +81,59 @@ def map_tools(tools):
         )
 
     return filtered_tools
+
+
+def inject_headers_into_args(
+    tools, tool_name: str, args: Optional[Dict], incoming_headers: Optional[dict]
+) -> Dict:
+    """
+    Fill missing args for tool_name from incoming_headers according to
+    MCP_MAP_HEADER_TO_INPUT mapping. Header matching is case-insensitive.
+    """
+    if not MCP_MAP_HEADER_TO_INPUT or not incoming_headers:
+        return args or {}
+
+    # normalize incoming headers to lowercase keys for case-insensitive lookup
+    headers_lc = {k.lower(): v for k, v in (incoming_headers.items() if incoming_headers else [])}
+
+    # tools can be an object with .tools attribute or a list of tool-like dicts
+    tool_list = getattr(tools, "tools", tools) if tools is not None else []
+    tool_def = None
+    for t in tool_list:
+        name = None
+        if hasattr(t, "name"):
+            name = getattr(t, "name")
+        elif isinstance(t, dict):
+            name = t.get("name")
+        if name == tool_name:
+            tool_def = t
+            break
+
+    if not tool_def:
+        return args or {}
+
+    # Obtain input schema properties
+    input_schema = None
+    if hasattr(tool_def, "inputSchema"):
+        input_schema = getattr(tool_def, "inputSchema")
+    elif isinstance(tool_def, dict):
+        input_schema = tool_def.get("inputSchema")
+
+    props = (input_schema or {}).get("properties", {}) if isinstance(input_schema, dict) else {}
+
+    out_args = dict(args or {})
+    for input_prop, header_name in MCP_MAP_HEADER_TO_INPUT.items():
+        # Only consider if tool declares this property
+        if input_prop not in props:
+            continue
+        # Do not overwrite explicit args
+        if input_prop in out_args:
+            continue
+        header_val = headers_lc.get(header_name.lower())
+        if header_val is not None:
+            out_args[input_prop] = header_val
+
+    return out_args
 
 
 async def list_resources(list_resources: any):
@@ -137,6 +211,10 @@ async def mcp_session_context(
                         decorated_args = await decorate_args_with_oauth_token(
                             tools, tool_name, args, access_token_inner
                         )
+                        # Inject header-mapped inputs if available
+                        decorated_args = inject_headers_into_args(
+                            tools, tool_name, decorated_args, incoming_headers
+                        )
                         result = await session.call_tool(tool_name, decorated_args)
                         return RunToolsResult(result)
 
@@ -184,6 +262,10 @@ async def mcp_session_context(
             tools = await mcp_task.request("list_tools")
             decorated_args = await decorate_args_with_oauth_token(
                 tools, tool_name, args, access_token_inner
+            )
+            # Inject header-mapped inputs if available
+            decorated_args = inject_headers_into_args(
+                tools, tool_name, decorated_args, incoming_headers
             )
             result = await mcp_task.request(
                 {"action": "run_tool", "tool_name": tool_name, "args": decorated_args}

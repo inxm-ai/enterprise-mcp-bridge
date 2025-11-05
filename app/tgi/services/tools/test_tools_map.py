@@ -169,3 +169,29 @@ def test_map_tools_list_with_ref():
     assert "items" in params["properties"]
     assert params["properties"]["items"]["items"]["type"] == "string"
     assert params["properties"]["items"]["items"]["enum"] == ["x", "y"]
+
+
+def test_map_tools_prunes_mapped_inputs(monkeypatch):
+    monkeypatch.setenv("MCP_MAP_HEADER_TO_INPUT", "location=x-auth-location")
+    from app import vars as vars_module
+
+    monkeypatch.setattr(vars_module, "MCP_MAP_HEADER_TO_INPUT", {"location": "x-auth-location"})
+
+    tools = [
+        {
+            "name": "get_weather",
+            "description": "Get the current weather for a given location.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "unit": {"type": "string"},
+                },
+            },
+        }
+    ]
+    result = map_tools(tools)
+    params = result[0]["function"]["parameters"]
+    assert "properties" in params
+    assert "location" not in params["properties"]
+    assert "unit" in params["properties"]

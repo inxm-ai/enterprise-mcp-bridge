@@ -133,3 +133,8 @@ def test_call_list_resources(test_client):
 def test_dry_run_uses_get_tool_dry_run_response(monkeypatch, test_client):
     suite = FastAPIWrapper(test_client)
     suite.test_dry_run_uses_get_tool_dry_run_response(monkeypatch)
+
+
+def test_header_mapping_integration(monkeypatch, test_client):
+    suite = FastAPIWrapper(test_client)
+    suite.test_header_mapping_integration(monkeypatch)

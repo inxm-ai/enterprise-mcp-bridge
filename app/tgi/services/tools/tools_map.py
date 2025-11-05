@@ -1,4 +1,5 @@
 import copy
+import app.vars as vars_module
 
 _SCHEMA_DROP_KEYS = {
     "description",
@@ -139,6 +140,19 @@ def map_tools(tools):
         # The top-level $defs is no longer needed after inlining
         if "$defs" in processed_schema:
             del processed_schema["$defs"]
+
+        # Remove any input properties that are mapped to headers
+        mapping = getattr(vars_module, "MCP_MAP_HEADER_TO_INPUT", {}) or {}
+        if isinstance(processed_schema, dict) and processed_schema.get("properties"):
+            props = processed_schema.get("properties", {})
+            for input_prop in list(props.keys()):
+                if input_prop in mapping:
+                    props.pop(input_prop, None)
+                    required = processed_schema.get("required")
+                    if isinstance(required, list) and input_prop in required:
+                        processed_schema["required"] = [r for r in required if r != input_prop]
+            if not processed_schema.get("properties"):
+                processed_schema = {}
 
         mapped_tool = {
             "type": "function",
