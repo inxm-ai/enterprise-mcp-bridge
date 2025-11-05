@@ -181,28 +181,44 @@ async def create_generated_dashboard(
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
-    with tracer.start_as_current_span("generated_dashboard.create") as span:
-        span.set_attribute("dashboard.scope", scope.kind)
-        span.set_attribute("dashboard.scope_id", scope.identifier)
-        span.set_attribute("dashboard.id", dashboard_id)
-        span.set_attribute("dashboard.name", name)
-        async with mcp_session_context(
-            sessions,
-            session_key,
-            access_token,
-            requested_group,
-            incoming_headers,
-        ) as session_obj:
-            record = await service.create_dashboard(
-                session=session_obj,
-                scope=scope,
-                actor=actor,
-                dashboard_id=dashboard_id,
-                name=name,
-                prompt=prompt,
-                tools=list(body.tools or []),
-                access_token=access_token,
-            )
+    try:
+        with tracer.start_as_current_span("generated_dashboard.create") as span:
+            span.set_attribute("dashboard.scope", scope.kind)
+            span.set_attribute("dashboard.scope_id", scope.identifier)
+            span.set_attribute("dashboard.id", dashboard_id)
+            span.set_attribute("dashboard.name", name)
+            async with mcp_session_context(
+                sessions,
+                session_key,
+                access_token,
+                requested_group,
+                incoming_headers,
+            ) as session_obj:
+                record = await service.create_dashboard(
+                    session=session_obj,
+                    scope=scope,
+                    actor=actor,
+                    dashboard_id=dashboard_id,
+                    name=name,
+                    prompt=prompt,
+                    tools=list(body.tools or []),
+                    access_token=access_token,
+                )
+    except BaseExceptionGroup as eg:  # type: ignore[misc]
+        # Handle ExceptionGroup from async context managers
+        for exc in eg.exceptions:
+            if isinstance(exc, HTTPException):
+                raise exc
+            if isinstance(exc, BaseException) and hasattr(exc, "exceptions"):
+                for nested_exc in exc.exceptions:  # type: ignore[attr-defined]
+                    if isinstance(nested_exc, HTTPException):
+                        raise nested_exc
+        # If no HTTPException found, log and raise as 500
+        logger.error("Unexpected error during dashboard creation", exc_info=eg)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    except Exception as exc:
+        logger.error("Unexpected error during dashboard creation", exc_info=exc)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
     return JSONResponse(status_code=201, content=_format_dashboard_response(record))
 
@@ -281,28 +297,48 @@ async def update_generated_dashboard(
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
-    with tracer.start_as_current_span("generated_dashboard.update") as span:
-        span.set_attribute("dashboard.scope", scope.kind)
-        span.set_attribute("dashboard.scope_id", scope.identifier)
-        span.set_attribute("dashboard.id", dashboard_id)
-        span.set_attribute("dashboard.name", name)
-        async with mcp_session_context(
-            sessions,
-            session_key,
-            access_token,
-            requested_group,
-            incoming_headers,
-        ) as session_obj:
-            record = await service.update_dashboard(
-                session=session_obj,
-                scope=scope,
-                actor=actor,
-                dashboard_id=dashboard_id,
-                name=name,
-                prompt=prompt,
-                tools=list(body.tools or []),
-                access_token=access_token,
-            )
+    try:
+        with tracer.start_as_current_span("generated_dashboard.update") as span:
+            span.set_attribute("dashboard.scope", scope.kind)
+            span.set_attribute("dashboard.scope_id", scope.identifier)
+            span.set_attribute("dashboard.id", dashboard_id)
+            span.set_attribute("dashboard.name", name)
+            async with mcp_session_context(
+                sessions,
+                session_key,
+                access_token,
+                requested_group,
+                incoming_headers,
+            ) as session_obj:
+                record = await service.update_dashboard(
+                    session=session_obj,
+                    scope=scope,
+                    actor=actor,
+                    dashboard_id=dashboard_id,
+                    name=name,
+                    prompt=prompt,
+                    tools=list(body.tools or []),
+                    access_token=access_token,
+                )
+    except HTTPException as exc:
+        raise exc
+    except BaseExceptionGroup as eg:  # type: ignore[misc]
+        # Handle ExceptionGroup from async context managers (Python 3.11+)
+        # Extract and re-raise HTTPException if present
+        for exc in eg.exceptions:
+            if isinstance(exc, HTTPException):
+                raise exc
+            # Recursively check nested ExceptionGroups
+            if isinstance(exc, BaseException) and hasattr(exc, "exceptions"):
+                for nested_exc in exc.exceptions:  # type: ignore[attr-defined]
+                    if isinstance(nested_exc, HTTPException):
+                        raise nested_exc
+        # If no HTTPException found, log and raise as 500
+        logger.error("Unexpected error during dashboard update", exc_info=eg)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    except Exception as exc:
+        logger.error("Unexpected error during dashboard update", exc_info=exc)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
     return JSONResponse(status_code=200, content=_format_dashboard_response(record))
 

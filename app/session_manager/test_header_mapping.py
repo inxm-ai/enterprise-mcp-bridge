@@ -1,4 +1,3 @@
-import pytest
 from app.session_manager import session_context
 from types import SimpleNamespace
 

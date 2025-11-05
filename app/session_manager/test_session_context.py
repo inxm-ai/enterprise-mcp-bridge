@@ -1,6 +1,6 @@
 import types
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import app.session_manager.session_context as sc
 

@@ -99,7 +99,10 @@ class WellPlannedOrchestrator:
         span,
     ) -> Tuple[Optional[list], Optional[str]]:
         plan_text = ""
-        request.response_format = {"type": "json_schema", "value": todo_response_schema}
+        request.response_format = {
+            "type": "json_schema",
+            "json_schema": todo_response_schema,
+        }
         try:
             plan_stream = self.llm_client.stream_completion(
                 request, access_token or "", span

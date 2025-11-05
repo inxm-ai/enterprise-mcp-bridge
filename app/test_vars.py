@@ -1,5 +1,4 @@
 import importlib
-import os
 
 
 def test_mcp_map_header_to_input_parsing(monkeypatch):

@@ -4,7 +4,7 @@ version = "0.2.3"
 description = "Wrapper for MCP Clients to be called via REST on a platform"
 license = "GPL-3.0"
 authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "httpx",
     "fastapi",

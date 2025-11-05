@@ -1,4 +1,6 @@
 import json
+import logging
+import html as _html_escape
 import os
 import re
 from dataclasses import dataclass
@@ -8,7 +10,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from fastapi import HTTPException
 
 from app.session import MCPSessionBase
+from app.vars import MCP_BASE_PATH
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
+from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 
 
@@ -30,6 +34,8 @@ DEFAULT_PFUSCH_PROMPT = (
     "- When you need shared styles from a design system, include "
     '"<link rel=\\"stylesheet\\" href=\\"...\\" data-pfusch>" so pfusch '
     "components inherit them.\n"
+    f"- The Base Url for all API calls is `{MCP_BASE_PATH}/tools/<tool_name>`, they all need POST to return data, and the body is the MCP input.\n"
+    "- The output is an MCP response, if the tool has structured output you find it under structuredContent following the outputSchema you received from the tool.\n"
     "- Define interactivity by registering custom elements with pfusch and using "
     "its html/css/script helpers. Do not use React, JSX, frameworks, or build steps.\n"
     "- Forms should remain standard HTML forms; enhance them by mutating pfusch "
@@ -88,6 +94,60 @@ DEFAULT_PFUSCH_PROMPT = (
     "Do not include Markdown fences or explanatory prose—return only JSON."
 )
 
+# JSON Schema describing the expected structure of the generated UI payload.
+# This is intentionally permissive for fields the service will normalise later
+# (for example either `html.page` or `html.snippet` may be provided).
+generation_ui_schema = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "GeneratedDashboard",
+    "type": "object",
+    "properties": {
+        "html": {
+            "type": "object",
+            "description": "HTML output. Either a full `page` (document) or a `snippet` (embed) is acceptable.",
+            "properties": {
+                "page": {
+                    "type": "string",
+                    "description": "Complete HTML document as a string",
+                },
+                "snippet": {
+                    "type": "string",
+                    "description": "HTML fragment suitable for embedding",
+                },
+            },
+            "additionalProperties": True,
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Auxiliary metadata about the generated dashboard",
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "scope": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["user", "group"]},
+                        "id": {"type": "string"},
+                    },
+                    "required": ["type", "id"],
+                    "additionalProperties": False,
+                },
+                "requirements": {"type": "string"},
+                "original_requirements": {"type": "string"},
+                "components": {"type": "array", "items": {"type": "string"}},
+                "pfusch_components": {"type": "array", "items": {"type": "string"}},
+                "created_by": {"type": "string"},
+                "created_at": {"type": "string", "format": "date-time"},
+                "updated_at": {"type": "string", "format": "date-time"},
+                "history": {"type": "array", "items": {"type": "object"}},
+            },
+            "additionalProperties": True,
+        },
+    },
+    "required": ["html"],
+    "additionalProperties": True,
+}
+
 
 @dataclass(frozen=True)
 class Scope:
@@ -141,7 +201,7 @@ class GeneratedUIStorage:
         try:
             with open(file_path, "r", encoding="utf-8") as handle:
                 return json.load(handle)
-        except FileNotFoundError as exc:
+        except FileNotFoundError:
             raise
         except json.JSONDecodeError as exc:
             raise HTTPException(
@@ -357,14 +417,29 @@ class GeneratedUIService:
         chat_request = ChatCompletionRequest(
             messages=messages,
             tools=allowed_tools if allowed_tools else None,
-            stream=False,
+            stream=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": generation_ui_schema,
+            },
         )
 
-        response = await self.tgi_service.well_planned_chat_completion(
-            session, chat_request, access_token
+        # Use streaming to collect the response
+        content = ""
+        stream_source = self.tgi_service.llm_client.stream_completion(
+            chat_request, access_token or "", None
         )
 
-        content = self._extract_content(response)
+        async with chunk_reader(stream_source) as reader:
+            async for parsed in reader.as_parsed():
+                if parsed.is_done:
+                    break
+                if parsed.content:
+                    content += parsed.content
+
+        if not content:
+            raise HTTPException(status_code=502, detail="Generation response was empty")
+
         payload = self._parse_json(content)
         self._normalise_payload(payload, scope, dashboard_id, name, prompt, previous)
         return payload
@@ -391,9 +466,9 @@ class GeneratedUIService:
     async def _select_tools(
         self, session: MCPSessionBase, requested_tools: Sequence[str]
     ) -> Optional[List[Dict[str, Any]]]:
-        if not requested_tools:
-            return None
         available = await self.tgi_service.tool_service.get_all_mcp_tools(session)
+        if not requested_tools:
+            return available
         selected: List[Dict[str, Any]] = []
         for tool in available or []:
             tool_name: Optional[str] = None
@@ -500,13 +575,64 @@ class GeneratedUIService:
             )
 
         html_section = payload.get("html")
+
+        # If the model returned a bare string for the html section, accept it
         if isinstance(html_section, str):
             html_section = {"page": html_section}
-        if not isinstance(html_section, dict):
-            raise HTTPException(
-                status_code=502,
-                detail="Generated payload must include an 'html' object",
+
+        # If there is no explicit `html` key, attempt to salvage common
+        # alternatives (top-level `page`, `snippet`, `content`, `body`, etc.)
+        if html_section is None:
+            maybe_page = (
+                payload.get("page")
+                or payload.get("html_page")
+                or payload.get("page_html")
             )
+            maybe_snippet = (
+                payload.get("snippet")
+                or payload.get("body")
+                or payload.get("content")
+                or payload.get("text")
+            )
+
+            if isinstance(maybe_page, str) or isinstance(maybe_snippet, str):
+                html_section = {}
+                if isinstance(maybe_page, str):
+                    html_section["page"] = maybe_page
+                if isinstance(maybe_snippet, str):
+                    html_section["snippet"] = maybe_snippet
+            else:
+                # As a last resort, search the payload for a single string
+                # value that looks like HTML and treat it as a page.
+                for val in payload.values():
+                    if isinstance(val, str) and ("<" in val and ">" in val):
+                        html_section = {"page": val}
+                        break
+
+        if not isinstance(html_section, dict):
+            # As a last-resort fallback, synthesize a minimal HTML page using
+            # the original prompt so the API can return something usable
+            # instead of failing with 502. Log a warning so this can be
+            # investigated.
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Generated payload missing 'html' object; synthesizing fallback page. payload keys: %s",
+                list(payload.keys()),
+            )
+            try:
+                prompt_snippet = _html_escape.escape(prompt or "")
+                synthesized_snippet = (
+                    f'<div class="generated-fallback">{prompt_snippet}</div>'
+                )
+                html_section = {
+                    "page": self._wrap_snippet(synthesized_snippet),
+                    "snippet": synthesized_snippet,
+                }
+            except Exception:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Generated payload must include an 'html' object",
+                )
 
         snippet = html_section.get("snippet")
         page = html_section.get("page")

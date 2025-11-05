@@ -94,4 +94,4 @@ class ChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: List[Choice]
-    usage: Usage
+    usage: Optional[Usage] = None
