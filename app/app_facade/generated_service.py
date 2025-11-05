@@ -23,76 +23,35 @@ DEFAULT_DESIGN_PROMPT = (
     "CSS conventions when no explicit design system guidance is provided."
 )
 
-DEFAULT_PFUSCH_PROMPT = (
-    "You are a microsite and dashboard designer that produces structured JSON. "
-    "All interactive behaviour must be implemented with pfusch, a minimal progressive enhancement "
-    "library that works directly in the browser. Follow these rules:\n"
-    "- Start with semantic HTML that works without JavaScript, then enhance it.\n"
-    "- Load pfusch using a module script tag: "
-    '"<script type=\\"module\\">import { pfusch, html, css, script } from '
-    "'https://matthiaskainer.github.io/pfusch/pfusch.min.js'; ... </script>\".\n"
-    "- When you need shared styles from a design system, include "
-    '"<link rel=\\"stylesheet\\" href=\\"...\\" data-pfusch>" so pfusch '
-    "components inherit them.\n"
-    f"- The Base Url for all API calls is `{MCP_BASE_PATH}/tools/<tool_name>`, they all need POST to return data, and the body is the MCP input.\n"
-    "- The output is an MCP response, if the tool has structured output you find it under structuredContent following the outputSchema you received from the tool.\n"
-    "- Define interactivity by registering custom elements with pfusch and using "
-    "its html/css/script helpers. Do not use React, JSX, frameworks, or build steps.\n"
-    "- Forms should remain standard HTML forms; enhance them by mutating pfusch "
-    "state or subscribing to events rather than replacing native behaviour.\n"
-    "- Use pfusch triggers/events for component communication instead of global "
-    "framework state.\n"
-    "- Example usage:\n"
-    '  <div class=\\"dashboard\\">\\n'
-    "    <feedback-panel>\\n"
-    "      <form method='post' action='/api/feedback'>\\n"
-    "        <label>Comment<input name='comment' placeholder='Say hi'></label>\\n"
-    "        <button type='submit'>Send</button>\\n"
-    "      </form>\\n"
-    "    </feedback-panel>\\n"
-    "  </div>\\n"
-    '  <script type=\\"module\\">\\n'
-    "    import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';\\n"
-    "    pfusch('feedback-panel', { status: 'idle', history: [] }, (state, trigger, helpers) => [\\n"
-    "      script(function() {\\n"
-    "        const [form] = helpers.children('form');\\n"
-    "        if (!form) return;\\n"
-    "        const textarea = form.querySelector('textarea, input[name=\\\\'comment\\\\']');\\n"
-    "        state.subscribe('status', (value) => {\\n"
-    "          this.dataset.status = value;\\n"
-    "        });\\n"
-    "        form.addEventListener('submit', async (event) => {\\n"
-    "          event.preventDefault();\\n"
-    "          state.status = 'saving';\\n"
-    "          const payload = new FormData(form);\\n"
-    "          await fetch(form.action || '#', { method: form.method || 'post', body: payload });\\n"
-    "          const text = textarea ? textarea.value : '';\\n"
-    "          state.history = [{ text, at: Date.now() }, ...state.history].slice(0, 5);\\n"
-    "          state.status = 'saved';\\n"
-    "          trigger('submitted', { text });\\n"
-    "        });\\n"
-    "      }),\\n"
-    "      html.slot(),\\n"
-    "      html.div({ class: 'status' }, state.status),\\n"
-    "      html.ul(\\n"
-    "        ...state.history.map((item) =>\\n"
-    "          html.li(\\n"
-    "            html.time(new Date(item.at).toLocaleTimeString()),\\n"
-    "            html.span(' ', item.text)\\n"
-    "          )\\n"
-    "        )\\n"
-    "      )\\n"
-    "    ]);\\n"
-    "    window.addEventListener('feedback-panel.submitted', (event) => {\\n"
-    "      console.log('Feedback event', event.detail);\\n"
-    "    });\\n"
-    "  </script>\n"
-    "Output strictly in JSON with top-level keys `html` and `metadata`. Within "
-    "`html`, provide `page` (a complete HTML document with pfusch imports) and "
-    "`snippet` (only the enhanced dashboard content). `metadata` must capture "
-    "requirements, pfusch components used, and guidance for future updates. "
-    "Do not include Markdown fences or explanatory prose—return only JSON."
-)
+
+def _load_pfusch_prompt() -> str:
+    """Load the pfusch dashboard prompt from the markdown file and replace placeholders."""
+    prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_dashboard_prompt.md")
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt_content = f.read()
+        # Replace the MCP_BASE_PATH placeholder
+        return prompt_content.replace("{{MCP_BASE_PATH}}", MCP_BASE_PATH)
+    except Exception as e:
+        logging.error(f"Error loading pfusch prompt: {e}")
+        raise e
+
+
+def _get_fallback_prompt() -> str:
+    """Fallback prompt if the markdown file cannot be loaded."""
+    return (
+        "You are a microsite and dashboard designer that produces structured JSON. "
+        "All interactive behaviour must be implemented with pfusch, a minimal progressive enhancement "
+        "library that works directly in the browser. Follow these rules:\n"
+        "- Start with semantic HTML that works without JavaScript, then enhance it.\n"
+        "- Load pfusch using a module script tag: "
+        '"<script type=\\"module\\">import { pfusch, html, css, script } from '
+        "'https://matthiaskainer.github.io/pfusch/pfusch.min.js'; ... </script>\".\n"
+        f"- The Base Url for all API calls is `{MCP_BASE_PATH}/tools/<tool_name>`, "
+        "they all need POST to return data, and the body is the MCP input.\n"
+        "Output strictly in JSON with top-level keys `html` and `metadata`."
+    )
+
 
 # JSON Schema describing the expected structure of the generated UI payload.
 # This is intentionally permissive for fields the service will normalise later
@@ -412,7 +371,7 @@ class GeneratedUIService:
             ),
         ]
 
-        allowed_tools = await self._select_tools(session, tools)
+        allowed_tools = await self._select_tools(session, tools, prompt)
 
         chat_request = ChatCompletionRequest(
             messages=messages,
@@ -459,28 +418,137 @@ class GeneratedUIService:
             design_prompt_content = ""
 
         combined_design = design_prompt_content or DEFAULT_DESIGN_PROMPT
-        return (
-            f"{DEFAULT_PFUSCH_PROMPT}\n\nDesign system guidelines:\n{combined_design}"
-        )
+
+        # Load the pfusch prompt from file and replace the design system placeholder
+        pfusch_prompt = _load_pfusch_prompt()
+        return pfusch_prompt.replace("{{DESIGN_SYSTEM_PROMPT}}", combined_design)
 
     async def _select_tools(
-        self, session: MCPSessionBase, requested_tools: Sequence[str]
+        self, session: MCPSessionBase, requested_tools: Sequence[str], prompt: str = ""
     ) -> Optional[List[Dict[str, Any]]]:
-        available = await self.tgi_service.tool_service.get_all_mcp_tools(session)
-        if not requested_tools:
-            return available
-        selected: List[Dict[str, Any]] = []
-        for tool in available or []:
-            tool_name: Optional[str] = None
-            if isinstance(tool, dict):
-                tool_name = tool.get("function", {}).get("name")
-            else:
-                tool_name = getattr(tool, "function", None)
-                if tool_name and hasattr(tool_name, "name"):
-                    tool_name = tool_name.name
-            if tool_name and tool_name in requested_tools:
-                selected.append(tool)
-        return selected
+        """
+        Select relevant tools for dashboard generation.
+
+        If specific tools are requested, use those. Otherwise, intelligently
+        filter tools based on the prompt to reduce context size.
+        """
+        # Get all tools with output schema for UI generation
+        available = await self.tgi_service.tool_service.get_all_mcp_tools(
+            session, include_output_schema=True
+        )
+
+        if not available:
+            return None
+
+        # If specific tools requested, filter to those
+        if requested_tools:
+            selected: List[Dict[str, Any]] = []
+            for tool in available:
+                tool_name: Optional[str] = None
+                if isinstance(tool, dict):
+                    tool_name = tool.get("function", {}).get("name")
+                else:
+                    tool_name = getattr(tool, "function", None)
+                    if tool_name and hasattr(tool_name, "name"):
+                        tool_name = tool_name.name
+                if tool_name and tool_name in requested_tools:
+                    selected.append(tool)
+            return selected if selected else None
+
+        # Otherwise, intelligently pre-select most relevant tools
+        return self._filter_relevant_tools(available, prompt)
+
+    def _filter_relevant_tools(
+        self, tools: List[Dict[str, Any]], prompt: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Filter tools to most relevant ones based on prompt keywords.
+
+        Uses simple keyword matching to reduce context size. If the prompt
+        mentions specific domain terms, prioritize tools with those terms.
+        """
+        if not prompt or len(tools) <= 10:
+            # If prompt is empty or tool count is manageable, return all
+            return tools
+
+        prompt_lower = prompt.lower()
+        scored_tools = []
+
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+
+            function = tool.get("function", {})
+            name = function.get("name", "")
+            description = function.get("description", "")
+
+            # Skip the meta tool "describe_tool"
+            if name == "describe_tool":
+                scored_tools.append((tool, 100))  # Always include
+                continue
+
+            # Score based on keyword matches
+            score = 0
+
+            # Check if tool name appears in prompt
+            if name.lower() in prompt_lower:
+                score += 50
+
+            # Check for partial name matches (e.g., "absence" matches "list_absence_types")
+            name_parts = name.lower().replace("_", " ").split()
+            for part in name_parts:
+                if len(part) > 3 and part in prompt_lower:
+                    score += 10
+
+            # Check if description keywords appear in prompt
+            desc_words = description.lower().replace("_", " ").split()
+            for word in desc_words:
+                if len(word) > 4 and word in prompt_lower:
+                    score += 5
+
+            # Prioritize list/get operations for dashboards
+            if any(
+                prefix in name.lower()
+                for prefix in ["list_", "get_", "fetch_", "retrieve_"]
+            ):
+                score += 3
+
+            # Deprioritize create/update/delete operations unless explicitly mentioned
+            if any(
+                prefix in name.lower()
+                for prefix in ["create_", "update_", "delete_", "remove_"]
+            ):
+                if not any(
+                    word in prompt_lower
+                    for word in [
+                        "create",
+                        "update",
+                        "delete",
+                        "edit",
+                        "modify",
+                        "remove",
+                    ]
+                ):
+                    score -= 10
+
+            scored_tools.append((tool, score))
+
+        # Sort by score descending
+        scored_tools.sort(key=lambda x: x[1], reverse=True)
+
+        # Take top tools, ensuring we include describe_tool
+        max_tools = 15  # Reasonable limit for context size
+        selected = [tool for tool, score in scored_tools[:max_tools] if score > 0]
+
+        # If we filtered too aggressively, include some more
+        if len(selected) < 5 and len(scored_tools) > len(selected):
+            selected = [tool for tool, score in scored_tools[:10]]
+
+        logging.info(
+            f"[GeneratedUI] Filtered {len(tools)} tools to {len(selected)} based on prompt relevance"
+        )
+
+        return selected if selected else tools
 
     def _extract_content(self, response: Any) -> str:
         if response is None:

@@ -63,7 +63,7 @@ class ToolService:
         self._tool_registry: dict[str, dict] = {}
 
     async def get_all_mcp_tools(
-        self, session: MCPSessionBase, parent_span=None
+        self, session: MCPSessionBase, parent_span=None, include_output_schema=False
     ) -> List[Tool]:
         """
         Get all available tools from the MCP server as OpenAI-compatible tools.
@@ -71,6 +71,8 @@ class ToolService:
         Args:
             session: The MCP session to use
             parent_span: Optional parent span for tracing
+            include_output_schema: If True, include outputSchema in tool definitions.
+                                   Useful for UI generation. Defaults to False.
 
         Returns:
             List of all available tools in OpenAI format
@@ -80,7 +82,9 @@ class ToolService:
                 # Get available tools from MCP server
                 raw_tools = await session.list_tools()
                 self._tool_registry = {tool.get("name"): tool for tool in raw_tools}
-                tools_result = map_tools(raw_tools)
+                tools_result = map_tools(
+                    raw_tools, include_output_schema=include_output_schema
+                )
                 if not tools_result:
                     self.logger.debug(
                         "[ToolService] No tools available from MCP server"

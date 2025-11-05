@@ -120,13 +120,16 @@ def inline_schema(schema, top_level_schema, seen=None):
     return new_schema
 
 
-def map_tools(tools):
+def map_tools(tools, include_output_schema=False):
     """
     Maps a list of tool objects to a new format with inlined schemas.
 
     Args:
         tools (list): A list of tool objects, where each object has a 'name', 'description',
                       and 'inputSchema'.
+        include_output_schema (bool): If True, include the outputSchema in the mapped tools.
+                                      This is useful for UI generation where the output structure
+                                      needs to be known. Defaults to False for backwards compatibility.
 
     Returns:
         list: A list of mapped tool objects with inlined schemas.
@@ -164,6 +167,21 @@ def map_tools(tools):
                 "parameters": processed_schema,
             },
         }
+
+        # Optionally include output schema for UI generation
+        if include_output_schema and tool.get("outputSchema"):
+            output_schema_copy = copy.deepcopy(tool.get("outputSchema"))
+            processed_output = inline_schema(output_schema_copy, output_schema_copy)
+            processed_output = prune_schema(
+                processed_output, depth=3
+            )  # More depth for output
+
+            # Remove top-level $defs after inlining
+            if "$defs" in processed_output:
+                del processed_output["$defs"]
+
+            mapped_tool["function"]["outputSchema"] = processed_output
+
         mapped_tools.append(mapped_tool)
 
     return mapped_tools
