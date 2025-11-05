@@ -625,4 +625,3 @@ The target app receives `X-Forwarded-Proto: https` to generate correct URLs.
 - Verify `PROXY_PREFIX` is set correctly
 - Check that cookie domains don't conflict with your setup
 
-For more details, see [`app/app_proxy/README.md`](app/app_proxy/README.md).

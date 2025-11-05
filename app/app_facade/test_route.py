@@ -23,7 +23,7 @@ from fastapi import Request
 from httpx import Response as HttpxResponse
 from httpx import AsyncClient, TimeoutException, ConnectError
 
-from app.app_proxy.route import (
+from app.app_facade.route import (
     get_target_url,
     prepare_headers,
     rewrite_location_header,
@@ -89,7 +89,7 @@ class TestGetTargetUrl:
     def test_basic_path(self, mock_request, monkeypatch):
         """Test basic path without query parameters."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.url.path = f"{PROXY_PREFIX}/api/users"
@@ -101,7 +101,7 @@ class TestGetTargetUrl:
     def test_with_query_parameters(self, mock_request, monkeypatch):
         """Test path with query parameters."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.url.path = f"{PROXY_PREFIX}/api/search"
@@ -113,7 +113,7 @@ class TestGetTargetUrl:
     def test_root_path(self, mock_request, monkeypatch):
         """Test root path proxying."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.url.path = PROXY_PREFIX or "/"
@@ -125,7 +125,7 @@ class TestGetTargetUrl:
     def test_nested_path(self, mock_request, monkeypatch):
         """Test deeply nested path."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.url.path = f"{PROXY_PREFIX}/api/v1/users/123/posts/456"
@@ -137,7 +137,7 @@ class TestGetTargetUrl:
     def test_special_characters_in_query(self, mock_request, monkeypatch):
         """Test query parameters with special characters."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.url.path = f"{PROXY_PREFIX}/search"
@@ -243,8 +243,8 @@ class TestRewriteLocationHeader:
         """Test rewriting absolute URL pointing to target server."""
         location = f"{TEST_TARGET_SERVER_URL}/api/callback"
 
-        with patch("app.app_proxy.route.PUBLIC_URL", "https://public.example.com"):
-            with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.PUBLIC_URL", "https://public.example.com"):
+            with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
                 result = rewrite_location_header(location, mock_request)
 
         assert result == f"https://public.example.com{PROXY_PREFIX}/api/callback"
@@ -253,8 +253,8 @@ class TestRewriteLocationHeader:
         """Test rewriting absolute URL with query parameters."""
         location = f"{TEST_TARGET_SERVER_URL}/callback?code=abc&state=xyz"
 
-        with patch("app.app_proxy.route.PUBLIC_URL", ""):
-            with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.PUBLIC_URL", ""):
+            with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
                 result = rewrite_location_header(location, mock_request)
 
         assert result.endswith(f"{PROXY_PREFIX}/callback?code=abc&state=xyz")
@@ -341,7 +341,7 @@ class TestRewriteContentUrls:
         </html>
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -358,7 +358,7 @@ class TestRewriteContentUrls:
         </html>
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -376,7 +376,7 @@ class TestRewriteContentUrls:
         </html>
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -395,7 +395,7 @@ class TestRewriteContentUrls:
         </html>
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -413,7 +413,7 @@ class TestRewriteContentUrls:
         """Test rewriting URLs with single quotes in HTML."""
         html = f"<a href='{TEST_TARGET_SERVER_URL}/path'>Link</a>"
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -427,7 +427,7 @@ class TestRewriteContentUrls:
         }
         json_str = json.dumps(data)
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(json_str.encode("utf-8"), "application/json")
             result_str = result.decode("utf-8")
 
@@ -447,7 +447,7 @@ class TestRewriteContentUrls:
         """Test content when rewriting is disabled."""
         html = f'<a href="{TEST_TARGET_SERVER_URL}/page">Link</a>'
 
-        with patch("app.app_proxy.route.REWRITE_HTML_URLS", False):
+        with patch("app.app_facade.route.REWRITE_HTML_URLS", False):
             result = rewrite_content_urls(html.encode("utf-8"), "text/html")
             result_str = result.decode("utf-8")
 
@@ -467,7 +467,7 @@ class TestRewriteContentUrls:
         }}
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(css.encode("utf-8"), "text/css")
             result_str = result.decode("utf-8")
 
@@ -484,7 +484,7 @@ class TestRewriteContentUrls:
         @import url("/fonts.css");
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(css.encode("utf-8"), "text/css")
             result_str = result.decode("utf-8")
 
@@ -502,7 +502,7 @@ class TestRewriteContentUrls:
         import {{ Component }} from '/components/Button.js';
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(js.encode("utf-8"), "application/javascript")
             result_str = result.decode("utf-8")
 
@@ -517,7 +517,7 @@ class TestRewriteContentUrls:
         """Test JavaScript URL rewriting with single quotes."""
         js = f"const url = '{TEST_TARGET_SERVER_URL}/path';"
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(js.encode("utf-8"), "application/javascript")
             result_str = result.decode("utf-8")
 
@@ -539,7 +539,7 @@ class TestRewriteContentUrls:
         }}
         """
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
             result = rewrite_content_urls(css.encode("utf-8"), "text/css")
             result_str = result.decode("utf-8")
 
@@ -559,7 +559,7 @@ class TestForwardToTarget:
     ):
         """Test successful GET request proxying."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.method = "GET"
@@ -586,7 +586,7 @@ class TestForwardToTarget:
     ):
         """Test successful POST request with body."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.method = "POST"
@@ -617,7 +617,7 @@ class TestForwardToTarget:
     ):
         """Test redirect response with Location header rewriting."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -650,7 +650,7 @@ class TestForwardToTarget:
     ):
         """Test Set-Cookie header path rewriting."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -682,7 +682,7 @@ class TestForwardToTarget:
     ):
         """Test streaming of large response."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -712,7 +712,7 @@ class TestForwardToTarget:
     ):
         """Test handling of gzip-compressed response (httpx auto-decompresses)."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -747,9 +747,9 @@ class TestForwardToTarget:
     ):
         """Test that content-encoding is removed for HTML when rewriting (httpx already decompressed)."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
-        monkeypatch.setattr("app.app_proxy.route.REWRITE_HTML_URLS", True)
+        monkeypatch.setattr("app.app_facade.route.REWRITE_HTML_URLS", True)
 
         mock_request.body = AsyncMock(return_value=b"")
 
@@ -780,7 +780,7 @@ class TestForwardToTarget:
     async def test_timeout_error(self, mock_request, monkeypatch):
         """Test handling of timeout errors."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -802,7 +802,7 @@ class TestForwardToTarget:
     async def test_connection_error(self, mock_request, monkeypatch):
         """Test handling of connection errors."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -823,11 +823,11 @@ class TestForwardToTarget:
     @pytest.mark.asyncio
     async def test_target_url_not_configured(self, mock_request, monkeypatch):
         """Test error when TEST_TARGET_SERVER_URL is not configured."""
-        monkeypatch.setattr("app.app_proxy.route.TARGET_SERVER_URL", "")
+        monkeypatch.setattr("app.app_facade.route.TARGET_SERVER_URL", "")
 
         mock_request.body = AsyncMock(return_value=b"")
 
-        with patch("app.app_proxy.route.TARGET_SERVER_URL", ""):
+        with patch("app.app_facade.route.TARGET_SERVER_URL", ""):
             with pytest.raises(Exception) as exc_info:
                 await forward_to_target(mock_request)
 
@@ -842,7 +842,7 @@ class TestForwardToTarget:
     ):
         """Test proxying various HTTP methods."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
@@ -873,7 +873,7 @@ class TestForwardToTarget:
     ):
         """Test handling multiple concurrent requests."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -900,7 +900,7 @@ class TestForwardToTarget:
     ):
         """Test handling of various HTTP status codes."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         status_codes = [200, 201, 204, 301, 302, 400, 401, 403, 404, 500, 502, 503]
@@ -927,7 +927,7 @@ class TestForwardToTarget:
     ):
         """Test that custom headers are preserved."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.headers = {
@@ -960,7 +960,7 @@ class TestForwardToTarget:
     ):
         """Test that hop-by-hop headers are removed from response."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
         mock_request.body = AsyncMock(return_value=b"")
@@ -995,10 +995,10 @@ class TestEdgeCases:
     def test_empty_proxy_prefix(self, mock_request, monkeypatch):
         """Test behavior when PROXY_PREFIX is empty."""
         monkeypatch.setattr(
-            "app.app_proxy.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
         )
 
-        with patch("app.app_proxy.route.PROXY_PREFIX", ""):
+        with patch("app.app_facade.route.PROXY_PREFIX", ""):
             mock_request.url.path = "/test"
             result = get_target_url(mock_request)
             assert result == f"{TEST_TARGET_SERVER_URL}/test"

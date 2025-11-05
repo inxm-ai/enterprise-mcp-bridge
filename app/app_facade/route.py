@@ -1,21 +1,35 @@
 import logging
 import os
 import re
-from typing import Dict, AsyncIterator
+from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urljoin, urlparse
 from http.cookies import SimpleCookie
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from opentelemetry import trace
 
-from app.vars import MCP_BASE_PATH
+from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
+from app.session import session_id, try_get_session_id
+from app.session_manager import mcp_session_context, session_manager
+from app.oauth.user_info import get_data_access_manager
+
+from .generated_service import (
+    Actor,
+    GeneratedDashboardService,
+    GeneratedDashboardStorage,
+    Scope,
+    validate_identifier,
+)
+from .schemas import DashboardCreateRequest, DashboardUpdateRequest
 
 # Initialize components
 router = APIRouter(prefix="/app")
 tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("uvicorn.error")
+sessions = session_manager()
+_generated_service: Optional[GeneratedDashboardService] = None
 
 # Configuration from environment
 PROXY_PREFIX = os.environ.get("PROXY_PREFIX", MCP_BASE_PATH + "/app")
@@ -50,6 +64,247 @@ FORWARDED_HEADERS = {
     "x-real-ip",
     "x-scheme",
 }
+
+
+def _ensure_tgi_enabled() -> None:
+    if not os.environ.get("TGI_URL"):
+        raise HTTPException(
+            status_code=503,
+            detail="Text generation is not available because TGI_URL is not configured.",
+        )
+
+
+def _get_generated_service() -> GeneratedDashboardService:
+    global _generated_service
+    base_path = os.environ.get("GENERATED_DASHBOARD_PATH", "").strip()
+    if not base_path:
+        raise HTTPException(
+            status_code=503,
+            detail="GENERATED_DASHBOARD_PATH must be configured to use generated dashboards.",
+        )
+    base_path = os.path.abspath(base_path)
+    existing_path = (
+        getattr(getattr(_generated_service, "storage", None), "base_path", None)
+        if _generated_service
+        else None
+    )
+    if _generated_service and existing_path == base_path:
+        return _generated_service
+    _generated_service = GeneratedDashboardService(
+        storage=GeneratedDashboardStorage(base_path),
+    )
+    return _generated_service
+
+
+def _parse_scope(target: str) -> Scope:
+    if not target:
+        raise HTTPException(status_code=400, detail="Scope target is required")
+    if target.startswith("group="):
+        identifier = validate_identifier(target[len("group=") :], "group id")
+        return Scope(kind="group", identifier=identifier)
+    if target.startswith("user="):
+        identifier = validate_identifier(target[len("user=") :], "user id")
+        return Scope(kind="user", identifier=identifier)
+    raise HTTPException(
+        status_code=400,
+        detail="Scope target must use 'group=<group_id>' or 'user=<user_id>' format",
+    )
+
+
+def _extract_actor(access_token: Optional[str]) -> Actor:
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Access token is required")
+    data_manager = get_data_access_manager()
+    try:
+        info = data_manager.user_extractor.extract_user_info(access_token)
+    except AssertionError as exc:
+        raise HTTPException(status_code=401, detail="Invalid access token") from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(
+            status_code=401, detail="Failed to decode access token"
+        ) from exc
+
+    user_id = info.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=401, detail="No user identifier found in access token"
+        )
+    groups = info.get("groups") or []
+    groups_list = [str(group) for group in groups]
+    return Actor(user_id=str(user_id), groups=groups_list)
+
+
+def _format_dashboard_response(record: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = record.get("metadata", {})
+    current = record.get("current", {})
+    response = {
+        "id": metadata.get("id"),
+        "name": metadata.get("name"),
+        "scope": metadata.get("scope"),
+        "created_at": metadata.get("created_at"),
+        "updated_at": metadata.get("updated_at"),
+        "html": current.get("html"),
+        "metadata": current.get("metadata"),
+    }
+    history = metadata.get("history")
+    if history:
+        response["history"] = history
+    return response
+
+
+@router.post("/_generated/{target}")
+async def create_generated_dashboard(
+    target: str,
+    body: DashboardCreateRequest,
+    request: Request,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+):
+    _ensure_tgi_enabled()
+    scope = _parse_scope(target)
+    dashboard_id = validate_identifier(body.id, "dashboard id")
+    name = validate_identifier(body.name, "dashboard name")
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    incoming_headers = dict(request.headers)
+    session_key = session_id(
+        try_get_session_id(
+            x_inxm_mcp_session_header,
+            x_inxm_mcp_session_cookie,
+        ),
+        access_token,
+    )
+    requested_group = scope.identifier if scope.kind == "group" else None
+
+    with tracer.start_as_current_span("generated_dashboard.create") as span:
+        span.set_attribute("dashboard.scope", scope.kind)
+        span.set_attribute("dashboard.scope_id", scope.identifier)
+        span.set_attribute("dashboard.id", dashboard_id)
+        span.set_attribute("dashboard.name", name)
+        async with mcp_session_context(
+            sessions,
+            session_key,
+            access_token,
+            requested_group,
+            incoming_headers,
+        ) as session_obj:
+            record = await service.create_dashboard(
+                session=session_obj,
+                scope=scope,
+                actor=actor,
+                dashboard_id=dashboard_id,
+                name=name,
+                prompt=prompt,
+                tools=list(body.tools or []),
+                access_token=access_token,
+            )
+
+    return JSONResponse(status_code=201, content=_format_dashboard_response(record))
+
+
+@router.get("/_generated/{target}/{dashboard_id}/{name}")
+async def get_generated_dashboard(
+    target: str,
+    dashboard_id: str,
+    name: str,
+    request: Request,
+    render_mode: str = Query("page", alias="as"),
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+):
+    _ensure_tgi_enabled()
+    scope = _parse_scope(target)
+    dashboard_id = validate_identifier(dashboard_id, "dashboard id")
+    name = validate_identifier(name, "dashboard name")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+
+    with tracer.start_as_current_span("generated_dashboard.fetch") as span:
+        span.set_attribute("dashboard.scope", scope.kind)
+        span.set_attribute("dashboard.scope_id", scope.identifier)
+        span.set_attribute("dashboard.id", dashboard_id)
+        span.set_attribute("dashboard.name", name)
+        record = service.get_dashboard(
+            scope=scope,
+            actor=actor,
+            dashboard_id=dashboard_id,
+            name=name,
+        )
+
+    html_section = (record.get("current") or {}).get("html") or {}
+    mode = (render_mode or "page").lower()
+    if mode not in {"page", "snippet"}:
+        raise HTTPException(status_code=400, detail="Invalid render mode requested")
+    content = html_section.get(mode)
+    if not content:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Stored dashboard does not contain HTML for mode '{mode}'",
+        )
+    return HTMLResponse(content=content, media_type="text/html")
+
+
+@router.post("/_generated/{target}/{dashboard_id}/{name}")
+async def update_generated_dashboard(
+    target: str,
+    dashboard_id: str,
+    name: str,
+    body: DashboardUpdateRequest,
+    request: Request,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+):
+    _ensure_tgi_enabled()
+    scope = _parse_scope(target)
+    dashboard_id = validate_identifier(dashboard_id, "dashboard id")
+    name = validate_identifier(name, "dashboard name")
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    incoming_headers = dict(request.headers)
+    session_key = session_id(
+        try_get_session_id(
+            x_inxm_mcp_session_header,
+            x_inxm_mcp_session_cookie,
+        ),
+        access_token,
+    )
+    requested_group = scope.identifier if scope.kind == "group" else None
+
+    with tracer.start_as_current_span("generated_dashboard.update") as span:
+        span.set_attribute("dashboard.scope", scope.kind)
+        span.set_attribute("dashboard.scope_id", scope.identifier)
+        span.set_attribute("dashboard.id", dashboard_id)
+        span.set_attribute("dashboard.name", name)
+        async with mcp_session_context(
+            sessions,
+            session_key,
+            access_token,
+            requested_group,
+            incoming_headers,
+        ) as session_obj:
+            record = await service.update_dashboard(
+                session=session_obj,
+                scope=scope,
+                actor=actor,
+                dashboard_id=dashboard_id,
+                name=name,
+                prompt=prompt,
+                tools=list(body.tools or []),
+                access_token=access_token,
+            )
+
+    return JSONResponse(status_code=200, content=_format_dashboard_response(record))
 
 
 def get_target_url(request: Request) -> str:
