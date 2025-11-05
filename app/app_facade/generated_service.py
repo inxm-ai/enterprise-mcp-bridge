@@ -25,10 +25,10 @@ DEFAULT_PFUSCH_PROMPT = (
     "library that works directly in the browser. Follow these rules:\n"
     "- Start with semantic HTML that works without JavaScript, then enhance it.\n"
     "- Load pfusch using a module script tag: "
-    "\"<script type=\\\"module\\\">import { pfusch, html, css, script } from "
+    '"<script type=\\"module\\">import { pfusch, html, css, script } from '
     "'https://matthiaskainer.github.io/pfusch/pfusch.min.js'; ... </script>\".\n"
     "- When you need shared styles from a design system, include "
-    "\"<link rel=\\\"stylesheet\\\" href=\\\"...\\\" data-pfusch>\" so pfusch "
+    '"<link rel=\\"stylesheet\\" href=\\"...\\" data-pfusch>" so pfusch '
     "components inherit them.\n"
     "- Define interactivity by registering custom elements with pfusch and using "
     "its html/css/script helpers. Do not use React, JSX, frameworks, or build steps.\n"
@@ -37,7 +37,7 @@ DEFAULT_PFUSCH_PROMPT = (
     "- Use pfusch triggers/events for component communication instead of global "
     "framework state.\n"
     "- Example usage:\n"
-    "  <div class=\\\"dashboard\\\">\\n"
+    '  <div class=\\"dashboard\\">\\n'
     "    <feedback-panel>\\n"
     "      <form method='post' action='/api/feedback'>\\n"
     "        <label>Comment<input name='comment' placeholder='Say hi'></label>\\n"
@@ -45,7 +45,7 @@ DEFAULT_PFUSCH_PROMPT = (
     "      </form>\\n"
     "    </feedback-panel>\\n"
     "  </div>\\n"
-    "  <script type=\\\"module\\\">\\n"
+    '  <script type=\\"module\\">\\n'
     "    import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';\\n"
     "    pfusch('feedback-panel', { status: 'idle', history: [] }, (state, trigger, helpers) => [\\n"
     "      script(function() {\\n"
@@ -108,9 +108,7 @@ class Actor:
 
 def validate_identifier(value: str, field_label: str) -> str:
     if not value:
-        raise HTTPException(
-            status_code=400, detail=f"{field_label} must not be empty"
-        )
+        raise HTTPException(status_code=400, detail=f"{field_label} must not be empty")
     if not IDENTIFIER_RE.fullmatch(value):
         raise HTTPException(
             status_code=400,
@@ -119,7 +117,7 @@ def validate_identifier(value: str, field_label: str) -> str:
     return value
 
 
-class GeneratedDashboardStorage:
+class GeneratedUIStorage:
     def __init__(self, base_path: str):
         if not base_path:
             raise ValueError("Generated dashboard storage path is required")
@@ -134,7 +132,9 @@ class GeneratedDashboardStorage:
         )
 
     def _file_path(self, scope: Scope, dashboard_id: str, name: str) -> str:
-        return os.path.join(self._dashboard_dir(scope, dashboard_id, name), "dashboard.json")
+        return os.path.join(
+            self._dashboard_dir(scope, dashboard_id, name), "dashboard.json"
+        )
 
     def read(self, scope: Scope, dashboard_id: str, name: str) -> Dict[str, Any]:
         file_path = self._file_path(scope, dashboard_id, name)
@@ -163,11 +163,11 @@ class GeneratedDashboardStorage:
         return os.path.exists(self._file_path(scope, dashboard_id, name))
 
 
-class GeneratedDashboardService:
+class GeneratedUIService:
     def __init__(
         self,
         *,
-        storage: GeneratedDashboardStorage,
+        storage: GeneratedUIStorage,
         tgi_service: Optional[ProxiedTGIService] = None,
     ):
         self.storage = storage
@@ -384,7 +384,9 @@ class GeneratedDashboardService:
             design_prompt_content = ""
 
         combined_design = design_prompt_content or DEFAULT_DESIGN_PROMPT
-        return f"{DEFAULT_PFUSCH_PROMPT}\n\nDesign system guidelines:\n{combined_design}"
+        return (
+            f"{DEFAULT_PFUSCH_PROMPT}\n\nDesign system guidelines:\n{combined_design}"
+        )
 
     async def _select_tools(
         self, session: MCPSessionBase, requested_tools: Sequence[str]
@@ -407,9 +409,7 @@ class GeneratedDashboardService:
 
     def _extract_content(self, response: Any) -> str:
         if response is None:
-            raise HTTPException(
-                status_code=502, detail="Generation response was empty"
-            )
+            raise HTTPException(status_code=502, detail="Generation response was empty")
 
         if isinstance(response, dict):
             content = response.get("content")
@@ -537,18 +537,20 @@ class GeneratedDashboardService:
                 metadata.setdefault("original_requirements", original_prompt)
 
     def _extract_body(self, html: str) -> Optional[str]:
-        match = re.search(r"<body[^>]*>(.*?)</body>", html, flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(
+            r"<body[^>]*>(.*?)</body>", html, flags=re.IGNORECASE | re.DOTALL
+        )
         if match:
             return match.group(1).strip()
         return None
 
     def _wrap_snippet(self, snippet: str) -> str:
         return (
-            "<!DOCTYPE html><html lang=\"en\"><head>"
-            "<meta charset=\"utf-8\"/>"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
+            '<!DOCTYPE html><html lang="en"><head>'
+            '<meta charset="utf-8"/>'
+            '<meta name="viewport" content="width=device-width, initial-scale=1"/>'
             "<title>Generated Dashboard</title>"
-            "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/pfusch/dist/pfusch.css\"/>"
+            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pfusch/dist/pfusch.css"/>'
             "</head><body>"
             f"{snippet}"
             "</body></html>"
@@ -559,15 +561,16 @@ class GeneratedDashboardService:
     ) -> None:
         metadata = existing.get("metadata", {})
         stored_scope = metadata.get("scope", {})
-        if stored_scope.get("type") != scope.kind or stored_scope.get("id") != scope.identifier:
+        if (
+            stored_scope.get("type") != scope.kind
+            or stored_scope.get("id") != scope.identifier
+        ):
             raise HTTPException(
                 status_code=403,
                 detail="Scope mismatch for stored dashboard",
             )
         if metadata.get("name") and metadata.get("name") != name:
-            raise HTTPException(
-                status_code=403, detail="Dashboard name mismatch"
-            )
+            raise HTTPException(status_code=403, detail="Dashboard name mismatch")
 
     def _ensure_update_permissions(
         self, existing: Dict[str, Any], scope: Scope, actor: Actor

@@ -375,18 +375,24 @@ class FastAPIWrapper:
 
         mapping = {"a": "x-mapped-a"}
         monkeypatch.setattr(sc, "MCP_MAP_HEADER_TO_INPUT", mapping, raising=False)
-        monkeypatch.setattr(tools_map.vars_module, "MCP_MAP_HEADER_TO_INPUT", mapping, raising=False)
+        monkeypatch.setattr(
+            tools_map.vars_module, "MCP_MAP_HEADER_TO_INPUT", mapping, raising=False
+        )
 
         # Verify that the tools list no longer exposes 'a' in the 'add' tool inputSchema
         r = self.client.get(f"{self.base_url}/tools")
-        assert r.status_code == 200, f"Unexpected status code: {r.status_code}, body: {r.text}"
+        assert (
+            r.status_code == 200
+        ), f"Unexpected status code: {r.status_code}, body: {r.text}"
         tools = r.json()
         add_tool = next((t for t in tools if t.get("name") == "add"), None)
         assert add_tool is not None, "add tool not found"
         input_schema = add_tool.get("inputSchema") or {}
         if isinstance(input_schema, dict):
             props = input_schema.get("properties", {})
-            assert "a" not in props, f"Mapped input 'a' still present in schema: {props.keys()}"
+            assert (
+                "a" not in props
+            ), f"Mapped input 'a' still present in schema: {props.keys()}"
 
         # Call the 'add' tool without 'a' in the JSON body but provide it via header
         r = self.client.post(
@@ -396,4 +402,6 @@ class FastAPIWrapper:
         )
         assert r.status_code == 200, f"Expected 200, got {r.status_code}, {r.text}"
         body = r.json()
-        assert body.get("structuredContent", {}).get("result") == 5, f"Unexpected result: {body}"
+        assert (
+            body.get("structuredContent", {}).get("result") == 5
+        ), f"Unexpected result: {body}"

@@ -175,7 +175,9 @@ def test_map_tools_prunes_mapped_inputs(monkeypatch):
     monkeypatch.setenv("MCP_MAP_HEADER_TO_INPUT", "location=x-auth-location")
     from app import vars as vars_module
 
-    monkeypatch.setattr(vars_module, "MCP_MAP_HEADER_TO_INPUT", {"location": "x-auth-location"})
+    monkeypatch.setattr(
+        vars_module, "MCP_MAP_HEADER_TO_INPUT", {"location": "x-auth-location"}
+    )
 
     tools = [
         {

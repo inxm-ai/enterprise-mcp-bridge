@@ -64,7 +64,7 @@ def _parse_map_header_to_input(raw: str) -> dict:
     mapping: dict = {}
     if not raw:
         return mapping
-    for entry in raw.split(','):
+    for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
             continue

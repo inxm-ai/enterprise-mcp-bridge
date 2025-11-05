@@ -63,7 +63,9 @@ def map_tools(tools):
                     props.pop(input_prop, None)
                     required = input_schema_copy.get("required")
                     if isinstance(required, list) and input_prop in required:
-                        input_schema_copy["required"] = [r for r in required if r != input_prop]
+                        input_schema_copy["required"] = [
+                            r for r in required if r != input_prop
+                        ]
             if not input_schema_copy.get("properties"):
                 input_schema_copy = {}
 
@@ -94,7 +96,9 @@ def inject_headers_into_args(
         return args or {}
 
     # normalize incoming headers to lowercase keys for case-insensitive lookup
-    headers_lc = {k.lower(): v for k, v in (incoming_headers.items() if incoming_headers else [])}
+    headers_lc = {
+        k.lower(): v for k, v in (incoming_headers.items() if incoming_headers else [])
+    }
 
     # tools can be an object with .tools attribute or a list of tool-like dicts
     tool_list = getattr(tools, "tools", tools) if tools is not None else []
@@ -119,7 +123,11 @@ def inject_headers_into_args(
     elif isinstance(tool_def, dict):
         input_schema = tool_def.get("inputSchema")
 
-    props = (input_schema or {}).get("properties", {}) if isinstance(input_schema, dict) else {}
+    props = (
+        (input_schema or {}).get("properties", {})
+        if isinstance(input_schema, dict)
+        else {}
+    )
 
     out_args = dict(args or {})
     for input_prop, header_name in MCP_MAP_HEADER_TO_INPUT.items():

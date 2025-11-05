@@ -17,8 +17,8 @@ from app.oauth.user_info import get_data_access_manager
 
 from .generated_service import (
     Actor,
-    GeneratedDashboardService,
-    GeneratedDashboardStorage,
+    GeneratedUIService,
+    GeneratedUIStorage,
     Scope,
     validate_identifier,
 )
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/app")
 tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("uvicorn.error")
 sessions = session_manager()
-_generated_service: Optional[GeneratedDashboardService] = None
+_generated_service: Optional[GeneratedUIService] = None
 
 # Configuration from environment
 PROXY_PREFIX = os.environ.get("PROXY_PREFIX", MCP_BASE_PATH + "/app")
@@ -74,13 +74,13 @@ def _ensure_tgi_enabled() -> None:
         )
 
 
-def _get_generated_service() -> GeneratedDashboardService:
+def _get_generated_service() -> GeneratedUIService:
     global _generated_service
-    base_path = os.environ.get("GENERATED_DASHBOARD_PATH", "").strip()
+    base_path = os.environ.get("GENERATED_WEB_PATH", "").strip()
     if not base_path:
         raise HTTPException(
             status_code=503,
-            detail="GENERATED_DASHBOARD_PATH must be configured to use generated dashboards.",
+            detail="GENERATED_WEB_PATH must be configured to use generated dashboards.",
         )
     base_path = os.path.abspath(base_path)
     existing_path = (
@@ -90,8 +90,8 @@ def _get_generated_service() -> GeneratedDashboardService:
     )
     if _generated_service and existing_path == base_path:
         return _generated_service
-    _generated_service = GeneratedDashboardService(
-        storage=GeneratedDashboardStorage(base_path),
+    _generated_service = GeneratedUIService(
+        storage=GeneratedUIStorage(base_path),
     )
     return _generated_service
 

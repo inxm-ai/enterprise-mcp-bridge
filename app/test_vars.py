@@ -3,7 +3,9 @@ import os
 
 
 def test_mcp_map_header_to_input_parsing(monkeypatch):
-    monkeypatch.setenv("MCP_MAP_HEADER_TO_INPUT", "userId=x-auth-user-id,email=x-auth-user-email")
+    monkeypatch.setenv(
+        "MCP_MAP_HEADER_TO_INPUT", "userId=x-auth-user-id,email=x-auth-user-email"
+    )
     import app.vars as vars_module
 
     importlib.reload(vars_module)

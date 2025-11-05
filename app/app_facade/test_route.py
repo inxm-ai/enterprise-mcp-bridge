@@ -244,7 +244,9 @@ class TestRewriteLocationHeader:
         location = f"{TEST_TARGET_SERVER_URL}/api/callback"
 
         with patch("app.app_facade.route.PUBLIC_URL", "https://public.example.com"):
-            with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+            with patch(
+                "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            ):
                 result = rewrite_location_header(location, mock_request)
 
         assert result == f"https://public.example.com{PROXY_PREFIX}/api/callback"
@@ -254,7 +256,9 @@ class TestRewriteLocationHeader:
         location = f"{TEST_TARGET_SERVER_URL}/callback?code=abc&state=xyz"
 
         with patch("app.app_facade.route.PUBLIC_URL", ""):
-            with patch("app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL):
+            with patch(
+                "app.app_facade.route.TARGET_SERVER_URL", TEST_TARGET_SERVER_URL
+            ):
                 result = rewrite_location_header(location, mock_request)
 
         assert result.endswith(f"{PROXY_PREFIX}/callback?code=abc&state=xyz")

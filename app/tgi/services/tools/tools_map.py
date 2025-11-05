@@ -150,7 +150,9 @@ def map_tools(tools):
                     props.pop(input_prop, None)
                     required = processed_schema.get("required")
                     if isinstance(required, list) and input_prop in required:
-                        processed_schema["required"] = [r for r in required if r != input_prop]
+                        processed_schema["required"] = [
+                            r for r in required if r != input_prop
+                        ]
             if not processed_schema.get("properties"):
                 processed_schema = {}
 
