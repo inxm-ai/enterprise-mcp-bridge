@@ -254,7 +254,9 @@ async def get_generated_ui(
         )
 
     html_section = (record.get("current") or {}).get("html") or {}
-    mode = (render_mode or "page").lower()
+    mode = (render_mode or "card").lower()
+    if mode == "card":
+        return JSONResponse(content=record)
     if mode not in {"page", "snippet"}:
         raise HTTPException(status_code=400, detail="Invalid render mode requested")
     content = html_section.get(mode)
