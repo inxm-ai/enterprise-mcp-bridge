@@ -25,8 +25,8 @@ DEFAULT_DESIGN_PROMPT = (
 
 
 def _load_pfusch_prompt() -> str:
-    """Load the pfusch dashboard prompt from the markdown file and replace placeholders."""
-    prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_dashboard_prompt.md")
+    """Load the pfusch ui prompt from the markdown file and replace placeholders."""
+    prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_ui_prompt.md")
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()
@@ -40,7 +40,7 @@ def _load_pfusch_prompt() -> str:
 def _get_fallback_prompt() -> str:
     """Fallback prompt if the markdown file cannot be loaded."""
     return (
-        "You are a microsite and dashboard designer that produces structured JSON. "
+        "You are a microsite and ui designer that produces structured JSON. "
         "All interactive behaviour must be implemented with pfusch, a minimal progressive enhancement "
         "library that works directly in the browser. Follow these rules:\n"
         "- Start with semantic HTML that works without JavaScript, then enhance it.\n"
@@ -58,7 +58,7 @@ def _get_fallback_prompt() -> str:
 # (for example either `html.page` or `html.snippet` may be provided).
 generation_ui_schema = {
     "$schema": "http://json-schema.org/draft-07/schema#",
-    "title": "GeneratedDashboard",
+    "title": "GeneratedUi",
     "type": "object",
     "properties": {
         "html": {
@@ -78,7 +78,7 @@ generation_ui_schema = {
         },
         "metadata": {
             "type": "object",
-            "description": "Auxiliary metadata about the generated dashboard",
+            "description": "Auxiliary metadata about the generated ui",
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
@@ -139,24 +139,24 @@ def validate_identifier(value: str, field_label: str) -> str:
 class GeneratedUIStorage:
     def __init__(self, base_path: str):
         if not base_path:
-            raise ValueError("Generated dashboard storage path is required")
+            raise ValueError("Generated ui storage path is required")
         self.base_path = os.path.abspath(base_path)
 
-    def _dashboard_dir(self, scope: Scope, dashboard_id: str, name: str) -> str:
+    def _ui_dir(self, scope: Scope, ui_id: str, name: str) -> str:
         safe_scope = validate_identifier(scope.identifier, f"{scope.kind} id")
-        safe_dashboard_id = validate_identifier(dashboard_id, "dashboard id")
-        safe_name = validate_identifier(name, "dashboard name")
+        safe_ui_id = validate_identifier(ui_id, "ui id")
+        safe_name = validate_identifier(name, "ui name")
         return os.path.join(
-            self.base_path, scope.kind, safe_scope, safe_dashboard_id, safe_name
+            self.base_path, scope.kind, safe_scope, safe_ui_id, safe_name
         )
 
-    def _file_path(self, scope: Scope, dashboard_id: str, name: str) -> str:
+    def _file_path(self, scope: Scope, ui_id: str, name: str) -> str:
         return os.path.join(
-            self._dashboard_dir(scope, dashboard_id, name), "dashboard.json"
+            self._ui_dir(scope, ui_id, name), "ui.json"
         )
 
-    def read(self, scope: Scope, dashboard_id: str, name: str) -> Dict[str, Any]:
-        file_path = self._file_path(scope, dashboard_id, name)
+    def read(self, scope: Scope, ui_id: str, name: str) -> Dict[str, Any]:
+        file_path = self._file_path(scope, ui_id, name)
         try:
             with open(file_path, "r", encoding="utf-8") as handle:
                 return json.load(handle)
@@ -165,21 +165,21 @@ class GeneratedUIStorage:
         except json.JSONDecodeError as exc:
             raise HTTPException(
                 status_code=500,
-                detail=f"Stored dashboard payload at {file_path} is invalid JSON",
+                detail=f"Stored ui payload at {file_path} is invalid JSON",
             ) from exc
 
     def write(
-        self, scope: Scope, dashboard_id: str, name: str, payload: Dict[str, Any]
+        self, scope: Scope, ui_id: str, name: str, payload: Dict[str, Any]
     ) -> None:
-        file_path = self._file_path(scope, dashboard_id, name)
+        file_path = self._file_path(scope, ui_id, name)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         tmp_path = f"{file_path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, file_path)
 
-    def exists(self, scope: Scope, dashboard_id: str, name: str) -> bool:
-        return os.path.exists(self._file_path(scope, dashboard_id, name))
+    def exists(self, scope: Scope, ui_id: str, name: str) -> bool:
+        return os.path.exists(self._file_path(scope, ui_id, name))
 
 
 class GeneratedUIService:
@@ -192,40 +192,40 @@ class GeneratedUIService:
         self.storage = storage
         self.tgi_service = tgi_service or ProxiedTGIService()
 
-    async def create_dashboard(
+    async def create_ui(
         self,
         *,
         session: MCPSessionBase,
         scope: Scope,
         actor: Actor,
-        dashboard_id: str,
+        ui_id: str,
         name: str,
         prompt: str,
         tools: Optional[Iterable[str]],
         access_token: Optional[str],
     ) -> Dict[str, Any]:
-        if self.storage.exists(scope, dashboard_id, name):
+        if self.storage.exists(scope, ui_id, name):
             raise HTTPException(
                 status_code=409,
-                detail="Dashboard already exists for this id and name",
+                detail="Ui already exists for this id and name",
             )
 
         if scope.kind == "user" and actor.user_id != scope.identifier:
             raise HTTPException(
                 status_code=403,
-                detail="User dashboards may only be created by the owning user",
+                detail="User uis may only be created by the owning user",
             )
 
         if scope.kind == "group" and scope.identifier not in set(actor.groups or []):
             raise HTTPException(
                 status_code=403,
-                detail="Group dashboards may only be created by group members",
+                detail="Group uis may only be created by group members",
             )
 
-        generated = await self._generate_dashboard_payload(
+        generated = await self._generate_ui_payload(
             session=session,
             scope=scope,
-            dashboard_id=dashboard_id,
+            ui_id=ui_id,
             name=name,
             prompt=prompt,
             tools=list(tools or []),
@@ -236,7 +236,7 @@ class GeneratedUIService:
         timestamp = self._now()
         record = {
             "metadata": {
-                "id": dashboard_id,
+                "id": ui_id,
                 "name": name,
                 "scope": {"type": scope.kind, "id": scope.identifier},
                 "owner": {"type": scope.kind, "id": scope.identifier},
@@ -257,33 +257,33 @@ class GeneratedUIService:
             "current": generated,
         }
 
-        self.storage.write(scope, dashboard_id, name, record)
+        self.storage.write(scope, ui_id, name, record)
         return record
 
-    async def update_dashboard(
+    async def update_ui(
         self,
         *,
         session: MCPSessionBase,
         scope: Scope,
         actor: Actor,
-        dashboard_id: str,
+        ui_id: str,
         name: str,
         prompt: str,
         tools: Optional[Iterable[str]],
         access_token: Optional[str],
     ) -> Dict[str, Any]:
         try:
-            existing = self.storage.read(scope, dashboard_id, name)
+            existing = self.storage.read(scope, ui_id, name)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Dashboard not found") from exc
+            raise HTTPException(status_code=404, detail="Ui not found") from exc
 
         self._assert_scope_consistency(existing, scope, name)
         self._ensure_update_permissions(existing, scope, actor)
 
-        generated = await self._generate_dashboard_payload(
+        generated = await self._generate_ui_payload(
             session=session,
             scope=scope,
-            dashboard_id=dashboard_id,
+            ui_id=ui_id,
             name=name,
             prompt=prompt,
             tools=list(tools or []),
@@ -310,32 +310,32 @@ class GeneratedUIService:
 
         existing["current"] = generated
 
-        self.storage.write(scope, dashboard_id, name, existing)
+        self.storage.write(scope, ui_id, name, existing)
         return existing
 
-    def get_dashboard(
+    def get_ui(
         self,
         *,
         scope: Scope,
         actor: Actor,
-        dashboard_id: str,
+        ui_id: str,
         name: str,
     ) -> Dict[str, Any]:
         try:
-            existing = self.storage.read(scope, dashboard_id, name)
+            existing = self.storage.read(scope, ui_id, name)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Dashboard not found") from exc
+            raise HTTPException(status_code=404, detail="Ui not found") from exc
 
         self._assert_scope_consistency(existing, scope, name)
         self._ensure_update_permissions(existing, scope, actor)
         return existing
 
-    async def _generate_dashboard_payload(
+    async def _generate_ui_payload(
         self,
         *,
         session: MCPSessionBase,
         scope: Scope,
-        dashboard_id: str,
+        ui_id: str,
         name: str,
         prompt: str,
         tools: List[str],
@@ -344,8 +344,8 @@ class GeneratedUIService:
     ) -> Dict[str, Any]:
         system_prompt = await self._build_system_prompt(session)
         message_payload = {
-            "dashboard": {
-                "id": dashboard_id,
+            "ui": {
+                "id": ui_id,
                 "name": name,
                 "scope": {"type": scope.kind, "id": scope.identifier},
             },
@@ -400,7 +400,7 @@ class GeneratedUIService:
             raise HTTPException(status_code=502, detail="Generation response was empty")
 
         payload = self._parse_json(content)
-        self._normalise_payload(payload, scope, dashboard_id, name, prompt, previous)
+        self._normalise_payload(payload, scope, ui_id, name, prompt, previous)
         return payload
 
     async def _build_system_prompt(self, session: MCPSessionBase) -> str:
@@ -427,7 +427,7 @@ class GeneratedUIService:
         self, session: MCPSessionBase, requested_tools: Sequence[str], prompt: str = ""
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Select relevant tools for dashboard generation.
+        Select relevant tools for ui generation.
 
         If specific tools are requested, use those. Otherwise, intelligently
         filter tools based on the prompt to reduce context size.
@@ -506,7 +506,7 @@ class GeneratedUIService:
                 if len(word) > 4 and word in prompt_lower:
                     score += 5
 
-            # Prioritize list/get operations for dashboards
+            # Prioritize list/get operations for uis
             if any(
                 prefix in name.lower()
                 for prefix in ["list_", "get_", "fetch_", "retrieve_"]
@@ -631,7 +631,7 @@ class GeneratedUIService:
         self,
         payload: Dict[str, Any],
         scope: Scope,
-        dashboard_id: str,
+        ui_id: str,
         name: str,
         prompt: str,
         previous: Optional[Dict[str, Any]],
@@ -714,7 +714,7 @@ class GeneratedUIService:
         payload["html"] = html_section
 
         metadata = payload.setdefault("metadata", {})
-        metadata.setdefault("id", dashboard_id)
+        metadata.setdefault("id", ui_id)
         metadata.setdefault("name", name)
         metadata.setdefault("scope", {"type": scope.kind, "id": scope.identifier})
         metadata.setdefault("requirements", prompt)
@@ -743,7 +743,7 @@ class GeneratedUIService:
             '<!DOCTYPE html><html lang="en"><head>'
             '<meta charset="utf-8"/>'
             '<meta name="viewport" content="width=device-width, initial-scale=1"/>'
-            "<title>Generated Dashboard</title>"
+            "<title>Generated Ui</title>"
             '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pfusch/dist/pfusch.css"/>'
             "</head><body>"
             f"{snippet}"
@@ -761,10 +761,10 @@ class GeneratedUIService:
         ):
             raise HTTPException(
                 status_code=403,
-                detail="Scope mismatch for stored dashboard",
+                detail="Scope mismatch for stored ui",
             )
         if metadata.get("name") and metadata.get("name") != name:
-            raise HTTPException(status_code=403, detail="Dashboard name mismatch")
+            raise HTTPException(status_code=403, detail="Ui name mismatch")
 
     def _ensure_update_permissions(
         self, existing: Dict[str, Any], scope: Scope, actor: Actor

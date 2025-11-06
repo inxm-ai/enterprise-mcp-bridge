@@ -393,7 +393,7 @@ class TestRewriteContentUrls:
         """Test that URLs already containing the proxy prefix are not rewritten again."""
         html = f"""
         <html>
-            <a href="{PROXY_PREFIX}/dashboard">Already prefixed</a>
+            <a href="{PROXY_PREFIX}/ui">Already prefixed</a>
             <a href="/api/auth">Not prefixed</a>
             <script src="{PROXY_PREFIX}/_next/static/chunks/main.js"></script>
         </html>
@@ -404,7 +404,7 @@ class TestRewriteContentUrls:
             result_str = result.decode("utf-8")
 
         # URLs already containing the prefix should not be rewritten
-        assert f'href="{PROXY_PREFIX}/dashboard"' in result_str
+        assert f'href="{PROXY_PREFIX}/ui"' in result_str
         assert f'src="{PROXY_PREFIX}/_next/static/chunks/main.js"' in result_str
 
         # URLs not containing the prefix should be rewritten

@@ -30,13 +30,13 @@ class StubGeneratedService:
             },
         }
 
-    async def create_dashboard(
+    async def create_ui(
         self,
         *,
         session,
         scope,
         actor,
-        dashboard_id,
+        ui_id,
         name,
         prompt,
         tools,
@@ -46,7 +46,7 @@ class StubGeneratedService:
             "session": session,
             "scope": scope,
             "actor": actor,
-            "dashboard_id": dashboard_id,
+            "ui_id": ui_id,
             "name": name,
             "prompt": prompt,
             "tools": list(tools or []),
@@ -54,13 +54,13 @@ class StubGeneratedService:
         }
         return self.record
 
-    async def update_dashboard(
+    async def update_ui(
         self,
         *,
         session,
         scope,
         actor,
-        dashboard_id,
+        ui_id,
         name,
         prompt,
         tools,
@@ -70,7 +70,7 @@ class StubGeneratedService:
             "session": session,
             "scope": scope,
             "actor": actor,
-            "dashboard_id": dashboard_id,
+            "ui_id": ui_id,
             "name": name,
             "prompt": prompt,
             "tools": list(tools or []),
@@ -81,7 +81,7 @@ class StubGeneratedService:
         updated["metadata"]["updated_at"] = "2024-01-02T00:00:00Z"
         return updated
 
-    def get_dashboard(self, *, scope, actor, dashboard_id, name):
+    def get_ui(self, *, scope, actor, ui_id, name):
         return self.record
 
 
@@ -113,13 +113,13 @@ def client(monkeypatch):
     return client
 
 
-def test_create_generated_dashboard(client):
+def test_create_generated_ui(client):
     response = client.post(
         "/app/_generated/user=user123",
         json={
             "id": "dash1",
             "name": "overview",
-            "prompt": "Build a dashboard",
+            "prompt": "Build a ui",
         },
         headers={"X-Auth-Request-Access-Token": "token"},
     )
@@ -131,10 +131,10 @@ def test_create_generated_dashboard(client):
     assert payload["scope"] == {"type": "user", "id": "user123"}
     assert payload["metadata"]["components"] == ["pfusch-card"]
     stub = client.stub_service  # type: ignore[attr-defined]
-    assert stub.last_create["prompt"] == "Build a dashboard"
+    assert stub.last_create["prompt"] == "Build a ui"
 
 
-def test_get_generated_dashboard_snippet(client):
+def test_get_generated_ui_snippet(client):
     response = client.get(
         "/app/_generated/user=user123/dash1/overview",
         params={"as": "snippet"},
@@ -144,11 +144,11 @@ def test_get_generated_dashboard_snippet(client):
     assert response.text.strip() == "<div>Full Page</div>"
 
 
-def test_update_generated_dashboard(client):
+def test_update_generated_ui(client):
     response = client.post(
         "/app/_generated/user=user123/dash1/overview",
         json={
-            "prompt": "Refine the dashboard layout",
+            "prompt": "Refine the ui layout",
             "tools": ["insights_tool"],
         },
         headers={"X-Auth-Request-Access-Token": "token"},

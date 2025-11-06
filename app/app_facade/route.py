@@ -22,7 +22,7 @@ from .generated_service import (
     Scope,
     validate_identifier,
 )
-from .schemas import DashboardCreateRequest, DashboardUpdateRequest
+from .schemas import UiCreateRequest, UiUpdateRequest
 
 # Initialize components
 router = APIRouter(prefix="/app")
@@ -80,7 +80,7 @@ def _get_generated_service() -> GeneratedUIService:
     if not base_path:
         raise HTTPException(
             status_code=503,
-            detail="GENERATED_WEB_PATH must be configured to use generated dashboards.",
+            detail="GENERATED_WEB_PATH must be configured to use generated uis.",
         )
     base_path = os.path.abspath(base_path)
     existing_path = (
@@ -134,7 +134,7 @@ def _extract_actor(access_token: Optional[str]) -> Actor:
     return Actor(user_id=str(user_id), groups=groups_list)
 
 
-def _format_dashboard_response(record: Dict[str, Any]) -> Dict[str, Any]:
+def _format_ui_response(record: Dict[str, Any]) -> Dict[str, Any]:
     metadata = record.get("metadata", {})
     current = record.get("current", {})
     response = {
@@ -153,9 +153,9 @@ def _format_dashboard_response(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.post("/_generated/{target}")
-async def create_generated_dashboard(
+async def create_generated_ui(
     target: str,
-    body: DashboardCreateRequest,
+    body: UiCreateRequest,
     request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
@@ -163,8 +163,8 @@ async def create_generated_dashboard(
 ):
     _ensure_tgi_enabled()
     scope = _parse_scope(target)
-    dashboard_id = validate_identifier(body.id, "dashboard id")
-    name = validate_identifier(body.name, "dashboard name")
+    ui_id = validate_identifier(body.id, "ui id")
+    name = validate_identifier(body.name, "ui name")
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt must not be empty")
@@ -182,11 +182,11 @@ async def create_generated_dashboard(
     requested_group = scope.identifier if scope.kind == "group" else None
 
     try:
-        with tracer.start_as_current_span("generated_dashboard.create") as span:
-            span.set_attribute("dashboard.scope", scope.kind)
-            span.set_attribute("dashboard.scope_id", scope.identifier)
-            span.set_attribute("dashboard.id", dashboard_id)
-            span.set_attribute("dashboard.name", name)
+        with tracer.start_as_current_span("generated_ui.create") as span:
+            span.set_attribute("ui.scope", scope.kind)
+            span.set_attribute("ui.scope_id", scope.identifier)
+            span.set_attribute("ui.id", ui_id)
+            span.set_attribute("ui.name", name)
             async with mcp_session_context(
                 sessions,
                 session_key,
@@ -194,11 +194,11 @@ async def create_generated_dashboard(
                 requested_group,
                 incoming_headers,
             ) as session_obj:
-                record = await service.create_dashboard(
+                record = await service.create_ui(
                     session=session_obj,
                     scope=scope,
                     actor=actor,
-                    dashboard_id=dashboard_id,
+                    ui_id=ui_id,
                     name=name,
                     prompt=prompt,
                     tools=list(body.tools or []),
@@ -214,19 +214,19 @@ async def create_generated_dashboard(
                     if isinstance(nested_exc, HTTPException):
                         raise nested_exc
         # If no HTTPException found, log and raise as 500
-        logger.error("Unexpected error during dashboard creation", exc_info=eg)
+        logger.error("Unexpected error during ui creation", exc_info=eg)
         raise HTTPException(status_code=500, detail="Internal Server Error")
     except Exception as exc:
-        logger.error("Unexpected error during dashboard creation", exc_info=exc)
+        logger.error("Unexpected error during ui creation", exc_info=exc)
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-    return JSONResponse(status_code=201, content=_format_dashboard_response(record))
+    return JSONResponse(status_code=201, content=_format_ui_response(record))
 
 
-@router.get("/_generated/{target}/{dashboard_id}/{name}")
-async def get_generated_dashboard(
+@router.get("/_generated/{target}/{ui_id}/{name}")
+async def get_generated_ui(
     target: str,
-    dashboard_id: str,
+    ui_id: str,
     name: str,
     request: Request,
     render_mode: str = Query("page", alias="as"),
@@ -236,20 +236,20 @@ async def get_generated_dashboard(
 ):
     _ensure_tgi_enabled()
     scope = _parse_scope(target)
-    dashboard_id = validate_identifier(dashboard_id, "dashboard id")
-    name = validate_identifier(name, "dashboard name")
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
     actor = _extract_actor(access_token)
     service = _get_generated_service()
 
-    with tracer.start_as_current_span("generated_dashboard.fetch") as span:
-        span.set_attribute("dashboard.scope", scope.kind)
-        span.set_attribute("dashboard.scope_id", scope.identifier)
-        span.set_attribute("dashboard.id", dashboard_id)
-        span.set_attribute("dashboard.name", name)
-        record = service.get_dashboard(
+    with tracer.start_as_current_span("generated_ui.fetch") as span:
+        span.set_attribute("ui.scope", scope.kind)
+        span.set_attribute("ui.scope_id", scope.identifier)
+        span.set_attribute("ui.id", ui_id)
+        span.set_attribute("ui.name", name)
+        record = service.get_ui(
             scope=scope,
             actor=actor,
-            dashboard_id=dashboard_id,
+            ui_id=ui_id,
             name=name,
         )
 
@@ -261,17 +261,17 @@ async def get_generated_dashboard(
     if not content:
         raise HTTPException(
             status_code=500,
-            detail=f"Stored dashboard does not contain HTML for mode '{mode}'",
+            detail=f"Stored ui does not contain HTML for mode '{mode}'",
         )
     return HTMLResponse(content=content, media_type="text/html")
 
 
-@router.post("/_generated/{target}/{dashboard_id}/{name}")
-async def update_generated_dashboard(
+@router.post("/_generated/{target}/{ui_id}/{name}")
+async def update_generated_ui(
     target: str,
-    dashboard_id: str,
+    ui_id: str,
     name: str,
-    body: DashboardUpdateRequest,
+    body: UiUpdateRequest,
     request: Request,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
@@ -279,8 +279,8 @@ async def update_generated_dashboard(
 ):
     _ensure_tgi_enabled()
     scope = _parse_scope(target)
-    dashboard_id = validate_identifier(dashboard_id, "dashboard id")
-    name = validate_identifier(name, "dashboard name")
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt must not be empty")
@@ -298,11 +298,11 @@ async def update_generated_dashboard(
     requested_group = scope.identifier if scope.kind == "group" else None
 
     try:
-        with tracer.start_as_current_span("generated_dashboard.update") as span:
-            span.set_attribute("dashboard.scope", scope.kind)
-            span.set_attribute("dashboard.scope_id", scope.identifier)
-            span.set_attribute("dashboard.id", dashboard_id)
-            span.set_attribute("dashboard.name", name)
+        with tracer.start_as_current_span("generated_ui.update") as span:
+            span.set_attribute("ui.scope", scope.kind)
+            span.set_attribute("ui.scope_id", scope.identifier)
+            span.set_attribute("ui.id", ui_id)
+            span.set_attribute("ui.name", name)
             async with mcp_session_context(
                 sessions,
                 session_key,
@@ -310,11 +310,11 @@ async def update_generated_dashboard(
                 requested_group,
                 incoming_headers,
             ) as session_obj:
-                record = await service.update_dashboard(
+                record = await service.update_ui(
                     session=session_obj,
                     scope=scope,
                     actor=actor,
-                    dashboard_id=dashboard_id,
+                    ui_id=ui_id,
                     name=name,
                     prompt=prompt,
                     tools=list(body.tools or []),
@@ -334,13 +334,13 @@ async def update_generated_dashboard(
                     if isinstance(nested_exc, HTTPException):
                         raise nested_exc
         # If no HTTPException found, log and raise as 500
-        logger.error("Unexpected error during dashboard update", exc_info=eg)
+        logger.error("Unexpected error during ui update", exc_info=eg)
         raise HTTPException(status_code=500, detail="Internal Server Error")
     except Exception as exc:
-        logger.error("Unexpected error during dashboard update", exc_info=exc)
+        logger.error("Unexpected error during ui update", exc_info=exc)
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-    return JSONResponse(status_code=200, content=_format_dashboard_response(record))
+    return JSONResponse(status_code=200, content=_format_ui_response(record))
 
 
 def get_target_url(request: Request) -> str:
