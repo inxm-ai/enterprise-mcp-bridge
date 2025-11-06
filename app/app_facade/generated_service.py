@@ -250,6 +250,7 @@ class GeneratedUIService:
                         user_id=actor.user_id,
                         generated_at=timestamp,
                         payload_metadata=generated.get("metadata", {}),
+                        payload_html=generated.get("html", {}),
                     )
                 ],
             },
@@ -390,6 +391,7 @@ class GeneratedUIService:
                         user_id=actor.user_id,
                         generated_at=timestamp,
                         payload_metadata=payload_obj.get("metadata", {}),
+                        payload_html=payload_obj.get("html", {}),
                     )
                 ],
             },
@@ -408,7 +410,7 @@ class GeneratedUIService:
         final_payload = json.dumps(
             {"status": "created", "record": record}, ensure_ascii=False
         )
-        yield f"event: done\ndata: {final_payload}\n\n[DONE]".encode("utf-8")
+        yield f"event: done\ndata: {final_payload}\n\n[DONE]\n\n".encode("utf-8")
 
     async def update_ui(
         self,
@@ -455,6 +457,7 @@ class GeneratedUIService:
                 user_id=actor.user_id,
                 generated_at=timestamp,
                 payload_metadata=generated.get("metadata", {}),
+                payload_html=generated.get("html", {}),
             )
         )
 
@@ -894,7 +897,6 @@ class GeneratedUIService:
             '<meta charset="utf-8"/>'
             '<meta name="viewport" content="width=device-width, initial-scale=1"/>'
             "<title>Generated Ui</title>"
-            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pfusch/dist/pfusch.css"/>'
             "</head><body>"
             f"{snippet}"
             "</body></html>"
@@ -939,6 +941,7 @@ class GeneratedUIService:
         user_id: str,
         generated_at: str,
         payload_metadata: Dict[str, Any],
+        payload_html: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return {
             "action": action,
@@ -947,6 +950,7 @@ class GeneratedUIService:
             "user_id": user_id,
             "generated_at": generated_at,
             "payload_metadata": payload_metadata,
+            "payload_html": payload_html,
         }
 
     def _now(self) -> str:
