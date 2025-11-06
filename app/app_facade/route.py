@@ -4,6 +4,7 @@ import re
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urljoin, urlparse
 from http.cookies import SimpleCookie
+import json
 
 import httpx
 from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Request
@@ -181,46 +182,95 @@ async def create_generated_ui(
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
-    try:
-        with tracer.start_as_current_span("generated_ui.create") as span:
-            span.set_attribute("ui.scope", scope.kind)
-            span.set_attribute("ui.scope_id", scope.identifier)
-            span.set_attribute("ui.id", ui_id)
-            span.set_attribute("ui.name", name)
-            async with mcp_session_context(
-                sessions,
-                session_key,
-                access_token,
-                requested_group,
-                incoming_headers,
-            ) as session_obj:
-                record = await service.create_ui(
-                    session=session_obj,
-                    scope=scope,
-                    actor=actor,
-                    ui_id=ui_id,
-                    name=name,
-                    prompt=prompt,
-                    tools=list(body.tools or []),
-                    access_token=access_token,
-                )
-    except BaseExceptionGroup as eg:  # type: ignore[misc]
-        # Handle ExceptionGroup from async context managers
-        for exc in eg.exceptions:
-            if isinstance(exc, HTTPException):
-                raise exc
-            if isinstance(exc, BaseException) and hasattr(exc, "exceptions"):
-                for nested_exc in exc.exceptions:  # type: ignore[attr-defined]
-                    if isinstance(nested_exc, HTTPException):
-                        raise nested_exc
-        # If no HTTPException found, log and raise as 500
-        logger.error("Unexpected error during ui creation", exc_info=eg)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-    except Exception as exc:
-        logger.error("Unexpected error during ui creation", exc_info=exc)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    # If the underlying service does not support streaming, fall back to the
+    # original synchronous create_ui path for compatibility (used by tests/stubs).
+    if not hasattr(service, "stream_generate_ui"):
+        try:
+            with tracer.start_as_current_span("generated_ui.create") as span:
+                span.set_attribute("ui.scope", scope.kind)
+                span.set_attribute("ui.scope_id", scope.identifier)
+                span.set_attribute("ui.id", ui_id)
+                span.set_attribute("ui.name", name)
+                async with mcp_session_context(
+                    sessions,
+                    session_key,
+                    access_token,
+                    requested_group,
+                    incoming_headers,
+                ) as session_obj:
+                    record = await service.create_ui(
+                        session=session_obj,
+                        scope=scope,
+                        actor=actor,
+                        ui_id=ui_id,
+                        name=name,
+                        prompt=prompt,
+                        tools=list(body.tools or []),
+                        access_token=access_token,
+                    )
+        except Exception as exc:
+            logger.error("Unexpected error during ui creation", exc_info=exc)
+            raise HTTPException(status_code=500, detail="Internal Server Error")
 
-    return JSONResponse(status_code=201, content=_format_ui_response(record))
+        return JSONResponse(status_code=201, content=_format_ui_response(record))
+
+    # SSE event stream generator
+    async def event_stream() -> AsyncIterator[bytes]:
+        try:
+            with tracer.start_as_current_span("generated_ui.create") as span:
+                span.set_attribute("ui.scope", scope.kind)
+                span.set_attribute("ui.scope_id", scope.identifier)
+                span.set_attribute("ui.id", ui_id)
+                span.set_attribute("ui.name", name)
+                async with mcp_session_context(
+                    sessions,
+                    session_key,
+                    access_token,
+                    requested_group,
+                    incoming_headers,
+                ) as session_obj:
+                    # Stream from the service; it's responsible for producing SSE-formatted bytes
+                    async for chunk in service.stream_generate_ui(
+                        session=session_obj,
+                        scope=scope,
+                        actor=actor,
+                        ui_id=ui_id,
+                        name=name,
+                        prompt=prompt,
+                        tools=list(body.tools or []),
+                        access_token=access_token,
+                    ):  # pragma: no cover - streaming path
+                        yield chunk
+        except Exception as eg:
+            # Some runtimes (py < 3.11) don't define ExceptionGroup/BaseExceptionGroup.
+            # Try to extract nested HTTPExceptions if present, otherwise emit a generic error.
+            if hasattr(eg, "exceptions"):
+                for exc in getattr(eg, "exceptions"):
+                    if isinstance(exc, HTTPException):
+                        payload = {"error": exc.detail}
+                        yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode(
+                            "utf-8"
+                        )
+                        return
+            logger.error("Unexpected error during ui creation", exc_info=eg)
+            yield f"event: error\ndata: {json.dumps({'error': 'Internal Server Error'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+        except HTTPException as exc:
+            payload = {"error": exc.detail}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+            return
+        except Exception as exc:
+            logger.error("Unexpected error during ui creation", exc_info=exc)
+            payload = {"error": "Internal Server Error"}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+            return
+
+    # Return StreamingResponse for SSE
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", status_code=201
+    )
 
 
 @router.get("/_generated/{target}/{ui_id}/{name}")

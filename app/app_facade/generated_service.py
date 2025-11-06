@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import AsyncIterator
 
 from fastapi import HTTPException
 
@@ -151,9 +152,7 @@ class GeneratedUIStorage:
         )
 
     def _file_path(self, scope: Scope, ui_id: str, name: str) -> str:
-        return os.path.join(
-            self._ui_dir(scope, ui_id, name), "ui.json"
-        )
+        return os.path.join(self._ui_dir(scope, ui_id, name), "ui.json")
 
     def read(self, scope: Scope, ui_id: str, name: str) -> Dict[str, Any]:
         file_path = self._file_path(scope, ui_id, name)
@@ -259,6 +258,157 @@ class GeneratedUIService:
 
         self.storage.write(scope, ui_id, name, record)
         return record
+
+    async def stream_generate_ui(
+        self,
+        *,
+        session: MCPSessionBase,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        prompt: str,
+        tools: Optional[Iterable[str]],
+        access_token: Optional[str],
+    ) -> AsyncIterator[bytes]:
+        """
+        Stream UI generation as Server-Sent Events (SSE).
+
+        Yields bytes that are already formatted as SSE messages. The stream
+        will emit keepalive comments when the underlying stream yields parsed
+        items without content to avoid client timeouts.
+        """
+        # Basic existence and permission checks similar to create_ui
+        if self.storage.exists(scope, ui_id, name):
+            # SSE error message and stop
+            payload = json.dumps({"error": "Ui already exists for this id and name"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        if scope.kind == "user" and actor.user_id != scope.identifier:
+            payload = json.dumps(
+                {"error": "User uis may only be created by the owning user"}
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        if scope.kind == "group" and scope.identifier not in set(actor.groups or []):
+            payload = json.dumps(
+                {"error": "Group uis may only be created by group members"}
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        system_prompt = await self._build_system_prompt(session)
+        message_payload = {
+            "ui": {
+                "id": ui_id,
+                "name": name,
+                "scope": {"type": scope.kind, "id": scope.identifier},
+            },
+            "request": {"prompt": prompt, "tools": list(tools or [])},
+        }
+
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(
+                role=MessageRole.USER,
+                content=json.dumps(message_payload, ensure_ascii=False),
+            ),
+        ]
+
+        allowed_tools = await self._select_tools(session, list(tools or []), prompt)
+
+        chat_request = ChatCompletionRequest(
+            messages=messages,
+            tools=allowed_tools if allowed_tools else None,
+            stream=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": generation_ui_schema,
+            },
+        )
+
+        # Stream source from LLM
+        content = ""
+        stream_source = self.tgi_service.llm_client.stream_completion(
+            chat_request, access_token or "", None
+        )
+
+        async with chunk_reader(stream_source) as reader:
+            # Read parsed chunks. If a parsed item has no content, emit a keepalive.
+            async for parsed in reader.as_parsed():
+                # If the parsed chunk marks completion, stop looping
+                if parsed.is_done:
+                    break
+
+                # When parsed contains content, append and send partial update
+                if getattr(parsed, "content", None):
+                    content_piece = parsed.content
+                    content += content_piece
+                    # send a chunk SSE with the partial content
+                    # wrap it in a JSON object to make it easy for clients
+                    payload = json.dumps({"chunk": content_piece})
+                    yield f"data: {payload}\n\n".encode("utf-8")
+                else:
+                    # Emit a keepalive comment (SSE comment) so clients don't timeout.
+                    # Comments start with ':' and are ignored by SSE parsers but keep
+                    # the connection alive.
+                    yield b":\n\n"
+
+        if not content:
+            # No content generated
+            payload = json.dumps({"error": "Generation response was empty"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        # Parse and normalise the final payload
+        try:
+            payload_obj = self._parse_json(content)
+            self._normalise_payload(payload_obj, scope, ui_id, name, prompt, None)
+        except HTTPException as exc:
+            payload = json.dumps({"error": exc.detail})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        # Build final record and persist
+        timestamp = self._now()
+        record = {
+            "metadata": {
+                "id": ui_id,
+                "name": name,
+                "scope": {"type": scope.kind, "id": scope.identifier},
+                "owner": {"type": scope.kind, "id": scope.identifier},
+                "created_by": actor.user_id,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "history": [
+                    self._history_entry(
+                        action="create",
+                        prompt=prompt,
+                        tools=list(tools or []),
+                        user_id=actor.user_id,
+                        generated_at=timestamp,
+                        payload_metadata=payload_obj.get("metadata", {}),
+                    )
+                ],
+            },
+            "current": payload_obj,
+        }
+
+        # persist
+        try:
+            self.storage.write(scope, ui_id, name, record)
+        except Exception as e:
+            payload = json.dumps({"error": f"Failed to persist generated ui: {str(e)}"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        # Final event with the created record
+        final_payload = json.dumps(
+            {"status": "created", "record": record}, ensure_ascii=False
+        )
+        yield f"event: done\ndata: {final_payload}\n\n[DONE]".encode("utf-8")
 
     async def update_ui(
         self,
