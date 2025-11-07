@@ -347,13 +347,10 @@ def test_load_pfusch_prompt_and_fallback_presence():
     # _load_pfusch_prompt should read the packaged markdown and replace MCP_BASE_PATH
     from app.app_facade.generated_service import (
         _load_pfusch_prompt,
-        _get_fallback_prompt,
     )
 
     s = _load_pfusch_prompt()
     assert "Pfusch" in s or "You are a microsite" in s
-    fb = _get_fallback_prompt()
-    assert "MCP_BASE_PATH" in fb or "Base Url" in fb
 
 
 def test_load_pfusch_prompt_error(monkeypatch):

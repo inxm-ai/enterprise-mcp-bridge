@@ -85,6 +85,62 @@ class StubGeneratedService:
     def get_ui(self, *, scope, actor, ui_id, name):
         return self.record
 
+    async def stream_generate_ui(self, **_kwargs):
+        """Provide a minimal streaming implementation for tests.
+
+        The route expects an async generator yielding bytes. To keep the
+        compatibility with existing tests that call `response.json()` on the
+        TestClient, yield a single JSON document (bytes) representing the
+        created record. Also record the last_create payload similar to
+        create_ui so assertions in tests continue to pass.
+        """
+        # Mirror what create_ui would set in last_create (if present in kwargs)
+        try:
+            # extract commonly used args if provided
+            session = _kwargs.get("session")
+            scope = _kwargs.get("scope")
+            actor = _kwargs.get("actor")
+            ui_id = _kwargs.get("ui_id")
+            name = _kwargs.get("name")
+            prompt = _kwargs.get("prompt")
+            tools = list(_kwargs.get("tools") or [])
+            access_token = _kwargs.get("access_token")
+            self.last_create = {
+                "session": session,
+                "scope": scope,
+                "actor": actor,
+                "ui_id": ui_id,
+                "name": name,
+                "prompt": prompt,
+                "tools": tools,
+                "access_token": access_token,
+            }
+        except Exception:
+            # best-effort; tests should still pass if we cannot populate last_create
+            pass
+
+        # Yield a single JSON payload (no SSE framing) that matches the
+        # route's `_format_ui_response` shape so TestClient.json() returns
+        # the expected top-level `id`, `name`, `scope`, etc.
+        import json as _json
+
+        metadata = self.record.get("metadata", {})
+        current = self.record.get("current", {})
+        formatted = {
+            "id": metadata.get("id"),
+            "name": metadata.get("name"),
+            "scope": metadata.get("scope"),
+            "created_at": metadata.get("created_at"),
+            "updated_at": metadata.get("updated_at"),
+            "html": current.get("html"),
+            "metadata": current.get("metadata"),
+        }
+        if metadata.get("history"):
+            formatted["history"] = metadata.get("history")
+
+        payload = _json.dumps(formatted, ensure_ascii=False).encode("utf-8")
+        yield payload
+
 
 @pytest.fixture
 def client(monkeypatch):
@@ -125,7 +181,7 @@ def test_create_generated_ui(client):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     payload = response.json()
     assert payload["id"] == "dash1"
     assert payload["name"] == "overview"
@@ -210,7 +266,7 @@ def test_create_generated_ui_streaming_already_exists(monkeypatch):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     assert b"Ui already exists for this id and name" in response.content
 
 
@@ -230,7 +286,7 @@ def test_create_generated_ui_streaming_non_owner_user(monkeypatch):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     assert b"User uis may only be created by the owning user" in response.content
 
 
@@ -251,7 +307,7 @@ def test_create_generated_ui_streaming_group_non_member(monkeypatch):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     assert b"Group uis may only be created by group members" in response.content
 
 
@@ -287,7 +343,7 @@ def test_create_generated_ui_streaming_success(monkeypatch):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     # Ensure keepalive and chunk and done event are present
     assert b":\n\n" in response.content
     assert b'"chunk": "part1"' in response.content

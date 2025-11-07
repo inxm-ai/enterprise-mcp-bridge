@@ -360,7 +360,8 @@ class PromptService:
                     prompt_content = await self.get_prompt_content(session, prompt)
                     if prompt_content:
                         system_message = Message(
-                            role=MessageRole.SYSTEM, content=prompt_content.replace("\\n", "\n")
+                            role=MessageRole.SYSTEM,
+                            content=prompt_content.replace("\\n", "\n"),
                         )
                         prepared_messages.append(system_message)
                         self.logger.debug(

@@ -208,6 +208,8 @@ class TestLLMClient:
         # Mock aiohttp response
         class MockResponse:
             ok = True
+            # some client code may access response.status; provide a success code
+            status = 200
 
             class MockContent:
                 def __init__(self):

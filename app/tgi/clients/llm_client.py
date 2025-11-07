@@ -313,13 +313,13 @@ class LLMClient:
                         f"[LLMClient] Received response, status={response.status}"
                     )
                     self.logger.info(
-                        f"[LLMClient] Response headers: {dict(response.headers)}"
+                        f"[LLMClient] Response headers: {dict(getattr(response, 'headers', {}))}"
                     )
                     self.logger.info(
-                        f"[LLMClient] Response content-type: {response.content_type}"
+                        f"[LLMClient] Response content-type: {getattr(response, 'content_type', None)}"
                     )
                     self.logger.info(
-                        f"[LLMClient] Response content-length: {response.content_length}"
+                        f"[LLMClient] Response content-length: {getattr(response, 'content_length', None)}"
                     )
 
                     if not response.ok:
@@ -327,8 +327,9 @@ class LLMClient:
                         error_msg = f"LLM API error: {response.status} {error_text}"
                         self.logger.error(f"[LLMClient] {error_msg}")
                         self.logger.debug(f"[LLMClient] Payload: {serialized_payload}")
-                        parent_span.set_attribute("error", True)
-                        parent_span.set_attribute("error.message", error_msg)
+                        if parent_span is not None:
+                            parent_span.set_attribute("error", True)
+                            parent_span.set_attribute("error.message", error_msg)
 
                         # Return error as streaming response
                         error_chunk = ChatCompletionChunk(
