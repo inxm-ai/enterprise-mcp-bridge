@@ -508,7 +508,8 @@ script(async function() {
 4. **Don't forget helpers.children()**: When enhancing existing HTML, preserve it
 5. **Don't use complex state management**: Keep state flat and simple
 6. **Don't forget async in script()**: If you need to fetch, mark the function `async`
-7. **Don't forget `data-pfusch` on styles**: Shadow DOM components won't receive styles without it
+7. **Don't pass direct arrays to html helpers**: Use spread syntax (`html.span(...[])`) for lists, not `html.span([])`
+8. **Don't forget `data-pfusch` on styles**: Shadow DOM components won't receive styles without it
    ```html
    <!-- WRONG: Styles won't reach components -->
    <link rel="stylesheet" href="styles.css">
