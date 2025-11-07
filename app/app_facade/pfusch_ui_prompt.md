@@ -62,10 +62,10 @@ Use `script()` for setup that should run only when component mounts:
 pfusch('data-loader', { data: [], loading: false }, (state, trigger, helpers) => [
   script(async function() {
     // THIS RUNS ONCE when component is created
-    // 'this' refers to the component element
+    // 'this' refers to the component instance
     
     // Set up event listeners
-    const form = this.querySelector('form');
+    const form = this.component.querySelector('form');
     form?.addEventListener('submit', async (e) => {
       e.preventDefault();
       state.loading = true;  // Mutation triggers re-render
@@ -446,7 +446,7 @@ script(async function() {
         
         // React to status changes
         state.subscribe('status', (value) => {
-          this.dataset.status = value;
+          this.component.dataset.status = value;
         });
         
         // Handle form submission
