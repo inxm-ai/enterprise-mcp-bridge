@@ -162,15 +162,22 @@ async def create_generated_ui(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
 ):
+    logger.info(
+        f"[create_generated_ui] POST /_generated/{target} - ui_id={body.id}, name={body.name}"
+    )
     _ensure_tgi_enabled()
     scope = _parse_scope(target)
     ui_id = validate_identifier(body.id, "ui id")
     name = validate_identifier(body.name, "ui name")
     prompt = (body.prompt or "").strip()
     if not prompt:
+        logger.warning("[create_generated_ui] Empty prompt provided")
         raise HTTPException(status_code=400, detail="prompt must not be empty")
 
     actor = _extract_actor(access_token)
+    logger.info(
+        f"[create_generated_ui] Actor: user_id={actor.user_id}, groups={len(actor.groups)}"
+    )
     service = _get_generated_service()
     incoming_headers = dict(request.headers)
     session_key = session_id(
@@ -182,40 +189,8 @@ async def create_generated_ui(
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
-    # If the underlying service does not support streaming, fall back to the
-    # original synchronous create_ui path for compatibility (used by tests/stubs).
-    if not hasattr(service, "stream_generate_ui"):
-        try:
-            with tracer.start_as_current_span("generated_ui.create") as span:
-                span.set_attribute("ui.scope", scope.kind)
-                span.set_attribute("ui.scope_id", scope.identifier)
-                span.set_attribute("ui.id", ui_id)
-                span.set_attribute("ui.name", name)
-                async with mcp_session_context(
-                    sessions,
-                    session_key,
-                    access_token,
-                    requested_group,
-                    incoming_headers,
-                ) as session_obj:
-                    record = await service.create_ui(
-                        session=session_obj,
-                        scope=scope,
-                        actor=actor,
-                        ui_id=ui_id,
-                        name=name,
-                        prompt=prompt,
-                        tools=list(body.tools or []),
-                        access_token=access_token,
-                    )
-        except Exception as exc:
-            logger.error("Unexpected error during ui creation", exc_info=exc)
-            raise HTTPException(status_code=500, detail="Internal Server Error")
-
-        return JSONResponse(status_code=201, content=_format_ui_response(record))
-
-    # SSE event stream generator
     async def event_stream() -> AsyncIterator[bytes]:
+        logger.info("[create_generated_ui] Starting event stream generator")
         try:
             with tracer.start_as_current_span("generated_ui.create") as span:
                 span.set_attribute("ui.scope", scope.kind)
@@ -229,7 +204,11 @@ async def create_generated_ui(
                     requested_group,
                     incoming_headers,
                 ) as session_obj:
+                    logger.info(
+                        "[create_generated_ui] MCP session established, calling stream_generate_ui"
+                    )
                     # Stream from the service; it's responsible for producing SSE-formatted bytes
+                    chunk_count = 0
                     async for chunk in service.stream_generate_ui(
                         session=session_obj,
                         scope=scope,
@@ -240,7 +219,14 @@ async def create_generated_ui(
                         tools=list(body.tools or []),
                         access_token=access_token,
                     ):  # pragma: no cover - streaming path
+                        chunk_count += 1
+                        logger.debug(
+                            f"[create_generated_ui] Yielding chunk {chunk_count}, size={len(chunk)}"
+                        )
                         yield chunk
+                    logger.info(
+                        f"[create_generated_ui] Finished streaming, total chunks={chunk_count}"
+                    )
         except Exception as eg:
             # Some runtimes (py < 3.11) don't define ExceptionGroup/BaseExceptionGroup.
             # Try to extract nested HTTPExceptions if present, otherwise emit a generic error.
@@ -252,24 +238,43 @@ async def create_generated_ui(
                             "utf-8"
                         )
                         return
-            logger.error("Unexpected error during ui creation", exc_info=eg)
+            logger.error(
+                f"[create_generated_ui] Exception (ExceptionGroup fallthrough): {str(eg)}",
+                exc_info=eg,
+            )
             yield f"event: error\ndata: {json.dumps({'error': 'Internal Server Error'})}\n\n".encode(
                 "utf-8"
             )
             return
         except HTTPException as exc:
+            logger.error(
+                f"[create_generated_ui] HTTPException in event_stream: {exc.detail}",
+                exc_info=exc,
+            )
             payload = {"error": exc.detail}
             yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
             return
         except Exception as exc:
-            logger.error("Unexpected error during ui creation", exc_info=exc)
+            logger.error(
+                f"[create_generated_ui] Unexpected exception in event_stream: {str(exc)}",
+                exc_info=exc,
+            )
             payload = {"error": "Internal Server Error"}
             yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
             return
 
     # Return StreamingResponse for SSE
+    logger.info("[create_generated_ui] Returning StreamingResponse")
     return StreamingResponse(
-        event_stream(), media_type="text/event-stream", status_code=201
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+        },
+        status_code=200,
     )
 
 

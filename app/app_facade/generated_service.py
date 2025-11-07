@@ -1,8 +1,10 @@
-import json
 import logging
 import html as _html_escape
 import os
 import re
+import asyncio
+import json
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -19,6 +21,8 @@ from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
+logger = logging.getLogger("uvicorn.error")
+
 DEFAULT_DESIGN_PROMPT = (
     "Use lightweight, responsive layouts. Prefer utility-first styling via Tailwind "
     "CSS conventions when no explicit design system guidance is provided."
@@ -34,24 +38,8 @@ def _load_pfusch_prompt() -> str:
         # Replace the MCP_BASE_PATH placeholder
         return prompt_content.replace("{{MCP_BASE_PATH}}", MCP_BASE_PATH)
     except Exception as e:
-        logging.error(f"Error loading pfusch prompt: {e}")
+        logger.error(f"Error loading pfusch prompt: {e}")
         raise e
-
-
-def _get_fallback_prompt() -> str:
-    """Fallback prompt if the markdown file cannot be loaded."""
-    return (
-        "You are a microsite and ui designer that produces structured JSON. "
-        "All interactive behaviour must be implemented with pfusch, a minimal progressive enhancement "
-        "library that works directly in the browser. Follow these rules:\n"
-        "- Start with semantic HTML that works without JavaScript, then enhance it.\n"
-        "- Load pfusch using a module script tag: "
-        '"<script type=\\"module\\">import { pfusch, html, css, script } from '
-        "'https://matthiaskainer.github.io/pfusch/pfusch.min.js'; ... </script>\".\n"
-        f"- The Base Url for all API calls is `{MCP_BASE_PATH}/tools/<tool_name>`, "
-        "they all need POST to return data, and the body is the MCP input.\n"
-        "Output strictly in JSON with top-level keys `html` and `metadata`."
-    )
 
 
 # JSON Schema describing the expected structure of the generated UI payload.
@@ -279,14 +267,22 @@ class GeneratedUIService:
         will emit keepalive comments when the underlying stream yields parsed
         items without content to avoid client timeouts.
         """
+        logger.info(
+            f"[stream_generate_ui] Starting stream for ui_id={ui_id}, name={name}, scope={scope.kind}:{scope.identifier}"
+        )
+
         # Basic existence and permission checks similar to create_ui
         if self.storage.exists(scope, ui_id, name):
+            logger.warning(f"[stream_generate_ui] UI already exists: {ui_id}/{name}")
             # SSE error message and stop
             payload = json.dumps({"error": "Ui already exists for this id and name"})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
         if scope.kind == "user" and actor.user_id != scope.identifier:
+            logger.warning(
+                f"[stream_generate_ui] Permission denied: user {actor.user_id} cannot create UI for user {scope.identifier}"
+            )
             payload = json.dumps(
                 {"error": "User uis may only be created by the owning user"}
             )
@@ -294,85 +290,222 @@ class GeneratedUIService:
             return
 
         if scope.kind == "group" and scope.identifier not in set(actor.groups or []):
+            logger.warning(
+                f"[stream_generate_ui] Permission denied: user {actor.user_id} not in group {scope.identifier}"
+            )
             payload = json.dumps(
                 {"error": "Group uis may only be created by group members"}
             )
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
-        system_prompt = await self._build_system_prompt(session)
-        message_payload = {
-            "ui": {
-                "id": ui_id,
-                "name": name,
-                "scope": {"type": scope.kind, "id": scope.identifier},
-            },
-            "request": {"prompt": prompt, "tools": list(tools or [])},
-        }
+        # Wrap initialization in try-catch to ensure we yield error messages
+        # if anything fails before streaming starts
+        logger.info("[stream_generate_ui] Building system prompt and selecting tools")
+        try:
+            system_prompt = await self._build_system_prompt(session)
+            logger.info(
+                f"[stream_generate_ui] System prompt built, length={len(system_prompt)}"
+            )
 
-        messages = [
-            Message(role=MessageRole.SYSTEM, content=system_prompt),
-            Message(
-                role=MessageRole.USER,
-                content=json.dumps(message_payload, ensure_ascii=False),
-            ),
-        ]
+            message_payload = {
+                "ui": {
+                    "id": ui_id,
+                    "name": name,
+                    "scope": {"type": scope.kind, "id": scope.identifier},
+                },
+                "request": {"prompt": prompt, "tools": list(tools or [])},
+            }
 
-        allowed_tools = await self._select_tools(session, list(tools or []), prompt)
+            messages = [
+                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                Message(
+                    role=MessageRole.USER,
+                    content=json.dumps(message_payload, ensure_ascii=False),
+                ),
+            ]
 
-        chat_request = ChatCompletionRequest(
-            messages=messages,
-            tools=allowed_tools if allowed_tools else None,
-            stream=True,
-            response_format={
-                "type": "json_schema",
-                "json_schema": generation_ui_schema,
-            },
+            allowed_tools = await self._select_tools(session, list(tools or []), prompt)
+            logger.info(
+                f"[stream_generate_ui] Selected {len(allowed_tools) if allowed_tools else 0} tools"
+            )
+
+            chat_request = ChatCompletionRequest(
+                messages=messages,
+                tools=allowed_tools if allowed_tools else None,
+                stream=True,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": generation_ui_schema,
+                },
+            )
+            logger.info(
+                "[stream_generate_ui] Chat request created, initiating LLM stream"
+            )
+
+            # Stream source from LLM
+            content = ""
+            stream_source = self.tgi_service.llm_client.stream_completion(
+                chat_request, access_token or "", None
+            )
+            logger.info(
+                "[stream_generate_ui] LLM stream source created, starting to read chunks"
+            )
+        except HTTPException as exc:
+            logger.error(
+                f"[stream_generate_ui] HTTPException during initialization: {exc.detail}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": exc.detail})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+        except Exception as exc:
+            logger.error(
+                f"[stream_generate_ui] Exception during initialization: {str(exc)}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": "Failed to initialize generation"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        logger.info("[stream_generate_ui] Entering chunk reading loop")
+        chunk_count = 0
+        try:
+            logger.info("[stream_generate_ui] Opening chunk_reader context")
+            async with chunk_reader(stream_source) as reader:
+                logger.info(
+                    "[stream_generate_ui] chunk_reader opened, starting iteration"
+                )
+
+                # Create a task to read chunks and a timer for keepalives
+                chunk_iterator = reader.as_parsed()
+                pending_chunk: Optional[asyncio.Task] = None
+                keepalive_interval = 10  # seconds
+
+                try:
+                    while True:
+                        try:
+                            if pending_chunk is None:
+                                pending_chunk = asyncio.create_task(
+                                    chunk_iterator.__anext__()
+                                )
+
+                            try:
+                                parsed = await asyncio.wait_for(
+                                    asyncio.shield(pending_chunk),
+                                    timeout=keepalive_interval,
+                                )
+                                pending_chunk = None
+                            except asyncio.TimeoutError:
+                                if pending_chunk.done():
+                                    try:
+                                        parsed = pending_chunk.result()
+                                    except StopAsyncIteration:
+                                        pending_chunk = None
+                                        logger.info(
+                                            f"[stream_generate_ui] Iterator exhausted, total chunks={chunk_count}"
+                                        )
+                                        break
+                                    else:
+                                        pending_chunk = None
+                                else:
+                                    logger.debug(
+                                        f"[stream_generate_ui] Sending keepalive after {keepalive_interval}s timeout"
+                                    )
+                                    yield b": keepalive\n\n"
+                                    continue
+
+                            chunk_count += 1
+                            logger.info(
+                                f"[stream_generate_ui] Received chunk {chunk_count}, is_done={parsed.is_done}, has_content={bool(getattr(parsed, 'content', None))}, raw={parsed.raw[:100] if hasattr(parsed, 'raw') else 'N/A'}..."
+                            )
+
+                            # If the parsed chunk marks completion, stop looping
+                            if parsed.is_done:
+                                logger.info(
+                                    f"[stream_generate_ui] Stream completed, received {chunk_count} chunks"
+                                )
+                                break
+
+                            # When parsed contains content, append and send partial update
+                            if getattr(parsed, "content", None):
+                                content_piece = parsed.content
+                                content += content_piece
+                                logger.debug(
+                                    f"[stream_generate_ui] Chunk {chunk_count}: received {len(content_piece)} bytes, total={len(content)}"
+                                )
+                                # send a chunk SSE with the partial content
+                                # wrap it in a JSON object to make it easy for clients
+                                payload = json.dumps({"chunk": content_piece})
+                                yield f"data: {payload}\n\n".encode("utf-8")
+                            else:
+                                logger.debug(
+                                    f"[stream_generate_ui] Chunk {chunk_count}: keepalive"
+                                )
+                                # Emit a keepalive comment (SSE comment) so clients don't timeout.
+                                # Comments start with ':' and are ignored by SSE parsers but keep
+                                # the connection alive.
+                                yield b":\n\n"
+
+                        except StopAsyncIteration:
+                            # Iterator exhausted
+                            logger.info(
+                                f"[stream_generate_ui] Iterator exhausted, total chunks={chunk_count}"
+                            )
+                            break
+                finally:
+                    if pending_chunk is not None and not pending_chunk.done():
+                        pending_chunk.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await pending_chunk
+        except HTTPException as exc:
+            logger.error(
+                f"[stream_generate_ui] HTTPException during streaming after {chunk_count} chunks: {exc.detail}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": exc.detail})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+        except Exception as exc:
+            logger.error(
+                f"[stream_generate_ui] Exception during streaming after {chunk_count} chunks: {str(exc)}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": "Streaming failed"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        logger.info(
+            f"[stream_generate_ui] Finished reading stream, total content length={len(content)}"
         )
-
-        # Stream source from LLM
-        content = ""
-        stream_source = self.tgi_service.llm_client.stream_completion(
-            chat_request, access_token or "", None
-        )
-
-        async with chunk_reader(stream_source) as reader:
-            # Read parsed chunks. If a parsed item has no content, emit a keepalive.
-            async for parsed in reader.as_parsed():
-                # If the parsed chunk marks completion, stop looping
-                if parsed.is_done:
-                    break
-
-                # When parsed contains content, append and send partial update
-                if getattr(parsed, "content", None):
-                    content_piece = parsed.content
-                    content += content_piece
-                    # send a chunk SSE with the partial content
-                    # wrap it in a JSON object to make it easy for clients
-                    payload = json.dumps({"chunk": content_piece})
-                    yield f"data: {payload}\n\n".encode("utf-8")
-                else:
-                    # Emit a keepalive comment (SSE comment) so clients don't timeout.
-                    # Comments start with ':' and are ignored by SSE parsers but keep
-                    # the connection alive.
-                    yield b":\n\n"
-
         if not content:
             # No content generated
+            logger.warning(
+                f"[stream_generate_ui] No content generated after {chunk_count} chunks"
+            )
             payload = json.dumps({"error": "Generation response was empty"})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
         # Parse and normalise the final payload
+        logger.info("[stream_generate_ui] Parsing and normalizing payload")
         try:
             payload_obj = self._parse_json(content)
             self._normalise_payload(payload_obj, scope, ui_id, name, prompt, None)
+            logger.info(
+                "[stream_generate_ui] Payload parsed and normalized successfully"
+            )
         except HTTPException as exc:
+            logger.error(
+                f"[stream_generate_ui] HTTPException during payload parsing: {exc.detail}",
+                exc_info=exc,
+            )
             payload = json.dumps({"error": exc.detail})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
         # Build final record and persist
+        logger.info("[stream_generate_ui] Building final record")
         timestamp = self._now()
         record = {
             "metadata": {
@@ -399,18 +532,27 @@ class GeneratedUIService:
         }
 
         # persist
+        logger.info("[stream_generate_ui] Persisting record to storage")
         try:
             self.storage.write(scope, ui_id, name, record)
+            logger.info("[stream_generate_ui] Record persisted successfully")
         except Exception as e:
+            logger.error(
+                f"[stream_generate_ui] Failed to persist record: {str(e)}", exc_info=e
+            )
             payload = json.dumps({"error": f"Failed to persist generated ui: {str(e)}"})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
         # Final event with the created record
+        logger.info("[stream_generate_ui] Sending final done event")
         final_payload = json.dumps(
             {"status": "created", "record": record}, ensure_ascii=False
         )
-        yield f"event: done\ndata: {final_payload}\n\n[DONE]\n\n".encode("utf-8")
+        yield f"event: done\ndata: {final_payload}\n\n".encode("utf-8")
+        # Send proper SSE done marker
+        yield b"data: [DONE]\n\n"
+        logger.info("[stream_generate_ui] Stream completed successfully")
 
     async def update_ui(
         self,
@@ -697,7 +839,7 @@ class GeneratedUIService:
         if len(selected) < 5 and len(scored_tools) > len(selected):
             selected = [tool for tool, score in scored_tools[:10]]
 
-        logging.info(
+        logger.info(
             f"[GeneratedUI] Filtered {len(tools)} tools to {len(selected)} based on prompt relevance"
         )
 
@@ -835,7 +977,6 @@ class GeneratedUIService:
             # the original prompt so the API can return something usable
             # instead of failing with 502. Log a warning so this can be
             # investigated.
-            logger = logging.getLogger(__name__)
             logger.warning(
                 "Generated payload missing 'html' object; synthesizing fallback page. payload keys: %s",
                 list(payload.keys()),

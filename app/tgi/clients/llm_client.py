@@ -289,21 +289,38 @@ class LLMClient:
         # Remove all tracing to avoid context cleanup issues with async generators
         try:
             # Prepare payload with size-aware compaction
+            self.logger.info("[LLMClient] Preparing payload for streaming request")
             payload, serialized_payload, payload_size = await self._prepare_payload(
                 request
             )
-            self.logger.debug(
+            self.logger.info(
                 "[LLMClient] Prepared streaming payload (bytes=%s, messages=%s)",
                 payload_size,
                 len(payload.get("messages", [])),
             )
 
+            self.logger.info(
+                f"[LLMClient] Opening HTTP session to {self.tgi_url}/chat/completions"
+            )
             async with aiohttp.ClientSession() as session:
+                self.logger.info("[LLMClient] Sending POST request to LLM")
                 async with session.post(
                     f"{self.tgi_url}/chat/completions",
                     headers=self._get_headers(access_token),
                     data=serialized_payload,
                 ) as response:
+                    self.logger.info(
+                        f"[LLMClient] Received response, status={response.status}"
+                    )
+                    self.logger.info(
+                        f"[LLMClient] Response headers: {dict(response.headers)}"
+                    )
+                    self.logger.info(
+                        f"[LLMClient] Response content-type: {response.content_type}"
+                    )
+                    self.logger.info(
+                        f"[LLMClient] Response content-length: {response.content_length}"
+                    )
 
                     if not response.ok:
                         error_text = await response.text()
@@ -333,14 +350,34 @@ class LLMClient:
                     # Stream chunks immediately without buffering
                     # Ensure proper SSE format by adding \n if not already present
                     chunk_count = 0
-                    self.logger.debug(
-                        f"[LLMClient] Response OK, starting to stream (model={request.model}, content={response.content})"
+                    self.logger.info(
+                        f"[LLMClient] Response OK, starting to stream chunks (model={request.model})"
+                    )
+                    self.logger.info(
+                        "[LLMClient] About to iterate over response.content"
+                    )
+                    self.logger.info(
+                        f"[LLMClient] Response content object: {response.content}"
                     )
 
                     async for chunk in response.content:
+                        self.logger.info(
+                            "[LLMClient] Received raw chunk from HTTP response"
+                        )
                         chunk_str = chunk.decode("utf-8")
                         if chunk_str:
                             chunk_count += 1
+                            if chunk_count == 1:
+                                self.logger.info(
+                                    f"[LLMClient] Received first chunk from LLM, length={len(chunk_str)}"
+                                )
+                            if chunk_count % 10 == 0:
+                                self.logger.info(
+                                    f"[LLMClient] Received {chunk_count} chunks so far"
+                                )
+                            self.logger.debug(
+                                f"[LLMClient] Chunk {chunk_count}: {chunk_str[:100]}..."
+                            )
                             # Ensure proper SSE format with \n\n terminator
                             # Most chunks will end with \n, so we add one more \n
                             if not chunk_str.endswith("\n\n"):
@@ -349,9 +386,13 @@ class LLMClient:
                                 else:
                                     chunk_str += "\n\n"
                             yield chunk_str
+                        else:
+                            self.logger.debug(
+                                "[LLMClient] Received empty chunk, skipping"
+                            )
 
-                    self.logger.debug(
-                        f"[LLMClient] Streamed {chunk_count} chunks from LLM"
+                    self.logger.info(
+                        f"[LLMClient] Streaming completed, total chunks={chunk_count}"
                     )
 
         except GeneratorExit:

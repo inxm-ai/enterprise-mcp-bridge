@@ -106,9 +106,8 @@ pfusch('enhanced-form', { status: 'idle' }, (state, trigger, helpers) => [
       });
     }
   }),
-  
-  // Render the preserved children + enhancements
-  helpers.children()[0],  // Original form HTML
+
+  html.slot(),  // Original form HTML
   html.div({ class: 'status' }, `Status: ${state.status}`)
 ])
 ```
@@ -472,7 +471,7 @@ script(async function() {
       }),
       
       // Preserve original form
-      helpers.children()[0],
+      html.slot(),
       
       // Add status and history display
       html.div({ class: 'status' }, `Status: ${state.status}`),
