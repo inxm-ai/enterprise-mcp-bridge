@@ -116,8 +116,13 @@ pfusch('enhanced-form', { status: 'idle' }, (state, trigger, helpers) => [
 
 **Trigger custom events**:
 ```javascript
-trigger('data-loaded', { count: state.data.length });
-// Fires as: window.dispatchEvent('component-name.data-loaded', detail)
+pfusch('data-loader', { data: [] }, (state, trigger, helpers) => [
+  script(async function() {
+    // After data is loaded
+    state.data = await fetch(/* ... */);
+    trigger('data-loaded', { count: state.data.length });
+// Fires as: window.dispatchEvent('component-name.event-name', detail),
+// so in our case: window.dispatchEvent('data-loader.data-loaded', { count: ... })
 ```
 
 **Listen to events**:
