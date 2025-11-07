@@ -33,6 +33,7 @@ This project directly addresses these gaps. It's designed for enterprise product
 ### Developer Experience & API Design
 * **REST-first Interface:** All tool discovery and invocation happens over standard HTTP/JSON endpoints, ensuring maximum compatibility with any client, platform, or automation tool (`curl`, browsers, etc.).
 * **Automatic Tool Endpoints:** Each tool exposed by the MCP server is automatically mapped to a canonical REST endpoint (e.g., `/tools/{tool_name}`), making the API discoverable and easy to integrate with.
+* **AI-Generated Web Applications:** Generate complete, production-ready web applications and dashboards directly from natural language prompts. Uses LLM-powered generation to create reactive interfaces built on pfusch (progressive enhancement) that integrate seamlessly with your MCP tools. Supports user/group scoping, versioned updates, and maintains full generation history.
 * **Structured Error Handling:** Maps MCP-level errors to standard HTTP status codes (`400`, `404`, `500`), providing a predictable and developer-friendly integration experience.
 * **Auto-Generated API Docs:** Because it's built on FastAPI, it automatically generates interactive OpenAPI (Swagger) and ReDoc documentation, making the API easy to explore and test.
 * **Containerized Deployment:** Supports running the MCP server as a containerized application (e.g., Docker), simplifying deployment and scaling.
@@ -223,6 +224,7 @@ volumes:
 | `MCP_REMOTE_SERVER_FORWARD_HEADERS` | Comma-separated list of incoming request header names to forward to remote MCP server | "" |
 | `MCP_MAP_HEADER_TO_INPUT` | Comma-separated list of mappings from tool input property to incoming HTTP header name, in the form `input=Header-Name` (e.g. `userId=x-auth-user-id,email=x-auth-user-email`). Mapped input properties are removed from tool input schemas and will be automatically filled from headers at call time. | "" |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
+| `GENERATED_WEB_PATH`      | Base directory for storing AI-generated web applications  | ""                     |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
 
@@ -261,6 +263,9 @@ Prompts are merged with prompts returned by the MCP server and are available thr
   - `GET /resource` – list available resources.
   - `GET /resource/{resource_id}` – access resources. If the resource is html/text, it is rendered directly.
   - `POST /session/start` and `POST /session/close` – manage stateful sessions.
+  - `POST /app/_generated/{scope}` – generate a new web application from a natural language prompt.
+  - `GET /app/_generated/{scope}/{ui_id}/{name}` – retrieve a generated application (as metadata, page, or snippet).
+  - `POST /app/_generated/{scope}/{ui_id}/{name}` – update an existing generated application.
   - `GET /.well-known/agent.json` – discover agent metadata when agent mode is enabled.
 
 ## OAuth Token Exchange & Extension
@@ -488,6 +493,227 @@ To list all available resources, send a `GET` request to `/resources`.
 To retrieve details about a specific resource, send a `GET` request to `/resources/{resource_name}`.
 
 Resources can have different MIME types, such as `text/plain`, `text/html`, or `application/json`. The server will return the appropriate content type based on the resource's MIME type, and render it accordingly. Thus, it allows you to directly serve HTML content or plain text as needed.
+
+## AI-Generated Web Applications
+
+The bridge includes a powerful feature for generating complete web applications and dashboards directly from natural language prompts. This enables rapid prototyping and deployment of custom interfaces on top of your MCP tools.
+
+### Overview
+
+The generated web application feature:
+- **LLM-powered generation**: Uses your configured LLM to translate natural language requirements into working HTML applications
+- **Progressive enhancement**: Built on [pfusch](https://matthiaskainer.github.io/pfusch/), a lightweight library for creating reactive web components without build steps
+- **MCP tool integration**: Automatically connects to your MCP tools with proper authentication and data handling
+- **User and group isolation**: Each application is scoped to specific users or groups with proper access control
+- **Versioned updates**: Maintains full history of changes with the ability to iterate and refine applications
+- **Streaming generation**: Real-time Server-Sent Events (SSE) for responsive UI updates during generation
+- **Zero build process**: Generated applications work directly in the browser with no compilation or bundling required
+
+### Configuration
+
+To enable AI-generated applications, configure these environment variables:
+
+```bash
+# Required: Path where generated applications are stored
+export GENERATED_WEB_PATH="/data/generated-apps"
+
+# Required: LLM endpoint (already required for agent mode)
+export TGI_URL="https://api.openai.com/v1"
+export TGI_API_TOKEN="your-api-token"
+export TGI_MODEL_NAME="gpt-4o"
+```
+
+### Creating Applications
+
+#### Create a new application
+
+```bash
+curl -X POST "http://localhost:8000/app/_generated/group=engineering" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "absence-dashboard",
+    "name": "absence-tracker",
+    "prompt": "Create a dashboard showing employee absence data with filters for date range and absence type",
+    "tools": ["list_absence_types", "get_absences"]
+  }'
+```
+
+The response is streamed as Server-Sent Events (SSE):
+- `data:` events contain incremental generation progress
+- `event: done` signals completion with the full application record
+- `event: error` indicates generation failures
+
+#### Scope Patterns
+Applications can be scoped to users or groups:
+- **Group scope**: `group=engineering` - accessible by all members of the engineering group
+- **User scope**: `user=alice_smith` - private to a specific user
+
+#### Request Parameters
+- `id`: Unique identifier for the application (alphanumeric with dashes/underscores)
+- `name`: Human-readable name (also used in file paths)
+- `prompt`: Natural language description of what the application should do
+- `tools` (optional): Array of MCP tool names to include; if omitted, relevant tools are auto-selected based on the prompt
+
+### Retrieving Applications
+
+#### Get application metadata and HTML
+
+```bash
+# Get full record with metadata (default)
+curl "http://localhost:8000/app/_generated/group=engineering/absence-dashboard/absence-tracker?as=card" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Get rendered HTML page
+curl "http://localhost:8000/app/_generated/group=engineering/absence-dashboard/absence-tracker?as=page" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Get HTML snippet for embedding
+curl "http://localhost:8000/app/_generated/group=engineering/absence-dashboard/absence-tracker?as=snippet" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Response formats:
+- `as=card` (default): Returns complete metadata including generation history, tools used, and current HTML
+- `as=page`: Returns the full HTML document ready to display
+- `as=snippet`: Returns just the HTML body content for embedding in another page
+
+### Updating Applications
+
+Iterate on existing applications by posting update prompts:
+
+```bash
+curl -X POST "http://localhost:8000/app/_generated/group=engineering/absence-dashboard/absence-tracker" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add a summary card showing total absences by type",
+    "tools": ["list_absence_types", "get_absences", "calculate_totals"]
+  }'
+```
+
+Updates:
+- Preserve the original requirements and generation history
+- Use context from previous versions to maintain consistency
+- Allow incremental refinement without starting from scratch
+- Return the updated application with new timestamp and history entry
+
+### Customizing Design Systems
+
+Applications can be styled according to your design system. Set a global design prompt:
+
+```bash
+export SYSTEM_DEFINED_PROMPTS='[
+  {
+    "name": "design-system",
+    "description": "Corporate design system guidelines",
+    "template": "Use our corporate color palette: primary #0066cc, secondary #00cc66. All cards should have rounded corners and subtle shadows. Use system fonts."
+  }
+]'
+```
+
+The design prompt is automatically incorporated during generation to ensure visual consistency across all applications.
+
+### Access Control
+
+Applications respect OAuth-based access control:
+- **User-scoped apps** can only be created and accessed by the owning user
+- **Group-scoped apps** require the actor to be a member of the target group
+- All requests must include a valid access token
+- Group membership is derived from token claims (`groups`, `realm_access.roles`, `resource_access`)
+
+### Storage Structure
+
+Generated applications are stored in a hierarchical structure:
+
+```
+${GENERATED_WEB_PATH}/
+├── user/
+│   └── alice_smith/
+│       └── my-dashboard/
+│           └── personal-view/
+│               └── ui.json
+└── group/
+    └── engineering/
+        └── absence-dashboard/
+            └── absence-tracker/
+                └── ui.json
+```
+
+Each `ui.json` contains:
+- `metadata`: Creation timestamps, owner info, generation history
+- `current`: The latest HTML and metadata including component lists
+- Version history with prompts and tool selections for each iteration
+
+### Technical Implementation
+
+Generated applications use [pfusch](https://github.com/matthiaskainer/pfusch), a progressive enhancement library that:
+- Works without build tools or compilation
+- Provides reactive state management through ES6 Proxies
+- Uses Web Components (custom elements) for encapsulation
+- Supports shadow DOM with automatic style injection via `data-pfusch` attributes
+- Enables event-driven communication between components
+
+Example generated component:
+
+```javascript
+pfusch('data-viewer', { items: [], loading: false }, (state, trigger, helpers) => [
+  script(async function() {
+    state.loading = true;
+    const response = await fetch('/app/tools/list_items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const mcpResponse = await response.json();
+    if (!mcpResponse.isError) {
+      state.items = mcpResponse.structuredContent.result;
+    }
+    state.loading = false;
+  }),
+  html.ul(...state.items.map(item => html.li(item.name)))
+])
+```
+
+### Best Practices
+
+1. **Be specific in prompts**: Include details about layout, interactions, and data requirements
+2. **List relevant tools**: Pre-selecting tools improves generation speed and relevance
+3. **Iterate incrementally**: Make small updates rather than regenerating from scratch
+4. **Use descriptive IDs**: Application IDs should clearly indicate their purpose
+5. **Leverage design prompts**: Define reusable design systems for visual consistency
+6. **Test with real tokens**: Ensure your OAuth configuration provides proper group claims
+
+### Example: Complete Workflow
+
+```bash
+# 1. Create initial dashboard
+curl -X POST "http://localhost:8000/app/_generated/group=finance/budget-tracker/overview" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "budget-tracker",
+    "name": "overview",
+    "prompt": "Create a budget overview dashboard with monthly spending charts and category breakdowns. Include filters for date range.",
+    "tools": ["get_transactions", "list_categories"]
+  }'
+
+# 2. View the generated application
+curl "http://localhost:8000/app/_generated/group=finance/budget-tracker/overview?as=page" \
+  -H "Authorization: Bearer $TOKEN" > dashboard.html
+
+# 3. Refine with additional features
+curl -X POST "http://localhost:8000/app/_generated/group=finance/budget-tracker/overview" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add an export button to download transactions as CSV"
+  }'
+
+# 4. Get metadata including history
+curl "http://localhost:8000/app/_generated/group=finance/budget-tracker/overview?as=card" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Generic Web Application Proxy
 
