@@ -1093,12 +1093,12 @@ class GeneratedUIService:
             with target_path.open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
 
-            logger.info(
-                "[GeneratedUI] Chat request preview dumped to %s", target_path
-            )
+            logger.info("[GeneratedUI] Chat request preview dumped to %s", target_path)
         except Exception as exc:  # pragma: no cover - debug helper
             logger.error(
-                "[GeneratedUI] Failed to dump chat request preview: %s", exc, exc_info=exc
+                "[GeneratedUI] Failed to dump chat request preview: %s",
+                exc,
+                exc_info=exc,
             )
 
     def _extract_body(self, html: str) -> Optional[str]:
