@@ -92,26 +92,31 @@ def inline_schema(schema, top_level_schema, seen=None):
             return {}
         seen.add(ref_path)
 
-        if ref_path.startswith("#/"):
-            path_parts = ref_path[2:].split("/")
-            definition = top_level_schema
-            for part in path_parts:
-                if isinstance(definition, dict):
-                    definition = definition.get(part)
-                else:
+        try:
+            if ref_path.startswith("#/"):
+                path_parts = ref_path[2:].split("/")
+                definition = top_level_schema
+                for part in path_parts:
+                    if isinstance(definition, dict):
+                        definition = definition.get(part)
+                    else:
+                        raise ValueError(
+                            f"Schema definition not found for ref: {ref_path}"
+                        )
+
+                if definition is None:
                     raise ValueError(f"Schema definition not found for ref: {ref_path}")
 
-            if definition is None:
-                raise ValueError(f"Schema definition not found for ref: {ref_path}")
-
-            return inline_schema(definition, top_level_schema, seen)
-        else:
-            # Handle other types of references, like definitions in $defs
-            def_name = ref_path.split("/")[-1]
-            definition = top_level_schema.get("$defs", {}).get(def_name)
-            if definition is None:
-                raise ValueError(f"Schema definition not found for ref: {ref_path}")
-            return inline_schema(definition, top_level_schema, seen)
+                return inline_schema(definition, top_level_schema, seen)
+            else:
+                # Handle other types of references, like definitions in $defs
+                def_name = ref_path.split("/")[-1]
+                definition = top_level_schema.get("$defs", {}).get(def_name)
+                if definition is None:
+                    raise ValueError(f"Schema definition not found for ref: {ref_path}")
+                return inline_schema(definition, top_level_schema, seen)
+        finally:
+            seen.discard(ref_path)
 
     new_schema = {}
     for key, value in schema.items():

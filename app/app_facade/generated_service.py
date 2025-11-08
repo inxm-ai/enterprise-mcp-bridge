@@ -7,13 +7,14 @@ import json
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from typing import AsyncIterator
 
 from fastapi import HTTPException
 
 from app.session import MCPSessionBase
-from app.vars import MCP_BASE_PATH
+from app.vars import MCP_BASE_PATH, GENERATED_UI_PROMPT_DUMP
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
@@ -270,6 +271,7 @@ class GeneratedUIService:
         logger.info(
             f"[stream_generate_ui] Starting stream for ui_id={ui_id}, name={name}, scope={scope.kind}:{scope.identifier}"
         )
+        requested_tools = list(tools or [])
 
         # Basic existence and permission checks similar to create_ui
         if self.storage.exists(scope, ui_id, name):
@@ -314,7 +316,7 @@ class GeneratedUIService:
                     "name": name,
                     "scope": {"type": scope.kind, "id": scope.identifier},
                 },
-                "request": {"prompt": prompt, "tools": list(tools or [])},
+                "request": {"prompt": prompt, "tools": requested_tools},
             }
 
             messages = [
@@ -325,7 +327,7 @@ class GeneratedUIService:
                 ),
             ]
 
-            allowed_tools = await self._select_tools(session, list(tools or []), prompt)
+            allowed_tools = await self._select_tools(session, requested_tools, prompt)
             logger.info(
                 f"[stream_generate_ui] Selected {len(allowed_tools) if allowed_tools else 0} tools"
             )
@@ -338,6 +340,15 @@ class GeneratedUIService:
                     "type": "json_schema",
                     "json_schema": generation_ui_schema,
                 },
+            )
+            self._maybe_dump_chat_request(
+                chat_request=chat_request,
+                scope=scope,
+                ui_id=ui_id,
+                name=name,
+                prompt=prompt,
+                tools=requested_tools,
+                message_payload=message_payload,
             )
             logger.info(
                 "[stream_generate_ui] Chat request created, initiating LLM stream"
@@ -676,6 +687,15 @@ class GeneratedUIService:
                 "type": "json_schema",
                 "json_schema": generation_ui_schema,
             },
+        )
+        self._maybe_dump_chat_request(
+            chat_request=chat_request,
+            scope=scope,
+            ui_id=ui_id,
+            name=name,
+            prompt=prompt,
+            tools=tools,
+            message_payload=message_payload,
         )
 
         # Use streaming to collect the response
@@ -1023,6 +1043,63 @@ class GeneratedUIService:
                     original_prompt = first_entry.get("prompt")
             if original_prompt:
                 metadata.setdefault("original_requirements", original_prompt)
+
+    def _maybe_dump_chat_request(
+        self,
+        *,
+        chat_request: ChatCompletionRequest,
+        scope: Scope,
+        ui_id: str,
+        name: str,
+        prompt: str,
+        tools: List[str],
+        message_payload: Dict[str, Any],
+    ) -> None:
+        dump_target = GENERATED_UI_PROMPT_DUMP
+        if not dump_target:
+            return
+        try:
+            path = Path(dump_target)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+            def _safe(value: str) -> str:
+                return re.sub(r"[^A-Za-z0-9_-]", "_", value or "")
+
+            file_name = (
+                f"{timestamp}_{_safe(scope.kind)}-{_safe(scope.identifier)}_"
+                f"{_safe(ui_id)}_{_safe(name)}.json"
+            )
+
+            if path.exists() and path.is_dir():
+                target_path = path / file_name
+            elif path.suffix:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                target_path = path
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                target_path = path / file_name
+
+            payload = {
+                "timestamp": timestamp,
+                "scope": {"type": scope.kind, "id": scope.identifier},
+                "ui_id": ui_id,
+                "name": name,
+                "prompt": prompt,
+                "requested_tools": tools,
+                "message_payload": message_payload,
+                "chat_request": chat_request.model_dump(exclude_none=True),
+            }
+
+            with target_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+            logger.info(
+                "[GeneratedUI] Chat request preview dumped to %s", target_path
+            )
+        except Exception as exc:  # pragma: no cover - debug helper
+            logger.error(
+                "[GeneratedUI] Failed to dump chat request preview: %s", exc, exc_info=exc
+            )
 
     def _extract_body(self, html: str) -> Optional[str]:
         match = re.search(

@@ -197,3 +197,64 @@ def test_map_tools_prunes_mapped_inputs(monkeypatch):
     assert "properties" in params
     assert "location" not in params["properties"]
     assert "unit" in params["properties"]
+
+
+def test_map_tools_allows_reusing_same_ref_multiple_times():
+    tools = [
+        {
+            "name": "double_ref",
+            "description": "Schema that reuses the same definition twice.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "first": {"$ref": "#/$defs/Thing"},
+                    "second": {"$ref": "#/$defs/Thing"},
+                },
+                "$defs": {
+                    "Thing": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    }
+                },
+            },
+        }
+    ]
+
+    result = map_tools(tools)
+    params = result[0]["function"]["parameters"]["properties"]
+    assert "value" in params["first"]["properties"]
+    assert params["first"]["properties"]["value"]["type"] == "string"
+    assert "value" in params["second"]["properties"]
+    assert params["second"]["properties"]["value"]["type"] == "string"
+
+
+def test_map_tools_keeps_duplicate_refs_in_output_schema():
+    tools = [
+        {
+            "name": "double_output_ref",
+            "description": "Tool with outputSchema reusing a definition twice.",
+            "inputSchema": {"type": "object"},
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "alpha": {"$ref": "#/$defs/Entry"},
+                    "beta": {"$ref": "#/$defs/Entry"},
+                },
+                "$defs": {
+                    "Entry": {
+                        "type": "object",
+                        "properties": {"label": {"type": "string"}},
+                        "required": ["label"],
+                    }
+                },
+            },
+        }
+    ]
+
+    result = map_tools(tools, include_output_schema=True)
+    output_schema = result[0]["function"]["outputSchema"]["properties"]
+    assert "label" in output_schema["alpha"]["properties"]
+    assert output_schema["alpha"]["properties"]["label"]["type"] == "string"
+    assert "label" in output_schema["beta"]["properties"]
+    assert output_schema["beta"]["properties"]["label"]["type"] == "string"

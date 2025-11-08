@@ -80,3 +80,5 @@ def _parse_map_header_to_input(raw: str) -> dict:
 MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
     os.getenv("MCP_MAP_HEADER_TO_INPUT", "")
 )
+
+GENERATED_UI_PROMPT_DUMP = os.getenv("GENERATED_UI_PROMPT_DUMP", "")
