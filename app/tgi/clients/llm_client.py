@@ -293,32 +293,32 @@ class LLMClient:
             payload, serialized_payload, payload_size = await self._prepare_payload(
                 request
             )
-            self.logger.info(
+            self.logger.debug(
                 "[LLMClient] Prepared streaming payload (bytes=%s, messages=%s)",
                 payload_size,
                 len(payload.get("messages", [])),
             )
 
-            self.logger.info(
+            self.logger.debug(
                 f"[LLMClient] Opening HTTP session to {self.tgi_url}/chat/completions"
             )
             async with aiohttp.ClientSession() as session:
-                self.logger.info("[LLMClient] Sending POST request to LLM")
+                self.logger.debug("[LLMClient] Sending POST request to LLM")
                 async with session.post(
                     f"{self.tgi_url}/chat/completions",
                     headers=self._get_headers(access_token),
                     data=serialized_payload,
                 ) as response:
-                    self.logger.info(
+                    self.logger.debug(
                         f"[LLMClient] Received response, status={response.status}"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"[LLMClient] Response headers: {dict(getattr(response, 'headers', {}))}"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"[LLMClient] Response content-type: {getattr(response, 'content_type', None)}"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"[LLMClient] Response content-length: {getattr(response, 'content_length', None)}"
                     )
 
@@ -354,22 +354,22 @@ class LLMClient:
                     self.logger.info(
                         f"[LLMClient] Response OK, starting to stream chunks (model={request.model})"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         "[LLMClient] About to iterate over response.content"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"[LLMClient] Response content object: {response.content}"
                     )
 
                     async for chunk in response.content:
-                        self.logger.info(
+                        self.logger.debug(
                             "[LLMClient] Received raw chunk from HTTP response"
                         )
                         chunk_str = chunk.decode("utf-8")
                         if chunk_str:
                             chunk_count += 1
                             if chunk_count == 1:
-                                self.logger.info(
+                                self.logger.debug(
                                     f"[LLMClient] Received first chunk from LLM, length={len(chunk_str)}"
                                 )
                             if chunk_count % 10 == 0:
