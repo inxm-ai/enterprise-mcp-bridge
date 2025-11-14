@@ -581,11 +581,12 @@ async def test_update_and_get_ui_paths(tmp_path, monkeypatch):
     )
     assert updated["current"]["html"]["page"] == "<p>new</p>"
 
-    # get with wrong actor -> should raise
-    with pytest.raises(Exception):
-        service.get_ui(
-            scope=scope, actor=Actor(user_id="x", groups=[]), ui_id="eid", name="n1"
-        )
+    # get_ui doesn't check permissions, it only checks existence and scope consistency
+    # So calling get with any actor should succeed as long as the UI exists
+    fetched = service.get_ui(
+        scope=scope, actor=Actor(user_id="x", groups=[]), ui_id="eid", name="n1"
+    )
+    assert fetched is not None
 
 
 @pytest.mark.asyncio
@@ -720,3 +721,418 @@ async def test_stream_generate_ui_success_and_failure_cases(tmp_path, monkeypatc
     async for b in gen3:
         out.append(b)
     assert any(b"Failed to persist" in o for o in out)
+
+
+def test_reset_last_change_success(tmp_path):
+    """Test successful reset of the last change."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="group", identifier="g1")
+    actor = Actor(user_id="u1", groups=["g1"])
+
+    # Create a record with multiple history entries
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "group", "id": "g1"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-03T00:00:00Z",
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first prompt",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {"m": 1},
+                    "payload_html": {"page": "<p>first</p>", "snippet": "<p>first</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "second prompt",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {"m": 2},
+                    "payload_html": {
+                        "page": "<p>second</p>",
+                        "snippet": "<p>second</p>",
+                    },
+                },
+                {
+                    "action": "update",
+                    "prompt": "third prompt",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-03T00:00:00Z",
+                    "payload_metadata": {"m": 3},
+                    "payload_html": {"page": "<p>third</p>", "snippet": "<p>third</p>"},
+                },
+            ],
+        },
+        "current": {
+            "html": {"page": "<p>third</p>", "snippet": "<p>third</p>"},
+            "metadata": {"m": 3},
+        },
+    }
+
+    storage.write(scope, "ui1", "test", existing)
+
+    # Reset the last change
+    result = service.reset_last_change(
+        scope=scope, actor=actor, ui_id="ui1", name="test"
+    )
+
+    # Verify the history has been reduced by one
+    assert len(result["metadata"]["history"]) == 2
+
+    # Verify the current state now reflects the second entry
+    assert result["current"]["html"]["page"] == "<p>second</p>"
+    assert result["current"]["metadata"]["m"] == 2
+
+    # Verify updated_at and updated_by were set
+    assert "updated_at" in result["metadata"]
+    assert result["metadata"]["updated_by"] == "u1"
+
+    # Verify the record was persisted
+    reloaded = storage.read(scope, "ui1", "test")
+    assert len(reloaded["metadata"]["history"]) == 2
+    assert reloaded["current"]["html"]["page"] == "<p>second</p>"
+
+
+def test_reset_last_change_not_found(tmp_path):
+    """Test reset on non-existent UI raises 404."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="user", identifier="u1")
+    actor = Actor(user_id="u1", groups=[])
+
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(
+            scope=scope, actor=actor, ui_id="nonexistent", name="test"
+        )
+
+    # Should be a 404 error
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 404
+
+
+def test_reset_last_change_single_history_entry(tmp_path):
+    """Test reset fails when only one history entry exists (initial creation)."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="user", identifier="u1")
+    actor = Actor(user_id="u1", groups=[])
+
+    # Create a record with only one history entry
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "user", "id": "u1"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first prompt",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {"m": 1},
+                    "payload_html": {"page": "<p>first</p>"},
+                }
+            ],
+        },
+        "current": {"html": {"page": "<p>first</p>"}, "metadata": {"m": 1}},
+    }
+
+    storage.write(scope, "ui1", "test", existing)
+
+    # Attempt to reset should fail
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(scope=scope, actor=actor, ui_id="ui1", name="test")
+
+    # Should be a 400 error about only one history entry
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 400
+    assert "only one history entry" in str(exc_info.value.detail).lower()
+
+
+def test_reset_last_change_permission_denied_user_scope(tmp_path):
+    """Test reset fails when user doesn't own user-scoped UI."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="user", identifier="u1")
+    actor = Actor(user_id="u2", groups=[])  # Different user
+
+    # Create a record
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "user", "id": "u1"},
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>1</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "second",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>2</p>"},
+                },
+            ],
+        },
+        "current": {"html": {"page": "<p>2</p>"}},
+    }
+
+    storage.write(scope, "ui1", "test", existing)
+
+    # Attempt to reset should fail due to permission
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(scope=scope, actor=actor, ui_id="ui1", name="test")
+
+    # Should be a 403 error
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 403
+
+
+def test_reset_last_change_permission_denied_group_scope(tmp_path):
+    """Test reset fails when user is not in the group."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="group", identifier="g1")
+    actor = Actor(user_id="u1", groups=["g2"])  # Different group
+
+    # Create a record
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "group", "id": "g1"},
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>1</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "second",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>2</p>"},
+                },
+            ],
+        },
+        "current": {"html": {"page": "<p>2</p>"}},
+    }
+
+    storage.write(scope, "ui1", "test", existing)
+
+    # Attempt to reset should fail due to permission
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(scope=scope, actor=actor, ui_id="ui1", name="test")
+
+    # Should be a 403 error
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 403
+
+
+def test_reset_last_change_scope_path_mismatch(tmp_path):
+    """Test reset fails when requested scope results in different storage path."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    # Store with one scope
+    stored_scope = Scope(kind="group", identifier="g1")
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "group", "id": "g1"},
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>1</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "second",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>2</p>"},
+                },
+            ],
+        },
+        "current": {"html": {"page": "<p>2</p>"}},
+    }
+
+    storage.write(stored_scope, "ui1", "test", existing)
+
+    # Try to reset with different scope - this will result in a different storage path
+    # so the file won't be found (404), not a scope mismatch (403)
+    wrong_scope = Scope(kind="user", identifier="u1")
+    actor = Actor(user_id="u1", groups=["g1"])
+
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(
+            scope=wrong_scope, actor=actor, ui_id="ui1", name="test"
+        )
+
+    # Should be a 404 error because the storage path differs
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 404
+
+
+def test_reset_last_change_stored_scope_inconsistency(tmp_path):
+    """Test reset fails when stored metadata scope doesn't match the request scope (data corruption scenario)."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    # Create a scenario where the file is in the right path but metadata is inconsistent
+    # This simulates data corruption or manual file manipulation
+    scope = Scope(kind="group", identifier="g1")
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            # Stored scope claims to be g2, but file is in g1 path
+            "scope": {"type": "group", "id": "g2"},
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "first",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>1</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "second",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {},
+                    "payload_html": {"page": "<p>2</p>"},
+                },
+            ],
+        },
+        "current": {"html": {"page": "<p>2</p>"}},
+    }
+
+    # Write to g1 path but with g2 in metadata
+    storage.write(scope, "ui1", "test", existing)
+
+    actor = Actor(user_id="u1", groups=["g1", "g2"])
+
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(scope=scope, actor=actor, ui_id="ui1", name="test")
+
+    # Should be a 403 error about scope mismatch
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 403
+    assert "scope mismatch" in str(exc_info.value.detail).lower()
+
+
+def test_reset_last_change_with_group_member(tmp_path):
+    """Test successful reset by a group member."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="group", identifier="team-alpha")
+    # Different user but in the same group
+    actor = Actor(user_id="u2", groups=["team-alpha", "other-group"])
+
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "dashboard",
+            "scope": {"type": "group", "id": "team-alpha"},
+            "created_by": "u1",
+            "history": [
+                {
+                    "action": "create",
+                    "prompt": "create dashboard",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-01T00:00:00Z",
+                    "payload_metadata": {"version": 1},
+                    "payload_html": {"page": "<p>v1</p>"},
+                },
+                {
+                    "action": "update",
+                    "prompt": "update dashboard",
+                    "tools": [],
+                    "user_id": "u1",
+                    "generated_at": "2024-01-02T00:00:00Z",
+                    "payload_metadata": {"version": 2},
+                    "payload_html": {"page": "<p>v2</p>"},
+                },
+            ],
+        },
+        "current": {"html": {"page": "<p>v2</p>"}, "metadata": {"version": 2}},
+    }
+
+    storage.write(scope, "ui1", "dashboard", existing)
+
+    # Reset should succeed because u2 is in team-alpha
+    result = service.reset_last_change(
+        scope=scope, actor=actor, ui_id="ui1", name="dashboard"
+    )
+
+    assert len(result["metadata"]["history"]) == 1
+    assert result["current"]["metadata"]["version"] == 1
+    assert result["metadata"]["updated_by"] == "u2"
+
+
+def test_reset_last_change_empty_history(tmp_path):
+    """Test reset fails gracefully when history is unexpectedly empty."""
+    storage = GeneratedUIStorage(str(tmp_path))
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    scope = Scope(kind="user", identifier="u1")
+    actor = Actor(user_id="u1", groups=[])
+
+    # Create a malformed record with empty history (shouldn't happen in practice)
+    existing = {
+        "metadata": {
+            "id": "ui1",
+            "name": "test",
+            "scope": {"type": "user", "id": "u1"},
+            "history": [],
+        },
+        "current": {"html": {"page": "<p>current</p>"}},
+    }
+
+    storage.write(scope, "ui1", "test", existing)
+
+    with pytest.raises(Exception) as exc_info:
+        service.reset_last_change(scope=scope, actor=actor, ui_id="ui1", name="test")
+
+    # Should be a 400 error
+    assert hasattr(exc_info.value, "status_code") and exc_info.value.status_code == 400

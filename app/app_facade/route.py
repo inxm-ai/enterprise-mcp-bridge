@@ -400,6 +400,43 @@ async def update_generated_ui(
     return JSONResponse(status_code=200, content=_format_ui_response(record))
 
 
+@router.delete("/_generated/{target}/{ui_id}/{name}/reset")
+async def reset_generated_ui(
+    target: str,
+    ui_id: str,
+    name: str,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    """
+    Reset the last change to a generated UI by removing the most recent history
+    entry and restoring the previous state as current.
+
+    This operation requires update permissions and will fail if there is only
+    one history entry (the initial creation).
+    """
+    _ensure_tgi_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+
+    with tracer.start_as_current_span("generated_ui.reset") as span:
+        span.set_attribute("ui.scope", scope.kind)
+        span.set_attribute("ui.scope_id", scope.identifier)
+        span.set_attribute("ui.id", ui_id)
+        span.set_attribute("ui.name", name)
+
+        record = service.reset_last_change(
+            scope=scope,
+            actor=actor,
+            ui_id=ui_id,
+            name=name,
+        )
+
+    return JSONResponse(status_code=200, content=_format_ui_response(record))
+
+
 def get_target_url(request: Request) -> str:
     """Construct the target URL from the request path."""
     # Remove the proxy prefix from the path

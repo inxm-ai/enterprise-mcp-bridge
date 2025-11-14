@@ -635,6 +635,67 @@ class GeneratedUIService:
         self._assert_scope_consistency(existing, scope, name)
         return existing
 
+    def reset_last_change(
+        self,
+        *,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+    ) -> Dict[str, Any]:
+        """
+        Reset the last change by removing the last history entry and
+        restoring the previous state as current.
+
+        Requires update permissions. Will fail if there is only one history entry.
+        """
+        try:
+            existing = self.storage.read(scope, ui_id, name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Ui not found") from exc
+
+        self._assert_scope_consistency(existing, scope, name)
+        self._ensure_update_permissions(existing, scope, actor)
+
+        metadata = existing.get("metadata", {})
+        history = metadata.get("history", [])
+
+        if len(history) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot reset: only one history entry exists (initial creation)",
+            )
+
+        # Remove the last history entry
+        last_entry = history.pop()
+
+        # Get the new last entry (which becomes current)
+        new_last_entry = history[-1]
+
+        # Reconstruct the current state from the new last entry
+        new_current = {
+            "html": new_last_entry.get("payload_html", {}),
+            "metadata": new_last_entry.get("payload_metadata", {}),
+        }
+
+        # Update timestamps
+        timestamp = self._now()
+        metadata["updated_at"] = timestamp
+        metadata["updated_by"] = actor.user_id
+
+        # Update the record
+        existing["current"] = new_current
+        existing["metadata"] = metadata
+
+        # Persist the changes
+        self.storage.write(scope, ui_id, name, existing)
+
+        logger.info(
+            f"Reset UI {ui_id}/{name} - removed history entry from {last_entry.get('generated_at')}"
+        )
+
+        return existing
+
     async def _generate_ui_payload(
         self,
         *,
