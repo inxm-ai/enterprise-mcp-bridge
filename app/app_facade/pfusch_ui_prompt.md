@@ -124,7 +124,7 @@ pfusch('enhanced-form', { status: 'idle' }, (state, trigger, helpers) => [
 ```
 
 > `helpers.children()` returns **all** top-level nodes inside the component. Do not destructure only the first child and assume you have the entire DOM. Instead:
-> - Use selectors (`helpers.children('.absences-list')[0]`) to grab specific elements, **or**
+> - Use selectors (`helpers.children('.absences-list')[0]`) to grab specific child elements, **or**
 > - Iterate all child nodes and query inside each one:
 >   ```javascript
 >   const nodes = helpers.children();
@@ -133,6 +133,8 @@ pfusch('enhanced-form', { status: 'idle' }, (state, trigger, helpers) => [
 >     .find(Boolean);
 >   ```
 > Failing to do this means later DOM queries (like `.absences-list`) will silently return `null`.
+> 
+> If you use `querySelector` for a child that is actually the root node, you will not find it—`querySelector` only searches descendants, not the node itself.
 
 ### 7. Events and Communication
 
