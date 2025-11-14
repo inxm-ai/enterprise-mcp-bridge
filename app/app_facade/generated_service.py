@@ -633,7 +633,6 @@ class GeneratedUIService:
             raise HTTPException(status_code=404, detail="Ui not found") from exc
 
         self._assert_scope_consistency(existing, scope, name)
-        self._ensure_update_permissions(existing, scope, actor)
         return existing
 
     async def _generate_ui_payload(
@@ -665,7 +664,9 @@ class GeneratedUIService:
             previous_metadata = previous.get("metadata", {})
             message_payload["context"] = {
                 "original_prompt": self._initial_prompt(previous_metadata),
-                "history": previous_metadata.get("history", []),
+                "history": self._history_for_prompt(
+                    previous_metadata.get("history", [])
+                ),
                 "current_state": previous.get("current", {}),
             }
 
@@ -1170,6 +1171,18 @@ class GeneratedUIService:
             "payload_metadata": payload_metadata,
             "payload_html": payload_html,
         }
+
+    def _history_for_prompt(
+        self, history_entries: Sequence[Any]
+    ) -> List[Dict[str, Any]]:
+        sanitized: List[Dict[str, Any]] = []
+        for entry in history_entries or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_copy = dict(entry)
+            entry_copy.pop("payload_html", None)
+            sanitized.append(entry_copy)
+        return sanitized
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

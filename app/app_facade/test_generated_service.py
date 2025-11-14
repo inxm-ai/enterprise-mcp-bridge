@@ -325,6 +325,20 @@ def test_history_entry_and_now_format():
     assert re.match(r"\d{4}-\d{2}-\d{2}", now)
 
 
+def test_history_for_prompt_strips_payload_html_without_mutating():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    history = [
+        {"action": "create", "payload_html": {"page": "<p>a</p>"}, "prompt": "one"},
+        "not-a-dict",
+    ]
+    sanitized = service._history_for_prompt(history)
+    assert len(sanitized) == 1
+    assert "payload_html" not in sanitized[0]
+    # original history entry still retains payload_html
+    assert "payload_html" in history[0]
+
+
 def test_build_system_prompt_reads_pfusch_and_fallback(monkeypatch):
     storage = GeneratedUIStorage(os.getcwd())
     tgi = DummyTGIService()
