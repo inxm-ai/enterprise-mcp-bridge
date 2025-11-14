@@ -240,9 +240,26 @@ class WellPlannedOrchestrator:
         todo_manager: TodoManager,
         todo: TodoItem,
         base_request: ChatCompletionRequest,
+        original_messages: Optional[List[Message]] = None,
     ):
+        # Preserve any original system prompt from the base request/prepared messages
+        original_system_content = None
+        if original_messages:
+            for msg in original_messages:
+                if msg.role == MessageRole.SYSTEM:
+                    original_system_content = msg.content
+                    break
+
+        # Combine original system prompt with todo-specific goal
+        if original_system_content:
+            combined_system_content = (
+                f"{original_system_content}\n\nCurrent Goal: {todo.goal}"
+            )
+        else:
+            combined_system_content = f"Goal: {todo.goal}"
+
         focused_messages = [
-            Message(role=MessageRole.SYSTEM, content=f"Goal: {todo.goal}")
+            Message(role=MessageRole.SYSTEM, content=combined_system_content)
         ]
 
         for hist in todo_manager.history():
@@ -304,6 +321,7 @@ class WellPlannedOrchestrator:
         available_tools: List[Any],
         access_token: Optional[str],
         span,
+        original_messages: Optional[List[Message]] = None,
     ) -> AsyncGenerator[str, None]:
         async def _generator():
             id = f"mcp-{str(uuid.uuid4())}"
@@ -322,7 +340,7 @@ class WellPlannedOrchestrator:
                 )
 
                 focused_messages, focused_request = self._build_focused_request(
-                    todo_manager, todo, request
+                    todo_manager, todo, request, original_messages
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
@@ -387,6 +405,7 @@ class WellPlannedOrchestrator:
         available_tools: List[Any],
         access_token: Optional[str],
         span,
+        original_messages: Optional[List[Message]] = None,
     ) -> ChatCompletionResponse:
         names = [t.name for t in todo_manager.list_todos()]
         results_payload: List[dict] = []
@@ -395,7 +414,7 @@ class WellPlannedOrchestrator:
             todo_manager.start_todo(todo.id)
 
             focused_messages, focused_request = self._build_focused_request(
-                todo_manager, todo, request
+                todo_manager, todo, request, original_messages
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
@@ -510,6 +529,7 @@ class WellPlannedOrchestrator:
                 available_tools,
                 access_token,
                 span,
+                original_messages=messages,
             )
 
         return await self._well_planned_non_streaming(
@@ -519,4 +539,5 @@ class WellPlannedOrchestrator:
             available_tools,
             access_token,
             span,
+            original_messages=messages,
         )
