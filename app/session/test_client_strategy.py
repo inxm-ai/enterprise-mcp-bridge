@@ -179,8 +179,9 @@ async def test_local_strategy_session(monkeypatch):
     captured = {}
 
     @asynccontextmanager
-    async def fake_stdio_client(params):
+    async def fake_stdio_client(params, errlog=None):
         captured["params"] = params
+        captured["errlog"] = errlog
         yield object(), object()
 
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "")
@@ -207,6 +208,7 @@ async def test_local_strategy_session(monkeypatch):
         "anon": False,
     }
     assert isinstance(captured["params"], StdioServerParameters)
+    assert captured["errlog"] is not None
 
 
 @pytest.mark.asyncio

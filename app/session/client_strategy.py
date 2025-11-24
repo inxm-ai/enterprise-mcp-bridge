@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
@@ -46,10 +47,31 @@ class LocalMCPClientStrategy(MCPClientStrategy):
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
-        async with stdio_client(self.server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                yield session
+        read_fd, write_fd = os.pipe()
+
+        def log_output():
+            with os.fdopen(read_fd, "r", errors="replace") as reader:
+                for line in reader:
+                    logger.info(f"[MCP Server] {line.strip()}")
+
+        reader_thread = threading.Thread(target=log_output, daemon=True)
+        reader_thread.start()
+
+        write_file = os.fdopen(write_fd, "w")
+
+        try:
+            async with stdio_client(self.server_params, errlog=write_file) as (
+                read,
+                write,
+            ):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        finally:
+            try:
+                write_file.close()
+            except Exception:
+                pass
 
 
 class _EphemeralTokenStorage(TokenStorage):
