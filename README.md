@@ -139,7 +139,6 @@ Example:
 ```bash
 export MCP_REMOTE_SERVER_FORWARD_HEADERS="X-Request-ID,X-Correlation-ID"
 ```
-```
 
 Authentication hierarchy:
 1. Exchange the incoming OAuth token using `TokenRetrieverFactory` (if configured).
@@ -208,7 +207,9 @@ volumes:
 | `KEYCLOAK_PROVIDER_ALIAS` | External IdP alias used in broker path                    | (required)             |
 | `MCP_SESSION_MANAGER`     | Implementation name (e.g., future Redis)                  | InMemorySessionManager |
 | `SESSION_FIELD_NAME`      | Name of the header/cookie containing the session ID       | x-inxm-mcp-session     |
-| `TOKEN_NAME`              | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
+| `TOKEN_NAME`              | Name of the header containing the OAuth token             | X-Auth-Request-Access-Token |
+| `TOKEN_COOKIE_NAME`       | Name of the cookie containing the OAuth token             | _oauth2_proxy          |
+| `TOKEN_SOURCE`            | Source of the token (`header` or `cookie`)                | header                 |
 | `INCLUDE_TOOLS`           | Comma-separated list of tool name patterns to include     | ""                     |
 | `EXCLUDE_TOOLS`           | Comma-separated list of tool name patterns to exclude     | ""                     |
 | `EFFECT_TOOLS`            | Comma-separated list of tool name patterns that modify data or have side effects | ""          |
@@ -846,8 +847,4 @@ The target app receives `X-Forwarded-Proto: https` to generate correct URLs.
 **Redirects pointing to internal URLs**
 - Set `PUBLIC_URL` to your public-facing domain
 - Verify the target app isn't hardcoding absolute URLs
-
-**Cookies not persisting**
-- Verify `PROXY_PREFIX` is set correctly
-- Check that cookie domains don't conflict with your setup
 

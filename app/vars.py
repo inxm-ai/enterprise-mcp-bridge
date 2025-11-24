@@ -2,6 +2,8 @@ import os
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
+TOKEN_COOKIE_NAME = os.environ.get("TOKEN_COOKIE_NAME", "_oauth2_proxy")
+TOKEN_SOURCE = os.environ.get("TOKEN_SOURCE", "header").lower()
 SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]

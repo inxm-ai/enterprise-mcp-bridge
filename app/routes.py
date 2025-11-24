@@ -1,7 +1,7 @@
 import logging
 import io
 from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
-from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request
+from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
@@ -24,6 +24,7 @@ from app.session_manager import mcp_session_context, session_manager
 from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
+from .oauth.token_dependency import get_access_token
 from .utils import mask_token
 from .utils.exception_logging import (
     find_exception_in_exception_groups,
@@ -56,7 +57,7 @@ def _extract_request_headers(request: Request) -> dict[str, str]:
 @router.get("/resources")
 async def list_resources(
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     group: Optional[str] = Query(
@@ -104,7 +105,7 @@ async def list_resources(
 async def get_resource_details(
     resource_name: str,
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     group: Optional[str] = Query(
@@ -187,7 +188,7 @@ async def get_resource_details(
 @router.get("/prompts")
 async def list_prompts(
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     group: Optional[str] = Query(
@@ -234,7 +235,7 @@ async def list_prompts(
 @router.get("/tools")
 async def list_tools(
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     group: Optional[str] = Query(
@@ -274,7 +275,7 @@ async def list_tools(
 async def get_tool_details(
     tool_name: str,
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     group: Optional[str] = Query(
@@ -331,7 +332,7 @@ async def run_tool(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     x_inxm_dry_run: Optional[str] = Header(None, alias="X-Inxm-Dry-Run"),
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
         None, description="Group name for sessionless group-specific data access"
@@ -415,7 +416,7 @@ async def run_prompt(
     request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
         None, description="Group name for sessionless group-specific data access"
@@ -477,7 +478,7 @@ async def run_prompt(
 
 @router.post("/session/start")
 async def start_session(
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     group: Optional[str] = Query(
         None, description="Group name for group-specific data access"
     ),
@@ -560,7 +561,7 @@ async def start_session(
 
 @router.post("/session/close")
 async def close_session(
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
 ):
