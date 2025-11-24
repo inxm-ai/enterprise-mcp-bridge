@@ -147,12 +147,11 @@ class ToolService:
 
             try:
                 # Parse tool arguments
+                raw_arguments = getattr(tool_call.function, "arguments", None)
                 try:
-                    args = (
-                        json.loads(tool_call.function.arguments)
-                        if tool_call.function.arguments
-                        else {}
-                    )
+                    if isinstance(raw_arguments, str):
+                        raw_arguments = raw_arguments.strip()
+                    args = json.loads(raw_arguments) if raw_arguments else {}
                 except json.JSONDecodeError as e:
                     error_msg = f"Invalid tool arguments JSON: {str(e)}"
                     self.logger.error(f"[ToolService] {error_msg}")
@@ -473,6 +472,39 @@ class ToolService:
                 return tool_calls
             return [(call, ToolCallFormat.OPENAI_JSON) for call in tool_calls]
 
+        def _result_has_error(result: dict) -> bool:
+            """Detect common error signals in tool execution results."""
+            if not isinstance(result, dict):
+                return False
+
+            if result.get("isError") is True:
+                return True
+            if result.get("success") is False:
+                return True
+
+            content = result.get("content")
+            parsed_content = None
+
+            if isinstance(content, str):
+                try:
+                    parsed_content = json.loads(content)
+                except Exception:
+                    parsed_content = None
+                if "error" in content.lower():
+                    return True
+            elif isinstance(content, dict):
+                parsed_content = content
+
+            if isinstance(parsed_content, dict) and parsed_content.get("error"):
+                return True
+
+            if isinstance(parsed_content, list):
+                for item in parsed_content:
+                    if isinstance(item, dict) and item.get("error"):
+                        return True
+
+            return False
+
         for tool_call, tool_call_format in _coerce_tool_calls():
             try:
                 if tool_call.function.name == "describe_tool":
@@ -485,16 +517,7 @@ class ToolService:
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
-                if "isError" in result and result["isError"]:
-                    success = False
-                if "success" in result and not result["success"]:
-                    success = False
-
-                # Its very brittle, but if the tool content contains "ERROR",
-                # we assume the tool call failed in some way. Unforuntately, not
-                # all MCP servers return isError=true on tool call failures.
-                content_check = result.get("content")
-                if isinstance(content_check, str) and "ERROR" in content_check:
+                if _result_has_error(result):
                     success = False
 
                 tool_message = await self.create_result_message(

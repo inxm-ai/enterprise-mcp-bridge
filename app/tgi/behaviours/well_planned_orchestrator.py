@@ -253,10 +253,14 @@ class WellPlannedOrchestrator:
         # Combine original system prompt with todo-specific goal
         if original_system_content:
             combined_system_content = (
-                f"{original_system_content}\n\nCurrent Goal: {todo.goal}"
+                f"{original_system_content}\n\nCurrent Goal: {todo.goal}\n"
+                "You have access to the results of previous steps. Use them to achieve the current goal."
             )
         else:
-            combined_system_content = f"Goal: {todo.goal}"
+            combined_system_content = (
+                f"Goal: {todo.goal}\n"
+                "You have access to the results of previous steps. Use them to achieve the current goal."
+            )
 
         focused_messages = [
             Message(role=MessageRole.SYSTEM, content=combined_system_content)
@@ -344,10 +348,13 @@ class WellPlannedOrchestrator:
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
+                    available_tool_names = [
+                        t.function.name if hasattr(t, "function") else str(t)
+                        for t in (available_tools or [])
+                    ]
                     logger.warning(
-                        f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools} in the available tools {available_tools}. Passing all tools as fallback."
+                        f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools}. Available: {available_tool_names}. Proceeding without tools."
                     )
-                    filtered_tools = available_tools
 
                 try:
                     logger.info(f"[WellPlanned] Processing todo {todo.id}")
@@ -379,11 +386,13 @@ class WellPlannedOrchestrator:
                                 result = aggregated
                         except Exception as exc:
                             result = {"error": str(exc)}
+                    else:
+                        result = "No content returned from step."
                 except Exception as exc:
                     result = {"error": str(exc)}
 
-                todo_manager.finish_todo(todo.id, result)
-                summary = f"<think>I have completed the todo '{todo.name}'.</think>"
+                todo_manager.finish_todo(todo.id, self._stringify_result(result))
+                summary = f"<think>I have completed the todo '{todo.name}'. Result summary: {self._stringify_result(result)[:200]}...</think>"
                 yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", summary)
 
             # yield the result of the final todo as a last chunk
@@ -418,6 +427,16 @@ class WellPlannedOrchestrator:
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
+            if len(filtered_tools) == 0 and len(todo.tools) > 0:
+                available_tool_names = [
+                    t.function.name if hasattr(t, "function") else str(t)
+                    for t in (available_tools or [])
+                ]
+                if logger:
+                    logger.warning(
+                        f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools}. Available: {available_tool_names}. Proceeding without tools."
+                    )
+
             try:
                 result = await self._non_stream_chat_with_tools(
                     session,
@@ -430,14 +449,17 @@ class WellPlannedOrchestrator:
             except Exception as exc:
                 result = {"error": str(exc)}
 
-            todo_manager.finish_todo(todo.id, result)
+            # Ensure we store a stringified version of the result in the history
+            # so that subsequent steps can read it properly (avoiding ChatCompletionResponse objects)
+            stored_result = self._stringify_result(result)
+            todo_manager.finish_todo(todo.id, stored_result)
 
             results_payload.append(
                 {
                     "id": todo.id,
                     "name": todo.name,
                     "goal": todo.goal,
-                    "result": self._stringify_result(result),
+                    "result": stored_result,
                 }
             )
 
@@ -484,6 +506,8 @@ class WellPlannedOrchestrator:
             "original goal is achieved, and that the todos are as specific as possible. "
             "Also ensure that the todos will get progressively closer to the user's goal, "
             "using the data from previous todos where possible. "
+            "Ensure that each todo builds upon the results of the previous ones, "
+            "explicitly stating what information from previous steps is needed. "
             "won't have to call the same tool multiple times, and that each todo is "
             "achievable with the tools available. If the user has already provided "
             "information that is needed for a todo, do not include that information "
