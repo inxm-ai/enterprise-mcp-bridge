@@ -468,6 +468,43 @@ class ToolService:
         )
         return message
 
+    def _result_has_error(self, result: dict) -> bool:
+        """Detect common error signals in tool execution results."""
+        if not isinstance(result, dict):
+            return False
+
+        if result.get("isError") is True:
+            return True
+        if result.get("success") is False:
+            return True
+
+        content = result.get("content")
+        parsed_content = None
+
+        if isinstance(content, str):
+            try:
+                parsed_content = json.loads(content)
+            except Exception:
+                parsed_content = None
+
+            # Only check for "error" string if we COULD NOT parse it as JSON
+            if parsed_content is None and "error" in content.lower():
+                return True
+        elif isinstance(content, dict):
+            parsed_content = content
+        elif isinstance(content, list):
+            parsed_content = content
+
+        if isinstance(parsed_content, dict) and parsed_content.get("error"):
+            return True
+
+        if isinstance(parsed_content, list):
+            for item in parsed_content:
+                if isinstance(item, dict) and item.get("error"):
+                    return True
+
+        return False
+
     async def execute_tool_calls(
         self,
         session: MCPSessionBase,
@@ -491,39 +528,6 @@ class ToolService:
                 return tool_calls
             return [(call, ToolCallFormat.OPENAI_JSON) for call in tool_calls]
 
-        def _result_has_error(result: dict) -> bool:
-            """Detect common error signals in tool execution results."""
-            if not isinstance(result, dict):
-                return False
-
-            if result.get("isError") is True:
-                return True
-            if result.get("success") is False:
-                return True
-
-            content = result.get("content")
-            parsed_content = None
-
-            if isinstance(content, str):
-                try:
-                    parsed_content = json.loads(content)
-                except Exception:
-                    parsed_content = None
-                if "error" in content.lower():
-                    return True
-            elif isinstance(content, dict):
-                parsed_content = content
-
-            if isinstance(parsed_content, dict) and parsed_content.get("error"):
-                return True
-
-            if isinstance(parsed_content, list):
-                for item in parsed_content:
-                    if isinstance(item, dict) and item.get("error"):
-                        return True
-
-            return False
-
         for tool_call, tool_call_format in _coerce_tool_calls():
             try:
                 if tool_call.function.name == "describe_tool":
@@ -536,7 +540,7 @@ class ToolService:
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(session, tool_call, access_token)
 
-                if _result_has_error(result):
+                if self._result_has_error(result):
                     success = False
 
                 tool_message = await self.create_result_message(
