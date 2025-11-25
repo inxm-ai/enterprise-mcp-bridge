@@ -17,6 +17,7 @@ class TodoItem:
     name: str
     goal: str
     needed_info: Optional[str] = None
+    expected_result: Optional[str] = None
     tools: List[str] = field(default_factory=list)
     state: TodoState = TodoState.TODO
     result: Optional[Any] = None

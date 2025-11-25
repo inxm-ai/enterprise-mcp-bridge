@@ -34,6 +34,7 @@ todo_response_schema = {
                     "name": {"type": "string"},
                     "goal": {"type": "string"},
                     "needed_info": {"type": ["string", "null"]},
+                    "expected_result": {"type": ["string", "null"]},
                     "tools": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["id", "name", "goal", "tools"],
@@ -196,6 +197,7 @@ class WellPlannedOrchestrator:
             name = entry.get("name") or entry.get("title") or f"todo-{tid}"
             goal = entry.get("goal") or entry.get("description") or ""
             needed_info = entry.get("needed_info") or entry.get("neededInfo")
+            expected_result = entry.get("expected_result") or entry.get("expectedResult")
             tools = entry.get("tools") or []
 
             todo_items.append(
@@ -204,6 +206,7 @@ class WellPlannedOrchestrator:
                     name=name,
                     goal=goal,
                     needed_info=needed_info,
+                    expected_result=expected_result,
                     tools=tools,
                 )
             )
@@ -261,6 +264,9 @@ class WellPlannedOrchestrator:
                 f"Goal: {todo.goal}\n"
                 "You have access to the results of previous steps. Use them to achieve the current goal."
             )
+
+        if todo.expected_result:
+            combined_system_content += f"\n\nExpected Result: {todo.expected_result}"
 
         focused_messages = [
             Message(role=MessageRole.SYSTEM, content=combined_system_content)
@@ -512,6 +518,8 @@ class WellPlannedOrchestrator:
             "achievable with the tools available. If the user has already provided "
             "information that is needed for a todo, do not include that information "
             "in the todo's needed_info field. "
+            "Also include an 'expected_result' field for each todo, which hints at "
+            "what the result should look like, giving good and bad examples if possible. "
             "In the reply, in the tools array, only include the exact names of tools "
             "that are available to you. If no tools are needed, use an empty array. "
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
