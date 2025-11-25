@@ -362,7 +362,8 @@ class ProxiedTGIService:
                             for tc, _ in tool_calls_to_execute
                         ]
                     )
-                    yield f"data: {json.dumps({'choices':[{'delta':{'content': f'<think>Executing the following tools{tools_summary}</think>'},'index':0}]})}\n\n"
+                    execution_msg = f"<think>Executing the following tools{tools_summary}</think>\\n\\n"
+                    yield f"data: {json.dumps({'choices':[{'delta':{'content': execution_msg},'index':0}]})}\\n\\n"
 
                     tool_results, success = await self.tool_service.execute_tool_calls(
                         session,
@@ -397,20 +398,21 @@ class ProxiedTGIService:
 
                     # If we didn't fail, this should repeat the cycle
                     if success:
-                        yield f"data: {json.dumps({'choices':[{'delta':{'content': '<think>I executed the tools successfully, resuming response generation...</think>'},'index':0}]})}\n\n"
+                        success_msg = "<think>I executed the tools successfully, resuming response generation</think>\n\n"
+                        yield f"data: {json.dumps({'choices':[{'delta':{'content': success_msg},'index':0}]})}\\n\\n"
                         self.logger.debug(
                             "[ProxiedTGI] Tool execution successful, continuing to next iteration"
                         )
                         tool_span.set_attribute("tool_calls.success", True)
                     else:
-                        failure_report = "<think>The tool call failed. I will try to adjust my approach</think>"
+                        failure_report = "<think>The tool call failed. I will try to adjust my approach</think>\n\n"
                         self.logger.info(
                             "[ProxiedTGI] Tool execution failed, asking the llm to fix the tool call"
                         )
                         self.logger.debug(
                             f"[ProxiedTGI] Tool execution failure details: {tool_results}"
                         )
-                        yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\n\n"
+                        yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\\n\\n"
                         tool_span.set_attribute("tool_calls.success", False)
 
                     # Continue to next iteration (both success and error paths)
