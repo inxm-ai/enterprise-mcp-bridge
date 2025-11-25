@@ -1,7 +1,15 @@
 import logging
 import os
 from typing import Optional, Any, AsyncGenerator
-from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Header,
+    Cookie,
+    Query,
+    Request,
+    Depends,
+)
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, ValidationError
 from opentelemetry import trace
@@ -23,6 +31,7 @@ from app.tgi.models import (
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.protocols.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
 from app.vars import DEFAULT_MODEL, TOKEN_NAME, SESSION_FIELD_NAME, SERVICE_NAME
+from app.oauth.token_dependency import get_access_token
 
 # Initialize components
 router = APIRouter(prefix="/tgi/v1")
@@ -186,7 +195,7 @@ def _is_async_iterable(obj: Any) -> bool:
 async def chat_completions(
     request: Request,
     chat_request: ChatCompletionRequest,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     prompt: Optional[str] = Query(None, description="Specific prompt name to use"),
@@ -279,7 +288,7 @@ async def chat_completions(
 @router.post("/a2a")
 async def a2a_chat_completion(
     request: Request,
-    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    access_token: Optional[str] = Depends(get_access_token),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     prompt: Optional[str] = Query(None, description="Specific prompt name to use"),

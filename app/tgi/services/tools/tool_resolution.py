@@ -328,13 +328,18 @@ class ToolResolutionStrategy:
 
         try:
             if isinstance(arguments_str, str):
-                return json.loads(arguments_str)
+                parsed = json.loads(arguments_str)
             elif isinstance(arguments_str, dict):
-                return arguments_str
+                parsed = arguments_str
             else:
-                return {"raw": str(arguments_str)}
+                parsed = arguments_str
         except (json.JSONDecodeError, TypeError):
             return {"raw": str(arguments_str)}
+
+        if parsed is None:
+            return {}
+
+        return parsed
 
     def _parse_xml_content(self, content: str) -> Dict[str, Any]:
         """Parse XML tag content into arguments dictionary."""

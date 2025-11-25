@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -6,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
@@ -27,6 +28,36 @@ from app.vars import (
 )
 
 logger = logging.getLogger("uvicorn.error")
+
+
+def _serialize_log_data(data: object) -> str:
+    """Render MCP log payload safely for application logs."""
+    try:
+        if isinstance(data, (dict, list)):
+            return json.dumps(data, ensure_ascii=False)
+        return str(data)
+    except Exception:
+        return "<unserializable MCP log payload>"
+
+
+async def _log_mcp_notification(
+    params: types.LoggingMessageNotificationParams,
+) -> None:
+    """Forward MCP server log notifications into the application logger."""
+    log_fn = {
+        "debug": logger.debug,
+        "info": logger.info,
+        "notice": logger.info,
+        "warning": logger.warning,
+        "error": logger.error,
+        "critical": logger.critical,
+        "alert": logger.critical,
+        "emergency": logger.critical,
+    }.get(params.level, logger.info)
+
+    logger_name = params.logger or "MCP"
+    message = _serialize_log_data(params.data)
+    log_fn(f"[MCP][{logger_name}][{params.level.upper()}] {message}")
 
 
 class MCPClientStrategy(ABC):
@@ -64,7 +95,9 @@ class LocalMCPClientStrategy(MCPClientStrategy):
                 read,
                 write,
             ):
-                async with ClientSession(read, write) as session:
+                async with ClientSession(
+                    read, write, logging_callback=_log_mcp_notification
+                ) as session:
                     await session.initialize()
                     yield session
         finally:
@@ -310,7 +343,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             headers=headers,
             auth=self._auth_provider,
         ) as (read, write, get_session_id):
-            async with ClientSession(read, write) as session:
+            async with ClientSession(
+                read, write, logging_callback=_log_mcp_notification
+            ) as session:
                 await session.initialize()
                 if get_session_id:
                     setattr(session, "get_remote_session_id", get_session_id)

@@ -46,6 +46,46 @@ class DummySession:
         ]
 
 
+class NullArgsSession:
+    def __init__(self):
+        self.args_seen = []
+
+    async def call_tool(self, name, args, access_token):
+        self.args_seen.append(args)
+        if args is None:
+            raise AssertionError("Tool arguments should be coerced to an empty dict")
+        mock_result = Mock()
+        mock_result.isError = False
+        mock_result.content = []
+        mock_result.structuredContent = {"args": args}
+        return mock_result
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
+class EmptySchemaSession:
+    def __init__(self):
+        self.args_seen = []
+
+    async def call_tool(self, name, args, access_token):
+        self.args_seen.append(args)
+        mock_result = Mock()
+        mock_result.isError = False
+        mock_result.content = []
+        mock_result.structuredContent = {"ok": True}
+        return mock_result
+
+    async def list_tools(self):
+        return [
+            {
+                "name": "get_servers",
+                "description": "List servers",
+                "inputSchema": {},
+            }
+        ]
+
+
 class ErrorSession:
     async def call_tool(self, name, args, access_token):
         mock_result = Mock()
@@ -193,6 +233,42 @@ class TestToolService:
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_123"
         assert "error" in result["content"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_null_arguments(self, tool_service):
+        """Ensure null tool arguments are coerced to empty dicts."""
+        session = NullArgsSession()
+
+        tool_call = ToolCall(
+            id="call_null",
+            type="function",
+            function=ToolCallFunction(name="list-files", arguments="null"),
+        )
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        assert session.args_seen and session.args_seen[0] == {}
+        assert result["role"] == "tool"
+        assert '"args":{}' in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_empty_schema_uses_none(self, tool_service):
+        """When a tool has no input schema and no args, pass None to mimic sessionless calls."""
+        session = EmptySchemaSession()
+        # Populate registry to inform schema lookup
+        await tool_service.get_all_mcp_tools(session)
+
+        tool_call = ToolCall(
+            id="call_empty",
+            type="function",
+            function=ToolCallFunction(name="get_servers", arguments="{}"),
+        )
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        assert session.args_seen and session.args_seen[0] is None
+        assert result["role"] == "tool"
+        assert '"ok":true' in result["content"]
 
     def test_parse_json_array_from_message_valid(self, tool_service):
         msg = 'Some error occurred: [\n {"code": "invalid_type", "expected": "boolean", "received": "string", "path": ["foo"], "message": "Type error"}\n]'

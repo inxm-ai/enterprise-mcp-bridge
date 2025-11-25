@@ -114,6 +114,9 @@ def fix_tool_arguments(tool_call: ToolCall, available_tools: list[dict]) -> Tool
         args = tool_call.function.arguments
         logger.debug("[ToolArgumentFixerService] Tool call arguments already a dict")
 
+    if args is None:
+        args = {}
+
     properties = (
         tool_definition.get("function", {}).get("parameters", {}).get("properties", {})
     )

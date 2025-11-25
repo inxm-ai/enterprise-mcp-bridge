@@ -152,6 +152,8 @@ class ToolService:
                     if isinstance(raw_arguments, str):
                         raw_arguments = raw_arguments.strip()
                     args = json.loads(raw_arguments) if raw_arguments else {}
+                    if args is None:
+                        args = {}
                 except json.JSONDecodeError as e:
                     error_msg = f"Invalid tool arguments JSON: {str(e)}"
                     self.logger.error(f"[ToolService] {error_msg}")
@@ -191,8 +193,25 @@ class ToolService:
                 logger.debug(
                     f"[ToolService] Executing tool '{tool_call.function.name}' with args: {args}"
                 )
+                call_args = args
+                try:
+                    tool_info = self._tool_registry.get(tool_call.function.name, {})
+                    schema = (
+                        tool_info.get("inputSchema")
+                        if isinstance(tool_info, dict)
+                        else None
+                    )
+                    props = (
+                        schema.get("properties", {}) if isinstance(schema, dict) else {}
+                    )
+                    # Some tools explicitly expect "no args"; allow None in that case
+                    if not props and args == {}:
+                        call_args = None
+                except Exception:
+                    call_args = args
+
                 result = await session.call_tool(
-                    tool_call.function.name, args, access_token
+                    tool_call.function.name, call_args, access_token
                 )
 
                 if result.isError:

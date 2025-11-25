@@ -3,12 +3,13 @@ from contextlib import asynccontextmanager
 import pytest
 
 import app.session.client_strategy as client_strategy
-from mcp import StdioServerParameters
+from mcp import StdioServerParameters, types
 
 
 class DummyClientSession:
     def __init__(self, *args, **kwargs):
         self.initialized = False
+        self.kwargs = kwargs
 
     async def __aenter__(self):
         return self
@@ -88,6 +89,10 @@ async def test_remote_strategy_uses_token_exchange(monkeypatch):
     async with strategy.session() as session:
         assert isinstance(session, DummyClientSession)
         assert session.initialized is True
+        assert (
+            session.kwargs.get("logging_callback")
+            is client_strategy._log_mcp_notification
+        )
         assert hasattr(session, "get_remote_session_id")
         assert session.get_remote_session_id() == "remote-session-id"
     assert captured["stream_auth"] is None
@@ -202,6 +207,10 @@ async def test_local_strategy_session(monkeypatch):
     async with strategy.session() as session:
         assert isinstance(session, DummyClientSession)
         assert session.initialized is True
+        assert (
+            session.kwargs.get("logging_callback")
+            is client_strategy._log_mcp_notification
+        )
     assert captured["server_params_kwargs"] == {
         "access_token": "token",
         "requested_group": "group",
@@ -365,3 +374,44 @@ async def test_remote_strategy_forward_all_headers(monkeypatch):
     assert "Host" not in captured["stream_headers"]
     assert "Content-Length" not in captured["stream_headers"]
     assert captured["stream_headers"]["Authorization"] == "Bearer static-token"
+
+
+@pytest.mark.asyncio
+async def test_mcp_log_notifications_forwarded(monkeypatch):
+    class FakeLogger:
+        def __init__(self):
+            self.messages = []
+
+        def debug(self, msg, *args, **kwargs):
+            self.messages.append(("debug", msg))
+
+        def info(self, msg, *args, **kwargs):
+            self.messages.append(("info", msg))
+
+        def warning(self, msg, *args, **kwargs):
+            self.messages.append(("warning", msg))
+
+        def error(self, msg, *args, **kwargs):
+            self.messages.append(("error", msg))
+
+        def critical(self, msg, *args, **kwargs):
+            self.messages.append(("critical", msg))
+
+    fake_logger = FakeLogger()
+    monkeypatch.setattr(client_strategy, "logger", fake_logger)
+
+    params_info = types.LoggingMessageNotificationParams(
+        level="info", data="hello", logger="tools"
+    )
+    params_error = types.LoggingMessageNotificationParams(
+        level="error", data={"detail": "boom"}, logger=None
+    )
+
+    await client_strategy._log_mcp_notification(params_info)
+    await client_strategy._log_mcp_notification(params_error)
+
+    assert ("info", "[MCP][tools][INFO] hello") in fake_logger.messages
+    # Second call should log to error with JSON rendered payload
+    assert fake_logger.messages[-1][0] == "error"
+    assert "[MCP][MCP][ERROR]" in fake_logger.messages[-1][1]
+    assert '"detail": "boom"' in fake_logger.messages[-1][1]

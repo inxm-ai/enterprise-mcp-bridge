@@ -473,6 +473,11 @@ class TestToolResolutionStrategy:
         result4 = self.strategy._parse_arguments("")
         assert result4 == {}
 
+    def test_parse_arguments_null_returns_empty(self):
+        """Ensure null/None arguments are coerced to an empty dict."""
+        result = self.strategy._parse_arguments("null")
+        assert result == {}
+
     def test_parse_xml_content_json(self):
         """Test XML content parsing with JSON content."""
         content = '{"param1": "value1", "param2": 42}'
