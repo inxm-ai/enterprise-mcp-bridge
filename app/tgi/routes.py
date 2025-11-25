@@ -30,7 +30,7 @@ from app.tgi.models import (
 )
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.protocols.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
-from app.vars import DEFAULT_MODEL, TOKEN_NAME, SESSION_FIELD_NAME, SERVICE_NAME
+from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME
 from app.oauth.token_dependency import get_access_token
 
 # Initialize components

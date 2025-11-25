@@ -1,7 +1,7 @@
 import pytest
 import json
 import time
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
@@ -12,6 +12,7 @@ from app.tgi.models import (
     MessageRole,
     Usage,
 )
+
 
 def configure_plan_stream(service, todos, stream_calls=None):
     todos_payload = json.dumps(todos, ensure_ascii=False)
@@ -39,6 +40,7 @@ def configure_plan_stream(service, todos, stream_calls=None):
         )
     )
 
+
 @pytest.mark.asyncio
 async def test_well_planned_context_forwarding():
     """Test that the result of the first todo is correctly forwarded to the second todo as a string content."""
@@ -58,9 +60,9 @@ async def test_well_planned_context_forwarding():
             "goal": "Do step two",
             "needed_info": None,
             "tools": [],
-        }
+        },
     ]
-    
+
     configure_plan_stream(service, todos)
 
     # We will capture the messages passed to _non_stream_chat_with_tools
@@ -68,7 +70,7 @@ async def test_well_planned_context_forwarding():
 
     async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
         captured_messages_per_call.append(messages)
-        
+
         # Return a ChatCompletionResponse object, which was causing issues when str() was used on it
         return ChatCompletionResponse(
             id="chatcmpl-test",
@@ -79,7 +81,7 @@ async def test_well_planned_context_forwarding():
                     index=0,
                     message=Message(
                         role=MessageRole.ASSISTANT,
-                        content=f"Result for {req.messages[0].content}", # Just some content
+                        content=f"Result for {req.messages[0].content}",  # Just some content
                     ),
                     finish_reason="stop",
                 )
@@ -92,6 +94,7 @@ async def test_well_planned_context_forwarding():
     class DummySession:
         async def list_tools(self):
             return []
+
         async def list_prompts(self):
             return []
 
@@ -108,14 +111,14 @@ async def test_well_planned_context_forwarding():
     )
 
     assert len(captured_messages_per_call) == 2
-    
+
     # Check the messages for the second todo (index 1)
     second_call_messages = captured_messages_per_call[1]
-    
+
     # The messages should contain the result of the first todo
     # It should be an ASSISTANT message
     # And crucially, the content should be the string content, not the object representation
-    
+
     found_result = False
     for msg in second_call_messages:
         if msg.role == MessageRole.ASSISTANT:
@@ -125,5 +128,7 @@ async def test_well_planned_context_forwarding():
                 # Verify it is NOT the string representation of the object
                 assert "ChatCompletionResponse" not in msg.content
                 assert "Result for" in msg.content
-    
-    assert found_result, "Did not find the result of the first todo in the messages for the second todo"
+
+    assert (
+        found_result
+    ), "Did not find the result of the first todo in the messages for the second todo"

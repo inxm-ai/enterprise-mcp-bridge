@@ -197,7 +197,9 @@ class WellPlannedOrchestrator:
             name = entry.get("name") or entry.get("title") or f"todo-{tid}"
             goal = entry.get("goal") or entry.get("description") or ""
             needed_info = entry.get("needed_info") or entry.get("neededInfo")
-            expected_result = entry.get("expected_result") or entry.get("expectedResult")
+            expected_result = entry.get("expected_result") or entry.get(
+                "expectedResult"
+            )
             tools = entry.get("tools") or []
 
             todo_items.append(

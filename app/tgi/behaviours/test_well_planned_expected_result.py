@@ -1,18 +1,14 @@
 import pytest
 import json
-import time
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
     ChatCompletionRequest,
-    ChatCompletionResponse,
-    Choice,
     Message,
     MessageRole,
-    Usage,
 )
-from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
+
 
 def configure_plan_stream(service, todos, stream_calls=None):
     todos_payload = json.dumps(todos, ensure_ascii=False)
@@ -40,6 +36,7 @@ def configure_plan_stream(service, todos, stream_calls=None):
         )
     )
 
+
 @pytest.mark.asyncio
 async def test_well_planned_expected_result_flow():
     service = ProxiedTGIService()
@@ -61,10 +58,14 @@ async def test_well_planned_expected_result_flow():
     # Patch _non_stream_chat_with_tools to verify expected_result is in the prompt
     async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
         # Check if expected_result is in the system prompt
-        system_message = next((m for m in messages if m.role == MessageRole.SYSTEM), None)
+        system_message = next(
+            (m for m in messages if m.role == MessageRole.SYSTEM), None
+        )
         assert system_message is not None
-        assert "Expected Result: A JSON object with key 'status'" in system_message.content
-        
+        assert (
+            "Expected Result: A JSON object with key 'status'" in system_message.content
+        )
+
         return {"ok": True, "messages": [getattr(m, "content", m) for m in messages]}
 
     service._non_stream_chat_with_tools = fake_non_stream_chat
@@ -91,4 +92,3 @@ async def test_well_planned_expected_result_flow():
     # Consume the generator to trigger the execution
     async for _ in gen:
         pass
-

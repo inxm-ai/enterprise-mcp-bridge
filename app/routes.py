@@ -1,6 +1,6 @@
 import logging
 import io
-from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
+from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
     JSONResponse,

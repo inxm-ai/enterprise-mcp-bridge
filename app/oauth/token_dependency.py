@@ -5,6 +5,7 @@ from app.vars import TOKEN_NAME, TOKEN_COOKIE_NAME, TOKEN_SOURCE
 
 logger = logging.getLogger("uvicorn.error")
 
+
 async def get_access_token(
     request: Request,
     header_token: Optional[str] = Header(None, alias=TOKEN_NAME),
@@ -15,7 +16,9 @@ async def get_access_token(
     if TOKEN_SOURCE == "cookie":
         cookie_value = request.cookies.get(TOKEN_COOKIE_NAME)
         if not cookie_value:
-            logger.warning(f"Cookie {TOKEN_COOKIE_NAME} not found in request cookies: {request.cookies.keys()}")
+            logger.warning(
+                f"Cookie {TOKEN_COOKIE_NAME} not found in request cookies: {request.cookies.keys()}"
+            )
         return cookie_value
     # Default to header
     return header_token
