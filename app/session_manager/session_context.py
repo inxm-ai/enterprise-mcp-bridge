@@ -1,9 +1,11 @@
+import fcntl
 import json
 import logging
 from fastapi import HTTPException
-from typing import Optional, Dict
+from typing import Optional, Dict, Awaitable, Callable, Any
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from app.session import mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
@@ -21,6 +23,15 @@ logger = logging.getLogger("uvicorn.error")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
+TOOLS_CACHE_ENABLED = (
+    os.environ.get("MCP_TOOLS_CACHE_ENABLED", "true").lower() == "true"
+)
+TOOLS_CACHE_FILE = Path(
+    os.environ.get("MCP_TOOLS_CACHE_FILE", "/tmp/mcp_tools_cache.json")
+)
+TOOLS_CACHE_LOCK_FILE = Path(
+    os.environ.get("MCP_TOOLS_CACHE_LOCK_FILE", str(TOOLS_CACHE_FILE) + ".lock")
+)
 
 
 def matches_pattern(value, pattern):
@@ -83,6 +94,85 @@ def map_tools(tools):
         )
 
     return filtered_tools
+
+
+def _read_tools_cache() -> list[dict[str, Any]] | None:
+    """Return cached tools when available and valid."""
+    if not TOOLS_CACHE_ENABLED:
+        return None
+
+    try:
+        with TOOLS_CACHE_FILE.open("r") as cache_file:
+            return json.load(cache_file)
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"[ToolsCache] Unable to read cached tools: {exc}")
+        return None
+
+
+def _write_tools_cache(tools: list[dict[str, Any]]) -> bool:
+    """
+    Persist tool list to cache using a non-blocking file lock.
+    If the lock is busy, skip caching and return False.
+    """
+    if not TOOLS_CACHE_ENABLED:
+        return False
+
+    lock_fd = None
+    lock_acquired = False
+    try:
+        TOOLS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(TOOLS_CACHE_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_acquired = True
+        except BlockingIOError:
+            logger.debug("[ToolsCache] Cache lock busy; returning live result.")
+            return False
+
+        tmp_path = TOOLS_CACHE_FILE.with_name(TOOLS_CACHE_FILE.name + ".tmp")
+        with tmp_path.open("w") as tmp_file:
+            json.dump(tools, tmp_file)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, TOOLS_CACHE_FILE)
+        return True
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"[ToolsCache] Unable to write cached tools: {exc}")
+        return False
+    finally:
+        if lock_fd is not None:
+            try:
+                if lock_acquired:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+
+
+async def _cached_mapped_tools(
+    fetch_raw_tools: Callable[[], Awaitable[Any]],
+) -> list[dict[str, Any]]:
+    """
+    Return mapped tools from cache when available, otherwise fetch and cache.
+    If caching fails due to a locked file, return the live response immediately.
+    """
+    cached = _read_tools_cache()
+    if cached is not None:
+        return cached
+
+    tools = await fetch_raw_tools()
+    mapped_tools = map_tools(tools)
+
+    if not mapped_tools:
+        return mapped_tools
+
+    if _write_tools_cache(mapped_tools):
+        cached = _read_tools_cache()
+        if cached is not None:
+            return cached
+
+    return mapped_tools
 
 
 def inject_headers_into_args(
@@ -206,8 +296,7 @@ async def mcp_session_context(
                         return await session.read_resource(resource_name)
 
                     async def list_tools(self):
-                        tools = await session.list_tools()
-                        return map_tools(tools)
+                        return await _cached_mapped_tools(session.list_tools)
 
                     async def call_tool(
                         self,
@@ -258,8 +347,7 @@ async def mcp_session_context(
 
     class TaskDelegate:
         async def list_tools(self):
-            tools = await mcp_task.request("list_tools")
-            return map_tools(tools)
+            return await _cached_mapped_tools(lambda: mcp_task.request("list_tools"))
 
         async def call_tool(
             self,

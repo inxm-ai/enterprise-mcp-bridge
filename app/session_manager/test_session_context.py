@@ -1,32 +1,35 @@
+import os
 import types
+import fcntl
 import pytest
 from unittest.mock import AsyncMock
 
 import app.session_manager.session_context as sc
 
 
+def dict_to_obj(d):
+    filled = {
+        k: d.get(k, None)
+        for k in [
+            "id",
+            "name",
+            "title",
+            "description",
+            "inputSchema",
+            "outputSchema",
+            "annotations",
+            "meta",
+        ]
+    }
+    filled.update(d)
+    if not filled.get("id"):
+        filled["id"] = d.get("id") or d.get("name")
+    return types.SimpleNamespace(**filled)
+
+
 @pytest.mark.asyncio
 async def test_sessionless_call_tool_injects_headers(monkeypatch):
     # Prepare fake tools: toolA expects userId
-    def dict_to_obj(d):
-        filled = {
-            k: d.get(k, None)
-            for k in [
-                "id",
-                "name",
-                "title",
-                "description",
-                "inputSchema",
-                "outputSchema",
-                "annotations",
-                "meta",
-            ]
-        }
-        filled.update(d)
-        if not filled.get("id"):
-            filled["id"] = d.get("id") or d.get("name")
-        return types.SimpleNamespace(**filled)
-
     tools_list = [
         dict_to_obj(
             {
@@ -93,3 +96,62 @@ async def test_sessionless_call_tool_injects_headers(monkeypatch):
         assert hasattr(result, "structuredContent")
         assert result.structuredContent["args"]["userId"] == "user-123"
         assert result.structuredContent["args"]["keep"] == "value"
+
+
+@pytest.mark.asyncio
+async def test_cached_mapped_tools_reads_and_writes(monkeypatch, tmp_path):
+    cache_file = tmp_path / "tools.json"
+    lock_file = tmp_path / "tools.json.lock"
+    monkeypatch.setattr(sc, "TOOLS_CACHE_FILE", cache_file)
+    monkeypatch.setattr(sc, "TOOLS_CACHE_LOCK_FILE", lock_file)
+    monkeypatch.setattr(sc, "TOOLS_CACHE_ENABLED", True)
+
+    tools_namespace = types.SimpleNamespace(
+        tools=[dict_to_obj({"name": "toolA", "description": "first run"})]
+    )
+    call_count = {"count": 0}
+
+    async def fetch():
+        call_count["count"] += 1
+        return tools_namespace
+
+    first = await sc._cached_mapped_tools(fetch)
+    assert cache_file.exists()
+    assert call_count["count"] == 1
+    assert first[0]["name"] == "toolA"
+
+    tools_namespace.tools[0].description = "updated"
+    second = await sc._cached_mapped_tools(fetch)
+    assert call_count["count"] == 1  # served from cache, no re-fetch
+    assert second == first  # cache contents should be returned
+
+
+@pytest.mark.asyncio
+async def test_cached_mapped_tools_skips_when_locked(monkeypatch, tmp_path):
+    cache_file = tmp_path / "tools.json"
+    lock_file = tmp_path / "tools.json.lock"
+    monkeypatch.setattr(sc, "TOOLS_CACHE_FILE", cache_file)
+    monkeypatch.setattr(sc, "TOOLS_CACHE_LOCK_FILE", lock_file)
+    monkeypatch.setattr(sc, "TOOLS_CACHE_ENABLED", True)
+
+    tools_namespace = types.SimpleNamespace(
+        tools=[dict_to_obj({"name": "toolB", "description": "locked"})]
+    )
+
+    async def fetch():
+        return tools_namespace
+
+    lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        result = await sc._cached_mapped_tools(fetch)
+        assert not cache_file.exists()
+        assert result[0]["name"] == "toolB"
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    # Once the lock is free, the tools should be cached
+    result_after_lock = await sc._cached_mapped_tools(fetch)
+    assert cache_file.exists()
+    assert result_after_lock[0]["name"] == "toolB"
