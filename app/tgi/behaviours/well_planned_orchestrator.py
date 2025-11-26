@@ -309,6 +309,15 @@ class WellPlannedOrchestrator:
 
         return focused_messages, focused_request
 
+    def _strip_think_tags(self, text: str) -> str:
+        # Remove <think>...</think> blocks, including newlines that might follow them
+        # The pattern should be non-greedy
+        import re
+
+        # This pattern matches <think>...</think> and optional following whitespace
+        pattern = r"<think>.*?</think>\s*"
+        return re.sub(pattern, "", text, flags=re.DOTALL)
+
     def _stringify_result(self, result: Any) -> str:
         if isinstance(result, ChatCompletionResponse):
             choice = result.choices[0] if result.choices else None
@@ -398,6 +407,24 @@ class WellPlannedOrchestrator:
                         result = "No content returned from step."
                 except Exception as exc:
                     result = {"error": str(exc)}
+
+                # Strip think tags from the result before storing it
+                if isinstance(result, str):
+                    result = self._strip_think_tags(result)
+                elif isinstance(result, dict) and "error" not in result:
+                    # If it's a dict (e.g. parsed JSON), we might want to check if any string values contain think tags
+                    # But usually the result is a string or a JSON object representing the answer.
+                    # If it was parsed from aggregated, aggregated was the string containing think tags.
+                    # So if we parsed it, the think tags might be inside the values or keys?
+                    # No, aggregated is "content <think>...</think>".
+                    # If we parsed it as JSON, it means the content was valid JSON.
+                    # <think> tags would break JSON unless they were inside a string value.
+                    # If aggregated was "{"a": 1}<think>...</think>", json.loads would fail or ignore trailing data?
+                    # json.loads fails on trailing data.
+                    # So if aggregated contained think tags at the end, json.loads(aggregated) would likely fail
+                    # and we would fall back to result = aggregated (string).
+                    # So result is likely a string if think tags are present at the end.
+                    pass
 
                 todo_manager.finish_todo(todo.id, self._stringify_result(result))
                 summary = f"<think>I have completed the todo '{todo.name}'. Result summary: {self._stringify_result(result)[:200]}...</think>"

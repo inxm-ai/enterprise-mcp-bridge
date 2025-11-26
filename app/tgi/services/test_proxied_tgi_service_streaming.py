@@ -1,6 +1,6 @@
 import pytest
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
     ChatCompletionRequest,
@@ -488,3 +488,137 @@ async def test_streaming_tool_call_chunked_arguments():
     # Arguments should be merged
     assert any("I will run <code>func1</code>" in c for c in result_chunks)
     assert any("[DONE]" in c for c in result_chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_with_tools_yields_correct_newlines():
+    """
+    Test that _stream_chat_with_tools yields SSE events with correct newlines (\n\n)
+    instead of escaped newlines (\\n\\n).
+    """
+    service = ProxiedTGIService()
+
+    # Mock LLM client stream_completion
+    # We simulate a tool call response
+    tool_call_chunk = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {"name": "test_tool", "arguments": "{}"},
+                        }
+                    ]
+                },
+                "finish_reason": None,
+            }
+        ]
+    }
+
+    done_chunk = {"choices": [{"finish_reason": "tool_calls"}]}
+
+    async def mock_stream_completion(*args, **kwargs):
+        yield f"data: {json.dumps(tool_call_chunk)}\n\n"
+        yield f"data: {json.dumps(done_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    service.llm_client.stream_completion = mock_stream_completion
+
+    # Mock tool service execute_tool_calls
+    service.tool_service.execute_tool_calls = AsyncMock(
+        return_value=(
+            [
+                Message(
+                    role=MessageRole.TOOL, content="Tool result", tool_call_id="call_1"
+                )
+            ],
+            True,
+        )
+    )
+
+    # Mock tool resolution
+    mock_tool_call = Mock()
+    mock_tool_call.name = "test_tool"
+    mock_tool_call.arguments = {}
+    mock_tool_call.id = "call_1"
+    mock_tool_call.format = Mock()
+    mock_tool_call.format.value = "openai"
+
+    service.tool_resolution.resolve_tool_calls = Mock(
+        return_value=([mock_tool_call], True)
+    )
+
+    # Prepare request
+    session = MagicMock()
+    messages = [Message(role=MessageRole.USER, content="Run tool")]
+    available_tools = [{"function": {"name": "test_tool"}}]
+    request = ChatCompletionRequest(messages=messages, tools=available_tools)
+
+    # Run stream
+    chunks = []
+    async for chunk in service._stream_chat_with_tools(
+        session, messages, available_tools, request, None, None
+    ):
+        chunks.append(chunk)
+
+    # Verify chunks
+    # We expect chunks containing <think> messages
+
+    think_chunks = [c for c in chunks if "<think>" in c]
+
+    # Check for double backslashes
+    for chunk in think_chunks:
+        # The chunk is an SSE string: data: {...}\n\n
+        # We want to ensure it doesn't contain literal \\n\\n inside the JSON string
+        # But wait, the chunk itself ends with \n\n (actual newlines)
+
+        # Let's inspect the raw string
+        print(f"Chunk: {chunk!r}")
+
+        # If the fix worked, the chunk should end with \n\n (actual newlines)
+        # and the JSON content inside should NOT have \\n\\n at the end of the content string
+        # unless it was intended.
+
+        # The problematic code was: yield f"data: ...\\n\\n"
+        # This produced a string ending with literal \n\n (backslash n backslash n)
+
+        # Correct code is: yield f"data: ...\n\n"
+        # This produces a string ending with actual newlines
+
+        assert chunk.endswith(
+            "\n\n"
+        ), f"Chunk should end with actual newlines: {chunk!r}"
+        assert not chunk.endswith(
+            "\\n\\n"
+        ), f"Chunk should not end with literal escaped newlines: {chunk!r}"
+
+    # Specifically check the execution message
+    execution_chunk = next(
+        (c for c in think_chunks if "Executing the following tools" in c), None
+    )
+    assert execution_chunk is not None
+
+    # Parse the JSON to check content
+    if execution_chunk.startswith("data: "):
+        json_str = execution_chunk[6:].strip()
+        data = json.loads(json_str)
+        content = data["choices"][0]["delta"]["content"]
+        # The content itself should end with \n\n if that was the intention
+        assert content.endswith(
+            "\n\n"
+        ), f"Content should end with newlines: {content!r}"
+
+    # Check success message
+    success_chunk = next(
+        (c for c in think_chunks if "executed the tools successfully" in c), None
+    )
+    assert success_chunk is not None
+    if success_chunk.startswith("data: "):
+        json_str = success_chunk[6:].strip()
+        data = json.loads(json_str)
+        content = data["choices"][0]["delta"]["content"]
+        assert content.endswith(
+            "\n\n"
+        ), f"Content should end with newlines: {content!r}"

@@ -502,3 +502,100 @@ async def test_well_planned_returns_chat_completion_when_not_streaming():
     assert result.choices
     assert result.choices[0].message
     assert "Completed" in result.choices[0].message.content
+
+
+@pytest.mark.asyncio
+async def test_well_planned_strips_think_tags_from_result():
+    """Test that <think> tags are stripped from the result before being stored/returned."""
+    service = ProxiedTGIService()
+
+    # Create a todo list
+    todos = [
+        {
+            "id": "t1",
+            "name": "think_task",
+            "goal": "Do thinking",
+            "needed_info": None,
+            "tools": [],
+        }
+    ]
+    configure_plan_stream(service, todos)
+
+    # Mock _stream_chat_with_tools to return content with <think> tags
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        # Yield chunks that form: "Here is the result.<think>Thinking process</think>"
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "Here is "}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "the result."}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: " + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {"content": "<think>Thinking process</think>"},
+                        "index": 0,
+                    }
+                ]
+            }
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do thinking")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        if chunk.strip():
+            chunks.append(chunk)
+
+    # Find the chunk that contains the result summary
+    # It should be one of the chunks after the start event
+
+    summary_chunk = None
+    final_result_chunk = None
+
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if not parsed:
+            continue
+        content = parsed["choices"][0]["delta"].get("content", "")
+
+        if "<think>I have completed" in content:
+            summary_chunk = parsed
+        elif content == "Here is the result.":
+            final_result_chunk = parsed
+
+    assert summary_chunk is not None, "Summary chunk not found"
+
+    # Check summary chunk
+    content = summary_chunk["choices"][0]["delta"]["content"]
+    # The summary should NOT contain <think> tags inside the result part
+    # The summary itself is wrapped in <think>...</think> by the orchestrator
+    # format: <think>I have completed... Result summary: ...</think>
+    assert "Thinking process" not in content
+    assert "Here is the result." in content
+
+    # Check final result chunk
+    assert final_result_chunk is not None, "Final result chunk not found"
+    content = final_result_chunk["choices"][0]["delta"]["content"]
+    assert content == "Here is the result."
