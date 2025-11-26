@@ -2,13 +2,20 @@ import os
 import json
 from contextlib import asynccontextmanager
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.tgi.routes import router
 
 
+def _create_test_client():
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
 # Initialize the FastAPI TestClient
-client = TestClient(router)
+client = _create_test_client()
 
 
 @pytest.fixture(autouse=True)

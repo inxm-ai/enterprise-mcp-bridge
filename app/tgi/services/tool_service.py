@@ -195,18 +195,21 @@ class ToolService:
                 )
                 call_args = args
                 try:
-                    tool_info = self._tool_registry.get(tool_call.function.name, {})
+                    tool_info = self._tool_registry.get(tool_call.function.name)
                     schema = (
                         tool_info.get("inputSchema")
                         if isinstance(tool_info, dict)
                         else None
                     )
-                    props = (
-                        schema.get("properties", {}) if isinstance(schema, dict) else {}
-                    )
-                    # Some tools explicitly expect "no args"; allow None in that case
-                    if not props and args == {}:
-                        call_args = None
+                    if schema is not None:
+                        props = (
+                            schema.get("properties", {})
+                            if isinstance(schema, dict)
+                            else {}
+                        )
+                        # Some tools explicitly expect "no args"; allow None only when schema is known and empty
+                        if not props and args == {}:
+                            call_args = None
                 except Exception:
                     call_args = args
 

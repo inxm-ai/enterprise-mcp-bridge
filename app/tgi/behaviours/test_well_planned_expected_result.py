@@ -10,8 +10,10 @@ from app.tgi.models import (
 )
 
 
-def configure_plan_stream(service, todos, stream_calls=None):
-    todos_payload = json.dumps(todos, ensure_ascii=False)
+def configure_plan_stream(service, todos, stream_calls=None, intent_payload=None):
+    todos_payload = intent_payload or json.dumps(
+        {"intent": "plan", "todos": todos}, ensure_ascii=False
+    )
     chunk_payload = json.dumps(
         {"choices": [{"delta": {"content": todos_payload}, "index": 0}]}
     )

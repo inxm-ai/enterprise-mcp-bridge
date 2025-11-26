@@ -46,6 +46,18 @@ todo_response_schema = {
     "additionalProperties": False,
 }
 
+intent_response_schema = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["plan", "answer", "reroute"]},
+        "reason": {"type": ["string", "null"]},
+        "answer": {"type": ["string", "null"]},
+        "todos": todo_response_schema["properties"]["todos"],
+    },
+    "required": ["intent"],
+    "additionalProperties": False,
+}
+
 
 async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
     """
@@ -93,16 +105,44 @@ class WellPlannedOrchestrator:
         self.tool_resolution = tool_resolution
         self.model_name = model_name or TGI_MODEL_NAME
 
-    async def _stream_todo_plan_json(
+    def _normalize_intent_response(self, intent_obj: Any) -> Optional[dict]:
+        if isinstance(intent_obj, list):
+            return {
+                "intent": "plan",
+                "todos": intent_obj,
+                "answer": None,
+                "reason": None,
+            }
+
+        if not isinstance(intent_obj, dict):
+            return None
+
+        intent = intent_obj.get("intent")
+        todos = intent_obj.get("todos")
+
+        if not intent:
+            intent = "plan" if todos is not None else None
+
+        if intent not in ("plan", "answer", "reroute"):
+            return None
+
+        return {
+            "intent": intent,
+            "todos": todos if todos is not None else [],
+            "answer": intent_obj.get("answer"),
+            "reason": intent_obj.get("reason") or intent_obj.get("reroute_reason"),
+        }
+
+    async def _stream_intent_decision(
         self,
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
-    ) -> Tuple[Optional[list], Optional[str]]:
+    ) -> Tuple[Optional[dict], Optional[str]]:
         plan_text = ""
         request.response_format = {
             "type": "json_schema",
-            "json_schema": todo_response_schema,
+            "json_schema": intent_response_schema,
         }
         try:
             plan_stream = self.llm_client.stream_completion(
@@ -116,48 +156,46 @@ class WellPlannedOrchestrator:
                         plan_text += parsed.content
         except Exception as exc:
             if logger:
-                logger.error(f"[WellPlanned] Error streaming todo plan: {exc}")
+                logger.error(f"[WellPlanned] Error streaming intent response: {exc}")
                 logger.debug(exc, exc_info=True)
             return None, str(exc)
 
         plan_text = plan_text.strip()
         if span:
-            span.set_attribute("chat.todo_plan_chars", len(plan_text))
+            span.set_attribute("chat.intent_response_chars", len(plan_text))
 
         if not plan_text:
-            return None, "empty todo plan"
+            return None, "empty intent response"
 
         try:
             decoder = json.JSONDecoder()
-            todos_json_obj, idx = decoder.raw_decode(plan_text)
+            intent_obj, idx = decoder.raw_decode(plan_text)
             remaining = plan_text[idx:].strip()
             if remaining and logger:
                 logger.debug(
-                    f"[WellPlanned] Trailing data after todos JSON (len={len(remaining)}), ignoring."
-                )
-            # Accept either a top-level array (the tests provide this form)
-            # or an object with a "todos" key. Be resilient to both shapes.
-            if isinstance(todos_json_obj, dict):
-                todos_json = todos_json_obj.get("todos", [])
-            elif isinstance(todos_json_obj, list):
-                todos_json = todos_json_obj
-            else:
-                return (
-                    None,
-                    "todo plan must be a JSON array or an object with a 'todos' key",
+                    f"[WellPlanned] Trailing data after intent JSON (len={len(remaining)}), ignoring."
                 )
         except Exception as exc:
             if logger:
-                logger.error(f"[WellPlanned] Failed to parse todo plan JSON: {exc}")
+                logger.error(f"[WellPlanned] Failed to parse intent JSON: {exc}")
             return None, str(exc)
 
-        if not isinstance(todos_json, list):
+        normalized = self._normalize_intent_response(intent_obj)
+        if not normalized:
+            return None, "intent response must include a valid intent"
+
+        if normalized["intent"] == "plan" and not isinstance(
+            normalized.get("todos"), list
+        ):
             return None, "todo plan must be a JSON array"
 
-        return todos_json, None
+        if normalized["intent"] != "plan":
+            normalized["todos"] = []
 
-    def _todo_plan_error_generator(self, detail: str) -> AsyncGenerator[str, None]:
-        payload = {"error": "failed to parse todos", "detail": detail}
+        return normalized, None
+
+    def _intent_error_generator(self, detail: str) -> AsyncGenerator[str, None]:
+        payload = {"error": "failed to parse intent", "detail": detail}
 
         async def _generator():
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -165,12 +203,12 @@ class WellPlannedOrchestrator:
 
         return _generator()
 
-    def _todo_plan_error_response(
+    def _intent_error_response(
         self,
         detail: str,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
-        payload = {"error": "failed to parse todos", "detail": detail}
+        payload = {"error": "failed to parse intent", "detail": detail}
         content = json.dumps(payload, ensure_ascii=False)
         return ChatCompletionResponse(
             id=self.llm_client.create_completion_id(),
@@ -185,6 +223,34 @@ class WellPlannedOrchestrator:
             ],
             usage=self.llm_client.create_usage_stats(),
         )
+
+    def _single_message_response(
+        self, content: str, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            id=self.llm_client.create_completion_id(),
+            created=int(time.time()),
+            model=request.model or self.model_name,
+            choices=[
+                Choice(
+                    index=0,
+                    message=Message(role=MessageRole.ASSISTANT, content=str(content)),
+                    finish_reason="stop",
+                )
+            ],
+            usage=self.llm_client.create_usage_stats(),
+        )
+
+    def _stream_single_message(self, content: str) -> AsyncGenerator[str, None]:
+        async def _generator():
+            yield create_response_chunk(
+                self.llm_client.create_completion_id(), str(content)
+            )
+            yield create_response_chunk(
+                self.llm_client.create_completion_id(), "[DONE]"
+            )
+
+        return _generator()
 
     def _create_todo_manager(self, todos_json: list) -> TodoManager:
         todo_manager = TodoManager()
@@ -535,32 +601,45 @@ class WellPlannedOrchestrator:
 
         available_tools = await self.tool_service.get_all_mcp_tools(session, span)
 
-        todo_prompt = (
-            "You are an assistant that turns the user's conversation into a short, "
-            "ordered todo list. Make sure that at the end of all todos, the user's "
-            "original goal is achieved, and that the todos are as specific as possible. "
-            "Also ensure that the todos will get progressively closer to the user's goal, "
-            "using the data from previous todos where possible. "
-            "Ensure that each todo builds upon the results of the previous ones, "
-            "explicitly stating what information from previous steps is needed. "
-            "won't have to call the same tool multiple times, and that each todo is "
-            "achievable with the tools available. If the user has already provided "
-            "information that is needed for a todo, do not include that information "
-            "in the todo's needed_info field. "
-            "Also include an 'expected_result' field for each todo, which hints at "
-            "what the result should look like, giving good and bad examples if possible. "
-            "In the reply, in the tools array, only include the exact names of tools "
-            "that are available to you. If no tools are needed, use an empty array. "
+        available_tool_names: List[str] = []
+        for tool in available_tools or []:
+            function = getattr(tool, "function", None)
+            if function and getattr(function, "name", None):
+                available_tool_names.append(function.name)
+            elif isinstance(tool, dict):
+                name = tool.get("function", {}).get("name")
+                if name:
+                    available_tool_names.append(name)
+
+        unique_tool_names = sorted(set(available_tool_names))
+        tool_list_text = ", ".join(unique_tool_names) if unique_tool_names else "none"
+        conversation_text = "\n".join([f"{m.role}: {m.content}" for m in messages])
+
+        intent_prompt = (
+            "You are an assistant that must decide between three intents: "
+            "'plan', 'answer', or 'reroute'. Always include the 'intent' property. "
+            "Choose 'plan' when the user request needs multiple steps or tool calls. "
+            "Choose 'answer' when the request is simple (e.g., greetings, short questions, "
+            "or anything that can be answered immediately without tools). "
+            "Choose 'reroute' when the request is out of scope for this agent or not "
+            "supported by the available tools or system prompt.\n\n"
+            "If you pick 'plan', create a short, ordered todo list that progressively reaches "
+            "the user's goal. Each todo should be specific, build on previous results, avoid "
+            "repeating the same tool unless necessary, list "
+            "only the tools it needs (using exact names), and include an 'expected_result' "
+            "field with examples of success/failure. Do not repeat information already "
+            "provided by the user in the needed_info field. If no tools are required, use an empty array. "
+            f"Available tools: {tool_list_text}.\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
-            + json.dumps(todo_response_schema, ensure_ascii=False)
+            + json.dumps(intent_response_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
-            + "\n".join([f"{m.role}: {m.content}" for m in messages])
-            + "\n\nReturn only the JSON array that matches the schema above."
+            + conversation_text
+            + "\n\nReturn only the JSON object that matches the schema above."
         )
 
         plan_request = ChatCompletionRequest(
             messages=[
-                Message(role=MessageRole.SYSTEM, content=todo_prompt),
+                Message(role=MessageRole.SYSTEM, content=intent_prompt),
                 Message(role=MessageRole.USER, content=messages[-1].content or "Do it"),
             ],
             model=request.model or self.model_name,
@@ -568,14 +647,51 @@ class WellPlannedOrchestrator:
             tools=available_tools,
         )
 
-        todos_json, plan_error = await self._stream_todo_plan_json(
+        intent_result, plan_error = await self._stream_intent_decision(
             plan_request, access_token, span
         )
 
         if plan_error:
             if request.stream:
-                return self._todo_plan_error_generator(plan_error)
-            return self._todo_plan_error_response(plan_error, request)
+                return self._intent_error_generator(plan_error)
+            return self._intent_error_response(plan_error, request)
+
+        intent = (intent_result or {}).get("intent", "plan")
+
+        if span:
+            span.set_attribute("chat.intent", intent)
+            if intent != "plan":
+                span.set_attribute("chat.todos_count", 0)
+
+        if intent == "reroute":
+            reason = intent_result.get("reason") if intent_result else None
+            if isinstance(reason, str):
+                reason = self._strip_think_tags(reason)
+            message = (
+                f"<reroute_requested>{reason}</reroute_requested>"
+                if reason
+                else "<reroute_requested>This request should be handled by another system.</reroute_requested>"
+            )
+            if request.stream:
+                return self._stream_single_message(message)
+            return self._single_message_response(message, request)
+
+        if intent == "answer":
+            answer_text = self._strip_think_tags(
+                str((intent_result or {}).get("answer") or "")
+            )
+            if request.stream:
+                return self._stream_single_message(answer_text)
+            return self._single_message_response(answer_text, request)
+
+        todos_json = intent_result.get("todos") if intent_result else []
+
+        if not isinstance(todos_json, list):
+            if request.stream:
+                return self._intent_error_generator("todo plan must be a JSON array")
+            return self._intent_error_response(
+                "todo plan must be a JSON array", request
+            )
 
         todo_manager = self._create_todo_manager(todos_json)
 

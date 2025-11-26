@@ -65,10 +65,12 @@ class DummyResponse:
             self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
-def configure_plan_stream(service, todos, stream_calls=None):
-    todos_payload = json.dumps(todos, ensure_ascii=False)
+def configure_plan_stream(service, todos, stream_calls=None, intent_payload=None):
+    payload = intent_payload or json.dumps(
+        {"intent": "plan", "todos": todos}, ensure_ascii=False
+    )
     chunk_payload = json.dumps(
-        {"choices": [{"delta": {"content": todos_payload}, "index": 0}]}
+        {"choices": [{"delta": {"content": payload}, "index": 0}]}
     )
     plan_chunks = [
         f"data: {chunk_payload}" + "\n\n",
@@ -257,6 +259,95 @@ async def test_well_planned_no_premature_done():
 
 
 @pytest.mark.asyncio
+async def test_well_planned_reroute_intent_short_circuit_streaming():
+    service = ProxiedTGIService()
+
+    reroute_payload = json.dumps(
+        {"intent": "reroute", "reason": "Out of scope"}, ensure_ascii=False
+    )
+    configure_plan_stream(service, [], intent_payload=reroute_payload)
+
+    service._stream_chat_with_tools = AsyncMock(
+        side_effect=AssertionError("Tool flow should not run for reroute intent")
+    )
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do something unrelated")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        if chunk.strip():
+            chunks.append(chunk)
+
+    assert len(chunks) == 2, f"Expected reroute + DONE, got {chunks}"
+    first_obj = _parse_stream_json(chunks[0])
+    content = first_obj["choices"][0]["delta"]["content"]
+    assert content.startswith("<reroute_requested>")
+    assert "Out of scope" in content
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
+@pytest.mark.asyncio
+async def test_well_planned_answer_intent_short_circuit_streaming():
+    service = ProxiedTGIService()
+
+    answer_payload = json.dumps(
+        {"intent": "answer", "answer": "Hello there!"}, ensure_ascii=False
+    )
+    configure_plan_stream(service, [], intent_payload=answer_payload)
+
+    service._stream_chat_with_tools = AsyncMock(
+        side_effect=AssertionError("Tool flow should not run for answer intent")
+    )
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Say hi")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        if chunk.strip():
+            chunks.append(chunk)
+
+    assert len(chunks) == 2, f"Expected answer + DONE, got {chunks}"
+    first_obj = _parse_stream_json(chunks[0])
+    content = first_obj["choices"][0]["delta"]["content"]
+    assert content == "Hello there!"
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_routes_to_well_planned_for_streaming():
     """Test that chat_completion routes to well_planned when tool_choice is set and stream=True.
 
@@ -359,7 +450,7 @@ async def test_well_planned_streaming_uses_stream_completion_for_plan():
             "tools": [],
         }
     ]
-    todos_payload = json.dumps(todos, ensure_ascii=False)
+    todos_payload = json.dumps({"intent": "plan", "todos": todos}, ensure_ascii=False)
     plan_chunks = [
         f"data: {json.dumps({'choices': [{'delta': {'content': todos_payload}, 'index': 0, 'finish_reason': 'stop'}]})}"
         + "\n\n",
@@ -435,7 +526,7 @@ async def test_well_planned_returns_chat_completion_when_not_streaming():
             "tools": [],
         }
     ]
-    todos_payload = json.dumps(todos, ensure_ascii=False)
+    todos_payload = json.dumps({"intent": "plan", "todos": todos}, ensure_ascii=False)
     plan_chunks = [
         f"data: {json.dumps({'choices': [{'delta': {'content': todos_payload}, 'index': 0, 'finish_reason': 'stop'}]})}\n\n",
         "data: [DONE]\n\n",
