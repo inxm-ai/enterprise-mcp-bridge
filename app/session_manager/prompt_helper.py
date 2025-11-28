@@ -79,7 +79,32 @@ async def call_prompt(call: any, prompt_name: str, args: Optional[dict] = []):
     prompt = next((p for p in system_prompts if p.name == prompt_name), None)
     if prompt:
         logger.info(f"Using system prompt: {prompt.name}")
-        expanded = prompt.template["content"].format(**args)
+        # If the template defines a file, load the template content from that file
+        template = prompt.template or {}
+        expanded = None
+        if "file" in template and template["file"]:
+            # Path is treated as relative to the app directory unless an absolute
+            # path is provided.
+            app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            file_path = os.path.join(app_dir, template["file"])
+            try:
+                with open(file_path, "r", encoding="utf-8") as fh:
+                    file_content = fh.read()
+                expanded = file_content.format(**(args or {}))
+            except Exception as e:
+                logger.warning(f"[PromptHelper] Error loading prompt file: {e}")
+                raise HTTPException(
+                    status_code=500, detail="Loading prompt file failed"
+                )
+        elif "content" in template and template["content"] is not None:
+            expanded = template["content"].format(**(args or {}))
+        else:
+            logger.warning(
+                "[PromptHelper] No 'file' or 'content' found in system prompt template"
+            )
+            raise HTTPException(
+                status_code=500, detail="Prompt template missing content"
+            )
 
         class SystemDefinedPromptResult:
             def __init__(self, description, messages):
@@ -89,7 +114,11 @@ async def call_prompt(call: any, prompt_name: str, args: Optional[dict] = []):
         return RunPromptResult(
             SystemDefinedPromptResult(
                 description=prompt.description,
-                messages=[Template(content=expanded, role=prompt.template["role"])],
+                messages=[
+                    Template(
+                        content=expanded, role=prompt.template.get("role", "assistant")
+                    )
+                ],
             )
         )
 

@@ -1,3 +1,148 @@
+import json
+import os
+import pytest
+
+from fastapi import HTTPException
+
+from app.session_manager.prompt_helper import call_prompt
+
+
+@pytest.mark.asyncio
+async def test_call_prompt_with_content(monkeypatch):
+    monkeypatch.setenv(
+        "SYSTEM_DEFINED_PROMPTS",
+        json.dumps(
+            [
+                {
+                    "name": "greeting_content",
+                    "title": "Greeting",
+                    "description": "A greeting",
+                    "arguments": [{"name": "name"}],
+                    "template": {"role": "assistant", "content": "Hello {name}!"},
+                }
+            ]
+        ),
+    )
+
+    res = await call_prompt(None, "greeting_content", {"name": "Alice"})
+    assert not res.isError
+    assert res.messages[0].content.text == "Hello Alice!"
+
+
+@pytest.mark.asyncio
+async def test_call_prompt_with_file(monkeypatch, tmp_path):
+    # Create a test file under the app directory (relative path expected)
+    app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    test_dir = os.path.join(app_dir, "session_manager", "test_files")
+    os.makedirs(test_dir, exist_ok=True)
+    file_path = os.path.join(test_dir, "greet.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("File hello {name} from file!")
+
+    rel_path = os.path.relpath(file_path, app_dir)
+
+    monkeypatch.setenv(
+        "SYSTEM_DEFINED_PROMPTS",
+        json.dumps(
+            [
+                {
+                    "name": "greeting_file",
+                    "title": "GreetingFile",
+                    "description": "A greeting from file",
+                    "arguments": [{"name": "name"}],
+                    "template": {"role": "assistant", "file": rel_path},
+                }
+            ]
+        ),
+    )
+
+    res = await call_prompt(None, "greeting_file", {"name": "Bob"})
+    assert not res.isError
+    assert res.messages[0].content.text == "File hello Bob from file!"
+
+
+@pytest.mark.asyncio
+async def test_file_precedence_over_content(monkeypatch):
+    # Create a file and also provide content; file should take precedence
+    app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    test_dir = os.path.join(app_dir, "session_manager", "test_files")
+    os.makedirs(test_dir, exist_ok=True)
+    file_path = os.path.join(test_dir, "precedence.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("FromFile {name}")
+    rel_path = os.path.relpath(file_path, app_dir)
+
+    monkeypatch.setenv(
+        "SYSTEM_DEFINED_PROMPTS",
+        json.dumps(
+            [
+                {
+                    "name": "greeting_both",
+                    "title": "Both",
+                    "description": "Both file and content",
+                    "arguments": [{"name": "name"}],
+                    "template": {
+                        "role": "assistant",
+                        "file": rel_path,
+                        "content": "FromContent {name}",
+                    },
+                }
+            ]
+        ),
+    )
+
+    res = await call_prompt(None, "greeting_both", {"name": "Carol"})
+    assert not res.isError
+    assert res.messages[0].content.text == "FromFile Carol"
+
+
+@pytest.mark.asyncio
+async def test_missing_file_raises(monkeypatch):
+    monkeypatch.setenv(
+        "SYSTEM_DEFINED_PROMPTS",
+        json.dumps(
+            [
+                {
+                    "name": "missing_file",
+                    "title": "Missing",
+                    "description": "Missing file",
+                    "arguments": [],
+                    "template": {"role": "assistant", "file": "does/not/exist.txt"},
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(HTTPException):
+        await call_prompt(None, "missing_file", {})
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_allowed(monkeypatch):
+        # Create a file in /tmp and reference it by absolute path
+        abs_file = "/tmp/mcp_prompt_test.txt"
+        with open(abs_file, "w", encoding="utf-8") as fh:
+            fh.write("Absolute {who}")
+
+        monkeypatch.setenv(
+            "SYSTEM_DEFINED_PROMPTS",
+            json.dumps(
+                [
+                    {
+                        "name": "abs_path",
+                        "title": "AbsPath",
+                        "description": "Absolute path prompt",
+                        "arguments": [{"name": "who"}],
+                        "template": {"role": "assistant", "file": abs_file},
+                    }
+                ]
+            ),
+        )
+
+        res = await call_prompt(None, "abs_path", {"who": "World"})
+        assert not res.isError
+        assert res.messages[0].content.text == "Absolute World"
+
+
 import os
 import json
 import pytest

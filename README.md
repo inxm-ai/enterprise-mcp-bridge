@@ -246,12 +246,25 @@ Provide curated prompts to every user by setting `SYSTEM_DEFINED_PROMPTS` to a J
     "title": "Hello You",
     "description": "Get a personalized greeting.",
     "arguments": [{ "name": "name" }],
-    "template": "Hello, {name}!"
+    "template": {
+      "role": "system",
+      "content": "The user is called {name}. For any greeting, use their name.",
+      "file": "prompts/greeting.md" // alternative to `content`
+    }
   }
 ]
 ```
 
 Prompts are merged with prompts returned by the MCP server and are available through `/prompts`.
+
+#### Template files note
+
+Templates may provide content directly via `template.content` or point to a file using `template.file`.
+
+- If `template.file` is a relative path (for example `prompts/greeting.md`) it is resolved relative to the `app/` directory and opened.
+- If `template.file` is an absolute path (for example `/tmp/prompt.md`) it will be opened directly as provided. This is intentional: system-defined prompts are controlled by the environment owner via `SYSTEM_DEFINED_PROMPTS` and may reference external files.
+
+Be aware that allowing absolute paths means the runtime will attempt to read any file the process user can access.
 
 ## API Docs
 - Interactive Swagger UI: `http://localhost:8000/docs`
