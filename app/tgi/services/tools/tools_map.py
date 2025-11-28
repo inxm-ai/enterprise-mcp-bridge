@@ -141,7 +141,43 @@ def map_tools(tools, include_output_schema=False):
     """
     mapped_tools = []
     for tool in tools:
-        input_schema_copy = copy.deepcopy(tool.get("inputSchema", {}))
+        # Support both dict-like and object-like tool definitions
+        name = None
+        description = None
+        input_schema = {}
+        output_schema = None
+
+        if isinstance(tool, dict):
+            name = tool.get("name") or tool.get("function", {}).get("name")
+            description = tool.get("description") or tool.get("function", {}).get(
+                "description"
+            )
+            input_schema = tool.get("inputSchema", {}) or tool.get("function", {}).get(
+                "parameters", {}
+            )
+            output_schema = tool.get("outputSchema") or tool.get("function", {}).get(
+                "outputSchema"
+            )
+        else:
+            # Object-like tool definitions (e.g., mcp Tool, pydantic Tool)
+            if hasattr(tool, "name"):
+                name = getattr(tool, "name")
+            if hasattr(tool, "function"):
+                func = getattr(tool, "function")
+                name = name or getattr(func, "name", None)
+                description = description or getattr(func, "description", None)
+                if hasattr(func, "parameters"):
+                    input_schema = getattr(func, "parameters") or {}
+                if hasattr(func, "outputSchema"):
+                    output_schema = getattr(func, "outputSchema")
+            description = description or getattr(tool, "description", None)
+            input_schema = input_schema or getattr(tool, "inputSchema", {}) or {}
+            output_schema = output_schema or getattr(tool, "outputSchema", None)
+
+        if not name:
+            continue
+
+        input_schema_copy = copy.deepcopy(input_schema)
         processed_schema = inline_schema(input_schema_copy, input_schema_copy)
         processed_schema = prune_schema(processed_schema)
 
@@ -167,15 +203,15 @@ def map_tools(tools, include_output_schema=False):
         mapped_tool = {
             "type": "function",
             "function": {
-                "name": tool.get("name"),
-                "description": tool.get("description"),
+                "name": name,
+                "description": description,
                 "parameters": processed_schema,
             },
         }
 
         # Optionally include output schema for UI generation
-        if include_output_schema and tool.get("outputSchema"):
-            output_schema_copy = copy.deepcopy(tool.get("outputSchema"))
+        if include_output_schema and output_schema:
+            output_schema_copy = copy.deepcopy(output_schema)
             processed_output = inline_schema(output_schema_copy, output_schema_copy)
             processed_output = prune_schema(
                 processed_output, depth=3

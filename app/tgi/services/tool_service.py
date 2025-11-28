@@ -81,10 +81,59 @@ class ToolService:
             try:
                 # Get available tools from MCP server
                 raw_tools = await session.list_tools()
-                self._tool_registry = {tool.get("name"): tool for tool in raw_tools}
-                tools_result = map_tools(
-                    raw_tools, include_output_schema=include_output_schema
+                # Build registry while handling both raw and already-mapped tools
+                self._tool_registry = {}
+                for tool in raw_tools:
+                    name = None
+                    if isinstance(tool, dict):
+                        name = tool.get("name") or tool.get("function", {}).get("name")
+                    else:
+                        name = getattr(tool, "name", None)
+                        if not name and hasattr(tool, "function"):
+                            name = getattr(getattr(tool, "function"), "name", None)
+                    if name:
+                        self._tool_registry[name] = tool
+
+                # Detect if the tools are already in OpenAI function-call format (dict with function, or object with function.name)
+                def _is_mapped(tool):
+                    if isinstance(tool, dict):
+                        func = tool.get("function") or {}
+                        return isinstance(func, dict) and bool(func.get("name"))
+                    func = getattr(tool, "function", None)
+                    return bool(getattr(func, "name", None))
+
+                is_already_mapped = bool(raw_tools) and all(
+                    _is_mapped(t) for t in raw_tools
                 )
+
+                if is_already_mapped:
+                    # Normalize to plain dicts for downstream consumers
+                    normalized = []
+                    for tool in raw_tools:
+                        if hasattr(tool, "model_dump"):
+                            normalized.append(tool.model_dump(exclude_none=True))
+                        elif isinstance(tool, dict):
+                            normalized.append(tool)
+                        else:
+                            # best-effort object -> dict conversion
+                            func = getattr(tool, "function", None)
+                            normalized.append(
+                                {
+                                    "type": getattr(tool, "type", "function"),
+                                    "function": {
+                                        "name": getattr(func, "name", None),
+                                        "description": getattr(
+                                            func, "description", None
+                                        ),
+                                        "parameters": getattr(func, "parameters", None),
+                                    },
+                                }
+                            )
+                    tools_result = normalized
+                else:
+                    tools_result = map_tools(
+                        raw_tools, include_output_schema=include_output_schema
+                    )
                 if not tools_result:
                     self.logger.debug(
                         "[ToolService] No tools available from MCP server"

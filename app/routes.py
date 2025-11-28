@@ -21,6 +21,7 @@ from app.session import (
     build_mcp_client_strategy,
 )
 from app.session_manager import mcp_session_context, session_manager
+from app.session_manager.session_context import map_tools
 from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
@@ -258,7 +259,9 @@ async def list_tools(
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
-                result = await session.list_tools()
+                tools = await session.list_tools()
+                # Map tools for client response (apply header mapping and pruning)
+                result = map_tools(tools)
                 logger.debug(
                     mask_token(
                         f"[Tools] Tools listed. Session: {x_inxm_mcp_session}",
@@ -298,7 +301,8 @@ async def get_tool_details(
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
-                result = await session.list_tools()
+                tools = await session.list_tools()
+                result = map_tools(tools)
                 # find the tool with the given name
                 result = next(
                     (tool for tool in result if tool.get("name") == tool_name), None
@@ -367,7 +371,7 @@ async def run_tool(
                     and x_inxm_dry_run.lower() == "true"
                     and tool_name in EFFECT_TOOLS
                 ):
-                    tools = await session.list_tools()
+                    tools = map_tools(await session.list_tools())
                     tool = next(
                         (tool for tool in tools if tool.get("name") == tool_name), None
                     )

@@ -29,7 +29,12 @@ from app.tgi.models import (
     ChatCompletionRequest,
 )
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
-from app.tgi.protocols.chunk_reader import chunk_reader, ChunkFormat, accumulate_content
+from app.tgi.protocols.chunk_reader import (
+    chunk_reader,
+    ChunkFormat,
+    accumulate_content,
+    create_response_chunk,
+)
 from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME
 from app.oauth.token_dependency import get_access_token
 
@@ -160,31 +165,48 @@ async def _handle_chat_completion(
             "chat.prompt_requested": prompt or "",
         },
     ):
-        async with mcp_session_context(
-            sessions,
-            x_inxm_mcp_session,
-            access_token,
-            group,
-            incoming_headers,
-        ) as session:
-            result = await tgi_service.chat_completion(
-                session, chat_request, access_token, prompt
-            )
+        done_sent = False
+        try:
+            async with mcp_session_context(
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
+            ) as session:
+                result = await tgi_service.chat_completion(
+                    session, chat_request, access_token, prompt
+                )
 
-            # If the service returned an async-iterable (stream), forward chunks
-            # while the mcp_session_context is still active. This ensures
-            # any cancel scopes, ContextVars and session state created by the
-            # session context remain valid for the lifetime of the stream.
-            if hasattr(result, "__aiter__"):
-                async for chunk in result:
-                    yield chunk
+                # If the service returned an async-iterable (stream), forward chunks
+                # while the mcp_session_context is still active. This ensures
+                # any cancel scopes, ContextVars and session state created by the
+                # session context remain valid for the lifetime of the stream.
+                if hasattr(result, "__aiter__"):
+                    async for chunk in result:
+                        if isinstance(chunk, str):
+                            if "[DONE]" in chunk:
+                                done_sent = True
+                            yield chunk
+                        else:
+                            yield chunk
+                else:
+                    # Non-streaming dict result: yield once inside the context
+                    async def _single():
+                        yield result
+
+                    async for chunk in _single():
+                        yield chunk
+        except Exception as exc:
+            logger.error(f"[TGI] Streaming chat error: {exc}", exc_info=True)
+            if is_streaming:
+                error_payload = {"error": "internal_error", "detail": str(exc)}
+                yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
             else:
-                # Non-streaming dict result: yield once inside the context
-                async def _single():
-                    yield result
-
-                async for chunk in _single():
-                    yield chunk
+                raise
+        finally:
+            if is_streaming and not done_sent:
+                yield "data: [DONE]\n\n"
 
 
 def _is_async_iterable(obj: Any) -> bool:

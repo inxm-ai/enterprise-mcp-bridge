@@ -32,6 +32,38 @@ TOOLS_CACHE_FILE = Path(
 TOOLS_CACHE_LOCK_FILE = Path(
     os.environ.get("MCP_TOOLS_CACHE_LOCK_FILE", str(TOOLS_CACHE_FILE) + ".lock")
 )
+CACHE_VERSION = 1
+
+
+def _to_tool_list(tools: Any) -> list:
+    """
+    Normalize tool container objects to a plain list for downstream use.
+    Accepts objects with a `.tools` attribute or an iterable directly.
+    """
+    if hasattr(tools, "tools"):
+        try:
+            return list(getattr(tools, "tools"))
+        except Exception:
+            return []
+    try:
+        return list(tools or [])
+    except Exception:
+        return []
+
+
+def _cache_signature() -> dict:
+    """
+    Build a lightweight signature so the tools cache is invalidated when the
+    server configuration or filtering changes. This prevents stale tool lists
+    (e.g., from earlier tests) from being reused after configuration changes.
+    """
+    return {
+        "include": INCLUDE_TOOLS,
+        "exclude": EXCLUDE_TOOLS,
+        "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
+        "server": os.environ.get("MCP_SERVER_COMMAND", "")
+        or os.environ.get("MCP_REMOTE_SERVER", ""),
+    }
 
 
 def matches_pattern(value, pattern):
@@ -42,23 +74,39 @@ def matches_pattern(value, pattern):
 def map_tools(tools):
     """Map tools with INCLUDE_TOOLS and EXCLUDE_TOOLS filters applied."""
 
+    tool_list = _to_tool_list(tools)
     filtered_tools = []
-    for tool in tools.tools:
+    for tool in tool_list:
+        name = (
+            getattr(tool, "name", None)
+            if not isinstance(tool, dict)
+            else tool.get("name")
+        )
+        if not name:
+            continue
         include_match = any(
-            matches_pattern(tool.name, pattern) for pattern in INCLUDE_TOOLS if pattern
+            matches_pattern(name, pattern) for pattern in INCLUDE_TOOLS if pattern
         )
         exclude_match = any(
-            matches_pattern(tool.name, pattern) for pattern in EXCLUDE_TOOLS if pattern
+            matches_pattern(name, pattern) for pattern in EXCLUDE_TOOLS if pattern
         )
         logger.debug(
-            f"[Tools] Filter check -> Tool: {tool.name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}"
+            f"[Tools] Filter check -> Tool: {name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}"
         )
         if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
             continue
         if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
             continue
 
-        input_schema = tool.inputSchema if getattr(tool, "inputSchema", None) else {}
+        input_schema = (
+            tool.inputSchema
+            if getattr(tool, "inputSchema", None) is not None
+            else (
+                tool.get("inputSchema", {})  # type: ignore[attr-defined]
+                if isinstance(tool, dict)
+                else {}
+            )
+        )
         # make a shallow deepcopy to avoid mutating original tool objects
         try:
             import copy
@@ -82,14 +130,34 @@ def map_tools(tools):
 
         filtered_tools.append(
             {
-                "name": tool.name,
-                "title": tool.title,
-                "description": tool.description,
+                "name": name,
+                "title": (
+                    getattr(tool, "title", None)
+                    if not isinstance(tool, dict)
+                    else tool.get("title")
+                ),
+                "description": (
+                    getattr(tool, "description", None)
+                    if not isinstance(tool, dict)
+                    else tool.get("description")
+                ),
                 "inputSchema": input_schema_copy,
-                "outputSchema": tool.outputSchema,
-                "annotations": tool.annotations,
-                "meta": tool.meta,
-                "url": f"{MCP_BASE_PATH}/tools/{tool.name}",
+                "outputSchema": (
+                    getattr(tool, "outputSchema", None)
+                    if not isinstance(tool, dict)
+                    else tool.get("outputSchema")
+                ),
+                "annotations": (
+                    getattr(tool, "annotations", None)
+                    if not isinstance(tool, dict)
+                    else tool.get("annotations")
+                ),
+                "meta": (
+                    getattr(tool, "meta", None)
+                    if not isinstance(tool, dict)
+                    else tool.get("meta")
+                ),
+                "url": f"{MCP_BASE_PATH}/tools/{name}",
             }
         )
 
@@ -103,7 +171,19 @@ def _read_tools_cache() -> list[dict[str, Any]] | None:
 
     try:
         with TOOLS_CACHE_FILE.open("r") as cache_file:
-            return json.load(cache_file)
+            data = json.load(cache_file)
+            if not isinstance(data, dict):
+                return None
+
+            meta = data.get("__meta__", {})
+            if meta.get("version") != CACHE_VERSION:
+                return None
+
+            if meta.get("signature") != _cache_signature():
+                return None
+
+            tools = data.get("tools")
+            return tools if isinstance(tools, list) else None
     except FileNotFoundError:
         return None
     except (json.JSONDecodeError, OSError) as exc:
@@ -132,8 +212,12 @@ def _write_tools_cache(tools: list[dict[str, Any]]) -> bool:
             return False
 
         tmp_path = TOOLS_CACHE_FILE.with_name(TOOLS_CACHE_FILE.name + ".tmp")
+        payload = {
+            "__meta__": {"version": CACHE_VERSION, "signature": _cache_signature()},
+            "tools": tools,
+        }
         with tmp_path.open("w") as tmp_file:
-            json.dump(tools, tmp_file)
+            json.dump(payload, tmp_file)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
         os.replace(tmp_path, TOOLS_CACHE_FILE)
@@ -296,7 +380,8 @@ async def mcp_session_context(
                         return await session.read_resource(resource_name)
 
                     async def list_tools(self):
-                        return await _cached_mapped_tools(session.list_tools)
+                        tools = await session.list_tools()
+                        return _to_tool_list(tools)
 
                     async def call_tool(
                         self,
@@ -347,7 +432,8 @@ async def mcp_session_context(
 
     class TaskDelegate:
         async def list_tools(self):
-            return await _cached_mapped_tools(lambda: mcp_task.request("list_tools"))
+            tools = await mcp_task.request("list_tools")
+            return _to_tool_list(tools)
 
         async def call_tool(
             self,

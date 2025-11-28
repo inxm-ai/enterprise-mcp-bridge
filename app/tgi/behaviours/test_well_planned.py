@@ -4,6 +4,8 @@ import time
 from unittest.mock import AsyncMock, Mock
 
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
+from app.tgi.behaviours.todos.todo_manager import TodoManager, TodoItem
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -203,6 +205,15 @@ async def test_well_planned_no_premature_done():
 
     service._non_stream_chat_with_tools = fake_non_stream_chat
 
+    # Stream path should not leak plan content; return a simple streamed answer
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "done"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
     class DummySession:
         async def list_tools(self):
             return []
@@ -240,17 +251,24 @@ async def test_well_planned_no_premature_done():
 
     # Second chunk should be the start event (parse and inspect)
     second_obj = _parse_stream_json(chunks[1]).get("choices", [{}])[0].get("delta", {})
+    content = second_obj.get("content", "") if second_obj else ""
     assert (
         second_obj is not None
-        and second_obj.get("content")
-        == "<think>I marked 'analyze' as current todo, and will work on the following goal: Analyze the data</think>"
+        and "<think>I marked 'analyze'" in content
+        and "current todo" in content
     ), f"Second chunk should be start event, got: {chunks[1]}"
 
-    # Third chunk should be the done event and include the result
-    third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "completed the todo" in third_obj.get(
-        "content", ""
-    ), f"Third chunk should be done event, got: {chunks[2]}"
+    # A later chunk should be the done event and include the result
+    found_done = False
+    for c in chunks[2:]:
+        obj = _parse_stream_json(c)
+        if not obj:
+            continue
+        delta = obj.get("choices", [{}])[0].get("delta", {})
+        if "completed the todo" in delta.get("content", ""):
+            found_done = True
+            break
+    assert found_done, f"Did not find completion chunk in sequence: {chunks}"
 
     # Last chunk should be [DONE]
     assert any(
@@ -375,6 +393,14 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
 
     service._non_stream_chat_with_tools = fake_non_stream_chat
 
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "done"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
     class DummySession:
         async def list_tools(self):
             return []
@@ -421,16 +447,23 @@ async def test_chat_completion_routes_to_well_planned_for_streaming():
     assert "delta" in c0 and "content" in c0["delta"]
 
     second_obj = _parse_stream_json(chunks[1]).get("choices", [{}])[0].get("delta", {})
+    content = second_obj.get("content", "") if second_obj else ""
     assert (
         second_obj is not None
-        and second_obj.get("content")
-        == "<think>I marked 'task' as current todo, and will work on the following goal: Do task</think>"
+        and "<think>I marked 'task'" in content
+        and "current todo" in content
     ), f"Should see start event, got: {chunks[1]}"
 
-    third_obj = _parse_stream_json(chunks[2]).get("choices", [{}])[0].get("delta", {})
-    assert third_obj is not None and "completed" in third_obj.get(
-        "content", ""
-    ), f"Should see done event, got: {chunks[2]}"
+    found_done = False
+    for c in chunks[2:]:
+        obj = _parse_stream_json(c)
+        if not obj:
+            continue
+        delta = obj.get("choices", [{}])[0].get("delta", {})
+        if "completed" in delta.get("content", ""):
+            found_done = True
+            break
+    assert found_done, f"Should see done event, got sequence: {chunks}"
     assert any(
         "[DONE]" in c for c in chunks
     ), f"Last chunk should be [DONE], got: {chunks[-1]}"
@@ -663,7 +696,7 @@ async def test_well_planned_strips_think_tags_from_result():
     # It should be one of the chunks after the start event
 
     summary_chunk = None
-    final_result_chunk = None
+    visible_parts = []
 
     for chunk in chunks:
         parsed = _parse_stream_json(chunk)
@@ -673,8 +706,9 @@ async def test_well_planned_strips_think_tags_from_result():
 
         if "<think>I have completed" in content:
             summary_chunk = parsed
-        elif content == "Here is the result.":
-            final_result_chunk = parsed
+            break
+        elif not content.startswith("<think>"):
+            visible_parts.append(content)
 
     assert summary_chunk is not None, "Summary chunk not found"
 
@@ -686,7 +720,323 @@ async def test_well_planned_strips_think_tags_from_result():
     assert "Thinking process" not in content
     assert "Here is the result." in content
 
-    # Check final result chunk
-    assert final_result_chunk is not None, "Final result chunk not found"
-    content = final_result_chunk["choices"][0]["delta"]["content"]
-    assert content == "Here is the result."
+    combined = "".join(visible_parts)
+    assert combined.strip() == "Here is the result."
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streams_final_message_chunks():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "streaming",
+            "goal": "Send updates",
+            "needed_info": None,
+            "tools": [],
+        }
+    ]
+
+    configure_plan_stream(service, todos)
+
+    async def fake_stream_chat(*args, **kwargs):
+        payloads = ["Hello ", "World"]
+        for piece in payloads:
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": piece}, "index": 0}]}
+            ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do it")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    contents = []
+    async for chunk in gen:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            contents.append(parsed["choices"][0]["delta"].get("content", ""))
+
+    assert any(
+        "Hello " in c for c in contents
+    ), f"Streamed chunks missing 'Hello ': {contents}"
+    assert any(
+        "World" in c for c in contents
+    ), f"Streamed chunks missing 'World': {contents}"
+
+    summary_idx = next(i for i, c in enumerate(contents) if "completed the todo" in c)
+    hello_idx = next(i for i, c in enumerate(contents) if "Hello " in c)
+    assert (
+        hello_idx < summary_idx
+    ), "Visible content should arrive before the completion summary"
+
+    # Ensure we did not emit a duplicated full result chunk after the summary
+    full_text = "Hello World"
+    assert not any(
+        full_text in c for c in contents[summary_idx + 1 :]
+    ), f"Duplicate final chunk detected after summary: {contents}"
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_preserves_all_visible_text():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "final-answer",
+            "goal": "Describe capabilities",
+            "needed_info": None,
+            "tools": [],
+        }
+    ]
+
+    configure_plan_stream(service, todos)
+
+    async def fake_stream_chat(*args, **kwargs):
+        pieces = [
+            "Hello! I'm INXM, ",
+            "<think>internal reasoning</think>",
+            "an orchestrator that builds ",
+            "repeatable ",
+            '<get_tools server-id="x">ignored</get_tools>',
+            "workflows with teams.",
+        ]
+        for piece in pieces:
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": piece}, "index": 0}]}
+            ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Tell me what you do")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    visible_parts = []
+    async for chunk in gen:
+        parsed = _parse_stream_json(chunk)
+        if not parsed or not parsed.get("choices"):
+            continue
+        content = parsed["choices"][0]["delta"].get("content", "") or ""
+        if content.startswith("<think>"):
+            continue
+        if "completed the todo" in content:
+            break
+        visible_parts.append(content)
+
+    combined = "".join(visible_parts)
+    expected = (
+        "Hello! I'm INXM, an orchestrator that builds repeatable workflows with teams."
+    )
+    assert (
+        combined == expected
+    ), f"Visible stream content lost pieces.\nExpected: {expected}\nGot: {combined}"
+
+
+@pytest.mark.asyncio
+async def test_well_planned_strips_tool_call_blocks_from_final_output():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "strip-tools",
+            "goal": "Produce answer",
+            "needed_info": None,
+            "tools": [],
+        }
+    ]
+
+    configure_plan_stream(service, todos)
+
+    service.tool_service.get_all_mcp_tools = AsyncMock(
+        return_value=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_tools",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            }
+        ]
+    )
+
+    async def fake_stream_chat(*args, **kwargs):
+        yield "data: " + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": 'Result <get_tools server-id="abc"></get_tools> value'
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+        ) + "\n\n"
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": " Final."}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Answer please")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    contents = []
+    async for chunk in gen:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            contents.append(parsed["choices"][0]["delta"].get("content", ""))
+
+    assert all("<get_tools" not in (c or "") for c in contents)
+    combined = "".join(c for c in contents if c and not c.startswith("<think>"))
+    assert "Result" in combined and "Final." in combined
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_does_not_repeat_tool_trace_in_final_chunk():
+    class DummyLLM:
+        def create_completion_id(self):
+            return "dummy"
+
+        def create_usage_stats(self):
+            return {}
+
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=DummyLLM(),
+        prompt_service=None,
+        tool_service=None,
+        non_stream_chat_with_tools_callable=lambda *a, **k: None,
+        stream_chat_with_tools_callable=lambda *a, **k: None,
+        tool_resolution=None,
+        logger_obj=None,
+        model_name="test-model",
+    )
+
+    final_raw = """
+<think>The user wants me to achieve the current goal, which is to retrieve docs.</think>
+I'll retrieve all documents from the collection 'your-collection-id' for you.
+<list_collection_documents>{"collection_id": "your-collection-id"}</list_collection_documents>
+<think>Executing the following tools
+- list_collection_documents(collection_id='your-collection-id')</think><think>I executed the tools successfully, resuming response generation...</think>
+I encountered an error with the collection ID format.
+"""
+
+    async def fake_stream_chat(*args, **kwargs):
+        payloads = [
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": final_raw}, "index": 0}]})
+            + "\n\n",
+            "data: [DONE]\n\n",
+        ]
+        for p in payloads:
+            yield p
+
+    orchestrator._stream_chat_with_tools = fake_stream_chat
+
+    todo_manager = TodoManager()
+    todo_manager.add_todos(
+        [
+            TodoItem(
+                id="t1",
+                name="list-docs",
+                goal="List docs",
+                needed_info=None,
+                expected_result=None,
+                tools=["list_collection_documents"],
+            )
+        ]
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List docs")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    available_tools = [{"function": {"name": "list_collection_documents"}}]
+
+    gen = orchestrator._well_planned_streaming(
+        todo_manager,
+        session=None,
+        request=request,
+        available_tools=available_tools,
+        access_token=None,
+        span=None,
+        original_messages=request.messages,
+    )
+
+    contents = []
+    async for chunk in gen:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            contents.append(parsed["choices"][0]["delta"].get("content", ""))
+
+    visible = [c for c in contents if c and not c.startswith("<think>")]
+    combined_visible = "".join(visible)
+    expected_visible = orchestrator._strip_tool_call_blocks(
+        orchestrator._strip_think_tags(final_raw), ["list_collection_documents"]
+    )
+
+    assert combined_visible.strip() == expected_visible.strip()
+    assert "<think>" not in combined_visible
+    assert "<list_collection_documents" not in combined_visible
+    assert "Executing the following tools" not in combined_visible

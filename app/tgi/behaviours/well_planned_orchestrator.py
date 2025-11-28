@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from typing import Any, List, Optional, AsyncGenerator, Tuple
@@ -306,12 +307,25 @@ class WellPlannedOrchestrator:
 
         return selected
 
+    def _extract_tool_names(self, tools: Optional[List[Any]]) -> List[str]:
+        names: List[str] = []
+        for tool in tools or []:
+            function = getattr(tool, "function", None)
+            if function and getattr(function, "name", None):
+                names.append(function.name)
+            elif isinstance(tool, dict):
+                name = tool.get("function", {}).get("name")
+                if name:
+                    names.append(name)
+        return names
+
     def _build_focused_request(
         self,
         todo_manager: TodoManager,
         todo: TodoItem,
         base_request: ChatCompletionRequest,
         original_messages: Optional[List[Message]] = None,
+        is_final_multistep_todo: bool = False,
     ):
         # Preserve any original system prompt from the base request/prepared messages
         original_system_content = None
@@ -331,6 +345,22 @@ class WellPlannedOrchestrator:
             combined_system_content = (
                 f"Goal: {todo.goal}\n"
                 "You have access to the results of previous steps. Use them to achieve the current goal."
+            )
+
+        tool_sentence = (
+            f"\nAllowed tools for this step: {', '.join(todo.tools)}."
+            if todo.tools
+            else "\nNo tools are available for this step; do not invent new tool calls."
+        )
+        combined_system_content += (
+            "\nUse only the tools listed for this todo; do not add new ones."
+            + tool_sentence
+        )
+
+        if is_final_multistep_todo:
+            combined_system_content += (
+                "\nThis is the final step of the plan. Do not start additional tool calls "
+                "or new tasks—deliver the final user-facing answer directly."
             )
 
         if todo.expected_result:
@@ -378,11 +408,84 @@ class WellPlannedOrchestrator:
     def _strip_think_tags(self, text: str) -> str:
         # Remove <think>...</think> blocks, including newlines that might follow them
         # The pattern should be non-greedy
-        import re
-
         # This pattern matches <think>...</think> and optional following whitespace
         pattern = r"<think>.*?</think>\s*"
         return re.sub(pattern, "", text, flags=re.DOTALL)
+
+    def _strip_tool_call_blocks(
+        self, text: str, tool_names: Optional[List[str]]
+    ) -> str:
+        if not text:
+            return text
+
+        default_names = {"get_tools"}
+        names = [re.escape(n) for n in set(tool_names or []).union(default_names) if n]
+        if not names:
+            return text
+
+        joined = "|".join(names)
+        open_tag = rf"<(?:{joined})\b[^>]*?>"
+        close_tag = rf"</(?:{joined})>"
+        paired_pattern = rf"{open_tag}.*?{close_tag}"
+        text = re.sub(paired_pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(open_tag, "", text, flags=re.IGNORECASE)
+        text = re.sub(close_tag, "", text, flags=re.IGNORECASE)
+        return text
+
+    def _visible_text_delta(
+        self, chunk: str, state: dict, tool_names: List[str]
+    ) -> str:
+        """
+        Extract non-<think> content from the chunk, accumulate it, strip tool-call
+        blocks, and return only the newly added portion.
+        """
+        if chunk is None:
+            chunk = ""
+
+        buffer = state.get("buffer", "")
+        in_think = state.get("in_think", False)
+
+        i = 0
+        while i < len(chunk):
+            if not in_think:
+                open_idx = chunk.find("<think>", i)
+                if open_idx == -1:
+                    buffer += chunk[i:]
+                    break
+                buffer += chunk[i:open_idx]
+                i = open_idx + len("<think>")
+                in_think = True
+            else:
+                close_idx = chunk.find("</think>", i)
+                if close_idx == -1:
+                    # Still inside a think block; skip the rest of this chunk
+                    i = len(chunk)
+                    break
+                i = close_idx + len("</think>")
+                in_think = False
+
+        state["buffer"] = buffer
+        state["in_think"] = in_think
+
+        cleaned = self._strip_tool_call_blocks(
+            self._strip_think_tags(buffer), tool_names
+        )
+        # Normalize excessive blank lines introduced by stripping think/tool blocks
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = re.sub(r"^\n{2,}", "\n", cleaned)
+        previous_clean = state.get("clean", "")
+
+        if not cleaned.startswith(previous_clean):
+            # If cleaning removed something we had not yet emitted, reset cursor safely
+            emitted_len = min(state.get("emitted", 0), len(cleaned))
+        else:
+            emitted_len = state.get("emitted", 0)
+
+        delta = cleaned[emitted_len:]
+        state["clean"] = cleaned
+        state["emitted"] = len(cleaned)
+
+        return delta
 
     def _stringify_result(self, result: Any) -> str:
         if isinstance(result, ChatCompletionResponse):
@@ -400,6 +503,37 @@ class WellPlannedOrchestrator:
 
         return str(result)
 
+    def _enforce_final_answer_step(
+        self, todo_manager: TodoManager, user_message: Optional[str]
+    ) -> None:
+        todos = todo_manager.list_todos()
+        user_goal = (user_message or "").strip() or "Answer the user's request."
+
+        if not todos:
+            todo_manager.add_todos(
+                [
+                    TodoItem(
+                        id=str(uuid.uuid4()),
+                        name="final-answer",
+                        goal=user_goal,
+                        needed_info=None,
+                        expected_result="A clear final answer to the user.",
+                        tools=[],
+                    )
+                ]
+            )
+            return
+
+        final_todo = todos[-1]
+        if final_todo and len(todos) > 1:
+            final_todo.goal = f"Use only the existing information to answer the user's request: {user_goal}"
+            final_todo.expected_result = final_todo.expected_result or (
+                "A concise final answer with no tool calls."
+            )
+            final_todo.tools = (
+                []
+            )  # Must not call tools in the last step if there are multiple todos
+
     def _well_planned_streaming(
         self,
         todo_manager: TodoManager,
@@ -411,15 +545,20 @@ class WellPlannedOrchestrator:
         original_messages: Optional[List[Message]] = None,
     ) -> AsyncGenerator[str, None]:
         async def _generator():
+            todos = todo_manager.list_todos()
+            all_tool_names = self._extract_tool_names(available_tools)
             id = f"mcp-{str(uuid.uuid4())}"
-            names = "\n - ".join([t.name for t in todo_manager.list_todos()])
+            names = "\n - ".join([t.name for t in todos])
             message = (
                 f"<think>I have planned the following todos:\n - {names}\n</think>"
             )
 
             yield create_response_chunk(id, message)
 
-            for todo in todo_manager.list_todos():
+            visible_accum = ""
+
+            for idx, todo in enumerate(todos):
+                is_last_todo = idx == len(todos) - 1
                 todo_manager.start_todo(todo.id)
                 yield create_response_chunk(
                     f"mcp-{str(uuid.uuid4())}",
@@ -427,7 +566,11 @@ class WellPlannedOrchestrator:
                 )
 
                 focused_messages, focused_request = self._build_focused_request(
-                    todo_manager, todo, request, original_messages
+                    todo_manager,
+                    todo,
+                    request,
+                    original_messages,
+                    is_final_multistep_todo=is_last_todo and len(todos) > 1,
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
@@ -435,12 +578,21 @@ class WellPlannedOrchestrator:
                         t.function.name if hasattr(t, "function") else str(t)
                         for t in (available_tools or [])
                     ]
-                    logger.warning(
-                        f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools}. Available: {available_tool_names}. Proceeding without tools."
-                    )
+                    if logger:
+                        logger.warning(
+                            f"[WellPlanned] No matching tools found for todo {todo.id} with requested tools {todo.tools}. Available: {available_tool_names}. Proceeding without tools."
+                        )
+
+                visible_state = {
+                    "buffer": "",
+                    "in_think": False,
+                    "clean": "",
+                    "emitted": 0,
+                }
 
                 try:
-                    logger.info(f"[WellPlanned] Processing todo {todo.id}")
+                    if logger:
+                        logger.info(f"[WellPlanned] Processing todo {todo.id}")
 
                     stream_gen = self._stream_chat_with_tools(
                         session,
@@ -455,8 +607,22 @@ class WellPlannedOrchestrator:
                     think_extractor = ThinkExtractor()
 
                     async for parsed in read_todo_stream(stream_gen):
-                        yield think_extractor.feed(parsed.content or "")
-                        aggregated += parsed.content or ""
+                        think_chunk = think_extractor.feed(parsed.content or "")
+                        if think_chunk and think_chunk.strip():
+                            yield think_chunk
+
+                        if parsed.content:
+                            aggregated += parsed.content
+
+                        if is_last_todo:
+                            delta = self._visible_text_delta(
+                                parsed.content or "", visible_state, all_tool_names
+                            )
+                            if delta:
+                                yield create_response_chunk(
+                                    f"mcp-{str(uuid.uuid4())}", delta
+                                )
+                                visible_accum = visible_state.get("clean", delta)
 
                     # Once the stream completes, turn the aggregated content into
                     # a stored result. If no content was aggregated, mark an error.
@@ -474,35 +640,35 @@ class WellPlannedOrchestrator:
                 except Exception as exc:
                     result = {"error": str(exc)}
 
-                # Strip think tags from the result before storing it
-                if isinstance(result, str):
-                    result = self._strip_think_tags(result)
-                elif isinstance(result, dict) and "error" not in result:
-                    # If it's a dict (e.g. parsed JSON), we might want to check if any string values contain think tags
-                    # But usually the result is a string or a JSON object representing the answer.
-                    # If it was parsed from aggregated, aggregated was the string containing think tags.
-                    # So if we parsed it, the think tags might be inside the values or keys?
-                    # No, aggregated is "content <think>...</think>".
-                    # If we parsed it as JSON, it means the content was valid JSON.
-                    # <think> tags would break JSON unless they were inside a string value.
-                    # If aggregated was "{"a": 1}<think>...</think>", json.loads would fail or ignore trailing data?
-                    # json.loads fails on trailing data.
-                    # So if aggregated contained think tags at the end, json.loads(aggregated) would likely fail
-                    # and we would fall back to result = aggregated (string).
-                    # So result is likely a string if think tags are present at the end.
-                    pass
+                stringified = self._stringify_result(result)
+                if isinstance(stringified, str):
+                    cleaned_result = self._strip_tool_call_blocks(
+                        self._strip_think_tags(stringified), all_tool_names
+                    )
+                else:
+                    cleaned_result = stringified
 
-                todo_manager.finish_todo(todo.id, self._stringify_result(result))
-                summary = f"<think>I have completed the todo '{todo.name}'. Result summary: {self._stringify_result(result)[:200]}...</think>"
+                todo_manager.finish_todo(todo.id, cleaned_result)
+                visible_accum = visible_state.get("clean", visible_accum)
+
+                if is_last_todo and isinstance(cleaned_result, str):
+                    emitted_len = visible_state.get("emitted", len(visible_accum))
+                    if len(cleaned_result) > emitted_len:
+                        remaining = cleaned_result[emitted_len:]
+                        if remaining:
+                            yield create_response_chunk(
+                                f"mcp-{str(uuid.uuid4())}", remaining
+                            )
+                            visible_accum = cleaned_result
+
+                summary = f"<think>I have completed the todo '{todo.name}'. Result summary: {self._stringify_result(cleaned_result)[:200]}...</think>"
                 yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", summary)
 
             # yield the result of the final todo as a last chunk
-            final_result = (
-                todo_manager.list_todos()[-1].result
-                if todo_manager.list_todos()
-                else "No todos were processed."
-            )
-            yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", final_result)
+            final_result = todos[-1].result if todos else "No todos were processed."
+            # If we already streamed visible content for the last todo, avoid duplicating it.
+            if not (todos):
+                yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", final_result)
             yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
 
         return _generator()
@@ -517,14 +683,21 @@ class WellPlannedOrchestrator:
         span,
         original_messages: Optional[List[Message]] = None,
     ) -> ChatCompletionResponse:
-        names = [t.name for t in todo_manager.list_todos()]
+        todos = todo_manager.list_todos()
+        names = [t.name for t in todos]
         results_payload: List[dict] = []
+        all_tool_names = self._extract_tool_names(available_tools)
 
-        for todo in todo_manager.list_todos():
+        for idx, todo in enumerate(todos):
+            is_last_todo = idx == len(todos) - 1
             todo_manager.start_todo(todo.id)
 
             focused_messages, focused_request = self._build_focused_request(
-                todo_manager, todo, request, original_messages
+                todo_manager,
+                todo,
+                request,
+                original_messages,
+                is_final_multistep_todo=is_last_todo and len(todos) > 1,
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
@@ -553,6 +726,10 @@ class WellPlannedOrchestrator:
             # Ensure we store a stringified version of the result in the history
             # so that subsequent steps can read it properly (avoiding ChatCompletionResponse objects)
             stored_result = self._stringify_result(result)
+            if isinstance(stored_result, str):
+                stored_result = self._strip_tool_call_blocks(
+                    self._strip_think_tags(stored_result), all_tool_names
+                )
             todo_manager.finish_todo(todo.id, stored_result)
 
             results_payload.append(
@@ -629,6 +806,7 @@ class WellPlannedOrchestrator:
             "only the tools it needs (using exact names), and include an 'expected_result' "
             "field with examples of success/failure. Do not repeat information already "
             "provided by the user in the needed_info field. If no tools are required, use an empty array. "
+            "If more then one todo is needed, ensure the final todo delivers a clear user-facing answer. "
             f"Available tools: {tool_list_text}.\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
             + json.dumps(intent_response_schema, ensure_ascii=False)
@@ -694,6 +872,8 @@ class WellPlannedOrchestrator:
             )
 
         todo_manager = self._create_todo_manager(todos_json)
+        user_message = messages[-1].content if messages else ""
+        self._enforce_final_answer_step(todo_manager, user_message)
 
         if span:
             span.set_attribute("chat.todos_count", len(todo_manager.list_todos()))
