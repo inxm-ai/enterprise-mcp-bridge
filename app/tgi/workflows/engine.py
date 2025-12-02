@@ -381,9 +381,11 @@ class WorkflowEngine:
             all_tools = await self.tool_service.get_all_mcp_tools(session)
         except Exception:
             return None
-        if not agent_def.tools:
+        if agent_def.tools is None:
             return all_tools
-        names = set(agent_def.tools)
+        if isinstance(agent_def.tools, list) and len(agent_def.tools) == 0:
+            return []
+        names = set(agent_def.tools or [])
         filtered = [
             tool
             for tool in all_tools

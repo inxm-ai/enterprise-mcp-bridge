@@ -42,6 +42,8 @@ class WorkflowRepository:
                     continue
                 agents = []
                 for agent in agents_payload:
+                    tools_field = agent.get("tools", None)
+                    tools_value = list(tools_field) if tools_field is not None else None
                     agents.append(
                         WorkflowAgentDef(
                             agent=agent.get("agent"),
@@ -50,7 +52,7 @@ class WorkflowRepository:
                             depends_on=list(agent.get("depends_on", []) or []),
                             when=agent.get("when"),
                             reroute=agent.get("reroute"),
-                            tools=list(agent.get("tools") or []) or None,
+                            tools=tools_value,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

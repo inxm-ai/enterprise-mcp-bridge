@@ -72,8 +72,13 @@ class StubLLMClient:
 
         response = self.responses.get(agent_marker, "")
         self.calls.append(agent_marker)
-        tool_names = []
-        if request.tools:
+        tool_names = None
+        if request.tools is None:
+            tool_names = None
+        elif request.tools == []:
+            tool_names = []
+        else:
+            collected: list[str] = []
             for t in request.tools:
                 if isinstance(t, dict):
                     func = t.get("function", {})
@@ -82,8 +87,9 @@ class StubLLMClient:
                     func = getattr(t, "function", None)
                     name = getattr(func, "name", None) if func else None
                 if name:
-                    tool_names.append(name)
-        self.request_tools.append(tool_names or None)
+                    collected.append(name)
+            tool_names = collected if collected else []
+        self.request_tools.append(tool_names)
 
         async def _gen():
             yield f"data: {response}\n\n"
@@ -438,6 +444,56 @@ async def test_agent_prompt_includes_feedback_guidelines(tmp_path, monkeypatch):
     _ = [chunk async for chunk in stream]
     # First system prompt is routing_agent; second is agent prompt with guidelines
     assert any("user_feedback_needed" in prompt for prompt in llm.system_prompts)
+
+
+@pytest.mark.asyncio
+async def test_agent_tools_empty_list_disables_tools(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "tools_none_flow",
+        "root_intent": "TOOLS_TEST",
+        "agents": [
+            {"agent": "get_location", "description": "Ask location", "tools": []},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_location",
+                "description": "Get location",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    llm = StubLLMClient({"get_location": "loc"})
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    exec_id = "exec-tools-none"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="tools_none_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    # No tools should be passed to LLM for the agent
+    assert llm.request_tools[-1] == []
 
 
 @pytest.mark.asyncio
