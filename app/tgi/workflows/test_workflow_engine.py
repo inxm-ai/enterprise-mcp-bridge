@@ -447,6 +447,42 @@ async def test_agent_prompt_includes_feedback_guidelines(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_custom_routing_prompt_by_flow_id(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "guidelines_flow",
+        "root_intent": "TEST",
+        "agents": [{"agent": "get_location", "description": "Ask location"}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    routing_prompt = StubPrompt("guidelines_flow", "Custom routing instructions")
+    llm = StubLLMClient({"routing_intent": "<reroute>STOP</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="where am I?")],
+        model="test-model",
+        stream=True,
+        use_workflow="guidelines_flow",
+        workflow_execution_id="exec-routing-prompt",
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(prompts=[routing_prompt]), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+    # First prompt sent to routing agent should include custom and default text
+    assert llm.system_prompts
+    assert "Custom routing instructions" in llm.system_prompts[0]
+    assert "You are the routing_agent" in llm.system_prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_agent_tools_empty_list_disables_tools(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()

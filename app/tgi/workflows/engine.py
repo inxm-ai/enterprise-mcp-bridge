@@ -477,7 +477,7 @@ class WorkflowEngine:
             f"agents={[a.agent for a in workflow_def.agents]}"
         )
         response = await self._call_routing_agent(
-            session, request, access_token, span, payload
+            session, request, access_token, span, payload, workflow_def
         )
         reroute_reason = self._extract_tag(response, "reroute")
         if reroute_reason:
@@ -503,7 +503,7 @@ class WorkflowEngine:
             f"user_message={self._extract_user_message(request) or ''}"
         )
         response = await self._call_routing_agent(
-            session, request, access_token, span, payload
+            session, request, access_token, span, payload, workflow_def
         )
         run_value = self._extract_run_tag(response)
         return run_value
@@ -527,7 +527,7 @@ class WorkflowEngine:
             f"context={json.dumps(context, ensure_ascii=False)}"
         )
         response = await self._call_routing_agent(
-            session, request, access_token, span, payload
+            session, request, access_token, span, payload, workflow_def
         )
         return self._extract_next_agent(response)
 
@@ -538,8 +538,9 @@ class WorkflowEngine:
         access_token: Optional[str],
         span,
         payload: str,
+        workflow_def: WorkflowDefinition,
     ) -> str:
-        routing_prompt = await self._resolve_routing_prompt(session)
+        routing_prompt = await self._resolve_routing_prompt(session, workflow_def)
         routing_request = ChatCompletionRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=routing_prompt),
@@ -560,7 +561,9 @@ class WorkflowEngine:
                     text += parsed.content
         return text.strip()
 
-    async def _resolve_routing_prompt(self, session: Any) -> str:
+    async def _resolve_routing_prompt(
+        self, session: Any, workflow_def: WorkflowDefinition
+    ) -> str:
         default_prompt = (
             "You are the routing_agent. Decide whether a workflow matches and which agent to run next. "
             "Respond only with tags: <run>true/false</run>, <reroute>REASON</reroute>, "
@@ -569,10 +572,11 @@ class WorkflowEngine:
         )
         try:
             prompt = await self.prompt_service.find_prompt_by_name_or_role(
-                session, "routing_agent"
+                session, workflow_def.flow_id
             )
             if prompt:
-                return await self.prompt_service.get_prompt_content(session, prompt)
+                custom = await self.prompt_service.get_prompt_content(session, prompt)
+                return f"{custom}\n\n{default_prompt}"
         except Exception as exc:  # pragma: no cover
             logger.debug(f"[WorkflowEngine] Using default routing prompt: {exc}")
         return default_prompt

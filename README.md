@@ -544,6 +544,7 @@ Prompt usage:
 - Prompts receive: the original user request, the workflow goal (`root_intent`), and the accumulated `context` JSON from prior agents.
 - Streaming is used for agent runs; `pass_through: true` agents stream their content to the user while still being stored in context.
 - A `routing_agent` prompt can be provided in the MCP prompt store; if absent, a built-in default is used. The routing agent checks overall intent fit, evaluates `when` conditions, and chooses reroutes.
+- Routing prompt lookup: the routing agent prompt is resolved by the workflow’s `flow_id` as the prompt name. If found, it is appended with the default routing instructions (tags for `<run>`, `<reroute>`, `<next_agent>`) so custom text always inherits the control contract.
 
 Rerouting and feedback:
 - Agents can emit special tags in their output:
