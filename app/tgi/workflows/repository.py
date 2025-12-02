@@ -50,6 +50,7 @@ class WorkflowRepository:
                             depends_on=list(agent.get("depends_on", []) or []),
                             when=agent.get("when"),
                             reroute=agent.get("reroute"),
+                            tools=list(agent.get("tools") or []) or None,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

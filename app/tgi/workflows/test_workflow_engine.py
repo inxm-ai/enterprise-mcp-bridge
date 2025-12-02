@@ -12,8 +12,11 @@ from app.tgi.workflows.state import WorkflowStateStore
 
 
 class StubSession:
-    def __init__(self, prompts: list[Any] | None = None):
+    def __init__(
+        self, prompts: list[Any] | None = None, tools: list[Any] | None = None
+    ):
         self.prompts = prompts or []
+        self.tools = tools or []
 
     async def list_prompts(self):
         return SimpleNamespace(prompts=self.prompts)
@@ -25,6 +28,9 @@ class StubSession:
         )
         message = SimpleNamespace(content=SimpleNamespace(text=text))
         return SimpleNamespace(isError=False, messages=[message])
+
+    async def list_tools(self):
+        return self.tools
 
 
 class StubPrompt:
@@ -42,6 +48,7 @@ class StubLLMClient:
     def __init__(self, responses: dict[str, str]):
         self.responses = responses
         self.calls: list[str] = []
+        self.request_tools: list[list[str] | None] = []
 
     def stream_completion(
         self, request: ChatCompletionRequest, access_token: str, span: Any
@@ -61,6 +68,18 @@ class StubLLMClient:
 
         response = self.responses.get(agent_marker, "")
         self.calls.append(agent_marker)
+        tool_names = []
+        if request.tools:
+            for t in request.tools:
+                if isinstance(t, dict):
+                    func = t.get("function", {})
+                    name = func.get("name")
+                else:
+                    func = getattr(t, "function", None)
+                    name = getattr(func, "name", None) if func else None
+                if name:
+                    tool_names.append(name)
+        self.request_tools.append(tool_names or None)
 
         async def _gen():
             yield f"data: {response}\n\n"
@@ -320,6 +339,70 @@ async def test_dynamic_reroute_decision(tmp_path, monkeypatch):
     state = engine.state_store.load_execution(exec_id)
     assert state.context["agents"]["first"]["reroute_reason"] == "GO_TO_SECOND"
     assert "second" in state.context["agents"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tools_scoping(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "tools_flow",
+        "root_intent": "TOOLS_TEST",
+        "agents": [
+            {"agent": "get_location", "description": "Ask location"},
+            {
+                "agent": "get_weather",
+                "description": "Fetch weather",
+                "tools": ["get_weather"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_location",
+                "description": "Get location",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    llm = StubLLMClient({"get_location": "loc", "get_weather": "sunny"})
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    exec_id = "exec-tools"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="tools_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    # First routing call has no tools, agent calls include scoped tools
+    assert llm.request_tools[1] and set(llm.request_tools[1]) >= {"get_location"}
+    assert llm.request_tools[2] == ["get_weather"]
 
 
 @pytest.mark.asyncio

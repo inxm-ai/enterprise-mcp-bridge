@@ -76,6 +76,7 @@ class ProxiedTGIService:
                 state_store=WorkflowStateStore(db_path),
                 llm_client=self.llm_client,
                 prompt_service=self.prompt_service,
+                tool_service=self.tool_service,
             )
         except Exception as exc:
             self.logger.debug(f"[ProxiedTGI] Workflow engine not initialized: {exc}")

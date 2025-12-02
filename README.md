@@ -498,13 +498,15 @@ Each workflow file must include `flow_id`, `root_intent`, and an ordered `agents
   "agents": [
     {
       "agent": "get_location",
-      "description": "Ask or infer the user's current city or coordinates."
+      "description": "Ask or infer the user's current city or coordinates.",
+      "tools": ["get_location"]
     },
     {
       "agent": "get_weather",
       "description": "Fetch the weather forecast for a given location.",
       "pass_through": true,
-      "depends_on": ["get_location"]
+      "depends_on": ["get_location"],
+      "tools": ["get_weather", "get_forecast_for_location"]
     },
     {
       "agent": "get_outdoor",
@@ -535,6 +537,7 @@ Field reference:
   - `depends_on` (array[string]): Agent names that must complete before this agent runs.
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
+  - `tools` (array[string], optional): Limit available tools for this agent to the listed names. If omitted, all MCP tools are available to the agent.
 
 Prompt usage:
 - For each agent the router looks for a prompt named exactly like the `agent` value via the MCP prompt service. If found, that prompt content is used; otherwise it falls back to the agent’s `description`.

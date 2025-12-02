@@ -11,6 +11,7 @@ class WorkflowAgentDef:
     depends_on: List[str] = field(default_factory=list)
     when: Optional[str] = None
     reroute: Optional[Dict[str, Any]] = None
+    tools: Optional[List[str]] = None
 
 
 @dataclass

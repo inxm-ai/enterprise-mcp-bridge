@@ -7,6 +7,7 @@ from typing import Any, AsyncGenerator, Optional
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.prompt_service import PromptService
+from app.tgi.services.tool_service import ToolService
 from app.tgi.workflows.models import (
     WorkflowAgentDef,
     WorkflowDefinition,
@@ -30,11 +31,13 @@ class WorkflowEngine:
         state_store: WorkflowStateStore,
         llm_client: Any,
         prompt_service: Optional[PromptService] = None,
+        tool_service: Optional[ToolService] = None,
     ):
         self.repository = repository
         self.state_store = state_store
         self.llm_client = llm_client
         self.prompt_service = prompt_service or PromptService()
+        self.tool_service = tool_service or ToolService()
 
     async def start_or_resume_workflow(
         self,
@@ -264,6 +267,7 @@ class WorkflowEngine:
             ],
             model=request.model or TGI_MODEL_NAME,
             stream=True,
+            tools=await self._resolve_tools(session, agent_def),
         )
 
         stream = self.llm_client.stream_completion(
@@ -353,6 +357,30 @@ class WorkflowEngine:
                 f"[WorkflowEngine] Using default prompt for {agent_def.agent}: {exc}"
             )
         return prompt_text or f"You are the {agent_def.agent} agent."
+
+    async def _resolve_tools(
+        self, session: Any, agent_def: WorkflowAgentDef
+    ) -> Optional[list]:
+        if not self.tool_service or not hasattr(session, "list_tools"):
+            return None
+        try:
+            all_tools = await self.tool_service.get_all_mcp_tools(session)
+        except Exception:
+            return None
+        if not agent_def.tools:
+            return all_tools
+        names = set(agent_def.tools)
+        filtered = [
+            tool
+            for tool in all_tools
+            if (
+                tool.get("function", {}).get("name")
+                if isinstance(tool, dict)
+                else getattr(getattr(tool, "function", None), "name", None)
+            )
+            in names
+        ]
+        return filtered
 
     def _extract_user_message(self, request: ChatCompletionRequest) -> Optional[str]:
         for message in reversed(request.messages):
