@@ -144,8 +144,6 @@ async def test_missing_file_raises(monkeypatch):
         assert res.messages[0].content.text == "Absolute World"
 
 
-
-
 class DummyCall:
     def __init__(self, result=None, error=None):
         self.result = result

@@ -53,6 +53,8 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Union[str, ToolChoice]] = "auto"
     stream: bool = False
+    use_workflow: Optional[Union[bool, str]] = None
+    workflow_execution_id: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None

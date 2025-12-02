@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from typing import List, Optional, Union, AsyncGenerator
 from opentelemetry import trace
@@ -24,6 +25,7 @@ from app.tgi.services.message_summarization_service import MessageSummarizationS
 from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
 from app.tgi.protocols.chunk_reader import chunk_reader
+from app.tgi.workflows import WorkflowEngine, WorkflowRepository, WorkflowStateStore
 from app.vars import TGI_MODEL_NAME
 from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
 
@@ -46,6 +48,7 @@ class ProxiedTGIService:
             llm_client=self.llm_client
         )
         self.tool_resolution = self.model_format.create_tool_resolution_strategy()
+        self.workflow_engine: Optional[WorkflowEngine] = None
         # pass a lambda that looks up the current _non_stream_chat_with_tools
         # attribute at call time so tests can monkeypatch it after
         # construction.
@@ -63,6 +66,19 @@ class ProxiedTGIService:
             logger_obj=self.logger,
             model_name=TGI_MODEL_NAME,
         )
+        try:
+            repo = WorkflowRepository()
+            db_path = os.environ.get("WORKFLOW_DB_PATH") or repo.base_path.joinpath(
+                "workflow_state.db"
+            )
+            self.workflow_engine = WorkflowEngine(
+                repository=repo,
+                state_store=WorkflowStateStore(db_path),
+                llm_client=self.llm_client,
+                prompt_service=self.prompt_service,
+            )
+        except Exception as exc:
+            self.logger.debug(f"[ProxiedTGI] Workflow engine not initialized: {exc}")
 
     async def one_off_chat_completion(
         self,
@@ -122,6 +138,14 @@ class ProxiedTGIService:
             span.set_attribute("chat.messages_count", len(request.messages))
             span.set_attribute("chat.has_tools", bool(request.tools))
             span.set_attribute("chat.tool_choice", bool(request.tool_choice))
+
+            if self.workflow_engine and request.use_workflow:
+                request.stream = True
+                workflow_result = await self.workflow_engine.start_or_resume_workflow(
+                    session, request, access_token, span
+                )
+                if workflow_result is not None:
+                    return workflow_result
 
             if request.tools:
                 span.set_attribute("chat.tools_count", len(request.tools))

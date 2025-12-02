@@ -381,11 +381,29 @@ async def a2a_chat_completion(
                 ).model_dump()
             )
 
+        params_dict = raw_body.get("params") if isinstance(raw_body, dict) else {}
+        use_workflow_param = None
+        workflow_execution_id = None
+        if isinstance(raw_body, dict):
+            use_workflow_param = raw_body.get("use_workflow")
+            workflow_execution_id = raw_body.get("workflow_execution_id")
+        if isinstance(params_dict, dict):
+            use_workflow_param = (
+                params_dict.get("use_workflow", use_workflow_param)
+                or use_workflow_param
+            )
+            workflow_execution_id = (
+                params_dict.get("workflow_execution_id", workflow_execution_id)
+                or workflow_execution_id
+            )
+
         # Map A2A prompt to an OpenAI chat request
         chat_request = ChatCompletionRequest(
             messages=[{"role": "user", "content": a2a_request.params.prompt}],
             model=model,
             stream=stream_requested,
+            use_workflow=use_workflow_param,
+            workflow_execution_id=workflow_execution_id,
         )
 
         x_inxm_mcp_session = session_id(

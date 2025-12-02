@@ -484,6 +484,88 @@ Set the following environment variables to expose OpenAI-compatible agent endpoi
 ### System prompts
 `SYSTEM_DEFINED_PROMPTS` can include prompts with `role: "system"` content. When no system message is supplied in the request, the bridge automatically prepends the configured system prompt, ensuring consistent agent behavior.
 
+### Workflow-aware routing
+You can let the bridge orchestrate multi-agent workflows. Configure:
+- `WORKFLOWS_PATH`: Directory containing workflow JSON files (one per file).
+- `WORKFLOW_DB_PATH` (optional): SQLite file for execution state (defaults to `<WORKFLOWS_PATH>/workflow_state.db`).
+- Existing agent settings (`TGI_URL`, `TGI_API_TOKEN`, `TGI_MODEL_NAME`) still apply for LLM calls.
+
+Each workflow file must include `flow_id`, `root_intent`, and an ordered `agents` list, for example:
+```json
+{
+  "flow_id": "what_can_i_do_today",
+  "root_intent": "SUGGEST_TODAY_ACTIVITIES",
+  "agents": [
+    {
+      "agent": "get_location",
+      "description": "Ask or infer the user's current city or coordinates."
+    },
+    {
+      "agent": "get_weather",
+      "description": "Fetch the weather forecast for a given location.",
+      "pass_through": true,
+      "depends_on": ["get_location"]
+    },
+    {
+      "agent": "get_outdoor",
+      "description": "Suggest outdoor activities.",
+      "depends_on": ["get_weather"],
+      "when": "context.weather_ok is True",
+      "reroute": {
+        "on": ["NO_GOOD_OUTDOOR_OPTIONS"],
+        "to": "get_restaurants"
+      }
+    },
+    {
+      "agent": "get_restaurants",
+      "description": "Indoor ideas if outdoor is not suitable.",
+      "depends_on": ["get_weather"]
+    }
+  ]
+}
+```
+
+Field reference:
+- `flow_id` (string): Unique id used by `use_workflow`.
+- `root_intent` (string): Intent label; used for auto-selection when `use_workflow: true`.
+- `agents` (array, ordered): Steps executed in order when their dependencies are met.
+  - `agent` (string): Name of the agent/prompt to run (also used to look up a custom prompt by name).
+  - `description` (string): Default prompt text if no custom prompt exists for this agent.
+  - `pass_through` (bool, default false): If true, the agent’s streamed content is shown to the user; otherwise kept in context only.
+  - `depends_on` (array[string]): Agent names that must complete before this agent runs.
+  - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
+  - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
+
+Prompt usage:
+- For each agent the router looks for a prompt named exactly like the `agent` value via the MCP prompt service. If found, that prompt content is used; otherwise it falls back to the agent’s `description`.
+- Prompts receive: the original user request, the workflow goal (`root_intent`), and the accumulated `context` JSON from prior agents.
+- Streaming is used for agent runs; `pass_through: true` agents stream their content to the user while still being stored in context.
+
+Rerouting and feedback:
+- Agents can emit special tags in their output:
+  - `<reroute>REASON</reroute>`: If the current agent has a matching `reroute.on`, execution jumps to that target agent. Otherwise the reason is stored on the agent context.
+  - `<user_feedback_needed>...optional text...</user_feedback_needed>`: The workflow pauses, persists state, and streams a “User feedback needed” event. When the user calls the same `workflow_execution_id` again with a new message, the engine resumes from that point.
+- To override a reroute inside a prompt, use `<no_reroute>` (stored but not forced; user can still choose to proceed by omitting reroute tags).
+
+Runtime behavior:
+- `use_workflow: "<flow_id>"` forces that workflow; `use_workflow: true` auto-selects by matching `root_intent` to the user request.
+- Optional `workflow_execution_id` resumes a prior execution (state is persisted in SQLite). Without it, a new execution id is generated.
+- The routing agent streams status events; agents marked `pass_through: true` stream their content to the user.
+
+#### Example: start or resume a workflow
+```bash
+curl -X POST http://localhost:8000/tgi/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "What can I do today in SF?"}],
+    "use_workflow": "what_can_i_do_today",
+    "workflow_execution_id": "my-session-123"
+  }'
+```
+
 ### Example call
 ```bash
 curl -X POST http://localhost:8000/tgi/v1/chat/completions \
@@ -860,4 +942,3 @@ The target app receives `X-Forwarded-Proto: https` to generate correct URLs.
 **Redirects pointing to internal URLs**
 - Set `PUBLIC_URL` to your public-facing domain
 - Verify the target app isn't hardcoding absolute URLs
-
