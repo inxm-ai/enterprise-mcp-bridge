@@ -356,7 +356,21 @@ class WorkflowEngine:
             logger.debug(
                 f"[WorkflowEngine] Using default prompt for {agent_def.agent}: {exc}"
             )
-        return prompt_text or f"You are the {agent_def.agent} agent."
+        return self._append_agent_guidelines(
+            prompt_text or f"You are the {agent_def.agent} agent."
+        )
+
+    def _append_agent_guidelines(self, prompt_text: str) -> str:
+        guidelines = (
+            "Workflow guidelines:\n"
+            "- If you need more info from the user, respond only with "
+            "<user_feedback_needed>Your question</user_feedback_needed>.\n"
+            "- If the request does not match the goal or cannot be solved by this workflow, respond only with "
+            "<reroute>reason</reroute>.\n"
+            "- Respect <no_reroute> if present in the latest user message; otherwise honor reroute signals.\n"
+            "- Keep responses concise; include only the necessary tag when using these markers."
+        )
+        return f"{prompt_text}\n\n{guidelines}"
 
     async def _resolve_tools(
         self, session: Any, agent_def: WorkflowAgentDef

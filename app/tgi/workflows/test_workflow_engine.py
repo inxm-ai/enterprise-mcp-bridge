@@ -49,10 +49,14 @@ class StubLLMClient:
         self.responses = responses
         self.calls: list[str] = []
         self.request_tools: list[list[str] | None] = []
+        self.system_prompts: list[str] = []
 
     def stream_completion(
         self, request: ChatCompletionRequest, access_token: str, span: Any
     ) -> AsyncGenerator[str, None]:
+        if request.messages and request.messages[0].role == MessageRole.SYSTEM:
+            self.system_prompts.append(request.messages[0].content or "")
+
         last_message = request.messages[-1].content or ""
         agent_marker = ""
         if "<agent:" in last_message:
@@ -403,6 +407,37 @@ async def test_agent_tools_scoping(tmp_path, monkeypatch):
     # First routing call has no tools, agent calls include scoped tools
     assert llm.request_tools[1] and set(llm.request_tools[1]) >= {"get_location"}
     assert llm.request_tools[2] == ["get_weather"]
+
+
+@pytest.mark.asyncio
+async def test_agent_prompt_includes_feedback_guidelines(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "guidelines_flow",
+        "root_intent": "TEST",
+        "agents": [{"agent": "get_location", "description": "Ask location"}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"get_location": "loc"})
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="where am I?")],
+        model="test-model",
+        stream=True,
+        use_workflow="guidelines_flow",
+        workflow_execution_id="exec-guidelines",
+    )
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+    # First system prompt is routing_agent; second is agent prompt with guidelines
+    assert any("user_feedback_needed" in prompt for prompt in llm.system_prompts)
 
 
 @pytest.mark.asyncio
