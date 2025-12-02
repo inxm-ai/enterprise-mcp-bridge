@@ -57,6 +57,8 @@ class WorkflowEngine:
         no_reroute = self._has_no_reroute(user_message)
 
         async def _runner():
+            # Always emit execution id first
+            yield f"data: <workflow_execution_id>{execution_id}</workflow_execution_id>\n\n"
             # Replay stored events for resume
             for event in state.events:
                 yield event
