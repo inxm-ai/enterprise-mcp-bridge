@@ -2,6 +2,7 @@ import json
 import os
 import pytest
 
+from app.session_manager import prompt_helper
 from fastapi import HTTPException
 
 from app.session_manager.prompt_helper import call_prompt
@@ -143,11 +144,6 @@ async def test_missing_file_raises(monkeypatch):
         assert res.messages[0].content.text == "Absolute World"
 
 
-import os
-import json
-import pytest
-from fastapi import HTTPException
-from app.session_manager import prompt_helper
 
 
 class DummyCall:

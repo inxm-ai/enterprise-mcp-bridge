@@ -263,12 +263,42 @@ class PromptService:
 
             try:
                 if "template" in prompt and prompt["template"]:
-                    content = prompt["template"]["content"]
-                    self.logger.debug(
-                        f"[PromptService] Retrieved prompt content: {len(content)} characters"
-                    )
-                    span.set_attribute("prompt.content_length", len(content))
-                    return content
+                    tpl = prompt["template"]
+                    content = ""
+
+                    # template may be a plain string
+                    if isinstance(tpl, str):
+                        content = tpl
+
+                    # template may be a dict with either `content` or `file`
+                    elif isinstance(tpl, dict):
+                        if tpl.get("content"):
+                            content = tpl.get("content") or ""
+                        elif tpl.get("file"):
+                            from pathlib import Path
+
+                            try:
+                                file_ref = tpl.get("file")
+                                # Resolve relative paths against the `app/` directory
+                                base_dir = Path(__file__).resolve().parents[2]
+                                p = Path(file_ref)
+                                if not p.is_absolute():
+                                    p = base_dir.joinpath(p).resolve()
+                                content = p.read_text(encoding="utf-8")
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"[PromptService] Unable to read template file '{tpl.get('file')}' - {e}"
+                                )
+                                content = ""
+
+                    # If we got any content, return it
+                    if content is not None and content != "":
+                        content = content
+                        self.logger.debug(
+                            f"[PromptService] Retrieved prompt content: {len(content)} characters"
+                        )
+                        span.set_attribute("prompt.content_length", len(content))
+                        return content
 
                 # Call the prompt to get its content
                 result = await session.call_prompt(prompt["name"], {})

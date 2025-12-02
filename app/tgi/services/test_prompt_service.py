@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from unittest.mock import Mock
 
 from app.tgi.services.prompt_service import PromptService
@@ -178,6 +179,81 @@ class TestPromptService:
         assert len(prepared) == 2
         assert prepared[0] == system_message
         assert prepared[1] == user_message
+
+
+class DummySession:
+    async def call_prompt(self, name, args):
+        # Should not be used when template/content/file is present
+        raise RuntimeError("call_prompt should not be invoked in these tests")
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_content_only_content(tmp_path):
+    svc = PromptService()
+    session = DummySession()
+
+    prompt = {"name": "only-content", "template": "This is direct content"}
+
+    content = await svc.get_prompt_content(session, prompt)
+
+    assert content == "This is direct content"
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_content_only_file(tmp_path):
+    svc = PromptService()
+    session = DummySession()
+
+    # create a file under the repository's `app/` directory since PromptService
+    # resolves relative paths against that directory
+    repo_app_dir = Path(__file__).resolve().parents[3] / "app"
+    repo_app_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = "test_prompt_file.txt"
+    file_path = repo_app_dir / filename
+    file_content = "Content from file prompt"
+    file_path.write_text(file_content, encoding="utf-8")
+
+    try:
+        prompt = {"name": "only-file", "template": {"file": filename}}
+
+        content = await svc.get_prompt_content(session, prompt)
+
+        assert content == file_content
+    finally:
+        try:
+            file_path.unlink()
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_content_both_content_and_file(tmp_path):
+    svc = PromptService()
+    session = DummySession()
+
+    # If both 'content' and 'file' are present, 'content' should be used
+    repo_app_dir = Path(__file__).resolve().parents[3] / "app"
+    repo_app_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = "test_prompt_file2.txt"
+    file_path = repo_app_dir / filename
+    file_path.write_text("File content should be ignored", encoding="utf-8")
+
+    try:
+        prompt = {
+            "name": "both",
+            "template": {"content": "Prefer this content", "file": filename},
+        }
+
+        content = await svc.get_prompt_content(session, prompt)
+
+        assert content == "Prefer this content"
+    finally:
+        try:
+            file_path.unlink()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

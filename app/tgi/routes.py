@@ -33,7 +33,6 @@ from app.tgi.protocols.chunk_reader import (
     chunk_reader,
     ChunkFormat,
     accumulate_content,
-    create_response_chunk,
 )
 from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME
 from app.oauth.token_dependency import get_access_token

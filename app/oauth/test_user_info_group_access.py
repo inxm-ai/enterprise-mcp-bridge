@@ -4,7 +4,7 @@ Pytest tests for group-based data access functionality
 
 import pytest
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from unittest.mock import patch
 from app.oauth.user_info import UserInfoExtractor, DataAccessManager
 
@@ -31,7 +31,7 @@ def create_test_token(user_id: str, groups: list, email: str = None):
         "groups": groups,
         "realm_access": {"roles": ["user"] + groups[:2]},  # Add some roles
         "iss": "http://test-keycloak/realms/test",
-        "exp": datetime.utcnow() + timedelta(hours=1),
+        "exp": datetime.now(UTC) + timedelta(hours=1),
     }
 
     # Create unsigned token for testing
@@ -201,7 +201,7 @@ def create_minimal_token(user_id: str = "testuser", **extra_payload):
     payload = {
         "sub": user_id,
         "iss": "http://test/realms/test",
-        "exp": datetime.utcnow() + timedelta(hours=1),
+        "exp": datetime.now(UTC) + timedelta(hours=1),
         **extra_payload,
     }
     return jwt.encode(payload, "secret", algorithm="HS256")
@@ -286,7 +286,7 @@ class TestEdgeCasesAndUnsetValues:
         """Test token without any user identifier fields"""
         payload = {
             "iss": "http://test/realms/test",
-            "exp": datetime.utcnow() + timedelta(hours=1),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
             # No sub, user_id, uid, preferred_username, or email
         }
         token = jwt.encode(payload, "secret", algorithm="HS256")
