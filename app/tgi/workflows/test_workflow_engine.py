@@ -47,10 +47,18 @@ class StubLLMClient:
         self, request: ChatCompletionRequest, access_token: str, span: Any
     ) -> AsyncGenerator[str, None]:
         last_message = request.messages[-1].content or ""
-        # Agent marker is appended by the workflow engine
         agent_marker = ""
         if "<agent:" in last_message:
             agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+        elif "ROUTING_INTENT_CHECK" in last_message:
+            agent_marker = "routing_intent"
+        elif "ROUTING_WHEN_CHECK" in last_message:
+            agent_marker = f"routing_when:{self._extract_value(last_message, 'agent')}"
+        elif "ROUTING_REROUTE_DECISION" in last_message:
+            agent_marker = (
+                f"routing_reroute:{self._extract_value(last_message, 'agent')}"
+            )
+
         response = self.responses.get(agent_marker, "")
         self.calls.append(agent_marker)
 
@@ -59,6 +67,12 @@ class StubLLMClient:
             yield "data: [DONE]\n\n"
 
         return _gen()
+
+    def _extract_value(self, text: str, key: str) -> str:
+        try:
+            return text.split(f"{key}=", 1)[1].split("\n", 1)[0].strip()
+        except Exception:
+            return ""
 
 
 def _write_workflow(tmpdir: Path, name: str, payload: dict[str, Any]) -> None:
@@ -142,7 +156,170 @@ async def test_engine_runs_agents_and_pass_through(tmp_path, monkeypatch):
     assert state.completed is True
     assert state.context["agents"]["get_location"]["content"] == "San Francisco"
     assert state.context["agents"]["get_weather"]["content"] == "Sunny"
-    assert llm.calls == ["get_location", "get_weather"]
+    assert llm.calls == ["routing_intent", "get_location", "get_weather"]
+
+
+@pytest.mark.asyncio
+async def test_routing_agent_blocks_intent_mismatch(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "what_can_i_do_today",
+        "root_intent": "SUGGEST_TODAY_ACTIVITIES",
+        "agents": [{"agent": "get_location", "description": "Ask location"}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"routing_intent": "<reroute>INTENT_MISMATCH</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Tell me a joke")],
+        model="test-model",
+        stream=True,
+        use_workflow="what_can_i_do_today",
+        workflow_execution_id="exec-intent",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    output = "".join([chunk async for chunk in stream])
+    assert "<reroute>INTENT_MISMATCH</reroute>" in output
+    state = engine.state_store.load_execution("exec-intent")
+    assert state.completed is True
+
+
+@pytest.mark.asyncio
+async def test_when_condition_via_routing_agent(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "conditional_flow",
+        "root_intent": "CHECK_WEATHER",
+        "agents": [
+            {
+                "agent": "get_weather",
+                "description": "Fetch weather",
+                "when": "context.should_check_weather",
+            },
+            {"agent": "finalize", "description": "Done"},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"routing_when:get_weather": "<run>false</run>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-when"
+    request = ChatCompletionRequest(
+        messages=[
+            Message(role=MessageRole.USER, content="Decide if we need weather check")
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="conditional_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+    state = engine.state_store.load_execution(exec_id)
+    # Agent skipped due to routing decision
+    assert state.context["agents"]["get_weather"]["skipped"] is True
+    assert state.context["agents"]["get_weather"]["reason"] == "condition_not_met"
+
+
+@pytest.mark.asyncio
+async def test_no_reroute_override(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "reroute_flow",
+        "root_intent": "ACTIVITY",
+        "agents": [
+            {
+                "agent": "get_outdoor",
+                "description": "Suggest outdoor",
+                "reroute": {"on": ["NO_GOOD_OUTDOOR_OPTIONS"], "to": "get_indoor"},
+            },
+            {"agent": "get_indoor", "description": "Indoor ideas"},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"get_outdoor": "<reroute>NO_GOOD_OUTDOOR_OPTIONS</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-noreroute"
+    request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content="Plan my day <no_reroute>",
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="reroute_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+    state = engine.state_store.load_execution(exec_id)
+    # Reroute was suppressed; current agent content recorded, but next agent still executed in order
+    assert (
+        state.context["agents"]["get_outdoor"]["reroute_reason"]
+        == "NO_GOOD_OUTDOOR_OPTIONS"
+    )
+    assert "get_indoor" in state.context["agents"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_reroute_decision(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "dynamic_reroute",
+        "root_intent": "ACTIVITY",
+        "agents": [
+            {"agent": "first", "description": "First agent"},
+            {"agent": "second", "description": "Second agent"},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first": "<reroute>GO_TO_SECOND</reroute>",
+            "routing_reroute:first": "<next_agent>second</next_agent>",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-dynamic"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start")],
+        model="test-model",
+        stream=True,
+        use_workflow="dynamic_reroute",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+    state = engine.state_store.load_execution(exec_id)
+    assert state.context["agents"]["first"]["reroute_reason"] == "GO_TO_SECOND"
+    assert "second" in state.context["agents"]
 
 
 @pytest.mark.asyncio

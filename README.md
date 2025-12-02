@@ -540,12 +540,14 @@ Prompt usage:
 - For each agent the router looks for a prompt named exactly like the `agent` value via the MCP prompt service. If found, that prompt content is used; otherwise it falls back to the agent’s `description`.
 - Prompts receive: the original user request, the workflow goal (`root_intent`), and the accumulated `context` JSON from prior agents.
 - Streaming is used for agent runs; `pass_through: true` agents stream their content to the user while still being stored in context.
+- A `routing_agent` prompt can be provided in the MCP prompt store; if absent, a built-in default is used. The routing agent checks overall intent fit, evaluates `when` conditions, and chooses reroutes.
 
 Rerouting and feedback:
 - Agents can emit special tags in their output:
   - `<reroute>REASON</reroute>`: If the current agent has a matching `reroute.on`, execution jumps to that target agent. Otherwise the reason is stored on the agent context.
   - `<user_feedback_needed>...optional text...</user_feedback_needed>`: The workflow pauses, persists state, and streams a “User feedback needed” event. When the user calls the same `workflow_execution_id` again with a new message, the engine resumes from that point.
 - To override a reroute inside a prompt, use `<no_reroute>` (stored but not forced; user can still choose to proceed by omitting reroute tags).
+- If the routing agent judges that the user request doesn’t match `root_intent`, it returns only `<reroute>reason</reroute>` and stops. For `when` conditions, the routing agent evaluates the condition against the current `context` (LLM-driven) and skips the agent if it returns `<run>false</run>`. When a reroute reason isn’t mapped, the routing agent can suggest the next agent via `<next_agent>name</next_agent>`. Users can force continuing without reroute by including `<no_reroute>` in their request.
 
 Runtime behavior:
 - `use_workflow: "<flow_id>"` forces that workflow; `use_workflow: true` auto-selects by matching `root_intent` to the user request.
