@@ -8,6 +8,7 @@ from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.prompt_service import PromptService
 from app.tgi.services.tool_service import ToolService
+from app.tgi.workflows.chunk_formatter import WorkflowChunkFormatter
 from app.tgi.workflows.models import (
     WorkflowAgentDef,
     WorkflowDefinition,
@@ -32,12 +33,14 @@ class WorkflowEngine:
         llm_client: Any,
         prompt_service: Optional[PromptService] = None,
         tool_service: Optional[ToolService] = None,
+        chunk_formatter: Optional[WorkflowChunkFormatter] = None,
     ):
         self.repository = repository
         self.state_store = state_store
         self.llm_client = llm_client
         self.prompt_service = prompt_service or PromptService()
         self.tool_service = tool_service or ToolService()
+        self.chunk_formatter = chunk_formatter or WorkflowChunkFormatter()
 
     async def start_or_resume_workflow(
         self,
@@ -53,12 +56,20 @@ class WorkflowEngine:
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
         state = self.state_store.get_or_create(execution_id, workflow_def.flow_id)
         state.context.setdefault("agents", {})
+        # Ensure we have a task id available for envelope formatting
+        self.chunk_formatter.ensure_task_id(state)
+        self.state_store.save_state(state)
         user_message = self._extract_user_message(request)
         no_reroute = self._has_no_reroute(user_message)
 
         async def _runner():
             # Always emit execution id first
-            yield f"data: <workflow_execution_id>{execution_id}</workflow_execution_id>\n\n"
+            yield self.chunk_formatter.format_chunk(
+                state=state,
+                content=f"<workflow_execution_id>{execution_id}</workflow_execution_id>",
+                status="submitted",
+                role="system",
+            )
             # Replay stored events for resume
             for event in state.events:
                 yield event
@@ -80,7 +91,9 @@ class WorkflowEngine:
                 reason = routing_check["reroute"]
                 state.completed = True
                 self.state_store.save_state(state)
-                yield f"data: <reroute>{reason}</reroute>\n\n"
+                yield self._record_event(
+                    state, f"<reroute>{reason}</reroute>", status="reroute"
+                )
                 yield "data: [DONE]\n\n"
                 return
 
@@ -88,12 +101,19 @@ class WorkflowEngine:
             if state.awaiting_feedback:
                 if user_message_local:
                     self._merge_feedback(state, user_message_local)
+                    # New feedback should start a fresh task id thread
+                    self.chunk_formatter.ensure_task_id(state, reset=True)
+                    self.state_store.save_state(state)
                     yield self._record_event(
-                        state, f"Received feedback: {user_message_local}"
+                        state,
+                        f"Received feedback: {user_message_local}",
+                        status="feedback_received",
                     )
                 else:
                     yield self._record_event(
-                        state, "Workflow paused awaiting user feedback."
+                        state,
+                        "Workflow paused awaiting user feedback.",
+                        status="waiting_for_feedback",
                     )
                     yield "data: [DONE]\n\n"
                     return
@@ -101,7 +121,9 @@ class WorkflowEngine:
             # Add a start marker once
             if not state.events:
                 yield self._record_event(
-                    state, f"Routing workflow {workflow_def.flow_id}"
+                    state,
+                    f"Routing workflow {workflow_def.flow_id}",
+                    status="in_progress",
                 )
 
             async for event in self._run_agents(
@@ -183,7 +205,9 @@ class WorkflowEngine:
                     completed_agents.add(agent_def.agent)
                     progress_made = True
                     yield self._record_event(
-                        state, f"Skipping {agent_def.agent} (condition not met)"
+                        state,
+                        f"Skipping {agent_def.agent} (condition not met)",
+                        status="skipped",
                     )
                     continue
 
@@ -214,7 +238,9 @@ class WorkflowEngine:
                         forced_next = result.get("target")
                         if forced_next:
                             yield self._record_event(
-                                state, f"Rerouting to {forced_next}"
+                                state,
+                                f"Rerouting to {forced_next}",
+                                status="reroute",
                             )
                     else:
                         forced_next = None
@@ -234,7 +260,9 @@ class WorkflowEngine:
                     state, f"Result: {last_visible_output.strip()}"
                 )
             state.completed = True
-            yield self._record_event(state, "Workflow complete")
+            yield self._record_event(
+                state, "Workflow complete", status="completed", finish_reason="stop"
+            )
             self.state_store.save_state(state)
 
     async def _execute_agent(
@@ -301,7 +329,11 @@ class WorkflowEngine:
         if feedback_needed:
             state.awaiting_feedback = True
             self.state_store.save_state(state)
-            yield self._record_event(state, "User feedback needed before continuing.")
+            yield self._record_event(
+                state,
+                "User feedback needed before continuing.",
+                status="waiting_for_feedback",
+            )
             yield {"status": "feedback", "content": cleaned_content}
             return
         if reroute_reason and not no_reroute:
@@ -445,8 +477,21 @@ class WorkflowEngine:
         stripped = re.sub(r"<(/?)(reroute|user_feedback_needed)>", "", text or "")
         return re.sub(r"<no_reroute>", "", stripped, flags=re.IGNORECASE)
 
-    def _record_event(self, state: WorkflowExecutionState, text: str) -> str:
-        event = f"data: {text}\n\n"
+    def _record_event(
+        self,
+        state: WorkflowExecutionState,
+        text: str,
+        status: str = "in_progress",
+        role: str = "assistant",
+        finish_reason: Optional[str] = None,
+    ) -> str:
+        event = self.chunk_formatter.format_chunk(
+            state=state,
+            content=text,
+            status=status,
+            role=role,
+            finish_reason=finish_reason,
+        )
         state.events.append(event)
         self.state_store.save_state(state)
         return event

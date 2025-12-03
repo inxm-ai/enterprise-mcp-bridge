@@ -580,6 +580,7 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
     state = store.load_execution("exec-feedback")
     assert state.awaiting_feedback is True
     assert state.completed is False
+    first_task_id = state.context.get("task_id")
 
     resume_request = ChatCompletionRequest(
         messages=[Message(role=MessageRole.USER, content="I prefer indoors")],
@@ -607,3 +608,4 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
     assert final_state.context["agents"]["ask_preference"]["content"].endswith(
         "prefer indoors"
     )
+    assert final_state.context.get("task_id") != first_task_id

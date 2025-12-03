@@ -298,7 +298,10 @@ async def test_as_json_to_a2a():
     assert len(chunks) == 3
 
     # Verify structure
-    chunk_data = json.loads(chunks[0])
+    first_chunk = chunks[0]
+    if first_chunk.startswith("data: "):
+        first_chunk = first_chunk.split("data: ", 1)[1]
+    chunk_data = json.loads(first_chunk)
     assert chunk_data["jsonrpc"] == "2.0"
     assert chunk_data["id"] == "test-123"
     assert chunk_data["result"]["completion"] == "Hello"

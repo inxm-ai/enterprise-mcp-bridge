@@ -25,6 +25,7 @@ Usage:
 
 import json
 import logging
+from datetime import datetime, timezone
 from enum import Enum
 import time
 from typing import AsyncGenerator, Optional, Any, Dict, Set
@@ -519,13 +520,48 @@ class ChunkReader:
         Returns:
             A2A formatted JSON string with newline
         """
-        a2a_dict = {
-            "jsonrpc": "2.0",
-            "result": {"completion": parsed.content or ""},
-            "id": request_id,
-        }
+        parsed_payload = parsed.parsed if isinstance(parsed.parsed, dict) else {}
+        agentic = (
+            parsed_payload.get("agentic") if isinstance(parsed_payload, dict) else {}
+        )
+        content = parsed.content or ""
 
-        return f"{json.dumps(a2a_dict)}\n"
+        if agentic:
+            context_id = (
+                agentic.get("context_id")
+                or agentic.get("workflow_id")
+                or parsed_payload.get("id")
+            )
+            task_id = agentic.get("task_id") or parsed_payload.get("id") or request_id
+            history_parts = agentic.get("parts") or [{"kind": "text", "text": content}]
+            status_state = agentic.get("status") or "in_progress"
+            result = {
+                "id": task_id,
+                "contextId": context_id,
+                "status": {
+                    "state": status_state,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                "history": [
+                    {
+                        "role": agentic.get("role") or "assistant",
+                        "parts": history_parts,
+                        "messageId": task_id,
+                        "taskId": task_id,
+                        "contextId": context_id,
+                    }
+                ],
+                "kind": agentic.get("kind") or "task",
+                "metadata": agentic.get("metadata") or {},
+            }
+            if agentic.get("error"):
+                result["error"] = agentic["error"]
+        else:
+            result = {"completion": content}
+
+        a2a_dict = {"jsonrpc": "2.0", "result": result, "id": request_id}
+
+        return f"data: {json.dumps(a2a_dict)}\n\n"
 
     def _to_tgi_format(self, parsed: ParsedChunk) -> str:
         """
