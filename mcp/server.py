@@ -1,4 +1,5 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
+import time
 
 # Create an MCP server
 mcp = FastMCP("mcp-EXAMPLE-server")
@@ -17,6 +18,19 @@ def add(a: int, b: int) -> int:
 def hello() -> str:
     """Write hello"""
     return "Hello"
+
+
+@mcp.tool()
+async def report_progress_and_logs(ctx: Context):
+    """Report progress and logs"""
+    for i in range(5):
+        await ctx.report_progress((i + 1) * 20)
+        await ctx.log(
+            "info",
+            f"Just wanna say that I'm at {(i + 1) * 20}% in case you didn't know.",
+        )
+        time.sleep(0.5)
+    return "Done"
 
 
 call_count = 0

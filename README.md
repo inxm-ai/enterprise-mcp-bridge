@@ -273,6 +273,7 @@ Be aware that allowing absolute paths means the runtime will attempt to read any
   - `GET /tools` – list available tools.
   - `GET /tools/{tool_name}` – retrieve a tool's details.
   - `POST /tools/{tool_name}` – invoke a tool (stateless unless a session header is provided).
+  - `POST /tools/{tool_name}/stream` – invoke a tool with SSE progress streaming (see [Progress Streaming](#progress-streaming-sse)).
   - `GET /prompts` – list available prompts (including system-defined).
   - `GET /resource` – list available resources.
   - `GET /resource/{resource_id}` – access resources. If the resource is html/text, it is rendered directly.
@@ -281,6 +282,176 @@ Be aware that allowing absolute paths means the runtime will attempt to read any
   - `GET /app/_generated/{scope}/{ui_id}/{name}` – retrieve a generated application (as metadata, page, or snippet).
   - `POST /app/_generated/{scope}/{ui_id}/{name}` – update an existing generated application.
   - `GET /.well-known/agent.json` – discover agent metadata when agent mode is enabled.
+
+## Progress Streaming (SSE)
+
+The bridge supports real-time progress streaming for long-running tool executions via Server-Sent Events (SSE). This is useful for tools that report progress updates during execution.
+
+### When to use
+
+Use the streaming endpoint when:
+- The tool execution takes a significant amount of time
+- The tool reports progress updates (using `ctx.report_progress()` in FastMCP)
+- You want to provide real-time feedback to users during execution
+
+### Endpoint
+
+`POST /tools/{tool_name}/stream`
+
+This endpoint accepts the same parameters as the regular `POST /tools/{tool_name}` endpoint but returns a stream of SSE events instead of waiting for the complete result.
+
+### Event Types
+
+The stream emits the following event types:
+
+| Event Type | Description | Fields |
+|------------|-------------|--------|
+| `progress` | Progress update from the tool | `progress` (float), `total` (float, optional), `message` (string, optional) |
+| `result` | Final tool execution result | `data` (object with `content`, `isError`, `structuredContent`) |
+| `error` | Error during execution | `data.message` (string), `data.details` (optional) |
+
+### Example Usage
+
+**Server-side tool (FastMCP)**
+```python
+from mcp.server.fastmcp import FastMCP, Context
+
+mcp = FastMCP("my-server")
+
+@mcp.tool()
+async def long_running_task(ctx: Context, items: list[str]):
+    """Process items with progress reporting"""
+    total = len(items)
+    results = []
+    
+    for i, item in enumerate(items):
+        # Report progress to the client
+        await ctx.report_progress(
+            progress=(i + 1) * 100 / total,
+            total=100.0,
+            message=f"Processing {item}..."
+        )
+        
+        # Do actual work
+        result = await process_item(item)
+        results.append(result)
+    
+    return {"processed": results}
+```
+
+**Client-side (curl)**
+```bash
+curl -N -X POST "http://localhost:8000/tools/long_running_task/stream" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"items": ["a", "b", "c"]}'
+```
+
+**Client-side (JavaScript)**
+```javascript
+// Using fetch with streaming
+async function callToolWithProgress(toolName, args, onProgress) {
+  const response = await fetch(`/tools/${toolName}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args)
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop(); // Keep incomplete event in buffer
+    
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const event = JSON.parse(line.slice(6));
+        
+        if (event.type === 'progress') {
+          onProgress(event.progress, event.total, event.message);
+        } else if (event.type === 'result') {
+          return event.data;
+        } else if (event.type === 'error') {
+          throw new Error(event.data.message);
+        }
+      }
+    }
+  }
+}
+
+// Usage
+const result = await callToolWithProgress(
+  'long_running_task',
+  { items: ['a', 'b', 'c'] },
+  (progress, total, message) => {
+    console.log(`Progress: ${progress}/${total} - ${message}`);
+    // Update progress bar, etc.
+  }
+);
+```
+
+**Client-side (Python)**
+```python
+import httpx
+import json
+
+async def call_tool_with_progress(tool_name: str, args: dict):
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            'POST',
+            f'http://localhost:8000/tools/{tool_name}/stream',
+            json=args,
+            headers={'Accept': 'text/event-stream'}
+        ) as response:
+            async for line in response.aiter_lines():
+                if line.startswith('data: '):
+                    event = json.loads(line[6:])
+                    
+                    if event['type'] == 'progress':
+                        print(f"Progress: {event['progress']}% - {event.get('message', '')}")
+                    elif event['type'] == 'result':
+                        return event['data']
+                    elif event['type'] == 'error':
+                        raise Exception(event['data']['message'])
+
+# Usage
+import asyncio
+result = asyncio.run(call_tool_with_progress('long_running_task', {'items': ['a', 'b', 'c']}))
+```
+
+### Response Format
+
+Each SSE event is a JSON object prefixed with `data: ` and followed by two newlines:
+
+```
+data: {"type": "progress", "progress": 33.33, "total": 100, "message": "Processing item 1..."}
+
+data: {"type": "progress", "progress": 66.67, "total": 100, "message": "Processing item 2..."}
+
+data: {"type": "progress", "progress": 100, "total": 100, "message": "Processing item 3..."}
+
+data: {"type": "result", "data": {"isError": false, "content": [...], "structuredContent": {"processed": [...]}}}
+
+```
+
+### Headers
+
+The streaming endpoint sets appropriate headers for SSE:
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache`
+- `Connection: keep-alive`
+- `X-Accel-Buffering: no` (disables nginx buffering)
+
+### Limitations
+
+- **Sessionful mode**: Progress streaming works best with sessionless tool calls. For sessionful sessions, the progress callbacks cannot currently be forwarded through the session task architecture, so the endpoint falls back to a regular tool call without progress updates.
+- **Log messages**: MCP log notifications (`ctx.log()`) are handled at the session level and are not currently streamed through the SSE endpoint. They appear in server logs instead.
 
 ## OAuth Token Exchange & Extension
 1. Set `OAUTH_ENV` to the environment variable that should receive the downstream provider token.

@@ -400,6 +400,49 @@ async def mcp_session_context(
                         result = await session.call_tool(tool_name, decorated_args)
                         return RunToolsResult(result)
 
+                    async def call_tool_with_progress(
+                        self,
+                        tool_name: str,
+                        args: Optional[Dict],
+                        access_token_inner: Optional[str],
+                        progress_callback: Optional[Callable] = None,
+                        log_callback: Optional[Callable] = None,
+                    ):
+                        """
+                        Call a tool with progress and log callbacks for streaming updates.
+
+                        Args:
+                            tool_name: Name of the tool to call
+                            args: Arguments to pass to the tool
+                            access_token_inner: OAuth access token
+                            progress_callback: Async callback for progress updates.
+                                              Signature: (progress: float, total: float | None, message: str | None) -> None
+                            log_callback: Async callback for log messages.
+                                         Signature: (level: str, data: Any, logger_name: str | None) -> None
+                                         Note: Log callbacks are handled via session-level notifications,
+                                         so this parameter is currently informational only.
+
+                        Returns:
+                            RunToolsResult with the tool execution result
+                        """
+                        tools = await session.list_tools()
+                        decorated_args = await decorate_args_with_oauth_token(
+                            tools, tool_name, args, access_token_inner
+                        )
+                        # Inject header-mapped inputs if available
+                        decorated_args = inject_headers_into_args(
+                            tools, tool_name, decorated_args, incoming_headers
+                        )
+
+                        # MCP SDK's call_tool only supports progress_callback
+                        # Log messages are handled via session-level logging_callback
+                        result = await session.call_tool(
+                            tool_name,
+                            decorated_args,
+                            progress_callback=progress_callback,
+                        )
+                        return RunToolsResult(result)
+
                     async def call_prompt(
                         self,
                         prompt_name: str,
@@ -453,6 +496,41 @@ async def mcp_session_context(
                 {"action": "run_tool", "tool_name": tool_name, "args": decorated_args}
             )
             return RunToolsResult(result)
+
+        async def call_tool_with_progress(
+            self,
+            tool_name: str,
+            args: Optional[Dict],
+            access_token_inner: Optional[str],
+            progress_callback: Optional[Callable] = None,
+            log_callback: Optional[Callable] = None,
+        ):
+            """
+            Call a tool with progress and log callbacks for streaming updates.
+
+            Note: For sessionful (persistent) sessions, progress streaming is not
+            currently supported as the session task runs in a separate context.
+            This method falls back to a regular tool call without progress updates.
+
+            Args:
+                tool_name: Name of the tool to call
+                args: Arguments to pass to the tool
+                access_token_inner: OAuth access token
+                progress_callback: Async callback for progress updates (not used in sessionful mode)
+                log_callback: Async callback for log messages (not used in sessionful mode)
+
+            Returns:
+                RunToolsResult with the tool execution result
+            """
+            # For sessionful mode, we cannot easily stream progress from the
+            # background task. Fall back to regular call_tool.
+            # TODO: Implement progress streaming for sessionful mode via a
+            # separate notification channel.
+            logger.warning(
+                "[TaskDelegate] call_tool_with_progress called on sessionful delegate; "
+                "progress callbacks are not supported, falling back to regular call"
+            )
+            return await self.call_tool(tool_name, args, access_token_inner)
 
         async def list_prompts(self):
             async def request():

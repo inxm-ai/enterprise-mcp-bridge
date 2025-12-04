@@ -35,6 +35,7 @@ from .tgi.routes import router as tgi_router
 from .tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 from .app_facade.route import router as app_facade_router
 from app.well_known.agent import router as agent_router
+from app.sse.routes import router as sse_router
 
 router = APIRouter()
 sessions = session_manager()
@@ -617,3 +618,6 @@ router.include_router(agent_router)
 
 # Include app proxy router
 router.include_router(app_facade_router)
+
+# Include SSE streaming router for progress updates
+router.include_router(sse_router)
