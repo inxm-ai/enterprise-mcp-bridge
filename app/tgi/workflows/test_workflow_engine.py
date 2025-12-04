@@ -2,10 +2,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
+from app.tgi.services.tool_service import ToolService
 from app.tgi.workflows.engine import WorkflowEngine
 from app.tgi.workflows.repository import WorkflowRepository
 from app.tgi.workflows.state import WorkflowStateStore
@@ -353,6 +355,56 @@ async def test_dynamic_reroute_decision(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_reroute_config(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "list_reroute_flow",
+        "root_intent": "ACTIVITY",
+        "agents": [
+            {
+                "agent": "detect",
+                "description": "Detect intent",
+                "reroute": [
+                    {"on": ["GO_TO_NEXT"], "to": "runner"},
+                    {"on": ["IGNORE"], "to": "noop"},
+                ],
+            },
+            {"agent": "runner", "description": "Run task"},
+            {
+                "agent": "noop",
+                "description": "Should not run",
+                "when": "context.get('agents', {}).get('detect', {}).get('reroute_reason') == 'IGNORE'",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"detect": "<reroute>GO_TO_NEXT</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-list-reroute"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="list_reroute_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+    state = engine.state_store.load_execution(exec_id)
+    # reroute reason captured and the matching target agent executed; unmatched agent skipped
+    assert state.context["agents"]["detect"]["reroute_reason"] == "GO_TO_NEXT"
+    assert "runner" in state.context["agents"]
+    assert state.context["agents"]["noop"]["skipped"] is True
+    assert state.context["agents"]["noop"]["reason"] == "condition_not_met"
+
+
+@pytest.mark.asyncio
 async def test_agent_tools_scoping(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
@@ -414,6 +466,132 @@ async def test_agent_tools_scoping(tmp_path, monkeypatch):
     # First routing call has no tools, agent calls include scoped tools
     assert llm.request_tools[1] and set(llm.request_tools[1]) >= {"get_location"}
     assert llm.request_tools[2] == ["get_weather"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tools_fallback_to_all_when_none_match(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "fallback_tools_flow",
+        "root_intent": "TOOLS_TEST",
+        "agents": [
+            {
+                "agent": "detect",
+                "description": "Should use tools even if names do not match",
+                "tools": ["missing_tool"],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "available_tool",
+                "description": "Some tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    session = StubSession(tools=tools)
+    llm = StubLLMClient({"detect": ""})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-fallback-tools"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="fallback_tools_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    # Even though the agent requested a missing tool, engine should pass all tools
+    assert llm.request_tools[0] == ["available_tool"]
+
+
+@pytest.mark.asyncio
+async def test_agent_executes_tool_calls(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "tool_call_flow",
+        "root_intent": "TOOLS_TEST",
+        "agents": [
+            {
+                "agent": "detect",
+                "description": "Detect intent",
+                "tools": ["search_plan"],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_plan",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class ToolCallingLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({})
+            self.call_count = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.call_count += 1
+
+            async def _gen_first():
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search_plan","arguments":"{}"}}]},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            async def _gen_second():
+                yield 'data: {"choices":[{"delta":{"content":"done"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return _gen_first() if self.call_count == 1 else _gen_second()
+
+    llm = ToolCallingLLM()
+    tool_service = ToolService()
+    tool_service.execute_tool_calls = AsyncMock(return_value=([], True))
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    exec_id = "exec-tool-call"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="tool_call_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    tool_service.execute_tool_calls.assert_called_once()
+    assert llm.call_count == 2
 
 
 @pytest.mark.asyncio

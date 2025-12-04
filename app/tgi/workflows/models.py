@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -10,7 +10,7 @@ class WorkflowAgentDef:
     pass_through: bool = False
     depends_on: List[str] = field(default_factory=list)
     when: Optional[str] = None
-    reroute: Optional[Dict[str, Any]] = None
+    reroute: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     tools: Optional[List[str]] = None
 
 

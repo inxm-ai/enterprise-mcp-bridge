@@ -86,7 +86,11 @@ class ClaudeModelFormat(BaseModelFormat):
         if not request.tools:
             return
 
-        tools = [self._format_tool(tool) for tool in request.tools if tool.function]
+        tools = [
+            self._format_tool(tool)
+            for tool in request.tools
+            if self._has_function(tool)
+        ]
         if not tools:
             return
 
@@ -141,8 +145,31 @@ class ClaudeModelFormat(BaseModelFormat):
 
     @staticmethod
     def _format_tool(tool) -> str:
-        parameters = tool.function.parameters or {}
-        return f"<{tool.function.name}>{json.dumps(parameters, ensure_ascii=False, separators=(',', ':'))}</{tool.function.name}>"
+        func = getattr(tool, "function", None)
+        if func:
+            name = getattr(func, "name", None)
+            parameters = getattr(func, "parameters", {}) or {}
+        elif isinstance(tool, dict):
+            fn = (
+                tool.get("function", {})
+                if isinstance(tool.get("function"), dict)
+                else {}
+            )
+            name = fn.get("name")
+            parameters = fn.get("parameters", {}) or {}
+        else:
+            name = getattr(tool, "name", None)
+            parameters = getattr(tool, "parameters", {}) or {}
+        return f"<{name}>{json.dumps(parameters, ensure_ascii=False, separators=(',', ':'))}</{name}>"
+
+    @staticmethod
+    def _has_function(tool: Any) -> bool:
+        if hasattr(tool, "function"):
+            return True
+        if isinstance(tool, dict):
+            fn = tool.get("function")
+            return isinstance(fn, dict) and bool(fn.get("name"))
+        return False
 
 
 def _guess_by_model_name(model_name: Optional[str]) -> Optional[str]:
