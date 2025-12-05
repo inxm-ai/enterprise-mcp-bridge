@@ -5,13 +5,53 @@ from typing import Any, Dict, List, Optional, Union
 
 @dataclass
 class WorkflowAgentDef:
+    """
+    Definition of an agent within a workflow.
+
+    Attributes:
+        agent: Unique identifier for the agent within the workflow.
+        description: Human-readable description of what the agent does.
+        pass_through: Controls response visibility. Can be:
+            - False: Don't show intermediate responses (default)
+            - True: Show all responses
+            - str: Show responses with this specific guideline/instruction
+        depends_on: List of agent names that must complete before this agent runs.
+        when: Optional condition expression for whether this agent should run.
+        reroute: Configuration for rerouting to other agents based on conditions.
+        tools: Tool configurations. Can be:
+            - None: Use all available tools
+            - []: Disable tools
+            - List of str: Use only these tool names
+            - List of dict: Advanced tool configs with settings/args, e.g.:
+              {"plan": {"settings": {"streaming": true}, "args": {"x": "agent.field"}}}
+        returns: List of field names to extract from tool results and store in context.
+    """
+
     agent: str
     description: str
-    pass_through: bool = False
+    pass_through: Union[bool, str] = False
     depends_on: List[str] = field(default_factory=list)
     when: Optional[str] = None
     reroute: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
-    tools: Optional[List[str]] = None
+    tools: Optional[List[Union[str, Dict[str, Any]]]] = None
+    returns: Optional[List[str]] = None
+
+    @property
+    def should_pass_through(self) -> bool:
+        """Whether responses should be passed through to the user."""
+        return bool(self.pass_through)
+
+    @property
+    def pass_through_guideline(self) -> Optional[str]:
+        """
+        Get the pass-through guideline if specified as a string.
+
+        Returns:
+            The guideline string if pass_through is a string, None otherwise.
+        """
+        if isinstance(self.pass_through, str):
+            return self.pass_through
+        return None
 
 
 @dataclass

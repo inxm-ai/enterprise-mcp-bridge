@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import inspect
 import logging
 from contextlib import asynccontextmanager
 from abc import ABC, abstractmethod
@@ -204,6 +205,46 @@ class MCPLocalSessionTask(MCPSessionBase):
                         )
                         try:
                             result = await session.get_prompt(prompt_name, args)
+                            await self.response_queue.put(result)
+                        except Exception as e:
+                            log_exception_with_details(
+                                logger, "[MCPLocalSessionTask]", e
+                            )
+                            await self.response_queue.put({"error": str(e)})
+                    elif (
+                        isinstance(req, dict)
+                        and req.get("action") == "run_tool_with_progress"
+                    ):
+                        tool_name = req["tool_name"]
+                        args = req.get("args", {})
+                        progress_callback = req.get("progress_callback")
+                        log_callback = req.get("log_callback")
+                        logger.info(
+                            f"[MCPLocalSessionTask] Running tool with progress: {tool_name} with args: {args}"
+                        )
+                        try:
+                            call_fn = getattr(
+                                session, "call_tool_with_progress", None
+                            ) or getattr(session, "call_tool", None)
+                            if not call_fn:
+                                raise RuntimeError(
+                                    "MCP session missing call_tool implementation"
+                                )
+
+                            call_kwargs: dict[str, object] = {}
+                            try:
+                                sig = inspect.signature(call_fn)
+                                if "progress_callback" in sig.parameters:
+                                    call_kwargs["progress_callback"] = progress_callback
+                                if log_callback and "log_callback" in sig.parameters:
+                                    call_kwargs["log_callback"] = log_callback
+                            except Exception:
+                                if progress_callback:
+                                    call_kwargs["progress_callback"] = progress_callback
+                                if log_callback:
+                                    call_kwargs["log_callback"] = log_callback
+
+                            result = await call_fn(tool_name, args, **call_kwargs)
                             await self.response_queue.put(result)
                         except Exception as e:
                             log_exception_with_details(

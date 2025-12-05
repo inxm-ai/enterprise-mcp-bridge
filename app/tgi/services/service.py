@@ -328,13 +328,23 @@ class TGIService:
 
                 # Format successful result
                 content = ""
-                if hasattr(result, "structuredContent") and result.structuredContent:
-                    content = json.dumps(result.structuredContent)
-                elif hasattr(result, "content") and result.content:
-                    if len(result.content) == 1 and hasattr(
-                        result.content[0], "structuredContent"
+                structured = getattr(result, "structuredContent", None)
+                if structured is None and isinstance(result, dict):
+                    structured = result.get("structuredContent")
+
+                raw_content = getattr(result, "content", None)
+                if raw_content is None and isinstance(result, dict):
+                    raw_content = result.get("content")
+
+                if structured:
+                    content = json.dumps(structured)
+                elif raw_content:
+                    if (
+                        isinstance(raw_content, list)
+                        and len(raw_content) == 1
+                        and hasattr(raw_content[0], "structuredContent")
                     ):
-                        content = json.dumps(result.content[0].structuredContent)
+                        content = json.dumps(raw_content[0].structuredContent)
                     else:
                         content = json.dumps(
                             [
@@ -345,7 +355,7 @@ class TGIService:
                                         else str(item)
                                     )
                                 }
-                                for item in result.content
+                                for item in raw_content
                             ]
                         )
                 else:

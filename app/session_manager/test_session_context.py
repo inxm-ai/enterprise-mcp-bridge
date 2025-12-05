@@ -155,3 +155,163 @@ async def test_cached_mapped_tools_skips_when_locked(monkeypatch, tmp_path):
     result_after_lock = await sc._cached_mapped_tools(fetch)
     assert cache_file.exists()
     assert result_after_lock[0]["name"] == "toolB"
+
+
+@pytest.mark.asyncio
+async def test_sessionless_progress_and_logs_forwarded(monkeypatch):
+    progress_calls: list[tuple[float, float | None, str | None]] = []
+    log_calls: list[tuple[str, str, str | None]] = []
+
+    called = {"with_progress": False}
+
+    class _AsyncMCPContext:
+        async def __aenter__(self):
+            class _Session:
+                async def list_tools(self):
+                    return types.SimpleNamespace(tools=[])
+
+                async def call_tool_with_progress(
+                    self,
+                    name: str,
+                    args,
+                    progress_callback=None,
+                    log_callback=None,
+                ):
+                    called["with_progress"] = True
+                    if progress_callback:
+                        await progress_callback(1.0, 2.0, "progress")
+                    if log_callback:
+                        await log_callback("info", "log message", "test_logger")
+                    return types.SimpleNamespace(
+                        content=[types.SimpleNamespace(text="ok")],
+                        structuredContent={"called": True},
+                    )
+
+                async def call_tool(self, *_args, **_kwargs):
+                    raise AssertionError(
+                        "call_tool should not be used when progress API exists"
+                    )
+
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sc, "mcp_session", lambda *a, **k: _AsyncMCPContext())
+    monkeypatch.setattr(
+        sc,
+        "decorate_args_with_oauth_token",
+        AsyncMock(side_effect=lambda *a, **k: a[2]),
+    )
+    monkeypatch.setattr(
+        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+    )
+
+    async def _progress_cb(progress, total=None, message=None):
+        progress_calls.append((progress, total, message))
+
+    async def _log_cb(level, data, logger_name=None):
+        log_calls.append((level, data, logger_name))
+
+    async with sc.mcp_session_context(
+        sessions=None,
+        x_inxm_mcp_session=None,
+        access_token=None,
+        group=None,
+        incoming_headers=None,
+    ) as delegate:
+        await delegate.call_tool_with_progress(
+            "demo_tool",
+            {"a": 1},
+            None,
+            progress_callback=_progress_cb,
+            log_callback=_log_cb,
+        )
+
+    assert progress_calls == [(1.0, 2.0, "progress")]
+    assert log_calls == [("info", "log message", "test_logger")]
+    # Ensure call_tool_with_progress path was used
+    assert called["with_progress"] is True
+
+
+@pytest.mark.asyncio
+async def test_sessionful_progress_and_logs_forwarded(monkeypatch):
+    progress_calls: list[tuple[float, float | None, str | None]] = []
+    log_calls: list[tuple[str, str, str | None]] = []
+
+    class _FakeTask:
+        def __init__(self):
+            self.requests = []
+
+        async def request(self, req):
+            self.requests.append(req)
+            if req == "list_tools":
+                return []
+            if isinstance(req, dict) and req.get("action") == "run_tool_with_progress":
+                if req.get("progress_callback"):
+                    await req["progress_callback"](0.5, None, "halfway")
+                if req.get("log_callback"):
+                    await req["log_callback"]("info", "log data", "test_logger")
+                return types.SimpleNamespace(
+                    content=[types.SimpleNamespace(text="ok")],
+                    structuredContent={"called": True},
+                )
+            if isinstance(req, dict) and req.get("action") == "run_tool":
+                return types.SimpleNamespace(
+                    content=[types.SimpleNamespace(text="fallback")],
+                    structuredContent={},
+                )
+            raise AssertionError(f"Unexpected request: {req}")
+
+    class _FakeManager:
+        def __init__(self, task):
+            self._task = task
+
+        def get(self, session_id):
+            return self._task
+
+        def set(self, session_id, session):
+            self._task = session
+
+        def pop(self, session_id, default=None):
+            return default
+
+    mcp_task = _FakeTask()
+    sessions = _FakeManager(mcp_task)
+
+    monkeypatch.setattr(
+        sc,
+        "decorate_args_with_oauth_token",
+        AsyncMock(side_effect=lambda *a, **k: a[2]),
+    )
+    monkeypatch.setattr(
+        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+    )
+
+    async def _progress_cb(progress, total=None, message=None):
+        progress_calls.append((progress, total, message))
+
+    async def _log_cb(level, data, logger_name=None):
+        log_calls.append((level, data, logger_name))
+
+    async with sc.mcp_session_context(
+        sessions=sessions,
+        x_inxm_mcp_session="sess-1",
+        access_token=None,
+        group=None,
+        incoming_headers=None,
+    ) as delegate:
+        await delegate.call_tool_with_progress(
+            "demo_tool",
+            {"b": 2},
+            None,
+            progress_callback=_progress_cb,
+            log_callback=_log_cb,
+        )
+
+    assert any(
+        isinstance(r, dict) and r.get("action") == "run_tool_with_progress"
+        for r in mcp_task.requests
+    )
+    assert progress_calls == [(0.5, None, "halfway")]
+    assert log_calls == [("info", "log data", "test_logger")]

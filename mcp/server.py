@@ -24,7 +24,7 @@ def hello() -> str:
 async def report_progress_and_logs(ctx: Context):
     """Report progress and logs"""
     for i in range(5):
-        await ctx.report_progress((i + 1) * 20)
+        await ctx.report_progress((i + 1) * 20, total=5, message="did a thing")
         await ctx.log(
             "info",
             f"Just wanna say that I'm at {(i + 1) * 20}% in case you didn't know.",

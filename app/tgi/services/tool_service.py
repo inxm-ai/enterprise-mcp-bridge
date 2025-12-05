@@ -5,7 +5,8 @@ Tool service module for handling MCP tool operations.
 import json
 import copy
 import logging
-from typing import List, Optional, Dict, Any, Tuple, Union
+import inspect
+from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
@@ -174,7 +175,14 @@ class ToolService:
                 raise
 
     async def execute_tool_call(
-        self, session: MCPSessionBase, tool_call: ToolCall, access_token: Optional[str]
+        self,
+        session: MCPSessionBase,
+        tool_call: ToolCall,
+        access_token: Optional[str],
+        progress_callback: Optional[
+            Callable[[float, Optional[float], Optional[str], Optional[str]], Any]
+        ] = None,
+        log_callback: Optional[Callable[[str, Any, Optional[str]], Any]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a single tool call via MCP.
@@ -183,6 +191,10 @@ class ToolService:
             session: The MCP session to use
             tool_call: The tool call to execute
             access_token: Optional access token for authentication
+            progress_callback: Optional async callback for progress updates. Signature:
+                (progress: float, total: float | None, message: str | None, tool_name: str | None)
+            log_callback: Optional async callback for log updates. Signature:
+                (level: str, data: Any, logger_name: str | None)
 
         Returns:
             The result of the tool execution
@@ -262,16 +274,68 @@ class ToolService:
                 except Exception:
                     call_args = args
 
-                result = await session.call_tool(
-                    tool_call.function.name, call_args, access_token
+                async def _progress_wrapper(
+                    progress: float,
+                    total: Optional[float] = None,
+                    message: Optional[str] = None,
+                ):
+                    if not progress_callback:
+                        return
+                    try:
+                        await progress_callback(
+                            progress, total, message, tool_call.function.name
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[ToolService] Progress callback failed for %s",
+                            tool_call.function.name,
+                        )
+
+                call_kwargs: dict[str, Any] = {}
+                call_fn = getattr(session, "call_tool", None)
+
+                # Prefer explicit progress-aware call if available
+                if progress_callback and hasattr(session, "call_tool_with_progress"):
+                    call_fn = getattr(session, "call_tool_with_progress")
+                    sig = inspect.signature(call_fn)
+                    if "progress_callback" in sig.parameters:
+                        call_kwargs["progress_callback"] = _progress_wrapper
+                    if log_callback and "log_callback" in sig.parameters:
+                        call_kwargs["log_callback"] = log_callback
+                elif progress_callback and call_fn:
+                    try:
+                        sig = inspect.signature(call_fn)
+                        if "progress_callback" in sig.parameters:
+                            call_kwargs["progress_callback"] = _progress_wrapper
+                    except Exception:
+                        pass
+
+                if not call_fn:
+                    raise RuntimeError("MCP session missing call_tool implementation")
+
+                result = await call_fn(
+                    tool_call.function.name, call_args, access_token, **call_kwargs
                 )
 
-                if result.isError:
+                # Normalize common result shapes (object or dict)
+                result_is_error = getattr(result, "isError", None)
+                if result_is_error is None and isinstance(result, dict):
+                    result_is_error = result.get("isError")
+
+                structured = getattr(result, "structuredContent", None)
+                if structured is None and isinstance(result, dict):
+                    structured = result.get("structuredContent")
+
+                content_entries = getattr(result, "content", None)
+                if content_entries is None and isinstance(result, dict):
+                    content_entries = result.get("content")
+
+                if result_is_error:
                     error_content = ""
-                    if hasattr(result, "content") and result.content:
+                    if content_entries:
                         error_content = (
-                            str(result.content[0].text)
-                            if result.content
+                            str(content_entries[0].text)
+                            if content_entries
                             else str(result)
                         )
 
@@ -295,22 +359,22 @@ class ToolService:
 
                 # Format successful result
                 content = ""
-                if hasattr(result, "structuredContent") and result.structuredContent:
+                if structured:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {str(result.structuredContent)[1000:]}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {str(structured)[1000:]}"
                     )
                     content = json.dumps(
-                        result.structuredContent,
+                        structured,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
-                elif hasattr(result, "content") and result.content:
+                elif content_entries:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(result.content)[1000:]}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(content_entries)[1000:]}"
                     )
 
-                    if isinstance(result.content, RunToolResultContent):
-                        value = result.content.value
+                    if isinstance(content_entries, RunToolResultContent):
+                        value = content_entries.value
                         content = value
                         # this _might_ be valid json. Try to parse it if it's a string
                         if isinstance(value, str):
@@ -328,14 +392,14 @@ class ToolService:
                                         else str(item)
                                     )
                                 }
-                                for item in result.content
+                                for item in content_entries
                             ],
                             ensure_ascii=False,
                             separators=(",", ":"),
                         )
                 else:
                     logger.debug(
-                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(result.content)[1000:] if result.content else str(result)[1000:]}"
+                        f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(content_entries)[1000:] if content_entries else str(result)[1000:]}"
                     )
                     content = json.dumps(
                         {"result": str(result)},
@@ -565,9 +629,27 @@ class ToolService:
         parent_span,
         *,
         available_tools: Optional[List[dict]] = None,
-    ) -> Tuple[List[Message], bool]:
-        """Execute multiple tool calls and return tool result messages."""
+        return_raw_results: bool = False,
+        progress_callback: Optional[
+            Callable[[float, Optional[float], Optional[str], Optional[str]], Any]
+        ] = None,
+        log_callback: Optional[Callable[[str, Any, Optional[str]], Any]] = None,
+    ) -> Tuple[List[Message], bool] | Tuple[List[Message], bool, List[Dict[str, Any]]]:
+        """Execute multiple tool calls and return tool result messages.
+
+        Args:
+            return_raw_results: If True, also return the raw result dicts before
+                summarization. This is useful for workflow engines that need to
+                capture structured data from tool results.
+            progress_callback: Optional async callback for progress updates from tools.
+            log_callback: Optional async callback for log events from tools.
+
+        Returns:
+            If return_raw_results is False: (messages, success)
+            If return_raw_results is True: (messages, success, raw_results)
+        """
         tool_results = []
+        raw_results = []  # Track raw results before summarization
         success = True
         mapped_tools = available_tools or map_tools(await session.list_tools())
 
@@ -584,13 +666,24 @@ class ToolService:
             try:
                 if tool_call.function.name == "describe_tool":
                     result = await self._handle_describe_tool(tool_call)
+                    if return_raw_results:
+                        raw_results.append(result)
                     tool_message = await self.create_result_message(
                         tool_call_format, result
                     )
                     tool_results.append(tool_message)
                     continue
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
-                result = await self.execute_tool_call(session, tool_call, access_token)
+                result = await self.execute_tool_call(
+                    session,
+                    tool_call,
+                    access_token,
+                    progress_callback=progress_callback,
+                    log_callback=log_callback,
+                )
+
+                if return_raw_results:
+                    raw_results.append(result)
 
                 if self._result_has_error(result):
                     success = False
@@ -604,13 +697,16 @@ class ToolService:
                 error_msg = f"Failed to execute tool {getattr(tool_call.function, 'name', 'unknown')}: {str(e)}"
                 self.logger.error(f"[ToolService] {error_msg}")
 
+                error_result = {
+                    "name": getattr(tool_call.function, "name", None),
+                    "tool_call_id": tool_call.id,
+                    "content": {"error": error_msg},
+                }
+                if return_raw_results:
+                    raw_results.append(error_result)
                 error_message = await self.create_result_message(
                     tool_call_format,
-                    {
-                        "name": getattr(tool_call.function, "name", None),
-                        "tool_call_id": tool_call.id,
-                        "content": {"error": error_msg},
-                    },
+                    error_result,
                 )
                 tool_results.append(error_message)
                 parsed_errors = self._parse_json_array_from_message(error_msg)
@@ -632,6 +728,8 @@ class ToolService:
                 success = False
                 break
 
+        if return_raw_results:
+            return tool_results, success, raw_results
         return tool_results, success
 
     async def _handle_describe_tool(self, tool_call: ToolCall) -> Dict[str, Any]:

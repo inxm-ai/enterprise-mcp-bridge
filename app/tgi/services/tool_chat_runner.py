@@ -1,6 +1,8 @@
+import asyncio
 import json
 import re
-from typing import Any, AsyncGenerator, List, Optional
+import inspect
+from typing import Any, AsyncGenerator, Callable, List, Optional
 
 from opentelemetry import trace
 
@@ -53,6 +55,8 @@ class ToolChatRunner:
         access_token: Optional[str],
         parent_span,
         emit_think_messages: bool = True,
+        arg_injector: Optional[Callable[[str, dict], dict]] = None,
+        tools_for_validation: Optional[List[dict]] = None,
     ) -> AsyncGenerator[str, None]:
         messages_history = messages.copy()
         if chat_request.messages and chat_request.messages is not messages:
@@ -146,12 +150,20 @@ class ToolChatRunner:
                             lambda tool: tool["function"]["name"], available_tools
                         ):
                             continue
+
+                        # Inject additional arguments if arg_injector is provided
+                        call_arguments = parsed_call.arguments
+                        if arg_injector:
+                            call_arguments = arg_injector(
+                                parsed_call.name, call_arguments
+                            )
+
                         tool_call = ToolCall(
                             id=parsed_call.id,
                             function=ToolCallFunction(
                                 name=parsed_call.name,
                                 arguments=json.dumps(
-                                    parsed_call.arguments,
+                                    call_arguments,
                                     ensure_ascii=False,
                                     separators=(",", ":"),
                                 ),
@@ -191,17 +203,176 @@ class ToolChatRunner:
                         execution_msg = f"<think>Executing the following tools{tools_summary}</think>\n\n"
                         yield f"data: {json.dumps({'choices':[{'delta':{'content': execution_msg},'index':0}]})}\n\n"
 
-                    tool_results, success = await self.tool_service.execute_tool_calls(
-                        session,
-                        tool_calls_to_execute,
-                        access_token,
-                        parent_span,
-                        available_tools=available_tools,
-                    )
+                    # Use original tools for validation (includes pre-mapped args in schema)
+                    # but available_tools for LLM (has those args removed)
+                    validation_tools = tools_for_validation or available_tools
+                    progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+                    async def _handle_progress(
+                        progress: float,
+                        total: Optional[float] = None,
+                        message: Optional[str] = None,
+                        tool_name: Optional[str] = None,
+                    ):
+                        try:
+                            progress_queue.put_nowait(
+                                {
+                                    "type": "progress",
+                                    "progress": progress,
+                                    "total": total,
+                                    "message": message,
+                                    "tool": tool_name,
+                                }
+                            )
+                        except Exception:
+                            if logger:
+                                logger.debug("[ToolChatRunner] Dropped progress update")
+
+                    async def _handle_log(
+                        level: str, data: Any, logger_name: Optional[str] = None
+                    ):
+                        try:
+                            progress_queue.put_nowait(
+                                {
+                                    "type": "log",
+                                    "level": level,
+                                    "data": data,
+                                    "logger_name": logger_name,
+                                }
+                            )
+                        except Exception:
+                            if logger:
+                                logger.debug("[ToolChatRunner] Dropped log update")
+
+                    async def _run_tools():
+                        execute_fn = getattr(self.tool_service, "execute_tool_calls")
+                        sig = inspect.signature(execute_fn)
+                        kwargs = {
+                            "available_tools": validation_tools,
+                            "return_raw_results": True,
+                        }
+                        if "progress_callback" in sig.parameters:
+                            kwargs["progress_callback"] = _handle_progress
+                        if "log_callback" in sig.parameters:
+                            kwargs["log_callback"] = _handle_log
+                        return await execute_fn(
+                            session,
+                            tool_calls_to_execute,
+                            access_token,
+                            parent_span,
+                            **kwargs,
+                        )
+
+                    tool_task = asyncio.create_task(_run_tools())
+                    queue_get = asyncio.create_task(progress_queue.get())
+                    tool_results: list = []
+                    success: bool = True
+                    raw_results: list = []
+
+                    try:
+                        while True:
+                            done, _pending = await asyncio.wait(
+                                {tool_task, queue_get},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+
+                            if queue_get in done:
+                                try:
+                                    event = queue_get.result()
+                                except asyncio.CancelledError:
+                                    event = None
+                                except Exception:
+                                    event = None
+                                queue_get = asyncio.create_task(progress_queue.get())
+                                if isinstance(event, dict) and event:
+                                    yield f"data: {json.dumps(event)}\n\n"
+                                    yield "\n\n"
+                                continue
+
+                            if tool_task in done:
+                                try:
+                                    queue_get.cancel()
+                                    await queue_get
+                                except asyncio.CancelledError:
+                                    pass
+                                except Exception:
+                                    pass
+                                try:
+                                    tool_results, success, raw_results = (
+                                        tool_task.result()
+                                    )
+                                except Exception as exc:  # pragma: no cover - defensive
+                                    if logger:
+                                        logger.error(
+                                            "[ToolChatRunner] Tool execution task failed: %s",
+                                            exc,
+                                        )
+                                    tool_results, success, raw_results = [], False, []
+
+                                # Flush any remaining queued events
+                                while not progress_queue.empty():
+                                    try:
+                                        leftover = progress_queue.get_nowait()
+                                        yield f"data: {json.dumps(leftover)}\n\n"
+                                        yield "\n\n"
+                                    except Exception:
+                                        break
+                                break
+                    except asyncio.CancelledError:
+                        tool_task.cancel()
+                        queue_get.cancel()
+                        raise
+                    finally:
+                        if not tool_task.done():
+                            tool_task.cancel()
+                            try:
+                                await tool_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception:
+                                pass
+                        if not queue_get.done():
+                            queue_get.cancel()
+                            try:
+                                await queue_get
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception:
+                                pass
 
                     tool_span.set_attribute(
                         "tool_calls.executed_count", len(tool_results)
                     )
+
+                    # Emit tool result events for workflow engines to capture
+                    # Use raw_results to get unsummarized content for structured data extraction
+                    for raw_result in raw_results:
+                        tool_name = raw_result.get("name", "unknown")
+                        raw_content = raw_result.get("content", "")
+                        # Ensure content is a string for the event
+                        if not isinstance(raw_content, str):
+                            try:
+                                raw_content = json.dumps(
+                                    raw_content,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            except Exception:
+                                raw_content = str(raw_content)
+                        tool_result_event = {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_result": {
+                                            "name": tool_name,
+                                            "content": raw_content,
+                                        }
+                                    },
+                                    "index": 0,
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(tool_result_event)}\n\n"
 
                     messages_history.extend(tool_results)
                     self._deduplicate_retry_hints(messages_history)

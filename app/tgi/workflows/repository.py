@@ -44,15 +44,20 @@ class WorkflowRepository:
                 for agent in agents_payload:
                     tools_field = agent.get("tools", None)
                     tools_value = list(tools_field) if tools_field is not None else None
+                    # pass_through can be boolean or string (guideline)
+                    pass_through_value = agent.get("pass_through", False)
+                    # returns is a list of field names to capture from tool results
+                    returns_value = agent.get("returns", None)
                     agents.append(
                         WorkflowAgentDef(
                             agent=agent.get("agent"),
                             description=agent.get("description", ""),
-                            pass_through=bool(agent.get("pass_through", False)),
+                            pass_through=pass_through_value,
                             depends_on=list(agent.get("depends_on", []) or []),
                             when=agent.get("when"),
                             reroute=agent.get("reroute"),
                             tools=tools_value,
+                            returns=returns_value,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

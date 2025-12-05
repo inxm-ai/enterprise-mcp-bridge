@@ -1,12 +1,34 @@
 import pytest
 import json
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import MagicMock, Mock
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
     MessageRole,
 )
+
+
+def make_execute_tool_calls_mock(messages, success=True):
+    """Create a mock execute_tool_calls that handles return_raw_results parameter."""
+
+    async def mock_execute(*args, **kwargs):
+        mock_execute.called = True
+        mock_execute.call_count += 1
+        mock_execute.call_args = (args, kwargs)
+        raw_results = [
+            {"name": getattr(m, "name", "unknown"), "content": m.content}
+            for m in messages
+            if m.role == MessageRole.TOOL
+        ]
+        if kwargs.get("return_raw_results"):
+            return (messages, success, raw_results)
+        return (messages, success)
+
+    mock_execute.called = False
+    mock_execute.call_count = 0
+    mock_execute.call_args = None
+    return mock_execute
 
 
 @pytest.mark.asyncio
@@ -73,18 +95,16 @@ async def test_streaming_tool_call_merging_and_status_messages():
 
     service.llm_client.stream_completion = mock_stream_llm_completion
     # Patch tool_service.execute_tool_calls to simulate tool execution
-    service.tool_service.execute_tool_calls = AsyncMock(
-        return_value=(
-            [
-                Message(
-                    role=MessageRole.TOOL,
-                    content='{"result": "sunny"}',
-                    tool_call_id=tool_call_id,
-                    name="get_weather",
-                )
-            ],
-            True,
-        )
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock(
+        [
+            Message(
+                role=MessageRole.TOOL,
+                content='{"result": "sunny"}',
+                tool_call_id=tool_call_id,
+                name="get_weather",
+            )
+        ],
+        True,
     )
     # Patch MCPSessionBase
     session = MagicMock()
@@ -163,24 +183,22 @@ async def test_streaming_multiple_tool_calls_parallel():
             yield chunk
 
     service.llm_client.stream_completion = mock_stream_llm_completion
-    service.tool_service.execute_tool_calls = AsyncMock(
-        return_value=(
-            [
-                Message(
-                    role=MessageRole.TOOL,
-                    content='{"result": "ok1"}',
-                    tool_call_id="id1",
-                    name="func1",
-                ),
-                Message(
-                    role=MessageRole.TOOL,
-                    content='{"result": "ok2"}',
-                    tool_call_id="id2",
-                    name="func2",
-                ),
-            ],
-            True,
-        )
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock(
+        [
+            Message(
+                role=MessageRole.TOOL,
+                content='{"result": "ok1"}',
+                tool_call_id="id1",
+                name="func1",
+            ),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"result": "ok2"}',
+                tool_call_id="id2",
+                name="func2",
+            ),
+        ],
+        True,
     )
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Do two things.")]
@@ -240,18 +258,16 @@ async def test_streaming_tool_call_missing_arguments():
             yield chunk
 
     service.llm_client.stream_completion = mock_stream_llm_completion
-    service.tool_service.execute_tool_calls = AsyncMock(
-        return_value=(
-            [
-                Message(
-                    role=MessageRole.TOOL,
-                    content='{"error": "missing arguments"}',
-                    tool_call_id="id1",
-                    name="func1",
-                ),
-            ],
-            True,
-        )
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock(
+        [
+            Message(
+                role=MessageRole.TOOL,
+                content='{"error": "missing arguments"}',
+                tool_call_id="id1",
+                name="func1",
+            ),
+        ],
+        True,
     )
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Call func1.")]
@@ -311,7 +327,7 @@ async def test_streaming_tool_calls_without_assistant_content_appends_tool_calls
     service.llm_client.stream_completion = mock_stream_llm_completion
 
     # make execute_tool_calls return an empty result set (we don't need to run tools)
-    service.tool_service.execute_tool_calls = AsyncMock(return_value=([], True))
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock([], True)
 
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Trigger tool.")]
@@ -350,7 +366,7 @@ async def test_streaming_content_only():
             yield chunk
 
     service.llm_client.stream_completion = mock_stream_llm_completion
-    service.tool_service.execute_tool_calls = AsyncMock()
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock([], True)
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Say something.")]
     available_tools = []
@@ -452,18 +468,16 @@ async def test_streaming_tool_call_chunked_arguments():
             yield chunk
 
     service.llm_client.stream_completion = mock_stream_llm_completion
-    service.tool_service.execute_tool_calls = AsyncMock(
-        return_value=(
-            [
-                Message(
-                    role=MessageRole.TOOL,
-                    content='{"result": "ok"}',
-                    tool_call_id=tool_call_id,
-                    name="func1",
-                ),
-            ],
-            True,
-        )
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock(
+        [
+            Message(
+                role=MessageRole.TOOL,
+                content='{"result": "ok"}',
+                tool_call_id=tool_call_id,
+                name="func1",
+            ),
+        ],
+        True,
     )
     session = MagicMock()
     messages = [Message(role=MessageRole.USER, content="Call func1.")]
@@ -527,15 +541,16 @@ async def test_stream_chat_with_tools_yields_correct_newlines():
     service.llm_client.stream_completion = mock_stream_completion
 
     # Mock tool service execute_tool_calls
-    service.tool_service.execute_tool_calls = AsyncMock(
-        return_value=(
-            [
-                Message(
-                    role=MessageRole.TOOL, content="Tool result", tool_call_id="call_1"
-                )
-            ],
-            True,
-        )
+    service.tool_service.execute_tool_calls = make_execute_tool_calls_mock(
+        [
+            Message(
+                role=MessageRole.TOOL,
+                content="Tool result",
+                tool_call_id="call_1",
+                name="test_tool",
+            )
+        ],
+        True,
     )
 
     # Mock tool resolution

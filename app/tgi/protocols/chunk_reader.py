@@ -64,6 +64,7 @@ class ParsedChunk:
         finish_reason: Optional[str] = None,
         is_done: bool = False,
         accumulated_tool_calls: Optional[Dict[int, dict]] = None,
+        tool_result: Optional[dict] = None,
     ):
         self.raw = raw
         self.parsed = parsed or {}
@@ -73,9 +74,11 @@ class ParsedChunk:
         self.is_done = is_done
         # Accumulated tool calls: {index: {id, name, arguments}}
         self.accumulated_tool_calls = accumulated_tool_calls or {}
+        # Tool execution result: {name: str, content: str}
+        self.tool_result = tool_result
 
     def __repr__(self):
-        return f"ParsedChunk(content={self.content!r}, is_done={self.is_done}, tool_calls={len(self.tool_calls or [])})"
+        return f"ParsedChunk(content={self.content!r}, is_done={self.is_done}, tool_calls={len(self.tool_calls or [])}, tool_result={self.tool_result is not None})"
 
 
 class ChunkReader:
@@ -237,6 +240,7 @@ class ChunkReader:
         content = None
         tool_calls = None
         finish_reason = None
+        tool_result = None
 
         # OpenAI format
         choices = parsed.get("choices", [])
@@ -252,6 +256,9 @@ class ChunkReader:
 
             # Try tool_calls
             tool_calls = delta.get("tool_calls") or message.get("tool_calls")
+
+            # Try tool_result (emitted by tool_chat_runner after tool execution)
+            tool_result = delta.get("tool_result")
 
             # Finish reason
             finish_reason = choice.get("finish_reason")
@@ -271,6 +278,7 @@ class ChunkReader:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             is_done=False,
+            tool_result=tool_result,
         )
 
     async def as_parsed(self) -> AsyncGenerator[ParsedChunk, None]:

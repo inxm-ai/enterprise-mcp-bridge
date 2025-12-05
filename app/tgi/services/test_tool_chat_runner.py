@@ -122,6 +122,8 @@ async def test_runner_executes_tool_calls_and_loops():
 
     # make execute_tool_calls async
     async def _exec(*_args, **_kwargs):
+        if _kwargs.get("return_raw_results"):
+            return ([], True, [])
         return ([], True)
 
     tool_service.execute_tool_calls = _exec  # type: ignore
@@ -165,6 +167,8 @@ async def test_runner_handles_multiple_tool_calls():
     )
 
     async def _exec(*_args, **_kwargs):
+        if _kwargs.get("return_raw_results"):
+            return ([], True, [])
         return ([], True)
 
     tool_service = ToolService()
@@ -215,6 +219,8 @@ async def test_runner_strips_hallucinated_tool_results_from_content():
     tool_resolution = StubToolResolution(responses=[[_parsed("select_tools")], []])
 
     async def _exec(*_args, **_kwargs):
+        if _kwargs.get("return_raw_results"):
+            return ([], True, [])
         return ([], True)
 
     tool_service = ToolService()
@@ -294,6 +300,12 @@ async def test_runner_tracks_message_history_across_iterations():
 
     async def _exec(*_args, **_kwargs):
         # return one tool result message to be appended
+        if _kwargs.get("return_raw_results"):
+            return (
+                [Message(role=MessageRole.TOOL, content="tool-result")],
+                True,
+                [{"name": "search", "content": "tool-result"}],
+            )
         return ([Message(role=MessageRole.TOOL, content="tool-result")], True)
 
     tool_service = ToolService()

@@ -10,6 +10,8 @@ from app.tgi.services.prompt_service import PromptService
 from app.tgi.services.tool_service import ToolService
 from app.tgi.services.tool_chat_runner import ToolChatRunner
 from app.tgi.services.tools.tool_resolution import ToolResolutionStrategy
+from app.tgi.workflows.agent import AgentExecutor
+from app.tgi.workflows.arg_injector import ArgInjector, ToolResultCapture
 from app.tgi.workflows.chunk_formatter import WorkflowChunkFormatter
 from app.tgi.workflows.models import (
     WorkflowAgentDef,
@@ -37,6 +39,7 @@ class WorkflowEngine:
         tool_service: Optional[ToolService] = None,
         chunk_formatter: Optional[WorkflowChunkFormatter] = None,
         tool_chat_runner: Optional[ToolChatRunner] = None,
+        agent_executor: Optional[AgentExecutor] = None,
     ):
         self.repository = repository
         self.state_store = state_store
@@ -44,6 +47,7 @@ class WorkflowEngine:
         self.prompt_service = prompt_service or PromptService()
         self.tool_service = tool_service or ToolService()
         self.chunk_formatter = chunk_formatter or WorkflowChunkFormatter()
+        self.agent_executor = agent_executor or AgentExecutor()
         self.tool_chat_runner = tool_chat_runner or ToolChatRunner(
             llm_client=self.llm_client,
             tool_service=self.tool_service,
@@ -80,7 +84,7 @@ class WorkflowEngine:
             # Always emit execution id first
             yield self.chunk_formatter.format_chunk(
                 state=state,
-                content=f"<workflow_execution_id>{execution_id}</workflow_execution_id>",
+                content=f"<workflow_execution_id>{execution_id}</workflow_execution_id>\n",
                 status="submitted",
                 role="system",
             )
@@ -96,9 +100,10 @@ class WorkflowEngine:
             # Pre-resolve tools for single-agent workflows so routing sees available tools
             preresolved_tools = None
             if len(workflow_def.agents) == 1:
-                preresolved_tools = await self._resolve_tools(
+                modified, original = await self._resolve_tools(
                     session, workflow_def.agents[0]
                 )
+                preresolved_tools = modified  # Use modified schema for routing
 
             routing_check = await self._routing_intent_check(
                 session,
@@ -114,7 +119,7 @@ class WorkflowEngine:
                 state.completed = True
                 self.state_store.save_state(state)
                 yield self._record_event(
-                    state, f"<reroute>{reason}</reroute>", status="reroute"
+                    state, f"<reroute>{reason}</reroute>\n", status="reroute"
                 )
                 yield "data: [DONE]\n\n"
                 return
@@ -157,7 +162,7 @@ class WorkflowEngine:
             if not state.events:
                 yield self._record_event(
                     state,
-                    f"Routing workflow {workflow_def.flow_id}",
+                    f"Routing workflow {workflow_def.flow_id}\n",
                     status="in_progress",
                 )
 
@@ -208,7 +213,8 @@ class WorkflowEngine:
 
         last_visible_output: Optional[str] = None
 
-        while len(completed_agents) < len(workflow_def.agents):
+        # Keep looping while there are unfinished agents OR a reroute target to honor
+        while len(completed_agents) < len(workflow_def.agents) or forced_next:
             progress_made = False
             for agent_def in workflow_def.agents:
                 if agent_def.agent in completed_agents:
@@ -274,7 +280,7 @@ class WorkflowEngine:
                         if forced_next:
                             yield self._record_event(
                                 state,
-                                f"Rerouting to {forced_next}",
+                                f"\nRerouting to {forced_next}\n",
                                 status="reroute",
                             )
                     else:
@@ -284,8 +290,49 @@ class WorkflowEngine:
                 progress_made = True
 
             if not progress_made:
-                # Avoid infinite loop if dependencies cannot be satisfied
-                break
+                remaining_agents = [
+                    agent.agent
+                    for agent in workflow_def.agents
+                    if agent.agent not in completed_agents
+                ]
+                metadata: dict[str, Any] = {"remaining_agents": remaining_agents}
+                message = (
+                    "\nNo runnable agents remain; workflow cannot make progress.\n"
+                )
+
+                if forced_next:
+                    metadata["forced_next"] = forced_next
+                    target_agent = next(
+                        (a for a in workflow_def.agents if a.agent == forced_next),
+                        None,
+                    )
+                    if target_agent:
+                        missing_deps = sorted(
+                            set(target_agent.depends_on or []).difference(
+                                completed_agents
+                            )
+                        )
+                        if missing_deps:
+                            metadata["missing_dependencies"] = missing_deps
+                            message = (
+                                f"\nReroute target '{forced_next}' is not runnable; "
+                                f"missing dependencies: {', '.join(missing_deps)}.\n"
+                            )
+                        else:
+                            message = f"\nReroute target '{forced_next}' could not be executed.\n"
+                    else:
+                        message = (
+                            f"\nReroute target '{forced_next}' is not defined in this "
+                            "workflow.\n"
+                        )
+
+                state.completed = True
+                self.state_store.save_state(state)
+                yield self._record_event(
+                    state, message, status="error", metadata=metadata
+                )
+                yield "data: [DONE]\n\n"
+                return
 
         if not state.awaiting_feedback and len(completed_agents) == len(
             workflow_def.agents
@@ -296,7 +343,7 @@ class WorkflowEngine:
                 )
             state.completed = True
             yield self._record_event(
-                state, "Workflow complete", status="completed", finish_reason="stop"
+                state, "\nWorkflow complete\n", status="completed", finish_reason="stop"
             )
             self.state_store.save_state(state)
 
@@ -325,6 +372,9 @@ class WorkflowEngine:
             f"Context: {context_json}"
         )
 
+        # Resolve tools - get both modified (for LLM) and original (for validation)
+        modified_tools, original_tools = await self._resolve_tools(session, agent_def)
+
         agent_request = ChatCompletionRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -332,13 +382,29 @@ class WorkflowEngine:
             ],
             model=request.model or TGI_MODEL_NAME,
             stream=True,
-            tools=await self._resolve_tools(session, agent_def),
+            tools=modified_tools,
             stop=request.stop,
         )
 
         content_text = ""
         tools_available = self._normalize_tools(agent_request.tools or [])
+        tools_for_validation = self._normalize_tools(original_tools or [])
         agent_request.tools = tools_available
+
+        # Create arg injector for pre-mapped arguments
+        arg_injector_obj = ArgInjector.from_agent_def(agent_def)
+        arg_injector_fn = (
+            (lambda name, args: arg_injector_obj.inject(name, args, state.context))
+            if arg_injector_obj
+            else None
+        )
+
+        # Create tool result capture for returns
+        result_capture = (
+            ToolResultCapture(agent_def.agent, agent_def.returns)
+            if agent_def.returns
+            else None
+        )
 
         runner_stream = self.tool_chat_runner.stream_chat_with_tools(
             session=session,
@@ -348,28 +414,72 @@ class WorkflowEngine:
             access_token=access_token or "",
             parent_span=span,
             emit_think_messages=agent_def.pass_through,
+            arg_injector=arg_injector_fn,
+            tools_for_validation=tools_for_validation,
         )
+
+        # For string-based pass_through, we need to extract content from <passthrough> tags
+        passthrough_buffer = ""
+        use_passthrough_tags = agent_def.pass_through_guideline is not None
 
         async with chunk_reader(runner_stream, enable_tracing=False) as reader:
             async for parsed in reader.as_parsed():
                 if parsed.is_done:
                     break
+
+                parsed_payload = (
+                    parsed.parsed if isinstance(parsed.parsed, dict) else None
+                )
+                if parsed_payload and parsed_payload.get("type") == "progress":
+                    async for event in self._handle_tool_progress(
+                        state,
+                        agent_def,
+                        request,
+                        parsed_payload,
+                        access_token,
+                        span,
+                    ):
+                        yield event
+                    continue
+
+                # Process tool results to extract returns
+                if parsed.tool_result and result_capture:
+                    tool_result_content = parsed.tool_result.get("content", "")
+                    result_capture.capture(tool_result_content, state.context)
+
                 if parsed.content:
                     content_text += parsed.content
                     if agent_def.pass_through:
-                        yield self._record_event(state, parsed.content)
+                        if use_passthrough_tags:
+                            # Accumulate and extract passthrough content
+                            passthrough_buffer += parsed.content
+                            extracted = self._extract_passthrough_content(
+                                passthrough_buffer
+                            )
+                            if extracted:
+                                yield self._record_event(state, extracted)
+                                # Keep only unprocessed content (after last closing tag)
+                                last_close = passthrough_buffer.rfind("</passthrough>")
+                                if last_close != -1:
+                                    passthrough_buffer = passthrough_buffer[
+                                        last_close + len("</passthrough>") :
+                                    ]
+                        else:
+                            yield self._record_event(state, parsed.content)
 
         reroute_reason = self._extract_tag(content_text, "reroute")
         feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
         cleaned_content = self._strip_tags(content_text)
 
-        state.context["agents"][agent_def.agent] = {
-            "content": cleaned_content.strip(),
-            "pass_through": agent_def.pass_through,
-        }
+        # Update agent context, preserving any captured returns
+        agent_context = state.context.setdefault("agents", {}).setdefault(
+            agent_def.agent, {}
+        )
+        agent_context["content"] = cleaned_content.strip()
+        agent_context["pass_through"] = agent_def.pass_through
 
         if reroute_reason:
-            state.context["agents"][agent_def.agent]["reroute_reason"] = reroute_reason
+            agent_context["reroute_reason"] = reroute_reason
 
         if feedback_needed:
             state.awaiting_feedback = True
@@ -410,15 +520,21 @@ class WorkflowEngine:
         }
 
     def _start_text(self, agent_def: WorkflowAgentDef) -> str:
+        """Generate a user-friendly status message when an agent starts.
+
+        Note: The agent's description is used as the LLM system prompt,
+        not shown to the user. This returns a brief status indicator.
+        """
         if agent_def.agent.startswith("get_"):
             noun = agent_def.agent.replace("get_", "").replace("_", " ")
-            return f"Fetching your {noun}..."
+            return f"\nFetching your {noun}...\n"
         if agent_def.agent.startswith("ask_"):
             noun = agent_def.agent.replace("ask_", "").replace("_", " ")
-            return f"Asking for {noun}..."
-        if agent_def.description:
-            return agent_def.description
-        return f"Running agent {agent_def.agent}"
+            return f"\nAsking for {noun}...\n"
+        # Use a simple status message, not the full description
+        # The description goes to the LLM as a prompt, not to the user
+        agent_name = agent_def.agent.replace("_", " ").title()
+        return f"\nI will work on the following: {agent_name}...\n"
 
     async def _resolve_prompt(self, session: Any, agent_def: WorkflowAgentDef) -> str:
         prompt_text = agent_def.description or f"You are the {agent_def.agent} agent."
@@ -435,10 +551,13 @@ class WorkflowEngine:
                 f"[WorkflowEngine] Using default prompt for {agent_def.agent}: {exc}"
             )
         return self._append_agent_guidelines(
-            prompt_text or f"You are the {agent_def.agent} agent."
+            prompt_text or f"You are the {agent_def.agent} agent.",
+            agent_def,
         )
 
-    def _append_agent_guidelines(self, prompt_text: str) -> str:
+    def _append_agent_guidelines(
+        self, prompt_text: str, agent_def: WorkflowAgentDef
+    ) -> str:
         guidelines = (
             "Workflow guidelines:\n"
             "- If you need more info from the user, respond only with "
@@ -448,17 +567,57 @@ class WorkflowEngine:
             "- Respect <no_reroute> if present in the latest user message; otherwise honor reroute signals.\n"
             "- Keep responses concise; include only the necessary tag when using these markers."
         )
-        return f"{prompt_text}\n\n{guidelines}"
+        result = f"{prompt_text}\n\n{guidelines}"
+
+        # Add pass-through guideline if specified as a string
+        if agent_def.pass_through_guideline:
+            result += (
+                f"\n\nResponse guideline: {agent_def.pass_through_guideline}\n"
+                "Wrap the content you want to show to the user in <passthrough></passthrough> tags. "
+                "Only content inside these tags will be visible to the user."
+            )
+
+        return result
+
+    def _get_tool_names_from_config(self, agent_def: WorkflowAgentDef) -> Optional[set]:
+        """
+        Extract tool names from agent definition, handling both string and dict formats.
+
+        Returns:
+            Set of tool names, empty set for disabled tools, or None for all tools.
+        """
+        if agent_def.tools is None:
+            return None
+        if isinstance(agent_def.tools, list) and len(agent_def.tools) == 0:
+            return set()
+
+        names = set()
+        for tool_def in agent_def.tools or []:
+            if isinstance(tool_def, str):
+                names.add(tool_def)
+            elif isinstance(tool_def, dict) and len(tool_def) == 1:
+                # Extract tool name from object config: {"tool_name": {...}}
+                names.add(next(iter(tool_def.keys())))
+
+        return names if names else None
 
     async def _resolve_tools(
         self, session: Any, agent_def: WorkflowAgentDef
-    ) -> Optional[list]:
+    ) -> tuple[Optional[list], Optional[list]]:
+        """
+        Resolve tools for an agent, returning both modified and original versions.
+
+        Returns:
+            Tuple of (modified_tools, original_tools):
+            - modified_tools: Schema with pre-mapped args removed for LLM
+            - original_tools: Original schema for tool_argument_fixer validation
+        """
         if not self.tool_service or not hasattr(session, "list_tools"):
-            return None
+            return None, None
         try:
             all_tools = await self.tool_service.get_all_mcp_tools(session)
         except Exception:
-            return None
+            return None, None
 
         # Drop helper tools so agents see only user-available MCP tools
         def _tool_name(tool):
@@ -468,11 +627,13 @@ class WorkflowEngine:
             return getattr(func, "name", None) if func else getattr(tool, "name", None)
 
         all_tools = [t for t in all_tools or [] if _tool_name(t) != "describe_tool"]
-        if agent_def.tools is None:
-            return all_tools
-        if isinstance(agent_def.tools, list) and len(agent_def.tools) == 0:
-            return []
-        names = set(agent_def.tools or [])
+
+        names = self._get_tool_names_from_config(agent_def)
+        if names is None:
+            return all_tools, all_tools
+        if len(names) == 0:
+            return [], []
+
         filtered = [
             tool
             for tool in all_tools
@@ -489,8 +650,31 @@ class WorkflowEngine:
                 "[WorkflowEngine] No matching tools for agent '%s'; using all tools",
                 agent_def.agent,
             )
-            return all_tools
-        return filtered
+            return all_tools, all_tools
+
+        # Apply tool schema modifications for pre-mapped arguments
+        tool_configs = self.agent_executor.get_tool_configs_for_agent(agent_def)
+        config_map = {tc.name: tc for tc in tool_configs if tc.args_mapping}
+
+        if not config_map:
+            # No arg mappings, return same list for both
+            return filtered, filtered
+
+        import copy
+
+        original_tools = [copy.deepcopy(t) for t in filtered]
+        modified_tools = []
+        for tool in filtered:
+            tool_name = _tool_name(tool)
+            if tool_name and tool_name in config_map:
+                modified = self.agent_executor.modify_tool_for_agent(
+                    tool, config_map[tool_name]
+                )
+                modified_tools.append(modified)
+            else:
+                modified_tools.append(tool)
+
+        return modified_tools, original_tools
 
     def _extract_user_message(self, request: ChatCompletionRequest) -> Optional[str]:
         for message in reversed(request.messages):
@@ -599,8 +783,147 @@ class WorkflowEngine:
         return None
 
     def _strip_tags(self, text: str) -> str:
-        stripped = re.sub(r"<(/?)(reroute|user_feedback_needed)>", "", text or "")
+        stripped = re.sub(
+            r"<(/?)(reroute|user_feedback_needed|passthrough)>", "", text or ""
+        )
         return re.sub(r"<no_reroute>", "", stripped, flags=re.IGNORECASE)
+
+    def _extract_passthrough_content(self, text: str) -> str:
+        """
+        Extract content from <passthrough> tags for streaming.
+
+        Returns all complete passthrough blocks found, excluding the tags themselves.
+        Handles multiple blocks and partial content.
+        """
+        if not text:
+            return ""
+
+        # Find all complete <passthrough>...</passthrough> blocks
+        pattern = r"<passthrough>(.*?)</passthrough>"
+        matches = re.findall(pattern, text, re.DOTALL)
+
+        return "\n\n".join(matches)
+
+    async def _handle_tool_progress(
+        self,
+        state: WorkflowExecutionState,
+        agent_def: WorkflowAgentDef,
+        request: ChatCompletionRequest,
+        progress_payload: dict,
+        access_token: Optional[str],
+        span,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Surface tool progress to the user by asking the LLM for a brief update.
+
+        If the agent is not configured for pass-through, we still emit a heartbeat
+        chunk with progress metadata to keep the connection alive.
+        """
+        progress_value = progress_payload.get("progress")
+        total_value = progress_payload.get("total")
+        progress_message = progress_payload.get("message")
+        tool_name = progress_payload.get("tool")
+
+        metadata = {
+            "type": "tool_progress",
+            "progress": progress_value,
+            "total": total_value,
+            "message": progress_message,
+            "tool": tool_name,
+        }
+
+        # Only ask the LLM for a user-visible update when pass-through is enabled
+        if agent_def.pass_through:
+            try:
+                system_prompt = (
+                    "You are providing brief user-visible updates while a tool runs.\n"
+                    "Decide whether the user needs to see this progress. "
+                    "Respond with a short, reassuring update only when helpful. "
+                    "If no update is needed, respond exactly with <no_update/>.\n"
+                    "Be concise and avoid repeating prior details."
+                )
+                if agent_def.pass_through_guideline:
+                    system_prompt += (
+                        "\nPass-through hint: "
+                        f"{agent_def.pass_through_guideline}\n"
+                        "Wrap any user-visible text in <passthrough></passthrough> tags."
+                    )
+
+                user_message = self._extract_user_message(request) or ""
+                progress_label = (
+                    "Progress: " + str(progress_value)
+                    if progress_value is not None
+                    else "Progress update"
+                )
+                progress_line = progress_label + (
+                    f"/{total_value}" if total_value is not None else ""
+                )
+                if progress_message:
+                    progress_line += f" - {progress_message}"
+                if tool_name:
+                    progress_line = f"[{tool_name}] {progress_line}"
+
+                progress_request = ChatCompletionRequest(
+                    messages=[
+                        Message(role=MessageRole.SYSTEM, content=system_prompt),
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                f"{progress_line}\nLatest user message: {user_message}"
+                            ),
+                        ),
+                    ],
+                    model=request.model or TGI_MODEL_NAME,
+                    stream=True,
+                )
+
+                stream = self.llm_client.stream_completion(
+                    progress_request, access_token or "", span
+                )
+
+                reply_text = ""
+                async with chunk_reader(stream, enable_tracing=False) as reader:
+                    async for progress_parsed in reader.as_parsed():
+                        if progress_parsed.is_done:
+                            break
+                        if progress_parsed.content:
+                            reply_text += progress_parsed.content
+
+                cleaned = reply_text.strip()
+                if "<no_update" in cleaned.lower():
+                    cleaned = ""
+
+                # Respect pass-through tags when present
+                visible = cleaned
+                if agent_def.pass_through_guideline:
+                    passthrough_only = self._extract_passthrough_content(reply_text)
+                    if passthrough_only:
+                        visible = passthrough_only
+
+                visible = self._strip_tags(visible).strip()
+
+                if visible:
+                    yield self._record_event(
+                        state,
+                        visible,
+                        status="in_progress",
+                        metadata=metadata,
+                    )
+                    return
+            except Exception as exc:  # pragma: no cover - fallback to heartbeat
+                logger.debug(
+                    "[WorkflowEngine] Progress update failed, sending heartbeat: %s",
+                    exc,
+                )
+
+        # Always emit a heartbeat chunk so long-running tools keep the stream alive
+        heartbeat = self.chunk_formatter.format_chunk(
+            state=state,
+            content="",
+            status="in_progress",
+            metadata=metadata,
+        )
+        yield heartbeat
 
     def _record_event(
         self,
@@ -609,6 +932,7 @@ class WorkflowEngine:
         status: str = "in_progress",
         role: str = "assistant",
         finish_reason: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> str:
         event = self.chunk_formatter.format_chunk(
             state=state,
@@ -616,6 +940,7 @@ class WorkflowEngine:
             status=status,
             role=role,
             finish_reason=finish_reason,
+            metadata=metadata,
         )
         state.events.append(event)
         self.state_store.save_state(state)

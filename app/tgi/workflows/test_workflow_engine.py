@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -355,6 +354,102 @@ async def test_dynamic_reroute_decision(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_reroute_target_emits_error_and_completes(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "missing_reroute",
+        "root_intent": "TEST",
+        "agents": [{"agent": "first", "description": "First agent"}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first": "<reroute>FAILURE</reroute>",
+            "routing_reroute:first": "<next_agent>ghost_agent</next_agent>",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-missing-reroute"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start")],
+        model="test-model",
+        stream=True,
+        use_workflow="missing_reroute",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "ghost_agent" in payload
+    assert "not defined" in payload or "not runnable" in payload
+    assert '"status":"error"' in payload or '"status": "error"' in payload
+    assert chunks[-1].strip() == "data: [DONE]"
+
+    state = engine.state_store.load_execution(exec_id)
+    assert state.completed is True
+    assert state.context["agents"]["first"]["reroute_reason"] == "FAILURE"
+
+    initial_call_count = len(llm.calls)
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None
+    )
+    resume_chunks = [chunk async for chunk in resume_stream]
+    assert resume_chunks[-1].strip() == "data: [DONE]"
+    # No new LLM invocations on resume because the workflow was marked complete
+    assert len(llm.calls) == initial_call_count
+
+
+@pytest.mark.asyncio
+async def test_no_runnable_agents_produces_terminal_error(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "deadlock_flow",
+        "root_intent": "TEST",
+        "agents": [
+            {"agent": "alpha", "description": "Alpha", "depends_on": ["beta"]},
+            {"agent": "beta", "description": "Beta", "depends_on": ["alpha"]},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"routing_intent": ""})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-deadlock"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start")],
+        model="test-model",
+        stream=True,
+        use_workflow="deadlock_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "No runnable agents" in payload
+    assert chunks[-1].strip() == "data: [DONE]"
+
+    state = engine.state_store.load_execution(exec_id)
+    assert state.completed is True
+    # Only the routing probe should have been executed
+    assert llm.calls and llm.calls[0] == "routing_intent"
+
+
+@pytest.mark.asyncio
 async def test_list_reroute_config(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
@@ -568,7 +663,16 @@ async def test_agent_executes_tool_calls(tmp_path, monkeypatch):
 
     llm = ToolCallingLLM()
     tool_service = ToolService()
-    tool_service.execute_tool_calls = AsyncMock(return_value=([], True))
+
+    call_tracker = {"called": False}
+
+    async def mock_execute_tool_calls(*args, **kwargs):
+        call_tracker["called"] = True
+        if kwargs.get("return_raw_results"):
+            return ([], True, [])
+        return ([], True)
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
 
     engine = WorkflowEngine(
         WorkflowRepository(),
@@ -590,7 +694,7 @@ async def test_agent_executes_tool_calls(tmp_path, monkeypatch):
     )
     _ = [chunk async for chunk in stream]
 
-    tool_service.execute_tool_calls.assert_called_once()
+    assert call_tracker["called"], "execute_tool_calls should have been called"
     assert llm.call_count == 2
 
 

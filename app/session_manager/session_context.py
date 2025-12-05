@@ -1,4 +1,5 @@
 import fcntl
+import inspect
 import json
 import logging
 from fastapi import HTTPException
@@ -434,13 +435,26 @@ async def mcp_session_context(
                             tools, tool_name, decorated_args, incoming_headers
                         )
 
-                        # MCP SDK's call_tool only supports progress_callback
-                        # Log messages are handled via session-level logging_callback
-                        result = await session.call_tool(
-                            tool_name,
-                            decorated_args,
-                            progress_callback=progress_callback,
-                        )
+                        call_fn = getattr(session, "call_tool_with_progress", None)
+                        if not call_fn:
+                            call_fn = getattr(session, "call_tool", None)
+                        if not call_fn:
+                            raise RuntimeError("MCP session missing call_tool")
+
+                        call_kwargs: dict[str, Any] = {}
+                        try:
+                            sig = inspect.signature(call_fn)
+                            if "progress_callback" in sig.parameters:
+                                call_kwargs["progress_callback"] = progress_callback
+                            if log_callback and "log_callback" in sig.parameters:
+                                call_kwargs["log_callback"] = log_callback
+                        except Exception:
+                            if progress_callback:
+                                call_kwargs["progress_callback"] = progress_callback
+                            if log_callback:
+                                call_kwargs["log_callback"] = log_callback
+
+                        result = await call_fn(tool_name, decorated_args, **call_kwargs)
                         return RunToolsResult(result)
 
                     async def call_prompt(
@@ -508,29 +522,35 @@ async def mcp_session_context(
             """
             Call a tool with progress and log callbacks for streaming updates.
 
-            Note: For sessionful (persistent) sessions, progress streaming is not
-            currently supported as the session task runs in a separate context.
-            This method falls back to a regular tool call without progress updates.
-
             Args:
                 tool_name: Name of the tool to call
                 args: Arguments to pass to the tool
                 access_token_inner: OAuth access token
-                progress_callback: Async callback for progress updates (not used in sessionful mode)
-                log_callback: Async callback for log messages (not used in sessionful mode)
+                progress_callback: Async callback for progress updates.
+                log_callback: Async callback for log messages.
 
             Returns:
                 RunToolsResult with the tool execution result
             """
-            # For sessionful mode, we cannot easily stream progress from the
-            # background task. Fall back to regular call_tool.
-            # TODO: Implement progress streaming for sessionful mode via a
-            # separate notification channel.
-            logger.warning(
-                "[TaskDelegate] call_tool_with_progress called on sessionful delegate; "
-                "progress callbacks are not supported, falling back to regular call"
+            tools = await mcp_task.request("list_tools")
+            decorated_args = await decorate_args_with_oauth_token(
+                tools, tool_name, args, access_token_inner
             )
-            return await self.call_tool(tool_name, args, access_token_inner)
+            decorated_args = inject_headers_into_args(
+                tools, tool_name, decorated_args, incoming_headers
+            )
+
+            return RunToolsResult(
+                await mcp_task.request(
+                    {
+                        "action": "run_tool_with_progress",
+                        "tool_name": tool_name,
+                        "args": decorated_args,
+                        "progress_callback": progress_callback,
+                        "log_callback": log_callback,
+                    }
+                )
+            )
 
         async def list_prompts(self):
             async def request():
