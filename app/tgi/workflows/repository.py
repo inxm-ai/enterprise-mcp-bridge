@@ -48,6 +48,8 @@ class WorkflowRepository:
                     pass_through_value = agent.get("pass_through", False)
                     # returns is a list of field names to capture from tool results
                     returns_value = agent.get("returns", None)
+                    # on_tool_error is the agent to reroute to on tool failure
+                    on_tool_error_value = agent.get("on_tool_error", None)
                     agents.append(
                         WorkflowAgentDef(
                             agent=agent.get("agent"),
@@ -58,6 +60,7 @@ class WorkflowRepository:
                             reroute=agent.get("reroute"),
                             tools=tools_value,
                             returns=returns_value,
+                            on_tool_error=on_tool_error_value,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

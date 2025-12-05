@@ -25,6 +25,9 @@ class WorkflowAgentDef:
             - List of dict: Advanced tool configs with settings/args, e.g.:
               {"plan": {"settings": {"streaming": true}, "args": {"x": "agent.field"}}}
         returns: List of field names to extract from tool results and store in context.
+        on_tool_error: Agent name to reroute to when a tool call fails. If set and a
+            tool error is detected, the workflow will automatically reroute to this
+            agent even if the LLM doesn't emit a reroute tag.
     """
 
     agent: str
@@ -35,6 +38,7 @@ class WorkflowAgentDef:
     reroute: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     tools: Optional[List[Union[str, Dict[str, Any]]]] = None
     returns: Optional[List[str]] = None
+    on_tool_error: Optional[str] = None
 
     @property
     def should_pass_through(self) -> bool:

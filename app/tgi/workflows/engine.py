@@ -421,6 +421,10 @@ class WorkflowEngine:
         # For string-based pass_through, we need to extract content from <passthrough> tags
         passthrough_buffer = ""
         use_passthrough_tags = agent_def.pass_through_guideline is not None
+        # Track history of emitted passthrough content to avoid repetition
+        passthrough_history: list[str] = []
+        # Track tool errors for automatic rerouting
+        tool_errors: list[dict[str, Any]] = []
 
         async with chunk_reader(runner_stream, enable_tracing=False) as reader:
             async for parsed in reader.as_parsed():
@@ -438,17 +442,40 @@ class WorkflowEngine:
                         parsed_payload,
                         access_token,
                         span,
+                        passthrough_history=passthrough_history,
                     ):
                         yield event
                     continue
 
-                # Process tool results to extract returns
-                if parsed.tool_result and result_capture:
+                # Process tool results to extract returns and detect errors
+                if parsed.tool_result:
                     tool_result_content = parsed.tool_result.get("content", "")
                     tool_result_name = parsed.tool_result.get("name")
-                    result_capture.capture(
-                        tool_result_content, state.context, tool_name=tool_result_name
-                    )
+
+                    # Check for tool errors
+                    if self._tool_result_has_error(tool_result_content):
+                        tool_errors.append(
+                            {
+                                "name": tool_result_name,
+                                "content": tool_result_content,
+                            }
+                        )
+                        logger.warning(
+                            "[WorkflowEngine] Tool error detected for %s: %s",
+                            tool_result_name,
+                            (
+                                tool_result_content[:200]
+                                if len(tool_result_content) > 200
+                                else tool_result_content
+                            ),
+                        )
+
+                    if result_capture:
+                        result_capture.capture(
+                            tool_result_content,
+                            state.context,
+                            tool_name=tool_result_name,
+                        )
 
                 if parsed.content:
                     content_text += parsed.content
@@ -461,6 +488,9 @@ class WorkflowEngine:
                             )
                             if extracted:
                                 yield self._record_event(state, extracted)
+                                # Track the extracted content for history
+                                # Strip trailing newlines for cleaner history entries
+                                passthrough_history.append(extracted.strip())
                                 # Keep only unprocessed content (after last closing tag)
                                 last_close = passthrough_buffer.rfind("</passthrough>")
                                 if last_close != -1:
@@ -480,6 +510,10 @@ class WorkflowEngine:
         )
         agent_context["content"] = cleaned_content.strip()
         agent_context["pass_through"] = agent_def.pass_through
+
+        # Store tool errors in agent context for visibility
+        if tool_errors:
+            agent_context["tool_errors"] = tool_errors
 
         if reroute_reason:
             agent_context["reroute_reason"] = reroute_reason
@@ -514,6 +548,22 @@ class WorkflowEngine:
                 self.state_store.save_state(state)
                 yield {"status": "reroute", "target": dynamic_target}
                 return
+
+        # Check for automatic tool error reroute if no explicit reroute was emitted
+        if tool_errors and agent_def.on_tool_error and not no_reroute:
+            logger.info(
+                "[WorkflowEngine] Tool errors detected, triggering on_tool_error reroute to '%s'",
+                agent_def.on_tool_error,
+            )
+            agent_context["reroute_reason"] = "TOOL_ERROR"
+            self.state_store.save_state(state)
+            yield self._record_event(
+                state,
+                f"\nTool execution failed, rerouting to {agent_def.on_tool_error}...\n",
+                status="reroute",
+            )
+            yield {"status": "reroute", "target": agent_def.on_tool_error}
+            return
 
         self.state_store.save_state(state)
         yield {
@@ -720,6 +770,57 @@ class WorkflowEngine:
             return match.group(1).strip()
         return None
 
+    def _tool_result_has_error(self, content: str) -> bool:
+        """
+        Detect if a tool result content indicates an error.
+
+        This mirrors the logic in ToolService._result_has_error but works
+        on the raw content string from tool_result events.
+        """
+        if not content:
+            return False
+
+        # Try to parse as JSON
+        parsed_content = None
+        try:
+            parsed_content = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Check for error key in parsed JSON
+        if isinstance(parsed_content, dict):
+            if parsed_content.get("error"):
+                return True
+            if parsed_content.get("isError") is True:
+                return True
+            if parsed_content.get("success") is False:
+                return True
+
+        if isinstance(parsed_content, list):
+            for item in parsed_content:
+                if isinstance(item, dict) and item.get("error"):
+                    return True
+
+        # If we couldn't parse as JSON, check for error patterns in the string
+        if parsed_content is None:
+            # Look for common error patterns in plain text
+            lower_content = content.lower()
+            if '"error":' in lower_content or "'error':" in lower_content:
+                return True
+            # Check for HTTP error status codes in error messages
+            if "bad request" in lower_content or "400" in content:
+                return True
+            if "internal server error" in lower_content or "500" in content:
+                return True
+            if "not found" in lower_content and "404" in content:
+                return True
+            if "unauthorized" in lower_content or "401" in content:
+                return True
+            if "forbidden" in lower_content or "403" in content:
+                return True
+
+        return False
+
     def _tool_name(self, tool: Any) -> Optional[str]:
         if isinstance(tool, dict):
             func = (
@@ -796,6 +897,7 @@ class WorkflowEngine:
         Extract content from <passthrough> tags for streaming.
 
         Returns all complete passthrough blocks found, excluding the tags themselves.
+        Each block ends with \\n\\n to ensure proper separation when streaming.
         Handles multiple blocks and partial content.
         """
         if not text:
@@ -805,7 +907,11 @@ class WorkflowEngine:
         pattern = r"<passthrough>(.*?)</passthrough>"
         matches = re.findall(pattern, text, re.DOTALL)
 
-        return "\n\n".join(matches)
+        if not matches:
+            return ""
+
+        # Join with \n\n and ensure the result ends with \n\n for proper separation
+        return "\n\n".join(matches) + "\n\n"
 
     async def _handle_tool_progress(
         self,
@@ -815,12 +921,17 @@ class WorkflowEngine:
         progress_payload: dict,
         access_token: Optional[str],
         span,
+        passthrough_history: Optional[list[str]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Surface tool progress to the user by asking the LLM for a brief update.
 
         If the agent is not configured for pass-through, we still emit a heartbeat
         chunk with progress metadata to keep the connection alive.
+
+        Args:
+            passthrough_history: List of previously emitted passthrough messages
+                                to help the LLM avoid repeating itself.
         """
         progress_value = progress_payload.get("progress")
         total_value = progress_payload.get("total")
@@ -866,14 +977,23 @@ class WorkflowEngine:
                 if tool_name:
                     progress_line = f"[{tool_name}] {progress_line}"
 
+                # Build user content with history of past passthroughs
+                user_content = f"{progress_line}\nLatest user message: {user_message}"
+                if passthrough_history and agent_def.pass_through_guideline:
+                    history_text = "\n".join(f"- {msg}" for msg in passthrough_history)
+                    user_content = (
+                        f"{progress_line}\n"
+                        f"Latest user message: {user_message}\n\n"
+                        f"Previous messages you've shown to the user (do not repeat):\n"
+                        f"{history_text}"
+                    )
+
                 progress_request = ChatCompletionRequest(
                     messages=[
                         Message(role=MessageRole.SYSTEM, content=system_prompt),
                         Message(
                             role=MessageRole.USER,
-                            content=(
-                                f"{progress_line}\nLatest user message: {user_message}"
-                            ),
+                            content=user_content,
                         ),
                     ],
                     model=request.model or TGI_MODEL_NAME,
@@ -901,9 +1021,10 @@ class WorkflowEngine:
                 if agent_def.pass_through_guideline:
                     passthrough_only = self._extract_passthrough_content(reply_text)
                     if passthrough_only:
-                        visible = passthrough_only
-
-                visible = self._strip_tags(visible).strip()
+                        # Keep the trailing \n\n from extracted passthrough content
+                        visible = self._strip_tags(passthrough_only)
+                else:
+                    visible = self._strip_tags(visible).strip()
 
                 if visible:
                     yield self._record_event(

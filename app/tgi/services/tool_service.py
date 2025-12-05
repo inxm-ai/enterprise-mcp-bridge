@@ -698,6 +698,13 @@ class ToolService:
             except Exception as e:
                 # If tool execution fails completely, create an error message
                 error_msg = f"Failed to execute tool {getattr(tool_call.function, 'name', 'unknown')}: {str(e)}"
+                err_lower = str(e).lower()
+                if "coroutine" in err_lower:
+                    error_msg += (
+                        " Hint: the MCP tool appears to have returned a coroutine "
+                        "without awaiting it. Define the tool as async or await the "
+                        "returned coroutine before returning."
+                    )
                 self.logger.error(f"[ToolService] {error_msg}")
 
                 error_result = {

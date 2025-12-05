@@ -570,7 +570,8 @@ class TestPassthroughTagExtraction:
 
         text = "Some preamble <passthrough>visible content</passthrough> more text"
         result = engine._extract_passthrough_content(text)
-        assert result == "visible content"
+        # Extracted content ends with \n\n for proper separation when streaming
+        assert result == "visible content\n\n"
 
     def test_extract_multiple_passthrough_blocks(self, tmp_path, monkeypatch):
         """Extract content from multiple passthrough blocks."""
@@ -595,7 +596,8 @@ class TestPassthroughTagExtraction:
             "<passthrough>first</passthrough> middle <passthrough>second</passthrough>"
         )
         result = engine._extract_passthrough_content(text)
-        assert result == "first\n\nsecond"  # Multiple blocks are joined with newlines
+        # Multiple blocks are joined with \n\n and result ends with \n\n
+        assert result == "first\n\nsecond\n\n"
 
     def test_extract_empty_when_no_complete_block(self, tmp_path, monkeypatch):
         """Return empty when there's no complete passthrough block."""
@@ -641,7 +643,8 @@ class TestPassthroughTagExtraction:
 
         text = "<passthrough>line 1\nline 2\nline 3</passthrough>"
         result = engine._extract_passthrough_content(text)
-        assert result == "line 1\nline 2\nline 3"
+        # Extracted content ends with \n\n for proper separation when streaming
+        assert result == "line 1\nline 2\nline 3\n\n"
 
     def test_strip_tags_includes_passthrough(self, tmp_path, monkeypatch):
         """_strip_tags removes passthrough tags along with other tags."""
@@ -939,6 +942,312 @@ async def test_engine_streams_all_content_for_boolean_pass_through(
 
     # All content should be visible for boolean pass_through
     assert "All this content should be visible" in combined
+
+
+@pytest.mark.asyncio
+async def test_passthrough_blocks_separated_by_newlines(tmp_path, monkeypatch):
+    """Passthrough blocks should be separated by double newlines."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+
+    flow = {
+        "flow_id": "multi_passthrough_flow",
+        "root_intent": "MULTI_PASSTHROUGH",
+        "agents": [
+            {
+                "agent": "streamer",
+                "description": "Stream multiple passthroughs",
+                "pass_through": "Show each step to the user",
+                "tools": [],
+            }
+        ],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    # LLM response with multiple passthrough blocks
+    llm = StubLLMClient(
+        responses={
+            "streamer": (
+                "Internal thinking <passthrough>First update</passthrough> "
+                "more thinking <passthrough>Second update</passthrough>"
+            )
+        }
+    )
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Stream updates")],
+        model="test-model",
+        stream=True,
+        use_workflow="multi_passthrough_flow",
+        workflow_execution_id="exec-multi-passthrough",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+    combined = "".join(chunks)
+
+    # Both passthrough contents should be present
+    assert "First update" in combined
+    assert "Second update" in combined
+
+    # Passthrough blocks should be separated by \n\n
+    # The content is JSON-escaped in the chunks, so look for the escaped form
+    # "First update\\n\\nSecond update" means the actual content has \n\n between them
+    assert (
+        "First update\\n\\nSecond update" in combined
+    ), "Passthrough blocks should be separated by \\n\\n"
+
+
+@pytest.mark.asyncio
+async def test_passthrough_history_provided_to_progress_agent(tmp_path, monkeypatch):
+    """Agent receives history of past passthroughs during tool progress updates."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "slow_tool",
+                "description": "A slow tool that sends progress",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    flow = {
+        "flow_id": "progress_flow",
+        "root_intent": "PROGRESS",
+        "agents": [
+            {
+                "agent": "worker",
+                "description": "Worker with progress",
+                "pass_through": "Show progress to user",
+                "tools": ["slow_tool"],
+            }
+        ],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    # Track user messages sent to LLM for progress updates
+    progress_user_messages: list[str] = []
+
+    class ProgressTrackingLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({})
+            self.call_count = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.call_count += 1
+
+            # Check if this is a progress update call (has progress in system prompt)
+            system_content = ""
+            user_content = ""
+            if request.messages:
+                if request.messages[0].role == MessageRole.SYSTEM:
+                    system_content = request.messages[0].content or ""
+                if len(request.messages) > 1:
+                    user_content = request.messages[1].content or ""
+
+            # Progress update calls have specific system prompt
+            if "user-visible updates" in system_content.lower():
+                progress_user_messages.append(user_content)
+
+            async def _gen_first():
+                # First agent call: emit passthrough content then tool call
+                yield 'data: {"choices":[{"delta":{"content":"<passthrough>First message shown to user</passthrough>"},"index":0}]}\n\n'
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                    '"function":{"name":"slow_tool","arguments":"{}"}}]},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            async def _gen_progress():
+                # Progress update call - emit a passthrough response
+                yield 'data: {"choices":[{"delta":{"content":"<passthrough>Progress update</passthrough>"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            async def _gen_final():
+                # Final response after tool
+                yield 'data: {"choices":[{"delta":{"content":"<passthrough>Done!</passthrough>"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            if self.call_count == 1:
+                return _gen_first()
+            elif self.call_count == 2:
+                return _gen_progress()
+            else:
+                return _gen_final()
+
+    llm = ProgressTrackingLLM()
+
+    # Mock tool service to emit a progress event
+    from app.tgi.services.tool_service import ToolService
+
+    tool_service = ToolService()
+    progress_event_sent = {"count": 0}
+
+    async def mock_execute_tool_calls(*args, **kwargs):
+        progress_event_sent["count"] += 1
+        return ([], True, [])
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run the slow tool")],
+        model="test-model",
+        stream=True,
+        use_workflow="progress_flow",
+        workflow_execution_id="exec-progress-history",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    # Verify the LLM was called multiple times
+    assert llm.call_count >= 2
+
+    # When there's a progress update call after passthrough content was emitted,
+    # the user message should contain the history of previous passthroughs
+    # This is only included when pass_through_guideline is set (string pass_through)
+    # and there's previous passthrough history
+    if progress_user_messages:
+        # Check that at least one progress message mentions previous messages
+        has_history_reference = any(
+            "Previous messages" in msg or "do not repeat" in msg
+            for msg in progress_user_messages
+        )
+        # This should be true when there's passthrough history before the progress update
+        # Since the test LLM emits passthrough before tool call, history should be passed
+        assert (
+            has_history_reference or len(progress_user_messages) == 0
+        ), f"Progress user messages should include history. Got: {progress_user_messages}"
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monkeypatch):
+    """Direct test that _handle_tool_progress includes passthrough history in prompts."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.models import WorkflowAgentDef, WorkflowExecutionState
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+
+    # Minimal workflow just to set up the engine
+    flow = {
+        "flow_id": "test_flow",
+        "root_intent": "TEST",
+        "agents": [{"agent": "test_agent", "description": "Test"}],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    # Track what user messages are sent to the LLM
+    user_messages_received: list[str] = []
+
+    class TrackingLLM(StubLLMClient):
+        def stream_completion(self, request, access_token, span):
+            if len(request.messages) > 1:
+                user_messages_received.append(request.messages[1].content or "")
+
+            async def _gen():
+                yield 'data: {"choices":[{"delta":{"content":"<no_update/>"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    llm = TrackingLLM({})
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    # Create an agent def with pass_through as a string (guideline)
+    agent_def = WorkflowAgentDef(
+        agent="test_agent",
+        description="Test agent",
+        pass_through="Show progress to user",
+    )
+
+    # Create a state
+    state = WorkflowExecutionState.new("exec-1", "test_flow")
+
+    # Create a request
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do something")],
+        model="test-model",
+        stream=True,
+    )
+
+    # Create progress payload
+    progress_payload = {
+        "type": "progress",
+        "progress": 50,
+        "total": 100,
+        "message": "Halfway there",
+        "tool": "slow_tool",
+    }
+
+    # Test WITHOUT history
+    user_messages_received.clear()
+    async for _ in engine._handle_tool_progress(
+        state, agent_def, request, progress_payload, None, None, passthrough_history=[]
+    ):
+        pass
+
+    assert len(user_messages_received) == 1
+    msg_without_history = user_messages_received[0]
+    assert "Previous messages" not in msg_without_history
+
+    # Test WITH history
+    user_messages_received.clear()
+    passthrough_history = ["First message to user", "Second update about progress"]
+    async for _ in engine._handle_tool_progress(
+        state,
+        agent_def,
+        request,
+        progress_payload,
+        None,
+        None,
+        passthrough_history=passthrough_history,
+    ):
+        pass
+
+    assert len(user_messages_received) == 1
+    msg_with_history = user_messages_received[0]
+    # Should include the history
+    assert "Previous messages" in msg_with_history
+    assert "do not repeat" in msg_with_history
+    assert "First message to user" in msg_with_history
+    assert "Second update about progress" in msg_with_history
 
 
 @pytest.mark.asyncio

@@ -891,3 +891,383 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
         "prefer indoors"
     )
     assert final_state.context.get("task_id") != first_task_id
+
+
+@pytest.mark.asyncio
+async def test_on_tool_error_reroutes_to_failure_handler(tmp_path, monkeypatch):
+    """Test that on_tool_error triggers automatic reroute when tool fails."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "save_plan_flow",
+        "root_intent": "SAVE_PLAN",
+        "agents": [
+            {
+                "agent": "save_plan",
+                "description": "Save the plan using the save_plan tool.",
+                "tools": ["save_plan"],
+                "on_tool_error": "summarize_failure",
+            },
+            {
+                "agent": "summarize_failure",
+                "description": "Summarize that save failed and provide options.",
+                "tools": [],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "save_plan",
+                "description": "Save a plan",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class ToolErrorLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {"summarize_failure": "Sorry, the save failed. Please try again."}
+            )
+            self.call_count = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.call_count += 1
+            last_message = request.messages[-1].content or ""
+
+            # Routing intent check
+            if "ROUTING_INTENT_CHECK" in last_message:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":""},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            # Agent save_plan - make a tool call that will fail
+            if "<agent:save_plan>" in last_message:
+
+                async def _gen_tool_call():
+                    yield (
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                        '"function":{"name":"save_plan","arguments":"{}"}}]},"index":0}]}\n\n'
+                    )
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool_call()
+
+            # After tool error - LLM just responds normally (doesn't emit reroute)
+            if self.call_count > 2 and "save_plan" in last_message.lower():
+
+                async def _gen_after_error():
+                    yield 'data: {"choices":[{"delta":{"content":"I tried to save."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_after_error()
+
+            # Summarize failure agent
+            if "<agent:summarize_failure>" in last_message:
+
+                async def _gen_summarize():
+                    yield 'data: {"choices":[{"delta":{"content":"Sorry, the save failed."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_summarize()
+
+            return super().stream_completion(request, access_token, span)
+
+    from app.tgi.services.tool_service import ToolService
+
+    tool_service = ToolService()
+
+    async def mock_execute_tool_calls(*args, **kwargs):
+        # Simulate a tool error - return raw_results with error content
+        error_result = {
+            "name": "save_plan",
+            "tool_call_id": "call_1",
+            "content": '{"error": "Client error \'400 Bad Request\'"}',
+        }
+        from app.tgi.models import Message, MessageRole
+
+        tool_message = Message(
+            role=MessageRole.TOOL,
+            content='{"error": "Client error \'400 Bad Request\'"}',
+            name="save_plan",
+            tool_call_id="call_1",
+        )
+        if kwargs.get("return_raw_results"):
+            return ([tool_message], False, [error_result])
+        return ([tool_message], False)
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
+
+    llm = ToolErrorLLM()
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    exec_id = "exec-tool-error"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="save my plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="save_plan_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    state = engine.state_store.load_execution(exec_id)
+
+    # Verify tool error was detected and stored
+    assert "tool_errors" in state.context["agents"]["save_plan"]
+    assert len(state.context["agents"]["save_plan"]["tool_errors"]) == 1
+    assert state.context["agents"]["save_plan"]["tool_errors"][0]["name"] == "save_plan"
+
+    # Verify reroute happened
+    assert state.context["agents"]["save_plan"]["reroute_reason"] == "TOOL_ERROR"
+    assert "summarize_failure" in state.context["agents"]
+
+    # Verify reroute message in output
+    assert "rerouting" in payload.lower() or "summarize_failure" in payload.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_error_detection_various_formats(tmp_path, monkeypatch):
+    """Test that _tool_result_has_error detects various error formats."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    engine = WorkflowEngine(
+        WorkflowRepository(workflows_path=str(tmp_path)),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        StubLLMClient({}),
+    )
+
+    # JSON with error key
+    assert engine._tool_result_has_error('{"error": "something went wrong"}') is True
+
+    # JSON with isError flag
+    assert engine._tool_result_has_error('{"isError": true}') is True
+
+    # JSON with success false
+    assert engine._tool_result_has_error('{"success": false}') is True
+
+    # List with error item
+    assert engine._tool_result_has_error('[{"error": "fail"}]') is True
+
+    # Plain text with HTTP error
+    assert engine._tool_result_has_error("Client error '400 Bad Request'") is True
+    assert engine._tool_result_has_error("500 Internal Server Error") is True
+    assert engine._tool_result_has_error("401 unauthorized access") is True
+
+    # Normal successful responses
+    assert engine._tool_result_has_error('{"result": "success"}') is False
+    assert engine._tool_result_has_error("Plan saved successfully") is False
+    assert engine._tool_result_has_error('{"data": [1, 2, 3]}') is False
+    assert engine._tool_result_has_error("") is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_reroute_takes_precedence_over_on_tool_error(
+    tmp_path, monkeypatch
+):
+    """Test that LLM's explicit reroute tag takes precedence over on_tool_error."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    # The workflow design is important:
+    # - first agent has on_tool_error pointing to error_handler
+    # - first agent also has explicit reroute config for CUSTOM_FAILURE -> custom_handler
+    # - When tool fails AND LLM emits <reroute>CUSTOM_FAILURE</reroute>, explicit reroute should win
+    # - Both error_handler and custom_handler depend on first, so only the routed one runs
+    flow = {
+        "flow_id": "reroute_precedence_flow",
+        "root_intent": "TEST",
+        "agents": [
+            {
+                "agent": "first",
+                "description": "First agent",
+                "tools": ["some_tool"],
+                "on_tool_error": "error_handler",
+                "reroute": {"on": ["CUSTOM_FAILURE"], "to": "custom_handler"},
+            },
+            {
+                "agent": "error_handler",
+                "description": "Generic error handler",
+                "tools": [],
+                "depends_on": ["first"],
+                "when": "context.get('agents', {}).get('first', {}).get('reroute_reason') == 'TOOL_ERROR'",
+            },
+            {
+                "agent": "custom_handler",
+                "description": "Custom failure handler",
+                "tools": [],
+                "depends_on": ["first"],
+                "when": "context.get('agents', {}).get('first', {}).get('reroute_reason') == 'CUSTOM_FAILURE'",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "some_tool",
+                "description": "Some tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class ExplicitRerouteLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({})
+            self.call_count = 0
+            self.agent_call_counts = {}
+
+        def stream_completion(self, request, access_token, span):
+            self.call_count += 1
+
+            # Check all messages to find agent context
+            all_content = " ".join(m.content or "" for m in request.messages)
+            last_message = request.messages[-1].content or ""
+
+            if "ROUTING_INTENT_CHECK" in last_message:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":""},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            # For "first" agent, check if we're in the tool loop (tool result in history)
+            if "<agent:first>" in all_content:
+                # Check if there's a tool result in the messages (indicating we're in retry)
+                has_tool_result = any(
+                    m.role.value == "tool"
+                    for m in request.messages
+                    if hasattr(m.role, "value")
+                ) or any(
+                    getattr(m, "name", None) == "some_tool" for m in request.messages
+                )
+
+                if not has_tool_result:
+                    # First call: return tool call
+                    async def _gen_tool_call():
+                        yield (
+                            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                            '"function":{"name":"some_tool","arguments":"{}"}}]},"index":0}]}\n\n'
+                        )
+                        yield "data: [DONE]\n\n"
+
+                    return _gen_tool_call()
+                else:
+                    # After tool error: LLM emits explicit reroute
+                    async def _gen_reroute():
+                        yield 'data: {"choices":[{"delta":{"content":"<reroute>CUSTOM_FAILURE</reroute>"},"index":0}]}\n\n'
+                        yield "data: [DONE]\n\n"
+
+                    return _gen_reroute()
+
+            # custom_handler and error_handler just return simple responses
+            if "<agent:custom_handler>" in all_content:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":"Handling custom failure gracefully."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            if "<agent:error_handler>" in all_content:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":"Generic error handling."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            async def _gen():
+                yield 'data: {"choices":[{"delta":{"content":"fallback"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    from app.tgi.services.tool_service import ToolService
+
+    tool_service = ToolService()
+
+    async def mock_execute_tool_calls(*args, **kwargs):
+        error_result = {
+            "name": "some_tool",
+            "tool_call_id": "call_1",
+            "content": '{"error": "failed"}',
+        }
+        from app.tgi.models import Message, MessageRole
+
+        tool_message = Message(
+            role=MessageRole.TOOL,
+            content='{"error": "failed"}',
+            name="some_tool",
+            tool_call_id="call_1",
+        )
+        if kwargs.get("return_raw_results"):
+            return ([tool_message], False, [error_result])
+        return ([tool_message], False)
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
+
+    llm = ExplicitRerouteLLM()
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    exec_id = "exec-reroute-precedence"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="test")],
+        model="test-model",
+        stream=True,
+        use_workflow="reroute_precedence_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = engine.state_store.load_execution(exec_id)
+
+    # Explicit reroute should take precedence - tool errors were detected but LLM's reroute wins
+    assert state.context["agents"]["first"]["reroute_reason"] == "CUSTOM_FAILURE"
+    assert (
+        "tool_errors" in state.context["agents"]["first"]
+    )  # Tool errors were still recorded
+
+    # Custom handler should have been executed (routed to by explicit reroute)
+    assert "custom_handler" in state.context["agents"]
+    assert (
+        state.context["agents"]["custom_handler"]["content"]
+        == "Handling custom failure gracefully."
+    )
+
+    # error_handler should be skipped (condition not met since reroute_reason is CUSTOM_FAILURE)
+    assert "error_handler" in state.context["agents"]
+    assert state.context["agents"]["error_handler"].get("skipped") is True

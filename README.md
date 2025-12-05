@@ -713,6 +713,34 @@ Field reference:
     - Empty array `[]`: Disable all tools for this agent
     - Omitted: All MCP tools are available
   - `returns` (array[string], optional): Field names to extract from tool results and store in context for use by subsequent agents.
+  - `on_tool_error` (string, optional): Agent name to reroute to when a tool call fails. This provides automatic error handling when the LLM doesn't emit an explicit `<reroute>` tag. Useful for gracefully handling API failures or validation errors.
+
+##### Automatic tool error handling
+
+When a tool call fails (returns an error response like `400 Bad Request`, `Error:`, etc.), the workflow engine can automatically reroute to a failure-handling agent. This is useful when you want guaranteed error handling without relying on the LLM to detect and emit reroute tags.
+
+Configure `on_tool_error` on any agent that uses tools which may fail:
+
+```json
+{
+  "agent": "save_plan",
+  "description": "Save the plan to the database",
+  "tools": ["save_plan"],
+  "on_tool_error": "summarize_creation_failure",
+  "depends_on": ["create_plan"]
+},
+{
+  "agent": "summarize_creation_failure",
+  "description": "Explain to the user that saving failed and suggest next steps",
+  "tools": []
+}
+```
+
+Behavior:
+- When `save_plan` tool returns an error, the workflow automatically reroutes to `summarize_creation_failure`
+- If the LLM emits an explicit `<reroute>` tag, that takes precedence over `on_tool_error`
+- Error detection recognizes common patterns: HTTP status codes (4xx, 5xx), "Error:", "Failed:", exception messages, etc.
+- The error details are stored in the agent's context and available to the failure handler
 
 ##### Advanced tool configuration
 
