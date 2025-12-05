@@ -17,7 +17,7 @@ into the tool call arguments.
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -135,20 +135,102 @@ class ArgInjector:
         return cls(mappings) if mappings else None
 
 
+@dataclass
+class ReturnSpec:
+    """Specification for a single return value to capture.
+
+    Attributes:
+        field: The field path to capture (e.g., "payload.result")
+        from_tool: Optional tool name to capture from (None means any tool)
+        as_name: Optional alias for storing the value (defaults to field path)
+    """
+
+    field: str
+    from_tool: Optional[str] = None
+    as_name: Optional[str] = None
+
+    @classmethod
+    def parse(cls, spec: Union[str, Dict[str, Any]]) -> "ReturnSpec":
+        """
+        Parse a return specification from workflow config.
+
+        Supports multiple formats:
+        - "field" -> captures 'field' from any tool
+        - "payload.result" -> captures nested path from any tool
+        - {"field": "payload.result", "from": "plan"} -> captures from specific tool
+        - {"field": "payload.result", "from": "plan", "as": "plan_data"} -> with alias
+        """
+        if isinstance(spec, str):
+            return cls(field=spec)
+
+        if isinstance(spec, dict):
+            field = spec.get("field", "")
+            from_tool = spec.get("from")
+            as_name = spec.get("as")
+            return cls(field=field, from_tool=from_tool, as_name=as_name)
+
+        raise ValueError(f"Invalid return spec: {spec}")
+
+
 class ToolResultCapture:
     """
     Captures tool results and stores specified fields in the workflow context.
 
     When an agent has a `returns` field, this captures those fields from
     tool results and stores them in the agent's context data.
+
+    Supports multiple formats for returns:
+    - ["field"] - captures top-level field from any tool
+    - ["payload.result"] - captures nested field from any tool
+    - [{"field": "payload.result", "from": "plan"}] - captures from specific tool
+    - [{"field": "payload.result", "from": "plan", "as": "my_plan"}] - with alias
     """
 
-    def __init__(self, agent_name: str, returns: List[str]):
+    def __init__(self, agent_name: str, returns: List[Union[str, Dict[str, Any]]]):
         self.agent_name = agent_name
-        self.returns = returns
+        self.return_specs = [ReturnSpec.parse(r) for r in returns]
+
+    def _get_nested_value(self, data: Dict[str, Any], path: str) -> Any:
+        """
+        Navigate a dotted path to get a nested value.
+
+        Args:
+            data: The source dictionary
+            path: A dotted path like "payload.result"
+
+        Returns:
+            The value at the path, or None if not found
+        """
+        value = data
+        for key in path.split("."):
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return None
+        return value
+
+    def _set_nested_value(self, target: Dict[str, Any], path: str, value: Any) -> None:
+        """
+        Set a value at a dotted path, creating intermediate dicts as needed.
+
+        Args:
+            target: The target dictionary to modify
+            path: A dotted path like "payload.result"
+            value: The value to set
+        """
+        keys = path.split(".")
+        current = target
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+        current[keys[-1]] = value
 
     def capture(
-        self, tool_result_content: str, context: Dict[str, Any]
+        self,
+        tool_result_content: str,
+        context: Dict[str, Any],
+        tool_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Parse tool result content and capture specified return values into context.
@@ -156,6 +238,7 @@ class ToolResultCapture:
         Args:
             tool_result_content: JSON string from tool execution
             context: Workflow context to update
+            tool_name: Name of the tool that produced this result (for filtering)
 
         Returns:
             Updated context with captured values
@@ -176,11 +259,32 @@ class ToolResultCapture:
 
         agent_data = context["agents"][self.agent_name]
 
-        for field in self.returns:
-            if field in data:
-                agent_data[field] = data[field]
-                logger.debug(
-                    f"ToolResultCapture: Stored {self.agent_name}.{field}={data[field]!r}"
-                )
+        for spec in self.return_specs:
+            # Skip if this spec is for a different tool
+            if spec.from_tool and tool_name and spec.from_tool != tool_name:
+                continue
+
+            # Get the value from the tool result
+            if "." in spec.field:
+                value = self._get_nested_value(data, spec.field)
+            else:
+                value = data.get(spec.field)
+
+            if value is None:
+                continue
+
+            # Determine where to store it
+            store_path = spec.as_name or spec.field
+
+            # Store the value
+            if "." in store_path:
+                self._set_nested_value(agent_data, store_path, value)
+            else:
+                agent_data[store_path] = value
+
+            logger.debug(
+                f"ToolResultCapture: Stored {self.agent_name}.{store_path}={value!r} "
+                f"(from tool={tool_name or 'any'})"
+            )
 
         return context

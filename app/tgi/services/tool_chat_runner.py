@@ -215,6 +215,19 @@ class ToolChatRunner:
                         tool_name: Optional[str] = None,
                     ):
                         try:
+                            if logger:
+                                progress_label = (
+                                    f"{progress}/{total}"
+                                    if total is not None
+                                    else str(progress)
+                                )
+                                log_msg = (
+                                    f"[ToolProgress] {tool_name or 'tool'} "
+                                    f"{progress_label}"
+                                )
+                                if message:
+                                    log_msg += f" - {message}"
+                                logger.info(log_msg)
                             progress_queue.put_nowait(
                                 {
                                     "type": "progress",
@@ -232,6 +245,11 @@ class ToolChatRunner:
                         level: str, data: Any, logger_name: Optional[str] = None
                     ):
                         try:
+                            if logger:
+                                log_fn = getattr(logger, (level or "").lower(), None)
+                                if not callable(log_fn):
+                                    log_fn = logger.info
+                                log_fn(f"[ToolLog][{logger_name or 'MCP'}] {data}")
                             progress_queue.put_nowait(
                                 {
                                     "type": "log",

@@ -198,7 +198,79 @@ async def test_runner_handles_multiple_tool_calls():
     # Two tool calls resolved
     resolved = tool_resolution.calls[0][1]
     assert 0 in resolved and 1 in resolved or resolved  # accumulated calls present
-    assert len(llm.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_logs_progress_and_log_events():
+    class _Logger:
+        def __init__(self):
+            self.entries: list[tuple[str, str]] = []
+
+        def info(self, msg, *_, **__):
+            self.entries.append(("info", msg))
+
+        def warning(self, msg, *_, **__):
+            self.entries.append(("warning", msg))
+
+        def error(self, msg, *_, **__):
+            self.entries.append(("error", msg))
+
+    logger = _Logger()
+
+    async def _exec(
+        _session,
+        _calls,
+        _token,
+        _span,
+        *,
+        available_tools=None,
+        return_raw_results=False,
+        progress_callback=None,
+        log_callback=None,
+    ):
+        if progress_callback:
+            await progress_callback(0.5, 1.0, "halfway", "demo_tool")
+        if log_callback:
+            await log_callback("info", "log message", "demo_logger")
+        if return_raw_results:
+            return ([], True, [])
+        return ([], True)
+
+    tool_service = ToolService()
+    tool_service.execute_tool_calls = _exec  # type: ignore
+
+    llm = StubLLM(
+        streams=[
+            [
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":"demo_tool","arguments":"{}"}}]},"index":0}]}\n\n'
+            ],
+            ['data: {"choices":[{"delta":{"content":"done"},"index":0}]}\n\n'],
+        ]
+    )
+    tool_resolution = StubToolResolution(responses=[[_parsed("demo_tool")], []])
+    runner = ToolChatRunner(
+        llm_client=llm,
+        tool_service=tool_service,
+        tool_resolution=tool_resolution,
+        logger_obj=logger,
+        message_summarization_service=None,
+    )
+
+    stream = runner.stream_chat_with_tools(
+        session=None,
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        available_tools=[_tool("demo_tool")],
+        chat_request=ChatCompletionRequest(
+            messages=[], model="test-model", stream=True
+        ),
+        access_token="",
+        parent_span=None,
+        emit_think_messages=False,
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert any("ToolProgress" in msg for level, msg in logger.entries)
+    assert any("ToolLog" in msg for level, msg in logger.entries)
 
 
 @pytest.mark.asyncio

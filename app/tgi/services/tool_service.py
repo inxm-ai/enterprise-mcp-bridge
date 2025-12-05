@@ -316,6 +316,9 @@ class ToolService:
                 result = await call_fn(
                     tool_call.function.name, call_args, access_token, **call_kwargs
                 )
+                if inspect.isawaitable(result):
+                    # Some MCP clients may return a coroutine from the handler; ensure it is awaited
+                    result = await result
 
                 # Normalize common result shapes (object or dict)
                 result_is_error = getattr(result, "isError", None)

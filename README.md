@@ -741,8 +741,43 @@ Tool configuration options:
 
 ##### Using `returns` to capture tool outputs
 
-The `returns` field allows you to capture specific fields from tool results for use in subsequent agents:
+The `returns` field allows you to capture specific fields from tool results for use in subsequent agents. It supports multiple formats for flexible data extraction:
 
+**Simple field capture (from any tool):**
+```json
+{
+  "agent": "select_tools",
+  "tools": ["select_tools"],
+  "returns": ["selected_tools"]
+}
+```
+
+**Nested path capture:**
+```json
+{
+  "agent": "create_plan",
+  "tools": ["plan"],
+  "returns": ["payload.result"]
+}
+```
+This captures the nested value at `payload.result` from the tool response and stores it at the same path in the agent's context.
+
+**Tool-specific capture (when agent calls multiple tools):**
+```json
+{
+  "agent": "create_plan",
+  "tools": ["select_tools", "plan"],
+  "returns": [
+    {"field": "selected_tools", "from": "select_tools"},
+    {"field": "payload.result", "from": "plan", "as": "plan"}
+  ]
+}
+```
+- `field`: The path to capture from the tool result
+- `from`: Only capture from this specific tool (ignores results from other tools)
+- `as` (optional): Store the value under this alias instead of the original field path
+
+**Complete example with tool-specific captures:**
 ```json
 {
   "agent": "select_tools",
@@ -752,23 +787,28 @@ The `returns` field allows you to capture specific fields from tool results for 
   "pass_through": true
 },
 {
-  "agent": "execute_plan",
-  "description": "Execute the plan with selected tools",
+  "agent": "create_plan",
+  "description": "Create a detailed plan using selected tools",
   "tools": [
-    {
-      "run_task": {
-        "args": { "tools": "select_tools.selected_tools" }
-      }
-    }
+    {"plan": {"args": {"selected_tools": "select_tools.selected_tools"}}}
   ],
+  "returns": [{"field": "payload.result", "from": "plan", "as": "plan"}],
   "depends_on": ["select_tools"]
+},
+{
+  "agent": "save_plan",
+  "description": "Save the created plan",
+  "tools": [
+    {"save_plan": {"args": {"plan": "create_plan.plan"}}}
+  ],
+  "depends_on": ["create_plan"]
 }
 ```
 
 In this example:
-1. `select_tools` agent runs a tool that returns `{ "selected_tools": ["tool1", "tool2"] }`
-2. The `returns: ["selected_tools"]` captures this value into the agent's context
-3. The `execute_plan` agent's `run_task` tool automatically receives `selected_tools` as its `tools` argument via the `args` mapping
+1. `select_tools` agent runs and captures `selected_tools` from its tool result
+2. `create_plan` agent receives `selected_tools` via arg mapping, runs the `plan` tool, and captures `payload.result` specifically from the `plan` tool, storing it as `plan`
+3. `save_plan` agent receives the plan via `create_plan.plan` arg mapping
 
 Prompt usage:
 - For each agent the router looks for a prompt named exactly like the `agent` value via the MCP prompt service. If found, that prompt content is used; otherwise it falls back to the agent’s `description`.

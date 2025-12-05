@@ -445,7 +445,10 @@ class WorkflowEngine:
                 # Process tool results to extract returns
                 if parsed.tool_result and result_capture:
                     tool_result_content = parsed.tool_result.get("content", "")
-                    result_capture.capture(tool_result_content, state.context)
+                    tool_result_name = parsed.tool_result.get("name")
+                    result_capture.capture(
+                        tool_result_content, state.context, tool_name=tool_result_name
+                    )
 
                 if parsed.content:
                     content_text += parsed.content

@@ -110,6 +110,26 @@ class DictStructuredSession:
         return await DummySession().list_tools()
 
 
+class CoroutineResultSession:
+    def __init__(self):
+        self.handler_awaited = False
+
+    async def call_tool(self, name, args, access_token):
+        async def handle_planner_stream():
+            self.handler_awaited = True
+            return {
+                "isError": False,
+                "content": [],
+                "structuredContent": {"result": {"ok": True, "name": name}},
+            }
+
+        # Simulate returning an un-awaited coroutine from the MCP layer
+        return handle_planner_stream()
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
 class ExceptionSession:
     def __init__(self, list_tools_fails=True, call_tool_fails=True):
         self.list_tools_fails = list_tools_fails
@@ -281,6 +301,18 @@ class TestToolService:
         assert session.args_seen and session.args_seen[0] is None
         assert result["role"] == "tool"
         assert '"ok":true' in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_awaits_coroutine_result(self, tool_service):
+        """Ensure execute_tool_call awaits coroutine results returned by MCP clients."""
+        session = CoroutineResultSession()
+        tool_call = make_tool_call(name="heal", args="{}", id="call_async")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        assert session.handler_awaited is True
+        assert result["role"] == "tool"
+        assert '"name":"heal"' in result["content"]
 
     def test_parse_json_array_from_message_valid(self, tool_service):
         msg = 'Some error occurred: [\n {"code": "invalid_type", "expected": "boolean", "received": "string", "path": ["foo"], "message": "Type error"}\n]'
