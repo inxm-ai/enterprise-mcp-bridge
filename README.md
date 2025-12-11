@@ -708,7 +708,7 @@ Field reference:
   - `agent` (string): Name of the agent/prompt to run (also used to look up a custom prompt by name).
   - `description` (string): Default prompt text if no custom prompt exists for this agent.
   - `pass_through` (bool | string, default false): Controls response visibility. If `true`, the agent's streamed content is shown to the user. If a string, it acts as a response guideline instruction added to the agent's system prompt (e.g., `"Return only the searches you are performing"`).
-  - `context` (bool | array[string], default true): Controls how much workflow context is sent to the agent. `true` sends the full context (current behavior), `false` sends no context, and an array limits context to specific references (e.g., `["detect.intent", "plan.steps"]`) using the same notation as arg mappings.
+  - `context` (bool | array[string] | `"user_prompt"`, default true): Controls how much workflow context is sent to the agent. `true` sends the full context (current behavior), `false` sends no context, `"user_prompt"` sends only the original user prompt captured when the workflow started, and an array limits context to specific references (e.g., `["detect.intent", "plan.steps"]`) using the same notation as arg mappings.
   - `depends_on` (array[string]): Agent names that must complete before this agent runs.
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.

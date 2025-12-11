@@ -57,6 +57,7 @@ class ToolChatRunner:
         emit_think_messages: bool = True,
         arg_injector: Optional[Callable[[str, dict], dict]] = None,
         tools_for_validation: Optional[List[dict]] = None,
+        streaming_tools: Optional[set[str]] = None,
     ) -> AsyncGenerator[str, None]:
         messages_history = messages.copy()
         if chat_request.messages and chat_request.messages is not messages:
@@ -286,23 +287,64 @@ class ToolChatRunner:
                                 logger.debug("[ToolChatRunner] Dropped log update")
 
                     async def _run_tools():
-                        execute_fn = getattr(self.tool_service, "execute_tool_calls")
-                        sig = inspect.signature(execute_fn)
-                        kwargs = {
-                            "available_tools": validation_tools,
-                            "return_raw_results": True,
-                        }
-                        if "progress_callback" in sig.parameters:
-                            kwargs["progress_callback"] = _handle_progress
-                        if "log_callback" in sig.parameters:
-                            kwargs["log_callback"] = _handle_log
-                        return await execute_fn(
-                            session,
-                            tool_calls_to_execute,
-                            access_token,
-                            parent_span,
-                            **kwargs,
-                        )
+                        stream_set = streaming_tools or set()
+                        normal_calls = []
+                        streaming_calls = []
+
+                        for tc, fmt in tool_calls_to_execute:
+                            if tc.function.name in stream_set:
+                                streaming_calls.append((tc, fmt))
+                            else:
+                                normal_calls.append((tc, fmt))
+
+                        tool_results: list = []
+                        raw_results: list = []
+                        success = True
+
+                        if normal_calls:
+                            execute_fn = getattr(
+                                self.tool_service, "execute_tool_calls"
+                            )
+                            sig = inspect.signature(execute_fn)
+                            kwargs = {
+                                "available_tools": validation_tools,
+                                "return_raw_results": True,
+                            }
+                            if "progress_callback" in sig.parameters:
+                                kwargs["progress_callback"] = _handle_progress
+                            if "log_callback" in sig.parameters:
+                                kwargs["log_callback"] = _handle_log
+                            normal_results, normal_success, normal_raw = (
+                                await execute_fn(
+                                    session,
+                                    normal_calls,
+                                    access_token,
+                                    parent_span,
+                                    **kwargs,
+                                )
+                            )
+                            tool_results.extend(normal_results)
+                            raw_results.extend(normal_raw)
+                            success = success and normal_success
+
+                        for streaming_call, fmt in streaming_calls:
+                            (
+                                streaming_results,
+                                streaming_success,
+                                streaming_raw,
+                            ) = await self._run_streaming_tool(
+                                session=session,
+                                tool_call=streaming_call,
+                                tool_call_format=fmt,
+                                access_token=access_token,
+                                progress_callback=_handle_progress,
+                                log_callback=_handle_log,
+                            )
+                            tool_results.extend(streaming_results)
+                            raw_results.extend(streaming_raw)
+                            success = success and streaming_success
+
+                        return tool_results, success, raw_results
 
                     tool_task = asyncio.create_task(_run_tools())
                     queue_get = asyncio.create_task(progress_queue.get())
@@ -440,6 +482,144 @@ class ToolChatRunner:
                 break
 
         yield "data: [DONE]\n\n"
+
+    async def _run_streaming_tool(
+        self,
+        session: Any,
+        tool_call: ToolCall,
+        tool_call_format: Any,
+        access_token: Optional[str],
+        progress_callback: Optional[
+            Callable[[float, Optional[float], Optional[str], Optional[str]], Any]
+        ] = None,
+        log_callback: Optional[Callable[[str, Any, Optional[str]], Any]] = None,
+    ) -> tuple[list, bool, list]:
+        """
+        Execute a single tool via the streaming endpoint and normalize results.
+        """
+        tool_results: list = []
+        raw_results: list = []
+        success = True
+
+        if not hasattr(session, "call_tool_streaming"):
+            execute_fn = getattr(self.tool_service, "execute_tool_calls")
+            fallback_results, fallback_success, fallback_raw = await execute_fn(
+                session,
+                [(tool_call, tool_call_format)],
+                access_token,
+                None,
+                available_tools=None,
+                return_raw_results=True,
+            )
+            return fallback_results, fallback_success, fallback_raw
+
+        try:
+            args = json.loads(tool_call.function.arguments or "{}")
+        except Exception:
+            args = {}
+
+        try:
+            maybe_stream = session.call_tool_streaming(
+                tool_call.function.name, args, access_token
+            )
+            stream = (
+                await maybe_stream
+                if inspect.isawaitable(maybe_stream)
+                else maybe_stream
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            error_payload = {
+                "name": tool_call.function.name,
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(
+                    {"error": f"Streaming call failed: {exc}"},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+            msg = await self.tool_service.create_result_message(
+                tool_call_format, error_payload
+            )
+            return [msg], False, [error_payload]
+
+        try:
+            async for event in stream:
+                if not isinstance(event, dict):
+                    continue
+
+                etype = event.get("type")
+                if etype == "progress":
+                    if progress_callback:
+                        try:
+                            await progress_callback(
+                                event.get("progress"),
+                                event.get("total"),
+                                event.get("message"),
+                                tool_call.function.name,
+                            )
+                        except Exception:
+                            if logger:
+                                logger.debug(
+                                    "[ToolChatRunner] Dropped streaming progress event"
+                                )
+                    continue
+
+                if etype == "log":
+                    if log_callback:
+                        try:
+                            await log_callback(
+                                event.get("level", "info"),
+                                event.get("data"),
+                                event.get("logger_name"),
+                            )
+                        except Exception:
+                            if logger:
+                                logger.debug(
+                                    "[ToolChatRunner] Dropped streaming log event"
+                                )
+                    continue
+
+                if etype != "result":
+                    continue
+
+                result_data = event.get("data")
+                raw_results.append(
+                    {"name": tool_call.function.name, "content": result_data}
+                )
+
+                try:
+                    content_str = (
+                        result_data
+                        if isinstance(result_data, str)
+                        else json.dumps(
+                            result_data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+                except Exception:
+                    content_str = str(result_data)
+
+                result_payload = {
+                    "name": tool_call.function.name,
+                    "tool_call_id": tool_call.id,
+                    "content": content_str,
+                }
+                msg = await self.tool_service.create_result_message(
+                    tool_call_format, result_payload
+                )
+                tool_results.append(msg)
+                try:
+                    if self.tool_service._result_has_error(result_data):
+                        success = False
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover - defensive
+            if logger:
+                logger.error("[ToolChatRunner] Streaming tool failed: %s", exc)
+            success = False
+
+        return tool_results, success, raw_results
 
     def _deduplicate_retry_hints(self, messages: List[Message]) -> None:
         if not self.message_summarization_service:

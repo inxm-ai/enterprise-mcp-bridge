@@ -333,6 +333,53 @@ async def test_agent_context_can_be_scoped(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_context_can_use_original_user_prompt(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "context_user_prompt",
+        "root_intent": "TEST_CONTEXT_USER_PROMPT",
+        "agents": [
+            {
+                "agent": "first",
+                "description": "First agent",
+                "pass_through": True,
+            },
+            {
+                "agent": "second",
+                "description": "Second agent",
+                "context": "user_prompt",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"first": "First out", "second": "Second out"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="original question")],
+        model="test-model",
+        stream=True,
+        use_workflow="context_user_prompt",
+        workflow_execution_id="exec-context-user-prompt",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    second_idx = llm.calls.index("second")
+    second_prompt = llm.user_messages[second_idx]
+
+    assert 'Context: {"user_prompt": "original question"}' in second_prompt
+    assert "First out" not in second_prompt
+    assert "task_id" not in second_prompt
+
+
+@pytest.mark.asyncio
 async def test_when_condition_via_routing_agent(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
@@ -1568,12 +1615,419 @@ async def test_missing_returns_with_error_aborts_immediately(tmp_path, monkeypat
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
-    assert "reported an error" in payload.lower()
-    assert "retry" not in payload.lower()
+    assert "non-recoverable error" in payload.lower()
+    assert "needs to be fixed" in payload.lower()
+    assert "internal server error" in payload.lower()
+    assert "retrying" not in payload.lower()
     state = engine.state_store.load_execution(exec_id)
     assert state.completed is True
     assert state.context["agents"]["collect_plan"]["return_attempts"] == 1
-    assert llm.calls.count("collect_plan") == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_returns_are_captured_without_retry(tmp_path, monkeypatch):
+    """Streaming tool results should satisfy returns without triggering retries."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "stream_returns",
+        "root_intent": "PLAN",
+        "agents": [
+            {
+                "agent": "create_plan",
+                "description": "Create plan",
+                "tools": [
+                    {
+                        "plan": {
+                            "settings": {"streaming": True},
+                        }
+                    }
+                ],
+                "returns": [{"field": "payload.result", "from": "plan", "as": "plan"}],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "plan",
+                "description": "Create plan",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class StreamingToolLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({})
+            self.call_count = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.call_count += 1
+
+            async def _gen_first():
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"plan","arguments":"{}"}}]},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            async def _gen_second():
+                yield 'data: {"choices":[{"delta":{"content":"done"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return _gen_first() if self.call_count == 1 else _gen_second()
+
+    class StreamingSession(StubSession):
+        async def call_tool_streaming(
+            self, name: str, args: dict[str, Any], access_token: str
+        ):
+            async def stream():
+                yield {"type": "progress", "progress": 0.5, "message": "halfway"}
+                yield {
+                    "type": "result",
+                    "data": {"payload": {"result": {"id": "plan-42"}}},
+                }
+
+            return stream()
+
+    llm = StreamingToolLLM()
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-stream-returns"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="create a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="stream_returns",
+        workflow_execution_id=exec_id,
+    )
+
+    session = StreamingSession(tools=tools)
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "retry" not in payload.lower()
+    state = engine.state_store.load_execution(exec_id)
+    assert state.completed is True
+    agent_ctx = state.context["agents"]["create_plan"]
+    assert agent_ctx.get("plan") == {"id": "plan-42"}
+    assert "return_attempts" not in agent_ctx
+    assert llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_returns_recoverable_error_retries_with_summary(
+    tmp_path, monkeypatch
+):
+    """Recoverable errors should retry and include the error summary."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "missing_returns_recoverable",
+        "root_intent": "PLAN",
+        "agents": [
+            {
+                "agent": "collect_plan",
+                "description": "Collect plan output",
+                "returns": [{"field": "payload.result", "from": "plan", "as": "plan"}],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "collect_plan": [
+                "temporary error: timeout",
+                "temporary error: timeout",
+                "temporary error: timeout",
+            ]
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-missing-returns-recoverable"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="gather plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="missing_returns_recoverable",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "retrying (attempt 1/3" in payload.lower()
+    assert "temporary error" in payload.lower()
+    assert "needs to be fixed" in payload.lower()
+    state = engine.state_store.load_execution(exec_id)
+    assert state.completed is True
+    assert state.context["agents"]["collect_plan"]["return_attempts"] == 3
+    assert llm.calls.count("collect_plan") == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_returns_with_tools_without_results_aborts(tmp_path, monkeypatch):
+    """Agents with returns and tools still fail when no tool output is captured."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "returns_with_tools",
+        "root_intent": "PLAN",
+        "agents": [
+            {
+                "agent": "create_plan",
+                "description": "Create plan",
+                "tools": ["plan"],
+                "returns": [{"field": "payload.result", "from": "plan", "as": "plan"}],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "plan",
+                "description": "Plan",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    llm = StubLLMClient({"create_plan": "no tool call"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-returns-tools-missing"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="make a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="returns_with_tools",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "needs to be fixed" in payload.lower()
+    assert "after 3 attempts" in payload.lower()
+    state = engine.state_store.load_execution(exec_id)
+    assert state.completed is True
+    assert state.context["agents"]["create_plan"]["return_attempts"] == 3
+    assert llm.calls.count("create_plan") == 3
+
+
+@pytest.mark.asyncio
+async def test_arg_mapping_works_when_context_disabled(tmp_path, monkeypatch):
+    """
+    Even when an agent hides context from the LLM (context: false),
+    arg mappings should still resolve from the full workflow state.
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "save_plan_flow",
+        "root_intent": "PLAN",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools",
+                "tools": ["select_tools"],
+                "returns": ["selected_tools"],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create plan",
+                "tools": [
+                    {
+                        "plan": {
+                            "args": {"selected_tools": "select_tools.selected_tools"},
+                        }
+                    }
+                ],
+                "depends_on": ["select_tools"],
+                "returns": [{"field": "payload.result", "from": "plan", "as": "plan"}],
+            },
+            {
+                "agent": "save_plan",
+                "description": "Save plan",
+                "context": False,
+                "tools": [
+                    {
+                        "save_plan": {
+                            "args": {"plan": "create_plan.plan"},
+                        }
+                    }
+                ],
+                "depends_on": ["create_plan"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "select_tools",
+                "description": "Select tools",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plan",
+                "description": "Plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"selected_tools": {"type": "array"}},
+                    "required": ["selected_tools"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_plan",
+                "description": "Save plan",
+                "parameters": {"type": "object", "properties": {"plan": {}}},
+            },
+        },
+    ]
+
+    class MappingLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                responses={
+                    "select_tools": "<passthrough>Selecting</passthrough>",
+                    "create_plan": "<passthrough>Created</passthrough>",
+                    "save_plan": "<passthrough>Saved</passthrough>",
+                }
+            )
+            self._call_sequence = {}
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+
+            # Emit a tool call for each agent once
+            if agent_marker and agent_marker not in self._call_sequence:
+                self._call_sequence[agent_marker] = 1
+
+                tool_name = agent_marker
+                if agent_marker == "create_plan":
+                    tool_name = "plan"
+                if agent_marker == "select_tools":
+                    tool_name = "select_tools"
+                if agent_marker == "save_plan":
+                    tool_name = "save_plan"
+
+                async def _gen_tool_call():
+                    import json
+
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": tool_name,
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool_call()
+
+            return super().stream_completion(request, access_token, span)
+
+    llm = MappingLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="save_plan_flow",
+        workflow_execution_id="exec-ctx-false-args",
+    )
+
+    class CaptureSession(StubSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tool_calls = []
+
+        async def call_tool(self, name: str, args: dict, access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            result_payload = {"result": f"{name}_result"}
+            if name == "select_tools":
+                result_payload = {"selected_tools": ["tool_a", "tool_b"]}
+            if name == "plan":
+                result_payload = {"payload": {"result": {"id": "plan-123"}}}
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(text=json.dumps(result_payload, ensure_ascii=False))
+                ],
+            )
+
+    # Pre-seed select_tools output so arg injection has data even though context is hidden
+    seeded_state = store.get_or_create("exec-ctx-false-args", "save_plan_flow")
+    seeded_state.context["agents"]["select_tools"] = {
+        "selected_tools": ["tool_a", "tool_b"],
+        "completed": True,
+        "content": "",
+    }
+    seeded_state.context["agents"]["create_plan"] = {
+        "plan": {"id": "plan-123"},
+        "completed": True,
+        "content": "",
+    }
+    store.save_state(seeded_state)
+
+    session = CaptureSession(tools=tools)
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    # The save_plan tool should receive injected plan arg despite context False
+    save_calls = [c for c in session.tool_calls if c["name"] == "save_plan"]
+    assert save_calls, "save_plan tool was not called"
+    assert save_calls[0]["args"].get("plan") is not None
 
 
 @pytest.mark.asyncio
@@ -1832,6 +2286,7 @@ async def test_arg_resolution_failure_stops_workflow(tmp_path):
             emit_think_messages=True,
             arg_injector=None,
             tools_for_validation=None,
+            streaming_tools=None,
         ):
             async def _gen():
                 # Simulate an argument mapping failure before any output is streamed

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
@@ -30,6 +31,13 @@ from app.tgi.workflows.state import WorkflowStateStore
 from app.vars import TGI_MODEL_NAME
 
 logger = logging.getLogger("uvicorn.error")
+
+
+@dataclass
+class ReturnFailureAnalysis:
+    fatal: bool
+    recoverable: bool
+    messages: list[str]
 
 
 class WorkflowEngine:
@@ -486,6 +494,10 @@ class WorkflowEngine:
 
         # Resolve tools - get both modified (for LLM) and original (for validation)
         modified_tools, original_tools = await self._resolve_tools(session, agent_def)
+        tool_configs = self.agent_executor.get_tool_configs_for_agent(agent_def)
+        streaming_tools = {
+            tc.name for tc in tool_configs if getattr(tc, "streaming", False)
+        }
 
         agent_request = ChatCompletionRequest(
             messages=[
@@ -532,6 +544,7 @@ class WorkflowEngine:
             emit_think_messages=agent_def.pass_through,
             arg_injector=arg_injector_fn,
             tools_for_validation=tools_for_validation,
+            streaming_tools=streaming_tools if streaming_tools else None,
         )
 
         # For string-based pass_through, we need to extract content from <passthrough> tags
@@ -796,8 +809,6 @@ class WorkflowEngine:
         missing_returns = self._get_missing_returns(
             agent_def, result_capture, agent_context
         )
-        if agent_def.tools and not tool_results_seen and not tool_errors:
-            missing_returns = []
         if missing_returns:
             action, events = self._handle_missing_returns(
                 agent_def=agent_def,
@@ -999,6 +1010,16 @@ class WorkflowEngine:
         if not history or history[-1] != message:
             history.append(message)
 
+    def _get_original_user_prompt(self, state: WorkflowExecutionState) -> Optional[str]:
+        """
+        Fetch the first user message captured for this workflow.
+        """
+        messages = state.context.get("user_messages") or []
+        if not isinstance(messages, list) or not messages:
+            return None
+        first = messages[0]
+        return str(first) if first is not None else None
+
     def _build_agent_context(
         self, agent_def: WorkflowAgentDef, state: WorkflowExecutionState
     ) -> dict:
@@ -1009,6 +1030,13 @@ class WorkflowEngine:
         if context_setting is False:
             return {}
         if context_setting is True or context_setting is None:
+            return state.context
+        if isinstance(context_setting, str):
+            if context_setting == "user_prompt":
+                original_prompt = self._get_original_user_prompt(state)
+                if original_prompt is None:
+                    return {}
+                return {"user_prompt": original_prompt}
             return state.context
         if isinstance(context_setting, list):
             return self._select_context_references(context_setting, state.context)
@@ -1183,40 +1211,112 @@ class WorkflowEngine:
         content: Optional[str],
         tool_errors: Optional[list[dict[str, Any]]] = None,
     ) -> bool:
-        """
-        Determine whether a response indicates a non-recoverable error.
+        """Detect whether the agent response is non-recoverable."""
+        analysis = self._analyze_return_failure(content, tool_errors)
+        return analysis.fatal
 
-        Uses tool error signals, structured error detection, and common
-        fatal keywords in the text content.
-        """
-        for err in tool_errors or []:
-            err_content = err.get("content", "")
-            if self._tool_result_has_error(err_content):
-                return True
-            if re.search(
-                r"\b(error|exception|traceback|fatal)\b", str(err_content), re.I
-            ):
-                return True
+    def _shorten_error_text(self, text: str, max_length: int = 200) -> str:
+        cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(cleaned) > max_length:
+            return cleaned[: max_length - 3] + "..."
+        return cleaned
 
-        if self._tool_result_has_error(content or ""):
-            return True
-
-        lowered = (content or "").lower()
-        fatal_markers = [
+    def _looks_like_error_text(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        indicators = [
+            "error",
             "exception",
-            "traceback",
-            "fatal",
+            "fail",
+            "unable",
+            "denied",
+            "invalid",
+            "timeout",
+            "unavailable",
+        ]
+        return any(indicator in lowered for indicator in indicators)
+
+    def _collect_error_messages(
+        self,
+        content: Optional[str],
+        tool_errors: Optional[list[dict[str, Any]]],
+    ) -> list[str]:
+        messages: list[str] = []
+
+        for err in tool_errors or []:
+            snippet = self._shorten_error_text(err.get("content", ""))
+            if not snippet:
+                continue
+            name = err.get("name")
+            if name:
+                snippet = f"{name}: {snippet}"
+            messages.append(snippet)
+
+        if content and self._looks_like_error_text(content):
+            messages.append(self._shorten_error_text(content))
+
+        return messages
+
+    def _analyze_return_failure(
+        self,
+        content: Optional[str],
+        tool_errors: Optional[list[dict[str, Any]]],
+    ) -> ReturnFailureAnalysis:
+        error_messages = self._collect_error_messages(content, tool_errors)
+        fatal_markers = [
             "unauthorized",
             "forbidden",
             "permission denied",
-            "timed out",
-            "timeout",
-            "internal server error",
+            "policy",
             "bad request",
-            "failed",
-            "error",
+            "invalid",
+            "not found",
+            "internal server error",
+            "traceback",
+            "exception",
+            "fatal",
         ]
-        return any(marker in lowered for marker in fatal_markers)
+        recoverable_markers = [
+            "timeout",
+            "temporarily",
+            "temporary",
+            "rate limit",
+            "retry",
+            "try again",
+            "unavailable",
+            "busy",
+            "conflict",
+            "locked",
+            "overloaded",
+            "429",
+            "503",
+        ]
+
+        fatal = False
+        for message in error_messages:
+            lower = message.lower()
+            if any(marker in lower for marker in fatal_markers):
+                fatal = True
+                break
+
+        recoverable = bool(error_messages) and not fatal
+        recoverable_hint = any(
+            marker in message.lower()
+            for message in error_messages
+            for marker in recoverable_markers
+        )
+        if recoverable_hint and not fatal:
+            recoverable = True
+
+        return ReturnFailureAnalysis(
+            fatal=fatal,
+            recoverable=recoverable,
+            messages=error_messages,
+        )
+
+    def _format_error_summary(self, messages: list[str]) -> str:
+        if not messages:
+            return ""
+        return " | ".join(messages)
 
     def _get_missing_returns(
         self,
@@ -1304,23 +1404,30 @@ class WorkflowEngine:
         agent_context["return_attempts"] = attempts
 
         missing_list = ", ".join(missing_returns)
+        failure = self._analyze_return_failure(content, tool_errors)
+        summary = self._format_error_summary(failure.messages)
 
-        if self._response_has_bad_error(content, tool_errors):
+        if failure.fatal:
             agent_context["completed"] = True
             state.completed = True
             self.state_store.save_state(state)
+            message = (
+                f"Agent '{agent_def.agent}' encountered a non-recoverable error "
+                f"while missing required data ({missing_list}). "
+                "This agent needs to be fixed."
+            )
+            if summary:
+                message += f" Errors: {summary}"
             events.append(
                 self._record_event(
                     state,
-                    (
-                        f"Agent '{agent_def.agent}' reported an error and did not "
-                        f"return required data ({missing_list}). Aborting workflow."
-                    ),
+                    message,
                     status="error",
                     metadata={
                         "missing_returns": missing_returns,
                         "attempts": attempts,
-                        "reason": "error_detected",
+                        "reason": "non_recoverable_error",
+                        "errors": failure.messages or None,
                     },
                 )
             )
@@ -1331,19 +1438,23 @@ class WorkflowEngine:
             agent_context["completed"] = True
             state.completed = True
             self.state_store.save_state(state)
+            message = (
+                f"Agent '{agent_def.agent}' did not provide required data "
+                f"after {attempts} attempts ({missing_list}). "
+                "This agent needs to be fixed."
+            )
+            if summary:
+                message += f" Errors: {summary}"
             events.append(
                 self._record_event(
                     state,
-                    (
-                        f"Agent '{agent_def.agent}' did not provide required data "
-                        f"after {attempts} attempts ({missing_list}). "
-                        "Aborting workflow."
-                    ),
+                    message,
                     status="error",
                     metadata={
                         "missing_returns": missing_returns,
                         "attempts": attempts,
                         "reason": "max_retries_exceeded",
+                        "errors": failure.messages or None,
                     },
                 )
             )
@@ -1354,18 +1465,29 @@ class WorkflowEngine:
         self._clear_return_paths(agent_context, return_specs)
         agent_context["completed"] = False
         self.state_store.save_state(state)
+        if failure.recoverable and summary:
+            retry_message = (
+                f"Agent '{agent_def.agent}' returned an error while missing required data "
+                f"({missing_list}): {summary}. "
+                f"Retrying (attempt {attempts}/{self.MAX_RETURN_RETRIES})."
+            )
+            reason = "recoverable_error"
+        else:
+            retry_message = (
+                f"Expected data from agent '{agent_def.agent}' was missing "
+                f"({missing_list}). Retrying (attempt {attempts}/{self.MAX_RETURN_RETRIES})."
+            )
+            reason = "missing_returns"
         events.append(
             self._record_event(
                 state,
-                (
-                    f"Expected data from agent '{agent_def.agent}' was missing "
-                    f"({missing_list}). Retrying (attempt {attempts}/{self.MAX_RETURN_RETRIES})."
-                ),
+                retry_message,
                 status="retry",
                 metadata={
                     "missing_returns": missing_returns,
                     "attempts": attempts,
-                    "reason": "missing_returns",
+                    "reason": reason,
+                    "errors": failure.messages or None,
                 },
             )
         )

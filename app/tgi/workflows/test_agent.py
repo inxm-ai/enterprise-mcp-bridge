@@ -1216,6 +1216,7 @@ async def test_progress_updates_cancel_previous(tmp_path):
             emit_think_messages=True,
             arg_injector=None,
             tools_for_validation=None,
+            streaming_tools=None,
         ):
             async def _gen():
                 yield 'data: {"type":"progress","progress":0.1,"message":"first"}\n\n'
@@ -1613,7 +1614,25 @@ async def test_engine_modifies_tool_schema_for_mapped_args(tmp_path, monkeypatch
 
     class CapturingLLM(StubLLMClient):
         def __init__(self):
-            super().__init__(responses={"select_tools": "done", "create_plan": "done"})
+            super().__init__(
+                responses={"select_tools": "", "create_plan": ""},
+                tool_call_responses={
+                    "select_tools": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {"name": "select_tools", "arguments": "{}"},
+                        }
+                    ],
+                    "create_plan": [
+                        {
+                            "index": 0,
+                            "id": "call_2",
+                            "function": {"name": "plan", "arguments": "{}"},
+                        }
+                    ],
+                },
+            )
             self.captured_tool_schemas = []
 
         def stream_completion(self, request, access_token, span):
@@ -1622,6 +1641,20 @@ async def test_engine_modifies_tool_schema_for_mapped_args(tmp_path, monkeypatch
             return super().stream_completion(request, access_token, span)
 
     llm = CapturingLLM()
+
+    class ReturnSession(StubSession):
+        async def call_tool(self, name: str, args: Optional[dict], access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            payload = {"result": f"{name}_result"}
+            if name == "select_tools":
+                payload = {"selected_tools": ["tool_a", "tool_b"]}
+            if name == "plan":
+                payload = {"payload": {"result": {"id": "plan-123"}}}
+            return SimpleNamespace(
+                isError=False,
+                structuredContent=payload,
+                content=[SimpleNamespace(text=json.dumps(payload))],
+            )
 
     engine = WorkflowEngine(
         WorkflowRepository(),
@@ -1637,7 +1670,7 @@ async def test_engine_modifies_tool_schema_for_mapped_args(tmp_path, monkeypatch
         workflow_execution_id="exec-schema-mod",
     )
 
-    session = StubSession(tools=tools)
+    session = ReturnSession(tools=tools)
     stream = await engine.start_or_resume_workflow(session, request, None, None)
     _ = [chunk async for chunk in stream]
 

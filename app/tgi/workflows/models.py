@@ -33,12 +33,14 @@ class WorkflowAgentDef:
             - False: no workflow context is provided
             - List[str]: only the referenced fields from other agents are provided,
               using the same notation as arg mappings (e.g., "agent.field.nested").
+            - "user_prompt": passes only the original user prompt captured when the
+              workflow started.
     """
 
     agent: str
     description: str
     pass_through: Union[bool, str] = False
-    context: Union[bool, List[str]] = True
+    context: Union[bool, List[str], str] = True
     depends_on: List[str] = field(default_factory=list)
     when: Optional[str] = None
     reroute: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
