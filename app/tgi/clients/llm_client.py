@@ -123,7 +123,7 @@ class LLMClient:
         ]
         candidates.sort(key=lambda msg: len(msg.content or ""), reverse=True)
 
-        payload = request.model_dump(exclude_none=True)
+        payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
         serialized = self._serialize_payload(payload)
         size = self._payload_size(serialized)
 
@@ -139,7 +139,7 @@ class LLMClient:
                 access_token=self.tgi_token,
                 outer_span=span,
             )
-            payload = request.model_dump(exclude_none=True)
+            payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
             serialized = self._serialize_payload(payload)
             size = self._payload_size(serialized)
             span.set_attribute("new_length", len(message.content or ""))
@@ -176,7 +176,7 @@ class LLMClient:
     def _drop_messages_until_fit(
         self, request: ChatCompletionRequest, limit: int
     ) -> tuple[dict, str, int]:
-        payload = request.model_dump(exclude_none=True)
+        payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
         serialized = self._serialize_payload(payload)
         size = self._payload_size(serialized)
 
@@ -190,11 +190,18 @@ class LLMClient:
                 dropped.role,
                 getattr(dropped, "name", ""),
             )
-            payload = request.model_dump(exclude_none=True)
+            payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
             serialized = self._serialize_payload(payload)
             size = self._payload_size(serialized)
 
         return payload, serialized, size
+
+    def _filter_llm_payload(self, payload: dict) -> dict:
+        """
+        Remove non-LLM fields from the outgoing payload to avoid API errors.
+        """
+        payload.pop("persist_inner_thinking", None)
+        return payload
 
     async def _ensure_payload_size(
         self, request: ChatCompletionRequest, payload: dict
@@ -213,7 +220,7 @@ class LLMClient:
 
         # First pass: compact whitespace and JSON formatting
         self._minify_messages_for_payload(request)
-        payload = request.model_dump(exclude_none=True)
+        payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
         serialized = self._serialize_payload(payload)
         size = self._payload_size(serialized)
 
@@ -251,7 +258,7 @@ class LLMClient:
 
         self.model_format.prepare_request(request)
 
-        payload = request.model_dump(exclude_none=True)
+        payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
 
         # tool_choice is only valid when tools are specified
         # OpenAI API returns 400 error if tool_choice is sent without tools

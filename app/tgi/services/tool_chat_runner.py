@@ -141,14 +141,37 @@ class ToolChatRunner:
                     )
                     tool_calls_to_execute = []
 
+                    available_tool_names = set()
+                    for tool in available_tools or []:
+                        if isinstance(tool, dict):
+                            name = tool.get("function", {}).get("name") or tool.get(
+                                "name"
+                            )
+                        else:
+                            func = getattr(tool, "function", None)
+                            name = getattr(func, "name", None) if func else None
+                            if not name:
+                                name = getattr(tool, "name", None)
+                        if name:
+                            available_tool_names.add(name)
+
                     content_message = self._strip_fabricated_tool_results(
                         content_message, tool_calls_to_execute or parsed_tool_calls
                     )
 
                     for parsed_call in parsed_tool_calls:
-                        if parsed_call.name not in map(
-                            lambda tool: tool["function"]["name"], available_tools
-                        ):
+                        if parsed_call.name not in available_tool_names:
+                            if logger:
+                                logger.warning(
+                                    "[ToolChatRunner] Skipping tool call '%s' "
+                                    "(not in available tools: %s)",
+                                    parsed_call.name,
+                                    (
+                                        ", ".join(sorted(available_tool_names))
+                                        if available_tool_names
+                                        else "none"
+                                    ),
+                                )
                             continue
 
                         # Inject additional arguments if arg_injector is provided

@@ -51,6 +51,20 @@ class ToolResolutionStrategy:
             # Function call with explicit arguments
             r'<function_calls?>\s*<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>\s*</function_calls?>',
         ]
+        # Tags that are part of workflow control flow and should never be treated as tools
+        self._non_tool_tags = {
+            "think",
+            "reasoning",
+            "analysis",
+            "p",
+            "div",
+            "span",
+            "invoke",
+            "passthrough",
+            "user_feedback_needed",
+            "reroute",
+            "no_reroute",
+        }
 
     def detect_format(
         self, content: str, tool_call_chunks: Optional[Dict] = None
@@ -78,6 +92,17 @@ class ToolResolutionStrategy:
             return ToolCallFormat.CLAUDE_XML
         else:
             return ToolCallFormat.UNKNOWN
+
+    def _is_non_tool_tag(self, tag_name: str) -> bool:
+        """
+        Determine if a tag should be ignored for tool resolution.
+
+        Workflow control tags like <passthrough> or <user_feedback_needed> are not tool
+        calls and should be skipped to avoid spurious tool resolution attempts.
+        """
+        if not tag_name:
+            return False
+        return tag_name.lower() in self._non_tool_tags
 
     def resolve_tool_calls(
         self, content: str, tool_call_chunks: Optional[Dict] = None
@@ -129,8 +154,21 @@ class ToolResolutionStrategy:
     def _has_claude_xml_format(self, content: str) -> bool:
         """Check if content contains Claude-style XML tags."""
         for pattern in self._xml_tag_patterns:
-            if re.search(pattern, content, re.DOTALL | re.IGNORECASE):
-                return True
+            matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+            if not matches:
+                continue
+
+            # Invoke pattern returns tuples of (function_name, content)
+            if pattern == self._xml_tag_patterns[1]:
+                for func_name, _ in matches:
+                    if not self._is_non_tool_tag(func_name):
+                        return True
+                continue
+
+            # Generic pattern returns tuples of (tag_name, content)
+            for tag_name, _ in matches:
+                if not self._is_non_tool_tag(tag_name):
+                    return True
         return False
 
     def _resolve_openai_format(
@@ -196,6 +234,8 @@ class ToolResolutionStrategy:
         processed_invoke_content = set()
 
         for function_name, function_content in invoke_matches:
+            if self._is_non_tool_tag(function_name):
+                continue
             try:
                 arguments = self._parse_xml_content(function_content.strip())
 
@@ -222,19 +262,12 @@ class ToolResolutionStrategy:
 
         for tag_name, tag_content in generic_matches:
             # Skip if this is a function_calls tag that was handled by invoke pattern
-            if tag_name.lower() == "function_calls" and invoke_matches:
+            lower_tag = tag_name.lower()
+            if lower_tag == "function_calls" and invoke_matches:
                 continue
 
             # Skip common HTML/XML tags that aren't function calls
-            if tag_name.lower() in [
-                "think",
-                "reasoning",
-                "analysis",
-                "p",
-                "div",
-                "span",
-                "invoke",
-            ]:
+            if self._is_non_tool_tag(lower_tag):
                 continue
 
             try:
@@ -287,14 +320,32 @@ class ToolResolutionStrategy:
         return unique_calls
 
     def _extract_json_objects(self, content: str) -> List[Dict]:
-        """Extract all valid JSON objects from content."""
+        """Extract all valid JSON objects from content, respecting quoted strings."""
         json_objects = []
 
-        # Find potential JSON by balancing braces
+        # Find potential JSON by balancing braces while skipping quoted text
         start = None
         brace_count = 0
+        in_string = False
+        escape_next = False
 
         for i, char in enumerate(content):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == "\\":
+                escape_next = True if in_string else False
+                continue
+
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                # Ignore braces inside quoted strings
+                continue
+
             if char == "{":
                 if brace_count == 0:
                     start = i

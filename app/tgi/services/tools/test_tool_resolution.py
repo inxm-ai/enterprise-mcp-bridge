@@ -222,6 +222,48 @@ class TestToolResolutionStrategy:
         assert "numbers" in call.arguments
         assert "operation" in call.arguments
 
+    def test_resolve_claude_skips_passthrough_tag(self):
+        """Passthrough markup should not be treated as a tool call."""
+        content = (
+            "<passthrough>Starting test</passthrough>"
+            '<resolve_mcp_properties_defaults>{"properties": '
+            '"create_plan.plan.plan_tree.properties"}</resolve_mcp_properties_defaults>'
+        )
+
+        tool_calls, success = self.strategy.resolve_tool_calls(content)
+
+        assert success
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "resolve_mcp_properties_defaults"
+        assert (
+            tool_calls[0].arguments["properties"]
+            == "create_plan.plan.plan_tree.properties"
+        )
+
+    def test_passthrough_tag_alone_not_treated_as_tool_call(self):
+        """A lone passthrough block should not trigger tool resolution."""
+        content = "<passthrough>progress update</passthrough>"
+
+        tool_calls, success = self.strategy.resolve_tool_calls(content)
+
+        assert tool_calls == []
+        assert success is False
+
+    def test_ignores_tool_call_json_inside_string(self):
+        """JSON that looks like a tool call but is inside quotes must be ignored."""
+        content = (
+            'prefix {"id":"call_1","type":"function","function":{'
+            '"name":"resolve_mcp_properties_defaults","arguments":"{}"}} '
+            'middle "{\\"id\\":\\"call_nested\\",\\"type\\":\\"function\\",'
+            '\\"function\\":{\\"name\\":\\"list-joined-teams\\",\\"arguments\\":\\"{}\\"}}"'
+        )
+
+        tool_calls, success = self.strategy.resolve_tool_calls(content)
+
+        assert success
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "resolve_mcp_properties_defaults"
+
     def test_resolve_claude_multiple_calls(self):
         """Test resolving multiple Claude XML calls."""
         content = """

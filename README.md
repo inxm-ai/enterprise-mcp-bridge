@@ -656,7 +656,11 @@ Set the following environment variables to expose OpenAI-compatible agent endpoi
 `SYSTEM_DEFINED_PROMPTS` can include prompts with `role: "system"` content. When no system message is supplied in the request, the bridge automatically prepends the configured system prompt, ensuring consistent agent behavior.
 
 ### Workflow-aware routing
-You can let the bridge orchestrate multi-agent workflows. Configure:
+Workflow-aware routing lets the bridge chain multiple agents with dependency ordering, reroute rules, and stateful resumes. It runs entirely on the bridge side, and is only for simple use cases: only MCP tools available to the current session are exposed to agents, reroutes cannot re-run agents that already completed, and cycles/loops in dependencies or reroutes will halt with an error instead of spinning forever.
+
+It is not a full-featured orchestration engine, but it is useful for coordinating multi-step tasks without building a separate service.
+
+You can let the bridge orchestrate simple multi-agent workflows. Configure:
 - `WORKFLOWS_PATH`: Directory containing workflow JSON files (one per file).
 - `WORKFLOW_DB_PATH` (optional): SQLite file for execution state (defaults to `<WORKFLOWS_PATH>/workflow_state.db`).
 - Existing agent settings (`TGI_URL`, `TGI_API_TOKEN`, `TGI_MODEL_NAME`) still apply for LLM calls.
@@ -704,9 +708,11 @@ Field reference:
   - `agent` (string): Name of the agent/prompt to run (also used to look up a custom prompt by name).
   - `description` (string): Default prompt text if no custom prompt exists for this agent.
   - `pass_through` (bool | string, default false): Controls response visibility. If `true`, the agent's streamed content is shown to the user. If a string, it acts as a response guideline instruction added to the agent's system prompt (e.g., `"Return only the searches you are performing"`).
+  - `context` (bool | array[string], default true): Controls how much workflow context is sent to the agent. `true` sends the full context (current behavior), `false` sends no context, and an array limits context to specific references (e.g., `["detect.intent", "plan.steps"]`) using the same notation as arg mappings.
   - `depends_on` (array[string]): Agent names that must complete before this agent runs.
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
+    - If a reroute target is missing, has unmet dependencies, or was already completed earlier in the run, the engine stops and emits an error chunk explaining the reason (e.g., missing dependencies, already completed).
   - `tools` (array, optional): Limit available tools for this agent. Can be:
     - Array of strings: Simple tool names (e.g., `["get_weather", "search"]`)
     - Array of objects: Advanced tool configurations with settings and argument mappings (see below)
@@ -714,6 +720,14 @@ Field reference:
     - Omitted: All MCP tools are available
   - `returns` (array[string], optional): Field names to extract from tool results and store in context for use by subsequent agents.
   - `on_tool_error` (string, optional): Agent name to reroute to when a tool call fails. This provides automatic error handling when the LLM doesn't emit an explicit `<reroute>` tag. Useful for gracefully handling API failures or validation errors.
+
+You can visualize your workflows using the [Workflow Visualizer](bin/viz-workflow.py):
+
+```bash
+python bin/viz-workflow.py ./your-workflow.json -o ./your-workflow.png
+```
+
+This will require `graphviz` to be installed (`pip install graphviz` & `apt install graphviz`).
 
 ##### Automatic tool error handling
 
@@ -856,6 +870,8 @@ Runtime behavior:
 - `use_workflow: "<flow_id>"` forces that workflow; `use_workflow: true` auto-selects by matching `root_intent` to the user request.
 - Optional `workflow_execution_id` resumes a prior execution (state is persisted in SQLite). Without it, a new execution id is generated.
 - The routing agent streams status events; agents marked `pass_through: true` stream their content to the user.
+- `persist_inner_thinking` (boolean, optional) controls how much agent output is stored in workflow context for later turns. Defaults to `false`, which keeps only pass-through content and explicit returns, trimming internal reasoning to avoid oversized LLM payloads. Set to `true` if you need full agent transcripts preserved across resumes.
+- Agent-level `context` controls how much prior workflow state each agent sees: set to `false` to omit context entirely, or provide a list of references (e.g., `["plan.steps", "detect.intent"]`) to send only selected values using the same notation as arg mappings.
 
 #### Example: start or resume a workflow
 ```bash

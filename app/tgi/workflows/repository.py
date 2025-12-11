@@ -46,6 +46,8 @@ class WorkflowRepository:
                     tools_value = list(tools_field) if tools_field is not None else None
                     # pass_through can be boolean or string (guideline)
                     pass_through_value = agent.get("pass_through", False)
+                    # context controls how much workflow context is provided
+                    context_value = agent.get("context", True)
                     # returns is a list of field names to capture from tool results
                     returns_value = agent.get("returns", None)
                     # on_tool_error is the agent to reroute to on tool failure
@@ -55,6 +57,7 @@ class WorkflowRepository:
                             agent=agent.get("agent"),
                             description=agent.get("description", ""),
                             pass_through=pass_through_value,
+                            context=context_value,
                             depends_on=list(agent.get("depends_on", []) or []),
                             when=agent.get("when"),
                             reroute=agent.get("reroute"),

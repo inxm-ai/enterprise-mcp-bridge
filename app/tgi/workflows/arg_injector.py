@@ -22,6 +22,26 @@ from typing import Any, Dict, List, Optional, Union
 logger = logging.getLogger("uvicorn.error")
 
 
+class ArgResolutionError(Exception):
+    """Raised when an argument mapping cannot be resolved from workflow context."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        arg_name: str,
+        source_path: str,
+        available_context: dict,
+    ):
+        self.tool_name = tool_name
+        self.arg_name = arg_name
+        self.source_path = source_path
+        self.available_context = available_context
+        super().__init__(
+            f"Could not resolve '{arg_name}' from '{source_path}' for tool '{tool_name}'. "
+            f"Available context for '{source_path.split('.')[0]}': {available_context}"
+        )
+
+
 @dataclass
 class ToolArgMapping:
     """Mapping configuration for a single tool's arguments."""
@@ -52,7 +72,12 @@ class ArgInjector:
         return tool_name in self._mappings
 
     def inject(
-        self, tool_name: str, args: Dict[str, Any], context: Dict[str, Any]
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        context: Dict[str, Any],
+        *,
+        fail_on_missing: bool = False,
     ) -> Dict[str, Any]:
         """
         Inject mapped arguments into the tool call args.
@@ -61,6 +86,8 @@ class ArgInjector:
             tool_name: Name of the tool being called
             args: Original arguments from the LLM
             context: Workflow context containing agent results
+            fail_on_missing: If True, raise ArgResolutionError when a mapping
+                cannot be resolved. If False, log a warning and skip the arg.
 
         Returns:
             Merged arguments with injected values
@@ -75,12 +102,22 @@ class ArgInjector:
             value = self._resolve_path(source_path, context)
             if value is not None:
                 result[arg_name] = value
-                logger.debug(
-                    f"ArgInjector: Injected {arg_name}={value!r} from {source_path}"
-                )
             else:
+                agent_name = source_path.split(".", 1)[0]
+                available = context.get("agents", {}).get(agent_name, {}) or {}
+                if fail_on_missing:
+                    # Surface a hard failure so misconfigured workflows stop immediately
+                    raise ArgResolutionError(
+                        tool_name=tool_name,
+                        arg_name=arg_name,
+                        source_path=source_path,
+                        available_context=available,
+                    )
                 logger.warning(
-                    f"ArgInjector: Could not resolve {source_path} for {arg_name}"
+                    "ArgInjector: Could not resolve %s for %s (available context: %s)",
+                    source_path,
+                    arg_name,
+                    available,
                 )
 
         return result

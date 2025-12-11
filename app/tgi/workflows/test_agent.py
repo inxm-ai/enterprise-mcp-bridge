@@ -3,7 +3,9 @@ Tests for the Agent module - handling enhanced tool configurations,
 returns, streaming tools, and pass_through guidelines.
 """
 
+import asyncio
 import json
+import os
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional
 
@@ -1147,6 +1149,144 @@ async def test_passthrough_history_provided_to_progress_agent(tmp_path, monkeypa
         assert (
             has_history_reference or len(progress_user_messages) == 0
         ), f"Progress user messages should include history. Got: {progress_user_messages}"
+
+
+@pytest.mark.asyncio
+async def test_progress_updates_cancel_previous(tmp_path):
+    """New tool progress updates cancel in-flight summaries and only surface the latest."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.models import (
+        WorkflowAgentDef,
+        WorkflowDefinition,
+        WorkflowExecutionState,
+    )
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "progress_cancel_flow",
+        "root_intent": "PROGRESS_CANCEL",
+        "agents": [{"agent": "worker", "description": "Worker", "pass_through": True}],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    os.environ["WORKFLOWS_PATH"] = str(workflows_dir)
+
+    class ProgressLLM:
+        def __init__(self):
+            self.progress_calls = 0
+            self.cancelled = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.progress_calls += 1
+            call_number = self.progress_calls
+
+            async def _gen():
+                try:
+                    if call_number == 1:
+                        await asyncio.sleep(0.05)  # Give time to be cancelled
+                        yield (
+                            'data: {"choices":[{"delta":{"content":"<passthrough>first progress</passthrough>"},"index":0}]}\n\n'
+                        )
+                    else:
+                        yield (
+                            'data: {"choices":[{"delta":{"content":"<passthrough>second progress</passthrough>"},"index":0}]}\n\n'
+                        )
+                    yield "data: [DONE]\n\n"
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+                    raise
+
+            return _gen()
+
+    progress_llm = ProgressLLM()
+
+    class ProgressRunner:
+        """Stub runner that emits two quick progress updates then final content."""
+
+        def stream_chat_with_tools(
+            self,
+            session,
+            messages,
+            available_tools,
+            chat_request,
+            access_token,
+            parent_span,
+            emit_think_messages=True,
+            arg_injector=None,
+            tools_for_validation=None,
+        ):
+            async def _gen():
+                yield 'data: {"type":"progress","progress":0.1,"message":"first"}\n\n'
+                await asyncio.sleep(0.01)
+                yield 'data: {"type":"progress","progress":0.5,"message":"second"}\n\n'
+                yield (
+                    'data: {"choices":[{"delta":{"content":"<passthrough>Done</passthrough>"},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    class Session:
+        async def list_tools(self):
+            return []
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        progress_llm,
+        tool_chat_runner=ProgressRunner(),
+    )
+
+    agent_def = WorkflowAgentDef(
+        agent="worker", description="Worker", pass_through=True, tools=[]
+    )
+    workflow_def = WorkflowDefinition(
+        flow_id="progress_cancel_flow",
+        root_intent="PROGRESS_CANCEL",
+        agents=[agent_def],
+    )
+    state = WorkflowExecutionState.new("exec-progress-cancel", "progress_cancel_flow")
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do work")],
+        model="test-model",
+        stream=True,
+    )
+
+    # Run the agent directly to capture emitted events
+    _ = [
+        chunk
+        async for chunk in engine._execute_agent(
+            workflow_def,
+            agent_def,
+            state,
+            Session(),
+            request,
+            None,
+            None,
+            no_reroute=False,
+        )
+    ]
+
+    # Progress LLM should have been called twice and the first should be cancelled
+    assert 1 <= progress_llm.progress_calls <= 2
+    assert progress_llm.cancelled <= 1
+
+    def _extract_progress_contents(events: list[str]) -> list[str]:
+        contents: list[str] = []
+        for ev in events:
+            if not ev.startswith("data: "):
+                continue
+            payload = json.loads(ev[len("data: ") :])
+            metadata = payload.get("agentic", {}).get("metadata", {})
+            if metadata.get("type") == "tool_progress":
+                contents.append(payload["choices"][0]["delta"]["content"] or "")
+        return contents
+
+    progress_contents = _extract_progress_contents(state.events)
+    # Only the latest progress message should be surfaced
+    assert progress_contents == ["second progress"]
 
 
 @pytest.mark.asyncio

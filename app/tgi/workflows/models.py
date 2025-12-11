@@ -28,11 +28,17 @@ class WorkflowAgentDef:
         on_tool_error: Agent name to reroute to when a tool call fails. If set and a
             tool error is detected, the workflow will automatically reroute to this
             agent even if the LLM doesn't emit a reroute tag.
+        context: Controls how much workflow context is provided to the agent:
+            - True (default): full context is provided (current behavior)
+            - False: no workflow context is provided
+            - List[str]: only the referenced fields from other agents are provided,
+              using the same notation as arg mappings (e.g., "agent.field.nested").
     """
 
     agent: str
     description: str
     pass_through: Union[bool, str] = False
+    context: Union[bool, List[str]] = True
     depends_on: List[str] = field(default_factory=list)
     when: Optional[str] = None
     reroute: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None

@@ -143,6 +143,11 @@ class ProxiedTGIService:
             span.set_attribute("chat.messages_count", len(request.messages))
             span.set_attribute("chat.has_tools", bool(request.tools))
             span.set_attribute("chat.tool_choice", bool(request.tool_choice))
+            span.set_attribute("chat.use_workflow", bool(request.use_workflow))
+
+            logger.info(
+                f"[ProxiedTGI] Received chat completion request: model={request.model}, use workflow={request.use_workflow}, tool_choice={request.tool_choice}, tools_provided={bool(request.tools)}"
+            )
 
             if self.workflow_engine and request.use_workflow:
                 request.stream = True

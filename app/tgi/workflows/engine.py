@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -11,13 +13,18 @@ from app.tgi.services.tool_service import ToolService
 from app.tgi.services.tool_chat_runner import ToolChatRunner
 from app.tgi.services.tools.tool_resolution import ToolResolutionStrategy
 from app.tgi.workflows.agent import AgentExecutor
-from app.tgi.workflows.arg_injector import ArgInjector, ToolResultCapture
+from app.tgi.workflows.arg_injector import (
+    ArgInjector,
+    ArgResolutionError,
+    ToolResultCapture,
+)
 from app.tgi.workflows.chunk_formatter import WorkflowChunkFormatter
 from app.tgi.workflows.models import (
     WorkflowAgentDef,
     WorkflowDefinition,
     WorkflowExecutionState,
 )
+from app.tgi.workflows.passthrough_filter import PassThroughFilter
 from app.tgi.workflows.repository import WorkflowRepository
 from app.tgi.workflows.state import WorkflowStateStore
 from app.vars import TGI_MODEL_NAME
@@ -29,6 +36,8 @@ class WorkflowEngine:
     """
     Executes workflows by streaming agent outputs and persisting state for resumption.
     """
+
+    MAX_RETURN_RETRIES = 3
 
     def __init__(
         self,
@@ -48,6 +57,11 @@ class WorkflowEngine:
         self.tool_service = tool_service or ToolService()
         self.chunk_formatter = chunk_formatter or WorkflowChunkFormatter()
         self.agent_executor = agent_executor or AgentExecutor()
+        self.passthrough_filter = PassThroughFilter(
+            llm_client=self.llm_client,
+            model_name=TGI_MODEL_NAME,
+            logger_obj=logger,
+        )
         self.tool_chat_runner = tool_chat_runner or ToolChatRunner(
             llm_client=self.llm_client,
             tool_service=self.tool_service,
@@ -74,10 +88,14 @@ class WorkflowEngine:
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
         state = self.state_store.get_or_create(execution_id, workflow_def.flow_id)
         state.context.setdefault("agents", {})
+        persist_inner_thinking = self._should_persist_inner_thinking(request, state)
+        if not persist_inner_thinking:
+            self._prune_inner_thinking(state, workflow_def)
         # Ensure we have a task id available for envelope formatting
         self.chunk_formatter.ensure_task_id(state)
-        self.state_store.save_state(state)
         user_message = self._extract_user_message(request)
+        self._append_user_message(state, user_message)
+        self.state_store.save_state(state)
         no_reroute = self._has_no_reroute(user_message)
 
         async def _runner():
@@ -173,6 +191,7 @@ class WorkflowEngine:
                 request,
                 access_token,
                 span,
+                persist_inner_thinking=persist_inner_thinking,
                 no_reroute=no_reroute,
             ):
                 yield event
@@ -198,6 +217,27 @@ class WorkflowEngine:
         except Exception:
             return None
 
+    def _get_completed_agents(
+        self, workflow_def: WorkflowDefinition, state: WorkflowExecutionState
+    ) -> set[str]:
+        """
+        Determine which agents are complete based on stored context.
+
+        Agents explicitly marked as awaiting feedback or with completed=False
+        are treated as incomplete so they can resume when the user responds.
+        """
+        completed: set[str] = set()
+        agents_ctx = state.context.get("agents", {}) or {}
+        for agent_def in workflow_def.agents:
+            ctx = agents_ctx.get(agent_def.agent, {})
+            if ctx.get("awaiting_feedback"):
+                continue
+            if ctx.get("completed") is False:
+                continue
+            if ctx:
+                completed.add(agent_def.agent)
+        return completed
+
     async def _run_agents(
         self,
         workflow_def: WorkflowDefinition,
@@ -206,16 +246,23 @@ class WorkflowEngine:
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
+        persist_inner_thinking: bool = False,
         no_reroute: bool = False,
     ) -> AsyncGenerator[str, None]:
-        completed_agents = set(state.context.get("agents", {}).keys())
+        completed_agents = self._get_completed_agents(workflow_def, state)
         forced_next: Optional[str] = None
 
         last_visible_output: Optional[str] = None
 
         # Keep looping while there are unfinished agents OR a reroute target to honor
         while len(completed_agents) < len(workflow_def.agents) or forced_next:
+            # If a prior agent terminated the workflow, stop immediately
+            if state.completed:
+                yield "data: [DONE]\n\n"
+                return
+
             progress_made = False
+            retry_triggered = False
             for agent_def in workflow_def.agents:
                 if agent_def.agent in completed_agents:
                     continue
@@ -241,6 +288,7 @@ class WorkflowEngine:
                         "pass_through": agent_def.pass_through,
                         "skipped": True,
                         "reason": "condition_not_met",
+                        "completed": True,
                     }
                     self.state_store.save_state(state)
                     completed_agents.add(agent_def.agent)
@@ -260,6 +308,7 @@ class WorkflowEngine:
                     request,
                     access_token,
                     span,
+                    persist_inner_thinking,
                     no_reroute,
                 ):
                     if isinstance(result, str):
@@ -283,11 +332,35 @@ class WorkflowEngine:
                                 f"\nRerouting to {forced_next}\n",
                                 status="reroute",
                             )
+                    elif status == "retry":
+                        retry_triggered = True
+                        progress_made = True
+                        # Restart loop to retry this agent before proceeding
+                        break
+                    elif status == "abort":
+                        # Workflow termination requested
+                        return
                     else:
                         forced_next = None
 
+                if state.completed:
+                    yield "data: [DONE]\n\n"
+                    return
+
+                if retry_triggered:
+                    break
+
                 completed_agents.add(agent_def.agent)
                 progress_made = True
+
+                if state.completed:
+                    # Stop processing further agents if the workflow was terminated
+                    yield "data: [DONE]\n\n"
+                    return
+
+            if retry_triggered:
+                # Skip deadlock detection and restart with the same agent
+                continue
 
             if not progress_made:
                 remaining_agents = [
@@ -318,6 +391,27 @@ class WorkflowEngine:
                                 f"\nReroute target '{forced_next}' is not runnable; "
                                 f"missing dependencies: {', '.join(missing_deps)}.\n"
                             )
+                        elif forced_next in completed_agents:
+                            agent_ctx = state.context.get("agents", {}).get(
+                                forced_next, {}
+                            )
+                            reason = agent_ctx.get("reason") or agent_ctx.get(
+                                "reroute_reason"
+                            )
+                            metadata["reason"] = "already_completed"
+                            if reason:
+                                metadata["prior_reason"] = reason
+                                message = (
+                                    f"\nReroute target '{forced_next}' was already "
+                                    f"completed (reason: {reason}); reroutes cannot "
+                                    f"re-run completed agents.\n"
+                                )
+                            else:
+                                message = (
+                                    f"\nReroute target '{forced_next}' was already "
+                                    "completed; reroutes cannot re-run completed "
+                                    "agents.\n"
+                                )
                         else:
                             message = f"\nReroute target '{forced_next}' could not be executed.\n"
                     else:
@@ -356,19 +450,37 @@ class WorkflowEngine:
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
-        no_reroute: bool,
+        persist_inner_thinking: bool = False,
+        no_reroute: bool = False,
     ) -> AsyncGenerator[Any, None]:
         state.current_agent = agent_def.agent
 
         start_text = self._start_text(agent_def)
         yield self._record_event(state, start_text)
 
+        agent_context = state.context.setdefault("agents", {}).setdefault(
+            agent_def.agent,
+            {"content": "", "pass_through": agent_def.pass_through},
+        )
+        agent_context["pass_through"] = agent_def.pass_through
+        agent_context["completed"] = False
+        was_awaiting_feedback = bool(agent_context.pop("awaiting_feedback", None))
+        had_feedback = bool(agent_context.pop("had_feedback", None))
+
         system_prompt = await self._resolve_prompt(session, agent_def)
-        context_json = json.dumps(state.context, ensure_ascii=False, default=str)
+        agent_context_payload = self._build_agent_context(agent_def, state)
+        context_json = json.dumps(
+            agent_context_payload, ensure_ascii=False, default=str
+        )
         user_prompt = self._extract_user_message(request) or ""
+        history_messages = state.context.get("user_messages", [])
+        history_text = (
+            "\n".join(history_messages[-10:]) if history_messages else "<none>"
+        )
         user_content = (
             f"<agent:{agent_def.agent}> Goal: {workflow_def.root_intent}\n"
-            f"User request: {user_prompt}\n"
+            f"Latest user input: {user_prompt}\n"
+            f"User message history:\n{history_text}\n"
             f"Context: {context_json}"
         )
 
@@ -394,7 +506,11 @@ class WorkflowEngine:
         # Create arg injector for pre-mapped arguments
         arg_injector_obj = ArgInjector.from_agent_def(agent_def)
         arg_injector_fn = (
-            (lambda name, args: arg_injector_obj.inject(name, args, state.context))
+            (
+                lambda name, args: arg_injector_obj.inject(
+                    name, args, state.context, fail_on_missing=True
+                )
+            )
             if arg_injector_obj
             else None
         )
@@ -423,92 +539,198 @@ class WorkflowEngine:
         use_passthrough_tags = agent_def.pass_through_guideline is not None
         # Track history of emitted passthrough content to avoid repetition
         passthrough_history: list[str] = []
+        emitted_passthrough = False
         # Track tool errors for automatic rerouting
         tool_errors: list[dict[str, Any]] = []
+        # Track a cancellable task for progress updates so newer updates
+        # can pre-empt older, still-running LLM summaries.
+        progress_task: Optional[asyncio.Task[list[str]]] = None
+        tool_results_seen = False
 
-        async with chunk_reader(runner_stream, enable_tracing=False) as reader:
-            async for parsed in reader.as_parsed():
-                if parsed.is_done:
-                    break
+        async def _flush_progress_task(wait: bool = False) -> list[str]:
+            nonlocal progress_task
+            if not progress_task:
+                return []
+            if not wait and not progress_task.done():
+                return []
+            try:
+                return await progress_task
+            except asyncio.CancelledError:
+                return []
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug("[WorkflowEngine] Progress handler task failed: %s", exc)
+                return []
+            finally:
+                progress_task = None
 
-                parsed_payload = (
-                    parsed.parsed if isinstance(parsed.parsed, dict) else None
-                )
-                if parsed_payload and parsed_payload.get("type") == "progress":
-                    async for event in self._handle_tool_progress(
-                        state,
-                        agent_def,
-                        request,
-                        parsed_payload,
-                        access_token,
-                        span,
-                        passthrough_history=passthrough_history,
-                    ):
-                        yield event
-                    continue
+        async def _cancel_progress_task() -> None:
+            nonlocal progress_task
+            if progress_task and not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.debug(
+                        "[WorkflowEngine] Progress handler cancellation error: %s", exc
+                    )
+                progress_task = None
 
-                # Process tool results to extract returns and detect errors
-                if parsed.tool_result:
-                    tool_result_content = parsed.tool_result.get("content", "")
-                    tool_result_name = parsed.tool_result.get("name")
+        try:
+            async with chunk_reader(runner_stream, enable_tracing=False) as reader:
+                async for parsed in reader.as_parsed():
+                    if parsed.is_done:
+                        break
 
-                    # Check for tool errors
-                    if self._tool_result_has_error(tool_result_content):
-                        tool_errors.append(
-                            {
-                                "name": tool_result_name,
-                                "content": tool_result_content,
-                            }
-                        )
-                        logger.warning(
-                            "[WorkflowEngine] Tool error detected for %s: %s",
-                            tool_result_name,
-                            (
-                                tool_result_content[:200]
-                                if len(tool_result_content) > 200
-                                else tool_result_content
-                            ),
-                        )
-
-                    if result_capture:
-                        result_capture.capture(
-                            tool_result_content,
-                            state.context,
-                            tool_name=tool_result_name,
-                        )
-
-                if parsed.content:
-                    content_text += parsed.content
-                    if agent_def.pass_through:
-                        if use_passthrough_tags:
-                            # Accumulate and extract passthrough content
-                            passthrough_buffer += parsed.content
-                            extracted = self._extract_passthrough_content(
-                                passthrough_buffer
+                    parsed_payload = (
+                        parsed.parsed if isinstance(parsed.parsed, dict) else None
+                    )
+                    if parsed_payload and parsed_payload.get("type") == "progress":
+                        if progress_task:
+                            if not progress_task.done():
+                                await _cancel_progress_task()
+                            # If it already completed, drop it in favor of the latest update
+                            progress_task = None
+                        progress_task = asyncio.create_task(
+                            self._run_progress_handler(
+                                state,
+                                agent_def,
+                                request,
+                                parsed_payload,
+                                access_token,
+                                span,
+                                passthrough_history=list(passthrough_history),
                             )
-                            if extracted:
-                                yield self._record_event(state, extracted)
-                                # Track the extracted content for history
-                                # Strip trailing newlines for cleaner history entries
-                                passthrough_history.append(extracted.strip())
-                                # Keep only unprocessed content (after last closing tag)
-                                last_close = passthrough_buffer.rfind("</passthrough>")
-                                if last_close != -1:
-                                    passthrough_buffer = passthrough_buffer[
-                                        last_close + len("</passthrough>") :
-                                    ]
-                        else:
-                            yield self._record_event(state, parsed.content)
+                        )
+                        for event in await _flush_progress_task(wait=False):
+                            yield event
+                        continue
+
+                    # Process tool results to extract returns and detect errors
+                    if parsed.tool_result:
+                        tool_results_seen = True
+                        tool_result_content = parsed.tool_result.get("content", "")
+                        tool_result_name = parsed.tool_result.get("name")
+
+                        # Check for tool errors
+                        if self._tool_result_has_error(tool_result_content):
+                            tool_errors.append(
+                                {
+                                    "name": tool_result_name,
+                                    "content": tool_result_content,
+                                }
+                            )
+                            logger.warning(
+                                "[WorkflowEngine] Tool error detected for %s: %s",
+                                tool_result_name,
+                                (
+                                    tool_result_content[:200]
+                                    if len(tool_result_content) > 200
+                                    else tool_result_content
+                                ),
+                            )
+
+                        if result_capture:
+                            result_capture.capture(
+                                tool_result_content,
+                                state.context,
+                                tool_name=tool_result_name,
+                            )
+                        # Store raw tool result content for simple chaining
+                        try:
+                            agent_context["result"] = json.loads(tool_result_content)
+                        except Exception:
+                            agent_context["result"] = tool_result_content
+
+                    if parsed.content:
+                        content_text += parsed.content
+                        if agent_def.pass_through:
+                            if use_passthrough_tags:
+                                # Accumulate and extract passthrough content
+                                passthrough_buffer += parsed.content
+                                extracted = self._extract_passthrough_content(
+                                    passthrough_buffer
+                                )
+                                if extracted:
+                                    filtered = await self.passthrough_filter.should_emit(
+                                        candidate=extracted,
+                                        agent_name=agent_def.agent,
+                                        history=passthrough_history,
+                                        user_message=user_prompt,
+                                        pass_through_guideline=agent_def.pass_through_guideline,
+                                        access_token=access_token,
+                                        span=span,
+                                    )
+                                    if filtered:
+                                        yield self._record_event(state, filtered)
+                                        emitted_passthrough = True
+                                        # Track the filtered content for history
+                                        # Strip trailing newlines for cleaner history entries
+                                        passthrough_history.append(filtered.strip())
+                                    # Keep only unprocessed content (after last closing tag)
+                                    last_close = passthrough_buffer.rfind(
+                                        "</passthrough>"
+                                    )
+                                    if last_close != -1:
+                                        passthrough_buffer = passthrough_buffer[
+                                            last_close + len("</passthrough>") :
+                                        ]
+                            else:
+                                yield self._record_event(state, parsed.content)
+                                emitted_passthrough = True
+
+                    # Emit completed progress updates without blocking the stream
+                    for event in await _flush_progress_task(wait=False):
+                        yield event
+
+            # Ensure the latest progress update (if any) is surfaced before moving on
+            for event in await _flush_progress_task(wait=True):
+                yield event
+
+            # Fallback: ensure pass-through content is emitted at least once
+            if agent_def.pass_through and not emitted_passthrough:
+                fallback_visible = self._extract_passthrough_content(content_text)
+                if fallback_visible:
+                    fallback_visible = self._strip_tags(fallback_visible)
+                else:
+                    fallback_visible = self._strip_tags(content_text)
+                if fallback_visible:
+                    yield self._record_event(state, fallback_visible)
+                    emitted_passthrough = True
+        except ArgResolutionError as exc:
+            logger.error("[WorkflowEngine] Argument resolution failed: %s", exc)
+            agent_context["content"] = ""
+            agent_context["completed"] = True
+            error_text = (
+                "Workflow configuration error while preparing tool arguments.\n"
+                f"{exc}"
+            )
+            state.completed = True
+            self.state_store.save_state(state)
+            yield self._record_event(state, error_text, status="error")
+            yield "data: [DONE]\n\n"
+            return
 
         reroute_reason = self._extract_tag(content_text, "reroute")
         feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
         cleaned_content = self._strip_tags(content_text)
+        content_for_context = cleaned_content.strip()
+        if not persist_inner_thinking:
+            content_for_context = self._visible_agent_content(
+                agent_def, cleaned_content, passthrough_history
+            )
+            if (
+                not agent_def.pass_through
+                and not agent_def.returns
+                and not agent_context.get("awaiting_feedback")
+                and not was_awaiting_feedback
+                and not had_feedback
+            ):
+                content_for_context = ""
 
         # Update agent context, preserving any captured returns
-        agent_context = state.context.setdefault("agents", {}).setdefault(
-            agent_def.agent, {}
-        )
-        agent_context["content"] = cleaned_content.strip()
+        agent_context["content"] = content_for_context or ""
         agent_context["pass_through"] = agent_def.pass_through
 
         # Store tool errors in agent context for visibility
@@ -519,6 +741,8 @@ class WorkflowEngine:
             agent_context["reroute_reason"] = reroute_reason
 
         if feedback_needed:
+            agent_context["awaiting_feedback"] = True
+            agent_context["completed"] = False
             state.awaiting_feedback = True
             self.state_store.save_state(state)
             yield self._record_event(
@@ -528,7 +752,10 @@ class WorkflowEngine:
             )
             yield {"status": "feedback", "content": cleaned_content}
             return
+        agent_context.pop("awaiting_feedback", None)
+
         if reroute_reason and not no_reroute:
+            agent_context["completed"] = True
             target = self._match_reroute_target(agent_def.reroute, reroute_reason)
             if target:
                 self.state_store.save_state(state)
@@ -556,6 +783,7 @@ class WorkflowEngine:
                 agent_def.on_tool_error,
             )
             agent_context["reroute_reason"] = "TOOL_ERROR"
+            agent_context["completed"] = True
             self.state_store.save_state(state)
             yield self._record_event(
                 state,
@@ -565,6 +793,32 @@ class WorkflowEngine:
             yield {"status": "reroute", "target": agent_def.on_tool_error}
             return
 
+        missing_returns = self._get_missing_returns(
+            agent_def, result_capture, agent_context
+        )
+        if agent_def.tools and not tool_results_seen and not tool_errors:
+            missing_returns = []
+        if missing_returns:
+            action, events = self._handle_missing_returns(
+                agent_def=agent_def,
+                state=state,
+                agent_context=agent_context,
+                missing_returns=missing_returns,
+                content=cleaned_content,
+                tool_errors=tool_errors,
+                return_specs=result_capture.return_specs if result_capture else None,
+            )
+            for event in events:
+                yield event
+            if action == "abort":
+                yield {"status": "abort"}
+                return
+            if action == "retry":
+                yield {"status": "retry"}
+                return
+
+        agent_context["completed"] = True
+        agent_context.pop("return_attempts", None)
         self.state_store.save_state(state)
         yield {
             "status": "done",
@@ -735,6 +989,102 @@ class WorkflowEngine:
                 return message.content
         return None
 
+    def _append_user_message(
+        self, state: WorkflowExecutionState, message: Optional[str]
+    ) -> None:
+        """Persist user messages so resumed runs have full history."""
+        if not message:
+            return
+        history = state.context.setdefault("user_messages", [])
+        if not history or history[-1] != message:
+            history.append(message)
+
+    def _build_agent_context(
+        self, agent_def: WorkflowAgentDef, state: WorkflowExecutionState
+    ) -> dict:
+        """
+        Build context payload for an agent based on its context setting.
+        """
+        context_setting = getattr(agent_def, "context", True)
+        if context_setting is False:
+            return {}
+        if context_setting is True or context_setting is None:
+            return state.context
+        if isinstance(context_setting, list):
+            return self._select_context_references(context_setting, state.context)
+        return state.context
+
+    def _select_context_references(
+        self, references: list[Any], full_context: dict
+    ) -> dict:
+        """
+        Extract only the requested references from prior agent contexts.
+        """
+        selected: dict[str, Any] = {"agents": {}}
+        for ref in references:
+            if not isinstance(ref, str):
+                continue
+            value = self.agent_executor.resolve_arg_reference(ref, full_context)
+            if value is None:
+                continue
+            parts = ref.split(".")
+            if len(parts) < 2:
+                continue
+            agent_name, path_parts = parts[0], parts[1:]
+            agent_ctx = selected["agents"].setdefault(agent_name, {})
+            self._set_nested_value(agent_ctx, path_parts, value)
+
+        if selected.get("agents"):
+            return selected
+        return {}
+
+    def _set_nested_value(
+        self, target: dict, path_parts: list[str], value: Any
+    ) -> None:
+        current = target
+        for part in path_parts[:-1]:
+            if not isinstance(current.get(part), dict):
+                current[part] = {}
+            current = current[part]
+        current[path_parts[-1]] = value
+
+    def _should_persist_inner_thinking(
+        self, request: ChatCompletionRequest, state: WorkflowExecutionState
+    ) -> bool:
+        """
+        Decide whether to keep full agent content in context.
+
+        If the request does not specify, fall back to any prior choice stored
+        on the workflow state. Defaults to False to minimize payload size.
+        """
+        if request.persist_inner_thinking is not None:
+            persist = bool(request.persist_inner_thinking)
+        else:
+            persist = bool(state.context.get("_persist_inner_thinking"))
+        state.context["_persist_inner_thinking"] = persist
+        return persist
+
+    def _prune_inner_thinking(
+        self, state: WorkflowExecutionState, workflow_def: WorkflowDefinition
+    ) -> None:
+        """
+        Strip stored inner thinking for non pass-through agents to reduce context.
+        """
+        agents_ctx = state.context.get("agents", {}) or {}
+        pass_through_map = {
+            agent_def.agent: bool(agent_def.pass_through)
+            for agent_def in workflow_def.agents
+        }
+        for agent_name, ctx in agents_ctx.items():
+            if not isinstance(ctx, dict):
+                continue
+            should_keep = pass_through_map.get(
+                agent_name, bool(ctx.get("pass_through"))
+            )
+            if should_keep:
+                continue
+            ctx["content"] = ""
+
     def _has_no_reroute(self, content: Optional[str]) -> bool:
         return bool(content and "<no_reroute>" in content)
 
@@ -750,6 +1100,13 @@ class WorkflowEngine:
     ) -> bool:
         if not agent_def.when:
             return True
+        # Prefer deterministic evaluation of the condition first; only fall back to
+        # the routing agent when we cannot safely evaluate it.
+        try:
+            evaluated = eval(agent_def.when, {"__builtins__": {}}, {"context": context})
+            return bool(evaluated)
+        except Exception:
+            pass
         decision = await self._routing_when_check(
             session, agent_def, context, request, access_token, span, workflow_def
         )
@@ -820,6 +1177,199 @@ class WorkflowEngine:
                 return True
 
         return False
+
+    def _response_has_bad_error(
+        self,
+        content: Optional[str],
+        tool_errors: Optional[list[dict[str, Any]]] = None,
+    ) -> bool:
+        """
+        Determine whether a response indicates a non-recoverable error.
+
+        Uses tool error signals, structured error detection, and common
+        fatal keywords in the text content.
+        """
+        for err in tool_errors or []:
+            err_content = err.get("content", "")
+            if self._tool_result_has_error(err_content):
+                return True
+            if re.search(
+                r"\b(error|exception|traceback|fatal)\b", str(err_content), re.I
+            ):
+                return True
+
+        if self._tool_result_has_error(content or ""):
+            return True
+
+        lowered = (content or "").lower()
+        fatal_markers = [
+            "exception",
+            "traceback",
+            "fatal",
+            "unauthorized",
+            "forbidden",
+            "permission denied",
+            "timed out",
+            "timeout",
+            "internal server error",
+            "bad request",
+            "failed",
+            "error",
+        ]
+        return any(marker in lowered for marker in fatal_markers)
+
+    def _get_missing_returns(
+        self,
+        agent_def: WorkflowAgentDef,
+        result_capture: Optional[ToolResultCapture],
+        agent_context: dict,
+    ) -> list[str]:
+        """Identify which declared return values are missing from agent context."""
+        if not agent_def.returns or not result_capture:
+            return []
+
+        missing: list[str] = []
+        for spec in result_capture.return_specs:
+            store_path = spec.as_name or spec.field
+            if not store_path:
+                continue
+            if not self._has_value(agent_context, store_path):
+                missing.append(store_path)
+        return missing
+
+    def _has_value(self, data: dict, path: str) -> bool:
+        """
+        Check if a dotted path exists in data and has a non-empty value.
+        Empty strings, lists, or dicts are treated as missing.
+        """
+        parts = path.split(".")
+        current: Any = data
+        for part in parts:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return False
+        if current is None:
+            return False
+        if isinstance(current, (list, dict, str, tuple)) and len(current) == 0:
+            return False
+        return True
+
+    def _delete_path(self, data: dict, path: str) -> None:
+        """Remove a dotted path from a nested dict if present."""
+        parts = path.split(".")
+        current = data
+        for part in parts[:-1]:
+            if not isinstance(current, dict) or part not in current:
+                return
+            current = current[part]
+        if isinstance(current, dict):
+            current.pop(parts[-1], None)
+
+    def _clear_return_paths(
+        self, agent_context: dict, return_specs: Optional[list[Any]]
+    ) -> None:
+        """Clear previously captured return data so retries start fresh."""
+        if not return_specs:
+            return
+        for spec in return_specs:
+            store_path = getattr(spec, "as_name", None) or getattr(spec, "field", None)
+            if not store_path:
+                continue
+            if "." in store_path:
+                self._delete_path(agent_context, store_path)
+            else:
+                agent_context.pop(store_path, None)
+
+    def _handle_missing_returns(
+        self,
+        agent_def: WorkflowAgentDef,
+        state: WorkflowExecutionState,
+        agent_context: dict,
+        missing_returns: list[str],
+        content: str,
+        tool_errors: Optional[list[dict[str, Any]]],
+        return_specs: Optional[list[Any]],
+    ) -> tuple[str, list[Any]]:
+        """
+        Decide whether to retry or abort when required returns are missing.
+
+        Returns:
+            Tuple of (action, events)
+            action: "retry" or "abort"
+            events: list of streamable events already formatted
+        """
+        events: list[Any] = []
+        attempts = int(agent_context.get("return_attempts", 0)) + 1
+        agent_context["return_attempts"] = attempts
+
+        missing_list = ", ".join(missing_returns)
+
+        if self._response_has_bad_error(content, tool_errors):
+            agent_context["completed"] = True
+            state.completed = True
+            self.state_store.save_state(state)
+            events.append(
+                self._record_event(
+                    state,
+                    (
+                        f"Agent '{agent_def.agent}' reported an error and did not "
+                        f"return required data ({missing_list}). Aborting workflow."
+                    ),
+                    status="error",
+                    metadata={
+                        "missing_returns": missing_returns,
+                        "attempts": attempts,
+                        "reason": "error_detected",
+                    },
+                )
+            )
+            events.append("data: [DONE]\n\n")
+            return "abort", events
+
+        if attempts >= self.MAX_RETURN_RETRIES:
+            agent_context["completed"] = True
+            state.completed = True
+            self.state_store.save_state(state)
+            events.append(
+                self._record_event(
+                    state,
+                    (
+                        f"Agent '{agent_def.agent}' did not provide required data "
+                        f"after {attempts} attempts ({missing_list}). "
+                        "Aborting workflow."
+                    ),
+                    status="error",
+                    metadata={
+                        "missing_returns": missing_returns,
+                        "attempts": attempts,
+                        "reason": "max_retries_exceeded",
+                    },
+                )
+            )
+            events.append("data: [DONE]\n\n")
+            return "abort", events
+
+        # Retry path
+        self._clear_return_paths(agent_context, return_specs)
+        agent_context["completed"] = False
+        self.state_store.save_state(state)
+        events.append(
+            self._record_event(
+                state,
+                (
+                    f"Expected data from agent '{agent_def.agent}' was missing "
+                    f"({missing_list}). Retrying (attempt {attempts}/{self.MAX_RETURN_RETRIES})."
+                ),
+                status="retry",
+                metadata={
+                    "missing_returns": missing_returns,
+                    "attempts": attempts,
+                    "reason": "missing_returns",
+                },
+            )
+        )
+        return "retry", events
 
     def _tool_name(self, tool: Any) -> Optional[str]:
         if isinstance(tool, dict):
@@ -912,6 +1462,65 @@ class WorkflowEngine:
 
         # Join with \n\n and ensure the result ends with \n\n for proper separation
         return "\n\n".join(matches) + "\n\n"
+
+    def _visible_agent_content(
+        self,
+        agent_def: WorkflowAgentDef,
+        raw_content: str,
+        passthrough_history: Optional[list[str]] = None,
+    ) -> str:
+        """
+        Reduce stored agent content to user-visible data to keep context small.
+
+        When pass-through is enabled, prefer the streamed passthrough history
+        or extracted passthrough blocks. Otherwise, drop inner thinking.
+        """
+        if agent_def.pass_through:
+            if passthrough_history:
+                joined = "\n\n".join(
+                    [entry.strip() for entry in passthrough_history if entry.strip()]
+                )
+                return joined.strip()
+            extracted = self._extract_passthrough_content(raw_content or "")
+            if extracted:
+                return self._strip_tags(extracted).strip()
+            return self._strip_tags(raw_content).strip()
+        return self._strip_tags(raw_content or "").strip()
+
+    async def _run_progress_handler(
+        self,
+        state: WorkflowExecutionState,
+        agent_def: WorkflowAgentDef,
+        request: ChatCompletionRequest,
+        progress_payload: dict,
+        access_token: Optional[str],
+        span,
+        passthrough_history: Optional[list[str]] = None,
+    ) -> list[str]:
+        """
+        Consume the progress handler generator into a list so it can be run
+        as a cancellable asyncio task. This allows new progress updates to
+        pre-empt older LLM progress summarizations.
+        """
+        events: list[str] = []
+        progress_gen = self._handle_tool_progress(
+            state,
+            agent_def,
+            request,
+            progress_payload,
+            access_token,
+            span,
+            passthrough_history=passthrough_history,
+        )
+        try:
+            async with contextlib.aclosing(progress_gen):
+                async for event in progress_gen:
+                    events.append(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("[WorkflowEngine] Progress handler failed: %s", exc)
+        return events
 
     async def _handle_tool_progress(
         self,
@@ -1079,6 +1688,9 @@ class WorkflowEngine:
             agent_entry["content"] = (
                 agent_entry.get("content", "") + f" {feedback}"
             ).strip()
+            agent_entry.pop("awaiting_feedback", None)
+            agent_entry["completed"] = False
+            agent_entry["had_feedback"] = True
         state.context.setdefault("feedback", []).append(feedback)
         self.state_store.save_state(state)
 
