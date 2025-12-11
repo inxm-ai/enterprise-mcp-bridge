@@ -3,7 +3,7 @@ Comprehensive tests for context compression strategies.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,

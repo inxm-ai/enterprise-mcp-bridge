@@ -576,9 +576,10 @@ class TestPayloadCompaction:
         assert "[SUMMARY]" in serialized or "system" in serialized
 
     @pytest.mark.asyncio
-    async def test_prepare_payload_drops_old_tool_messages(self):
+    async def test_prepare_payload_drops_old_tool_messages(self, monkeypatch):
         """Test that old tool messages are dropped when needed."""
         client = llm.LLMClient()
+        monkeypatch.setattr(llm, "LLM_MAX_PAYLOAD_BYTES", 400)
 
         big_payload = "{" + ("y" * 300) + "}"
         request = ChatCompletionRequest(
@@ -591,19 +592,27 @@ class TestPayloadCompaction:
             stream=True,
         )
 
-        # Mock summarize_text
+        # Verify original request has the large tool message
+        assert any(m.role == MessageRole.TOOL for m in request.messages)
+        original_message_count = len(request.messages)
+
+        # Mock summarize_text to compress tool results
         async def mock_summarize_text(base_request, content, access_token, outer_span):
             return "[SUMMARY]"
 
         client.summarize_text = mock_summarize_text
 
-        # Test the adaptive compressor's ability to handle the request
-        # by checking it can compress when needed
-        payload, serialized, size = (
-            client._serialize_payload(request.model_dump(exclude_none=True)),
-            "",
-            0,
-        )
+        # Prepare payload should drop or compress the large tool message
+        payload, serialized, size = await client._prepare_payload(request, "test_token")
 
-        # Verify we have tool message
-        assert any(m.role == MessageRole.TOOL for m in request.messages)
+        # Verify final payload fits within size limit
+        assert size <= llm.LLM_MAX_PAYLOAD_BYTES
+
+        # Verify payload was serialized
+        assert serialized
+
+        # After compression, tool message should be dropped or significantly reduced
+        # The payload should be much smaller than the original big_payload
+        assert (
+            size < original_message_count * 302
+        )  # Much smaller than 302 bytes per message

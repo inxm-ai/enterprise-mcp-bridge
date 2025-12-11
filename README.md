@@ -783,7 +783,7 @@ Tool configuration options:
 
 ##### Using `returns` to capture tool outputs
 
-The `returns` field allows you to capture specific fields from tool results for use in subsequent agents. It supports multiple formats for flexible data extraction:
+The `returns` field allows you to capture specific fields from tool results for use in subsequent agents. This allows you to pass complex/plentiful information without bloating the context. It supports multiple formats for flexible data extraction:
 
 **Simple field capture (from any tool):**
 ```json
@@ -886,6 +886,12 @@ curl -X POST http://localhost:8000/tgi/v1/chat/completions \
     "workflow_execution_id": "my-session-123"
   }'
 ```
+
+#### Typical Problems
+
+- **Reroute to missing agent**: Ensure the target agent exists and has all dependencies met.
+- **Empty Tools vs No Tools**: An empty `tools: []` disables all tools for that agent, while omitting `tools` allows all MCP tools.
+- **Context Overload**: Large contexts can exceed LLM input limits; use agent-level `context` settings to limit data sent.
 
 ### Example call
 ```bash

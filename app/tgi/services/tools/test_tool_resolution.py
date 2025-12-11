@@ -702,6 +702,44 @@ class TestToolResolutionIntegration:
         assert "create_entities" in names
         assert "add_observations" in names
 
+    def test_resolve_claude_xml_strips_tool_prefix(self):
+        """Test that tool: prefix is stripped from XML tag names."""
+        content = """
+        I'll create a plan for you.
+        
+        <tool:plan>
+        {
+            "name": "Test Plan",
+            "steps": ["step1", "step2"]
+        }
+        </tool:plan>
+        
+        <tool:select_tools>
+        {
+            "tools": ["tool1", "tool2"]
+        }
+        </tool:select_tools>
+        """
+
+        tool_calls, success = self.strategy.resolve_tool_calls(content)
+
+        assert success
+        assert len(tool_calls) == 2
+
+        # Verify that tool names have the 'tool:' prefix stripped
+        names = [call.name for call in tool_calls]
+        assert "plan" in names
+        assert "select_tools" in names
+        
+        # Make sure the prefixed versions are NOT present
+        assert "tool:plan" not in names
+        assert "tool:select_tools" not in names
+
+        # Verify the arguments are parsed correctly
+        plan_call = next((call for call in tool_calls if call.name == "plan"), None)
+        assert plan_call is not None
+        assert plan_call.arguments["name"] == "Test Plan"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

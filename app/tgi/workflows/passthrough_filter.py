@@ -113,13 +113,9 @@ class PassThroughFilter:
             if judge_result is False:
                 return None
 
-        # Passed filters; record cadence and return normalized text with trailing break
+        # Passed filters; record cadence and return normalized text without forcing extra breaks
         self._last_emit_at[agent_name] = time.monotonic()
-        return (
-            clean_candidate
-            if clean_candidate.endswith("\n\n")
-            else f"{clean_candidate}\n\n"
-        )
+        return clean_candidate
 
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", text or "").strip().lower()

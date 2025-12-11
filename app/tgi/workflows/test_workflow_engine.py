@@ -282,7 +282,8 @@ async def test_agent_context_can_be_disabled(tmp_path, monkeypatch):
     second_idx = llm.calls.index("second")
     second_prompt = llm.user_messages[second_idx]
 
-    assert "Context: {}" in second_prompt
+    # Context is disabled (empty), so we get an empty dict
+    assert "Context summary: {}" in second_prompt
     assert "First out" not in second_prompt
 
 
@@ -374,7 +375,9 @@ async def test_agent_context_can_use_original_user_prompt(tmp_path, monkeypatch)
     second_idx = llm.calls.index("second")
     second_prompt = llm.user_messages[second_idx]
 
-    assert 'Context: {"user_prompt": "original question"}' in second_prompt
+    # Context is now provided as a summary
+    assert "Context summary:" in second_prompt
+    assert '"user_prompt": "original question"' in second_prompt
     assert "First out" not in second_prompt
     assert "task_id" not in second_prompt
 
@@ -999,7 +1002,8 @@ async def test_agent_tools_fallback_to_all_when_none_match(tmp_path, monkeypatch
     _ = [chunk async for chunk in stream]
 
     # Even though the agent requested a missing tool, engine should pass all tools
-    assert llm.request_tools[0] == ["available_tool"]
+    # (plus the lazy context tool added by routing)
+    assert set(llm.request_tools[0]) == {"available_tool", "get_workflow_context"}
 
 
 @pytest.mark.asyncio

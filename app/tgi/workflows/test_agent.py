@@ -14,6 +14,28 @@ import pytest
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 
 
+def _extract_delta_contents(chunks: list[str]) -> list[str]:
+    """Extract delta.content strings from streamed chunks."""
+    contents: list[str] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk.startswith("data: "):
+            continue
+        try:
+            payload = json.loads(chunk[6:])
+        except Exception:
+            continue
+        delta = (
+            payload.get("choices", [{}])[0].get("delta", {})
+            if isinstance(payload, dict)
+            else {}
+        )
+        content = delta.get("content")
+        if content:
+            contents.append(content)
+    return contents
+
+
 class StubSession:
     """Stub session for testing."""
 
@@ -997,18 +1019,95 @@ async def test_passthrough_blocks_separated_by_newlines(tmp_path, monkeypatch):
 
     stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
     chunks = [chunk async for chunk in stream]
-    combined = "".join(chunks)
 
-    # Both passthrough contents should be present
-    assert "First update" in combined
-    assert "Second update" in combined
+    contents = _extract_delta_contents(chunks)
+    updates = [c for c in contents if "update" in c]
 
-    # Passthrough blocks should be separated by \n\n
-    # The content is JSON-escaped in the chunks, so look for the escaped form
-    # "First update\\n\\nSecond update" means the actual content has \n\n between them
-    assert (
-        "First update\\n\\nSecond update" in combined
-    ), "Passthrough blocks should be separated by \\n\\n"
+    # Both passthrough contents should be present and streamed as separate updates
+    assert any("First update" in c for c in updates)
+    assert any("Second update" in c for c in updates)
+    first_idx = next(i for i, c in enumerate(contents) if "First update" in c)
+    second_idx = next(i for i, c in enumerate(contents) if "Second update" in c)
+    assert first_idx < second_idx
+
+
+@pytest.mark.asyncio
+async def test_passthrough_streams_before_completion(tmp_path, monkeypatch):
+    """Passthrough content streams incrementally instead of only at the end of a block."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+
+    flow = {
+        "flow_id": "streaming_passthrough",
+        "root_intent": "STREAMING",
+        "agents": [
+            {
+                "agent": "streamer",
+                "description": "Streams content inside passthrough tags",
+                "pass_through": "Show the live output to the user",
+                "tools": [],
+            }
+        ],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class StreamingPassthroughLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_completion(self, request, access_token, span):
+            self.calls += 1
+
+            async def _gen():
+                yield 'data: {"choices":[{"delta":{"content":"<passthrough>First chunk "},"index":0}]}\n\n'
+                yield 'data: {"choices":[{"delta":{"content":"second part "},"index":0}]}\n\n'
+                yield 'data: {"choices":[{"delta":{"content":"done</passthrough>"},"index":0}]}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    llm = StreamingPassthroughLLM()
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Stream live output")],
+        model="test-model",
+        stream=True,
+        use_workflow="streaming_passthrough",
+        workflow_execution_id="exec-streaming-passthrough",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+
+    contents = _extract_delta_contents(chunks)
+    passthrough_updates = [
+        c
+        for c in contents
+        if any(marker in c for marker in ["First chunk", "second part", "done"])
+    ]
+
+    assert passthrough_updates, "Expected passthrough content to be streamed"
+    assert any(
+        "done" not in update for update in passthrough_updates
+    ), "Passthrough should emit before the closing tag arrives"
+    assert any("done" in update for update in passthrough_updates)
+
+    first_visible = next(
+        update for update in passthrough_updates if "done" not in update
+    )
+    done_update = next(update for update in passthrough_updates if "done" in update)
+    assert contents.index(first_visible) < contents.index(done_update)
 
 
 @pytest.mark.asyncio

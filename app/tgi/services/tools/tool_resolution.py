@@ -93,6 +93,28 @@ class ToolResolutionStrategy:
         else:
             return ToolCallFormat.UNKNOWN
 
+    def _normalize_tool_name(self, tag_name: str) -> str:
+        """
+        Normalize a tool name by stripping common prefixes.
+        
+        Some LLMs generate tool calls with prefixes like 'tool:plan' instead of 'plan'.
+        This method strips those prefixes to get the actual tool name.
+        
+        Args:
+            tag_name: The raw tag name from XML parsing
+            
+        Returns:
+            Normalized tool name with prefixes removed
+        """
+        if not tag_name:
+            return tag_name
+        
+        # Strip 'tool:' prefix if present
+        if ':' in tag_name and tag_name.split(':', 1)[0].lower() == 'tool':
+            return tag_name.split(':', 1)[1]
+        
+        return tag_name
+    
     def _is_non_tool_tag(self, tag_name: str) -> bool:
         """
         Determine if a tag should be ignored for tool resolution.
@@ -102,7 +124,9 @@ class ToolResolutionStrategy:
         """
         if not tag_name:
             return False
-        return tag_name.lower() in self._non_tool_tags
+        # Normalize the tag name before checking (strip 'tool:' prefix)
+        normalized_tag = self._normalize_tool_name(tag_name)
+        return normalized_tag.lower() in self._non_tool_tags
 
     def resolve_tool_calls(
         self, content: str, tool_call_chunks: Optional[Dict] = None
@@ -237,12 +261,14 @@ class ToolResolutionStrategy:
             if self._is_non_tool_tag(function_name):
                 continue
             try:
+                # Normalize the function name to strip prefixes like 'tool:'
+                normalized_name = self._normalize_tool_name(function_name)
                 arguments = self._parse_xml_content(function_content.strip())
 
                 parsed_call = ParsedToolCall(
-                    id=f"claude_invoke_{function_name}_{len(tool_calls)}",
+                    id=f"claude_invoke_{normalized_name}_{len(tool_calls)}",
                     index=len(tool_calls),
-                    name=function_name,
+                    name=normalized_name,
                     arguments=arguments,
                     format=ToolCallFormat.CLAUDE_XML,
                     raw_content=f'<invoke name="{function_name}">{function_content}</invoke>',
@@ -267,16 +293,18 @@ class ToolResolutionStrategy:
                 continue
 
             # Skip common HTML/XML tags that aren't function calls
-            if self._is_non_tool_tag(lower_tag):
+            if self._is_non_tool_tag(tag_name):
                 continue
 
             try:
+                # Normalize the tag name to strip prefixes like 'tool:'
+                normalized_name = self._normalize_tool_name(tag_name)
                 arguments = self._parse_xml_content(tag_content.strip())
 
                 parsed_call = ParsedToolCall(
-                    id=f"claude_{tag_name}_{len(tool_calls)}",
+                    id=f"claude_{normalized_name}_{len(tool_calls)}",
                     index=len(tool_calls),
-                    name=tag_name,
+                    name=normalized_name,
                     arguments=arguments,
                     format=ToolCallFormat.CLAUDE_XML,
                     raw_content=f"<{tag_name}>{tag_content}</{tag_name}>",

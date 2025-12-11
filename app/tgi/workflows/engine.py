@@ -20,6 +20,7 @@ from app.tgi.workflows.arg_injector import (
     ToolResultCapture,
 )
 from app.tgi.workflows.chunk_formatter import WorkflowChunkFormatter
+from app.tgi.workflows.lazy_context import LazyContextProvider
 from app.tgi.workflows.models import (
     WorkflowAgentDef,
     WorkflowDefinition,
@@ -139,6 +140,7 @@ class WorkflowEngine:
                 access_token,
                 span,
                 routing_tools=preresolved_tools,
+                execution_id=execution_id,
             )
             if routing_check and routing_check.get("reroute") and not no_reroute:
                 reason = routing_check["reroute"]
@@ -290,6 +292,7 @@ class WorkflowEngine:
                     access_token,
                     span,
                     workflow_def,
+                    execution_id=state.execution_id,
                 ):
                     state.context["agents"][agent_def.agent] = {
                         "content": "",
@@ -477,9 +480,11 @@ class WorkflowEngine:
 
         system_prompt = await self._resolve_prompt(session, agent_def)
         agent_context_payload = self._build_agent_context(agent_def, state)
-        context_json = json.dumps(
-            agent_context_payload, ensure_ascii=False, default=str
-        )
+
+        # Instead of embedding full context, provide a summary and tool access
+        # Full context can grow to hundreds of KB with accumulated agent results
+        context_summary = self._create_context_summary(agent_context_payload)
+
         user_prompt = self._extract_user_message(request) or ""
         history_messages = state.context.get("user_messages", [])
         history_text = (
@@ -489,7 +494,8 @@ class WorkflowEngine:
             f"<agent:{agent_def.agent}> Goal: {workflow_def.root_intent}\n"
             f"Latest user input: {user_prompt}\n"
             f"User message history:\n{history_text}\n"
-            f"Context: {context_json}"
+            f"Context summary: {context_summary}\n"
+            f"Note: Full context available via tools if you have them configured."
         )
 
         # Resolve tools - get both modified (for LLM) and original (for validation)
@@ -553,12 +559,16 @@ class WorkflowEngine:
         # Track history of emitted passthrough content to avoid repetition
         passthrough_history: list[str] = []
         emitted_passthrough = False
+        passthrough_pending = ""
+        passthrough_emitted_len = 0
+        inside_passthrough = False
+        START_TAG = "<passthrough>"
+        END_TAG = "</passthrough>"
         # Track tool errors for automatic rerouting
         tool_errors: list[dict[str, Any]] = []
         # Track a cancellable task for progress updates so newer updates
         # can pre-empt older, still-running LLM summaries.
         progress_task: Optional[asyncio.Task[list[str]]] = None
-        tool_results_seen = False
 
         async def _flush_progress_task(wait: bool = False) -> list[str]:
             nonlocal progress_task
@@ -589,6 +599,17 @@ class WorkflowEngine:
                         "[WorkflowEngine] Progress handler cancellation error: %s", exc
                     )
                 progress_task = None
+
+        async def _emit_passthrough_delta(
+            delta: str, add_to_history: bool = False
+        ) -> Optional[str]:
+            """Emit a passthrough delta without chunk-level deduplication."""
+            if not delta:
+                return None
+            event = self._record_event(state, delta)
+            if add_to_history:
+                passthrough_history.append(delta.strip())
+            return event
 
         try:
             async with chunk_reader(runner_stream, enable_tracing=False) as reader:
@@ -622,7 +643,6 @@ class WorkflowEngine:
 
                     # Process tool results to extract returns and detect errors
                     if parsed.tool_result:
-                        tool_results_seen = True
                         tool_result_content = parsed.tool_result.get("content", "")
                         tool_result_name = parsed.tool_result.get("name")
 
@@ -650,45 +670,107 @@ class WorkflowEngine:
                                 state.context,
                                 tool_name=tool_result_name,
                             )
-                        # Store raw tool result content for simple chaining
+                        
+                        # Store compacted tool result to avoid massive JSON payloads in context
+                        # This prevents external API results (news articles, web searches, etc.) 
+                        # from bloating agent context with thousands of lines of data
                         try:
-                            agent_context["result"] = json.loads(tool_result_content)
+                            full_result = json.loads(tool_result_content)
+                            
+                            # Compact large results before storing in agent context
+                            compacted_json = self._summarize_tool_result(
+                                tool_result_content, max_size=2000
+                            )
+                            agent_context["result"] = json.loads(compacted_json)
+                            
+                            # Store full result separately for deep inspection if needed
+                            full_results = agent_context.setdefault("_full_tool_results", {})
+                            if tool_result_name:
+                                full_results[tool_result_name] = full_result
+                                
                         except Exception:
+                            # If not valid JSON, store as-is (likely already small)
                             agent_context["result"] = tool_result_content
 
                     if parsed.content:
                         content_text += parsed.content
                         if agent_def.pass_through:
                             if use_passthrough_tags:
-                                # Accumulate and extract passthrough content
                                 passthrough_buffer += parsed.content
-                                extracted = self._extract_passthrough_content(
-                                    passthrough_buffer
-                                )
-                                if extracted:
-                                    filtered = await self.passthrough_filter.should_emit(
-                                        candidate=extracted,
-                                        agent_name=agent_def.agent,
-                                        history=passthrough_history,
-                                        user_message=user_prompt,
-                                        pass_through_guideline=agent_def.pass_through_guideline,
-                                        access_token=access_token,
-                                        span=span,
-                                    )
-                                    if filtered:
-                                        yield self._record_event(state, filtered)
-                                        emitted_passthrough = True
-                                        # Track the filtered content for history
-                                        # Strip trailing newlines for cleaner history entries
-                                        passthrough_history.append(filtered.strip())
-                                    # Keep only unprocessed content (after last closing tag)
-                                    last_close = passthrough_buffer.rfind(
-                                        "</passthrough>"
-                                    )
-                                    if last_close != -1:
-                                        passthrough_buffer = passthrough_buffer[
-                                            last_close + len("</passthrough>") :
+                                while passthrough_buffer:
+                                    if inside_passthrough:
+                                        end_idx = passthrough_buffer.find(END_TAG)
+                                        if end_idx == -1:
+                                            # Preserve a small tail to catch a closing tag across chunks
+                                            safe_len = max(
+                                                0,
+                                                len(passthrough_buffer)
+                                                - (len(END_TAG) - 1),
+                                            )
+                                            if safe_len:
+                                                passthrough_pending += (
+                                                    passthrough_buffer[:safe_len]
+                                                )
+                                                passthrough_buffer = passthrough_buffer[
+                                                    safe_len:
+                                                ]
+                                                delta = passthrough_pending[
+                                                    passthrough_emitted_len:
+                                                ]
+                                                event = await _emit_passthrough_delta(
+                                                    delta, add_to_history=False
+                                                )
+                                                if event:
+                                                    emitted_passthrough = True
+                                                    yield event
+                                                passthrough_emitted_len = len(
+                                                    passthrough_pending
+                                                )
+                                            break
+
+                                        passthrough_pending += passthrough_buffer[
+                                            :end_idx
                                         ]
+                                        passthrough_buffer = passthrough_buffer[
+                                            end_idx + len(END_TAG) :
+                                        ]
+                                        delta = passthrough_pending[
+                                            passthrough_emitted_len:
+                                        ]
+                                        event = await _emit_passthrough_delta(
+                                            delta, add_to_history=False
+                                        )
+                                        if event:
+                                            emitted_passthrough = True
+                                            yield event
+                                        if passthrough_pending.strip():
+                                            passthrough_history.append(
+                                                passthrough_pending.strip()
+                                            )
+                                        # Reset for the next passthrough block
+                                        passthrough_pending = ""
+                                        passthrough_emitted_len = 0
+                                        inside_passthrough = False
+                                        # Continue scanning remaining buffer for additional tags
+                                        continue
+
+                                    start_idx = passthrough_buffer.find(START_TAG)
+                                    if start_idx == -1:
+                                        # Keep a small tail in case the tag is split across chunks
+                                        if len(passthrough_buffer) > (
+                                            len(START_TAG) - 1
+                                        ):
+                                            passthrough_buffer = passthrough_buffer[
+                                                -(len(START_TAG) - 1) :
+                                            ]
+                                        break
+
+                                    passthrough_buffer = passthrough_buffer[
+                                        start_idx + len(START_TAG) :
+                                    ]
+                                    inside_passthrough = True
+                                    passthrough_pending = ""
+                                    passthrough_emitted_len = 0
                             else:
                                 yield self._record_event(state, parsed.content)
                                 emitted_passthrough = True
@@ -783,6 +865,7 @@ class WorkflowEngine:
                 request,
                 access_token,
                 span,
+                execution_id=state.execution_id,
             )
             if dynamic_target:
                 self.state_store.save_state(state)
@@ -1076,6 +1159,88 @@ class WorkflowEngine:
             current = current[part]
         current[path_parts[-1]] = value
 
+    def _create_context_summary(self, context: dict, max_full_size: int = 2000) -> str:
+        """
+        Create a compact summary of context instead of serializing the entire thing.
+
+        This prevents massive JSON blobs from being embedded in agent messages,
+        which can cause payload size issues when agents accumulate large results.
+
+        For small contexts or explicitly scoped contexts (with limited keys),
+        returns the full context. For large accumulated contexts, returns metadata only.
+
+        Args:
+            context: Full context dictionary
+            max_full_size: If serialized context is under this size, return it in full
+
+        Returns:
+            Compact JSON string with metadata only for large contexts, or full for small/scoped ones
+        """
+        # For small or scoped contexts, include full data
+        # Scoped contexts typically have only "agents" with a few selected fields
+        context_json = json.dumps(context, ensure_ascii=False, default=str)
+        if len(context_json) <= max_full_size:
+            return context_json
+
+        # For large contexts, create a summary
+        summary = {}
+
+        # Include top-level keys so agent knows what's available
+        summary["available_keys"] = list(context.keys())
+
+        # For agents context, show which agents have completed and their status
+        if "agents" in context and isinstance(context["agents"], dict):
+            agents_summary = {}
+            for agent_name, agent_data in context["agents"].items():
+                if not isinstance(agent_data, dict):
+                    continue
+                # Only include metadata, not full content
+                agents_summary[agent_name] = {
+                    "completed": agent_data.get("completed", False),
+                    "has_content": bool(agent_data.get("content")),
+                    "has_result": "result" in agent_data,
+                    "content_length": (
+                        len(str(agent_data.get("content", "")))
+                        if "content" in agent_data
+                        else 0
+                    ),
+                }
+                # Include any return values by name but not their full data
+                for key in agent_data.keys():
+                    if key not in [
+                        "completed",
+                        "content",
+                        "result",
+                        "pass_through",
+                        "awaiting_feedback",
+                        "had_feedback",
+                        "skipped",
+                        "reason",
+                        "reroute_reason",
+                        "tool_errors",
+                        "return_attempts",
+                    ]:
+                        # This is likely a return value - note its presence
+                        agents_summary[agent_name][f"has_{key}"] = True
+            summary["agents"] = agents_summary
+
+        # Include user message count
+        if "user_messages" in context:
+            messages = context.get("user_messages", [])
+            summary["user_messages_count"] = (
+                len(messages) if isinstance(messages, list) else 0
+            )
+
+        # Include any other top-level scalar values (but not large structures)
+        for key, value in context.items():
+            if key in ["agents", "user_messages", "_persist_inner_thinking"]:
+                continue
+            # Only include simple types, not nested structures
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                summary[key] = value
+
+        return json.dumps(summary, ensure_ascii=False, default=str)
+
     def _should_persist_inner_thinking(
         self, request: ChatCompletionRequest, state: WorkflowExecutionState
     ) -> bool:
@@ -1125,6 +1290,7 @@ class WorkflowEngine:
         access_token: Optional[str],
         span,
         workflow_def: WorkflowDefinition,
+        execution_id: Optional[str] = None,
     ) -> bool:
         if not agent_def.when:
             return True
@@ -1136,7 +1302,14 @@ class WorkflowEngine:
         except Exception:
             pass
         decision = await self._routing_when_check(
-            session, agent_def, context, request, access_token, span, workflow_def
+            session,
+            agent_def,
+            context,
+            request,
+            access_token,
+            span,
+            workflow_def,
+            execution_id=execution_id,
         )
         if decision is not None:
             return decision
@@ -1825,12 +1998,14 @@ class WorkflowEngine:
         access_token: Optional[str],
         span,
         routing_tools: Optional[list] = None,
+        execution_id: Optional[str] = None,
     ) -> Optional[dict]:
         payload = (
             "ROUTING_INTENT_CHECK\n"
             f"root_intent={workflow_def.root_intent}\n"
             f"user_message={user_message or ''}\n"
-            f"agents={[a.agent for a in workflow_def.agents]}"
+            f"agents={[a.agent for a in workflow_def.agents]}\n"
+            f"Use get_workflow_context tool if you need to inspect detailed workflow context."
         )
         response = await self._call_routing_agent(
             session,
@@ -1840,6 +2015,7 @@ class WorkflowEngine:
             payload,
             workflow_def,
             routing_tools=routing_tools,
+            execution_id=execution_id,
         )
         reroute_reason = self._extract_tag(response, "reroute")
         if reroute_reason:
@@ -1855,17 +2031,30 @@ class WorkflowEngine:
         access_token: Optional[str],
         span,
         workflow_def: WorkflowDefinition,
+        execution_id: Optional[str] = None,
     ) -> Optional[bool]:
+        # Use lazy context instead of full context to reduce payload size
+        context_summary = {
+            "available_keys": list(context.keys()),
+            "use_get_workflow_context_tool": "for detailed context inspection",
+        }
         payload = (
             "ROUTING_WHEN_CHECK\n"
             f"agent={agent_def.agent}\n"
             f"when={agent_def.when}\n"
             f"root_intent={workflow_def.root_intent}\n"
-            f"context={json.dumps(context, ensure_ascii=False)}\n"
-            f"user_message={self._extract_user_message(request) or ''}"
+            f"context_summary={json.dumps(context_summary, ensure_ascii=False)}\n"
+            f"user_message={self._extract_user_message(request) or ''}\n"
+            f"Use get_workflow_context tool to retrieve specific context details if needed."
         )
         response = await self._call_routing_agent(
-            session, request, access_token, span, payload, workflow_def
+            session,
+            request,
+            access_token,
+            span,
+            payload,
+            workflow_def,
+            execution_id=execution_id,
         )
         run_value = self._extract_run_tag(response)
         return run_value
@@ -1880,16 +2069,29 @@ class WorkflowEngine:
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
+        execution_id: Optional[str] = None,
     ) -> Optional[str]:
+        # Use lazy context to avoid embedding full context in routing decision
+        context_summary = {
+            "available_keys": list(context.keys()),
+            "use_get_workflow_context_tool": "for detailed context inspection",
+        }
         payload = (
             "ROUTING_REROUTE_DECISION\n"
             f"agent={agent_def.agent}\n"
             f"reason={reroute_reason}\n"
             f"available_agents={[a.agent for a in workflow_def.agents]}\n"
-            f"context={json.dumps(context, ensure_ascii=False)}"
+            f"context_summary={json.dumps(context_summary, ensure_ascii=False)}\n"
+            f"Use get_workflow_context tool to retrieve specific context if needed."
         )
         response = await self._call_routing_agent(
-            session, request, access_token, span, payload, workflow_def
+            session,
+            request,
+            access_token,
+            span,
+            payload,
+            workflow_def,
+            execution_id=execution_id,
         )
         return self._extract_next_agent(response)
 
@@ -1902,8 +2104,22 @@ class WorkflowEngine:
         payload: str,
         workflow_def: WorkflowDefinition,
         routing_tools: Optional[list] = None,
+        execution_id: Optional[str] = None,
     ) -> str:
         routing_prompt = await self._resolve_routing_prompt(session, workflow_def)
+
+        # Add lazy context tool to routing tools
+        tools_for_routing = list(routing_tools or [])
+        lazy_context_tool = self._create_lazy_context_tool()
+        tools_for_routing.append(lazy_context_tool)
+
+        # Create context provider for lazy loading
+        context_provider = (
+            LazyContextProvider(self.state_store, execution_id, logger)
+            if execution_id
+            else None
+        )
+
         routing_request = ChatCompletionRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=routing_prompt),
@@ -1911,18 +2127,89 @@ class WorkflowEngine:
             ],
             model=request.model or TGI_MODEL_NAME,
             stream=True,
-            tools=routing_tools,
+            tools=tools_for_routing,
         )
         text = ""
         stream = self.llm_client.stream_completion(
             routing_request, access_token or "", span
         )
+
+        # Track tool calls and results for multi-turn conversation
+        messages_to_append = []
+
         async with chunk_reader(stream, enable_tracing=False) as reader:
             async for parsed in reader.as_parsed():
                 if parsed.is_done:
                     break
                 if parsed.content:
                     text += parsed.content
+
+                # Handle tool calls inline if present
+                if context_provider and parsed.tool_calls:
+                    for tool_call in parsed.tool_calls:
+                        if (
+                            tool_call.get("function", {}).get("name")
+                            == "get_workflow_context"
+                        ):
+                            try:
+                                tool_input = json.loads(
+                                    tool_call.get("function", {}).get("arguments", "{}")
+                                )
+                                result = await self._handle_lazy_context_tool(
+                                    context_provider, tool_input
+                                )
+                                # Log the tool use for debugging
+                                logger.debug(
+                                    f"[WorkflowEngine] Routing agent used lazy context tool: "
+                                    f"{tool_input.get('operation')}"
+                                )
+
+                                # Store tool call with summarized result to avoid huge payloads
+                                # Only send a reference/summary, not the full result
+                                summary = self._summarize_tool_result(result)
+                                messages_to_append.append(
+                                    {
+                                        "tool_call_id": tool_call.get("id"),
+                                        "tool_name": "get_workflow_context",
+                                        "result": summary,
+                                        "full_result": result,  # Keep for potential inspection
+                                    }
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    f"[WorkflowEngine] Error processing tool call: {exc}"
+                                )
+
+        # If the routing agent made tool calls and we have results,
+        # continue the conversation with those results
+        if messages_to_append and text.strip():
+            # Append the assistant's response with tool calls
+            routing_request.messages.append(
+                Message(role=MessageRole.ASSISTANT, content=text)
+            )
+
+            # Append tool results so the agent can see them
+            for tool_result in messages_to_append:
+                routing_request.messages.append(
+                    Message(
+                        role=MessageRole.TOOL,
+                        content=tool_result["result"],
+                        name=tool_result["tool_name"],
+                    )
+                )
+
+            # Get the final response after tool results
+            text = ""
+            stream = self.llm_client.stream_completion(
+                routing_request, access_token or "", span
+            )
+            async with chunk_reader(stream, enable_tracing=False) as reader:
+                async for parsed in reader.as_parsed():
+                    if parsed.is_done:
+                        break
+                    if parsed.content:
+                        text += parsed.content
+
         return text.strip()
 
     async def _resolve_routing_prompt(
@@ -1956,3 +2243,175 @@ class WorkflowEngine:
         if next_agent:
             return next_agent.strip()
         return None
+
+    async def _handle_lazy_context_tool(
+        self,
+        context_provider: LazyContextProvider,
+        tool_input: dict,
+    ) -> str:
+        """
+        Handle get_workflow_context tool calls from agents.
+
+        Args:
+            context_provider: LazyContextProvider instance
+            tool_input: Tool input dict with operation and parameters
+
+        Returns:
+            JSON string with result
+        """
+        operation = tool_input.get("operation", "summary")
+
+        try:
+            if operation == "summary":
+                result = context_provider.get_context_summary()
+            elif operation == "get_value":
+                path = tool_input.get("path", "")
+                max_depth = tool_input.get("max_depth", 2)
+                max_size = tool_input.get("max_size_bytes")
+                query_result = context_provider.get_context_value(
+                    path, max_depth=max_depth, max_size_bytes=max_size
+                )
+                result = query_result.to_dict()
+            elif operation == "get_agent":
+                agent_name = tool_input.get("agent_name", "")
+                fields = tool_input.get("fields")
+                query_result = context_provider.get_agent_context(agent_name, fields)
+                result = query_result.to_dict()
+            elif operation == "get_messages":
+                limit = tool_input.get("limit")
+                query_result = context_provider.get_user_messages(limit=limit)
+                result = query_result.to_dict()
+            else:
+                result = {"error": f"Unknown operation: {operation}"}
+
+            return json.dumps(result, ensure_ascii=False, default=str)
+
+        except Exception as exc:
+            logger.debug(f"[WorkflowEngine] Error handling lazy context tool: {exc}")
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            )
+
+    def _compact_large_structure(self, obj: Any, max_items: int = 3, max_depth: int = 3, current_depth: int = 0) -> Any:
+        """
+        Recursively compact large data structures while preserving type information.
+        
+        Handles nested dicts, lists, and objects to create compact summaries
+        that preserve shape/schema but omit bulk data.
+        
+        Args:
+            obj: Object to compact (dict, list, or primitive)
+            max_items: Maximum items to keep in lists/dicts before summarizing
+            max_depth: Maximum nesting depth before truncation
+            current_depth: Current recursion depth
+            
+        Returns:
+            Compacted version of obj with metadata instead of bulk data
+        """
+        if current_depth >= max_depth:
+            return "<nested too deep>"
+        
+        if isinstance(obj, dict):
+            if len(obj) <= max_items:
+                # Small dict: compact values recursively
+                return {k: self._compact_large_structure(v, max_items, max_depth, current_depth + 1) for k, v in obj.items()}
+            else:
+                # Large dict: show schema with sample
+                sample_keys = list(obj.keys())[:max_items]
+                return {
+                    "_summary": f"Dict with {len(obj)} keys",
+                    "_sample_keys": sample_keys,
+                    **{k: self._compact_large_structure(obj[k], max_items, max_depth, current_depth + 1) for k in sample_keys}
+                }
+        
+        elif isinstance(obj, list):
+            if len(obj) <= max_items:
+                # Small list: compact items recursively
+                return [self._compact_large_structure(item, max_items, max_depth, current_depth + 1) for item in obj]
+            else:
+                # Large list: show count with sample
+                return {
+                    "_summary": f"Array with {len(obj)} items",
+                    "_sample": [self._compact_large_structure(obj[i], max_items, max_depth, current_depth + 1) for i in range(min(max_items, len(obj)))]
+                }
+        
+        elif isinstance(obj, str):
+            # Truncate very long strings
+            if len(obj) > 200:
+                return obj[:200] + f"... ({len(obj)} chars total)"
+            return obj
+        
+        else:
+            # Primitive types: return as-is
+            return obj
+
+    def _summarize_tool_result(self, result_json: str, max_size: int = 500) -> str:
+        """
+        Summarize a large tool result to avoid bloating routing agent messages.
+
+        Intelligently compacts nested structures (lists, dicts) while preserving
+        key metadata (counts, keys, samples) so agents can make informed decisions.
+        
+        Args:
+            result_json: JSON string result from tool
+            max_size: Maximum size in bytes; results larger than this get summarized
+
+        Returns:
+            Summarized or original JSON depending on size
+        """
+        if len(result_json) <= max_size:
+            return result_json
+
+        # Try to parse and summarize
+        try:
+            data = json.loads(result_json)
+            
+            # Apply recursive compaction to the data
+            compacted = self._compact_large_structure(data, max_items=3, max_depth=3)
+            
+            # Add metadata about the compaction
+            summary = {
+                "_compacted": True,
+                "_original_size_bytes": len(result_json),
+                "_note": "Large result compacted. Use get_workflow_context tool with specific filters to retrieve full data."
+            }
+            
+            # Merge compacted data with summary metadata
+            if isinstance(compacted, dict):
+                summary.update(compacted)
+            else:
+                summary["data"] = compacted
+            
+            result = json.dumps(summary, ensure_ascii=False, default=str)
+            
+            # If compaction didn't help enough, be more aggressive
+            if len(result) > max_size * 2:
+                return json.dumps({
+                    "_compacted": True,
+                    "_original_size_bytes": len(result_json),
+                    "_summary": "Very large result. Structure too complex to summarize inline.",
+                    "_note": "Use get_workflow_context tool to query specific fields."
+                }, ensure_ascii=False, default=str)
+            
+            return result
+            
+        except Exception as exc:
+            # If parsing fails, return a generic summary
+            logger.debug(f"[WorkflowEngine] Error compacting tool result: {exc}")
+            return json.dumps(
+                {
+                    "_compacted": True,
+                    "_original_size_bytes": len(result_json),
+                    "_summary": "Large tool result. Data omitted to reduce message size.",
+                    "_note": "Refine your query with specific path or field parameters."
+                },
+                ensure_ascii=False,
+            )
+
+    def _create_lazy_context_tool(self) -> dict:
+        """Create the lazy context retrieval tool definition."""
+        return LazyContextProvider.create_tool_definition()

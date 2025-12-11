@@ -18,7 +18,6 @@ from app.tgi.models import (
     Message,
     MessageRole,
 )
-from app.vars import TOOL_CHUNK_SIZE
 
 logger = logging.getLogger("uvicorn.error")
 
