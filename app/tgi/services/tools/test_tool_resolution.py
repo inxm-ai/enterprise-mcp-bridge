@@ -730,7 +730,7 @@ class TestToolResolutionIntegration:
         names = [call.name for call in tool_calls]
         assert "plan" in names
         assert "select_tools" in names
-        
+
         # Make sure the prefixed versions are NOT present
         assert "tool:plan" not in names
         assert "tool:select_tools" not in names

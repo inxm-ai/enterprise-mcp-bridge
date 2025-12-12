@@ -124,29 +124,44 @@ class ArgInjector:
 
     def _resolve_path(self, path: str, context: Dict[str, Any]) -> Any:
         """
-        Resolve a dotted path like "agent_name.field" from context.
+        Resolve a path from context.
 
-        The path format is: "<agent_name>.<field_path>"
-        This looks up context["agents"][<agent_name>][<field_path>]
+        Supports:
+        - "agent.field" (or nested) -> context["agents"]["agent"]["field"]
+        - "shared_key"              -> context["shared_key"]
+        - "nested.shared.key"       -> context["nested"]["shared"]["key"]
         """
-        parts = path.split(".", 1)
-        if len(parts) != 2:
+        if not path:
             return None
 
-        agent_name, field_path = parts
-        agents = context.get("agents", {})
-        agent_data = agents.get(agent_name, {})
+        # Support global context references (e.g., "plan_id") for shared values
+        if "." not in path:
+            return context.get(path)
 
-        # Navigate nested path (e.g., "result.items")
-        value = agent_data
-        for key in field_path.split("."):
+        # Prefer agent-scoped lookup when the first segment matches an agent
+        agent_name, field_path = path.split(".", 1)
+        agents = context.get("agents", {})
+        if agent_name in agents:
+            agent_data = agents.get(agent_name, {}) or {}
+            value = agent_data
+            for key in field_path.split("."):
+                if isinstance(value, dict):
+                    value = value.get(key)
+                else:
+                    return None
+                if value is None:
+                    return None
+            return value
+
+        # Fallback: allow dotted paths into the root context
+        value: Any = context
+        for key in path.split("."):
             if isinstance(value, dict):
                 value = value.get(key)
             else:
                 return None
             if value is None:
                 return None
-
         return value
 
     @classmethod

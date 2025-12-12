@@ -52,6 +52,8 @@ class WorkflowRepository:
                     returns_value = agent.get("returns", None)
                     # on_tool_error is the agent to reroute to on tool failure
                     on_tool_error_value = agent.get("on_tool_error", None)
+                    # stop_point indicates this agent is a terminal point
+                    stop_point_value = agent.get("stop_point", False)
                     agents.append(
                         WorkflowAgentDef(
                             agent=agent.get("agent"),
@@ -64,6 +66,7 @@ class WorkflowRepository:
                             tools=tools_value,
                             returns=returns_value,
                             on_tool_error=on_tool_error_value,
+                            stop_point=stop_point_value,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

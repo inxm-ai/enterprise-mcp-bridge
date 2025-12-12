@@ -35,6 +35,8 @@ class WorkflowAgentDef:
               using the same notation as arg mappings (e.g., "agent.field.nested").
             - "user_prompt": passes only the original user prompt captured when the
               workflow started.
+        stop_point: If True, no further agents will be executed after this agent
+            completes. Useful for terminal agents like summaries or error handlers.
     """
 
     agent: str
@@ -47,6 +49,7 @@ class WorkflowAgentDef:
     tools: Optional[List[Union[str, Dict[str, Any]]]] = None
     returns: Optional[List[str]] = None
     on_tool_error: Optional[str] = None
+    stop_point: bool = False
 
     @property
     def should_pass_through(self) -> bool:

@@ -96,25 +96,25 @@ class ToolResolutionStrategy:
     def _normalize_tool_name(self, tag_name: str) -> str:
         """
         Normalize a tool name by stripping common prefixes.
-        
+
         Some LLMs generate tool calls with prefixes like 'tool:plan' instead of 'plan'.
         This method strips those prefixes to get the actual tool name.
-        
+
         Args:
             tag_name: The raw tag name from XML parsing
-            
+
         Returns:
             Normalized tool name with prefixes removed
         """
         if not tag_name:
             return tag_name
-        
+
         # Strip 'tool:' prefix if present
-        if ':' in tag_name and tag_name.split(':', 1)[0].lower() == 'tool':
-            return tag_name.split(':', 1)[1]
-        
+        if ":" in tag_name and tag_name.split(":", 1)[0].lower() == "tool":
+            return tag_name.split(":", 1)[1]
+
         return tag_name
-    
+
     def _is_non_tool_tag(self, tag_name: str) -> bool:
         """
         Determine if a tag should be ignored for tool resolution.

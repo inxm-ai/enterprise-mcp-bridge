@@ -364,6 +364,16 @@ class WorkflowEngine:
                 completed_agents.add(agent_def.agent)
                 progress_made = True
 
+                # Check if this agent is a stop_point; if so, halt execution
+                if agent_def.stop_point:
+                    state.completed = True
+                    self.state_store.save_state(state)
+                    yield self._record_event(
+                        state,
+                        f"Stop point reached at {agent_def.agent}; halting workflow execution.",
+                        status="stop_point",
+                    )
+
                 if state.completed:
                     # Stop processing further agents if the workflow was terminated
                     yield "data: [DONE]\n\n"
@@ -670,24 +680,26 @@ class WorkflowEngine:
                                 state.context,
                                 tool_name=tool_result_name,
                             )
-                        
+
                         # Store compacted tool result to avoid massive JSON payloads in context
-                        # This prevents external API results (news articles, web searches, etc.) 
+                        # This prevents external API results (news articles, web searches, etc.)
                         # from bloating agent context with thousands of lines of data
                         try:
                             full_result = json.loads(tool_result_content)
-                            
+
                             # Compact large results before storing in agent context
                             compacted_json = self._summarize_tool_result(
                                 tool_result_content, max_size=2000
                             )
                             agent_context["result"] = json.loads(compacted_json)
-                            
+
                             # Store full result separately for deep inspection if needed
-                            full_results = agent_context.setdefault("_full_tool_results", {})
+                            full_results = agent_context.setdefault(
+                                "_full_tool_results", {}
+                            )
                             if tool_result_name:
                                 full_results[tool_result_name] = full_result
-                                
+
                         except Exception:
                             # If not valid JSON, store as-is (likely already small)
                             agent_context["result"] = tool_result_content
@@ -809,6 +821,7 @@ class WorkflowEngine:
 
         reroute_reason = self._extract_tag(content_text, "reroute")
         feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
+        inline_returns = self._extract_return_values(content_text)
         cleaned_content = self._strip_tags(content_text)
         content_for_context = cleaned_content.strip()
         if not persist_inner_thinking:
@@ -818,6 +831,7 @@ class WorkflowEngine:
             if (
                 not agent_def.pass_through
                 and not agent_def.returns
+                and not inline_returns
                 and not agent_context.get("awaiting_feedback")
                 and not was_awaiting_feedback
                 and not had_feedback
@@ -835,6 +849,10 @@ class WorkflowEngine:
         if reroute_reason:
             agent_context["reroute_reason"] = reroute_reason
 
+        # Capture inline <return name="...">value</return> tags into agent context
+        for name, value in inline_returns:
+            self._set_path_value(agent_context, name, value)
+
         if feedback_needed:
             agent_context["awaiting_feedback"] = True
             agent_context["completed"] = False
@@ -851,8 +869,12 @@ class WorkflowEngine:
 
         if reroute_reason and not no_reroute:
             agent_context["completed"] = True
-            target = self._match_reroute_target(agent_def.reroute, reroute_reason)
+            target, with_fields = self._match_reroute_target(
+                agent_def.reroute, reroute_reason
+            )
             if target:
+                if with_fields:
+                    self._apply_reroute_with(state.context, agent_context, with_fields)
                 self.state_store.save_state(state)
                 yield {"status": "reroute", "target": target}
                 return
@@ -1712,12 +1734,14 @@ class WorkflowEngine:
 
     def _match_reroute_target(
         self, reroute_config: Any, reroute_reason: Optional[str]
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], list[str]]:
         """
         Support both single reroute maps and lists of maps from JSON workflows.
+
+        Returns the matched target and any "with" fields to propagate.
         """
         if not reroute_config or not reroute_reason:
-            return None
+            return None, []
         configs = (
             reroute_config if isinstance(reroute_config, list) else [reroute_config]
         )
@@ -1728,14 +1752,69 @@ class WorkflowEngine:
             if isinstance(reroute_on, str):
                 reroute_on = [reroute_on]
             if reroute_reason in reroute_on:
-                return cfg.get("to")
-        return None
+                with_fields = cfg.get("with") or []
+                if isinstance(with_fields, str):
+                    with_fields = [with_fields]
+                return cfg.get("to"), [w for w in with_fields if isinstance(w, str)]
+        return None, []
 
     def _strip_tags(self, text: str) -> str:
         stripped = re.sub(
             r"<(/?)(reroute|user_feedback_needed|passthrough)>", "", text or ""
         )
+        stripped = re.sub(
+            r"<return\b[^>]*>(.*?)</return>",
+            "",
+            stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         return re.sub(r"<no_reroute>", "", stripped, flags=re.IGNORECASE)
+
+    def _extract_return_values(self, text: str) -> list[tuple[str, str]]:
+        """
+        Extract all <return name="...">value</return> pairs from LLM output.
+        """
+        pattern = r"<return\s+name=[\"']([^\"']+)[\"']>(.*?)</return>"
+        matches = re.findall(pattern, text or "", re.IGNORECASE | re.DOTALL)
+        return [
+            (name.strip(), value.strip()) for name, value in matches if name.strip()
+        ]
+
+    def _get_path_value(self, data: dict, path: str) -> Any:
+        """Resolve dotted path from a dict."""
+        current: Any = data
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+            if current is None:
+                return None
+        return current
+
+    def _set_path_value(self, data: dict, path: str, value: Any) -> None:
+        """Set dotted path on a dict, creating nested dicts as needed."""
+        parts = path.split(".")
+        current = data
+        for part in parts[:-1]:
+            if part not in current or not isinstance(current.get(part), dict):
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+
+    def _apply_reroute_with(
+        self, state_context: dict, agent_context: dict, fields: list[str]
+    ) -> None:
+        """
+        Copy selected fields from the current agent context to the workflow context
+        so downstream agents can consume them without knowing which agent produced them.
+        """
+        if not fields:
+            return
+        for field in fields:
+            value = self._get_path_value(agent_context, field)
+            if value is None:
+                continue
+            self._set_path_value(state_context, field, value)
 
     def _extract_passthrough_content(self, text: str) -> str:
         """
@@ -2296,55 +2375,77 @@ class WorkflowEngine:
                 ensure_ascii=False,
             )
 
-    def _compact_large_structure(self, obj: Any, max_items: int = 3, max_depth: int = 3, current_depth: int = 0) -> Any:
+    def _compact_large_structure(
+        self, obj: Any, max_items: int = 3, max_depth: int = 3, current_depth: int = 0
+    ) -> Any:
         """
         Recursively compact large data structures while preserving type information.
-        
+
         Handles nested dicts, lists, and objects to create compact summaries
         that preserve shape/schema but omit bulk data.
-        
+
         Args:
             obj: Object to compact (dict, list, or primitive)
             max_items: Maximum items to keep in lists/dicts before summarizing
             max_depth: Maximum nesting depth before truncation
             current_depth: Current recursion depth
-            
+
         Returns:
             Compacted version of obj with metadata instead of bulk data
         """
         if current_depth >= max_depth:
             return "<nested too deep>"
-        
+
         if isinstance(obj, dict):
             if len(obj) <= max_items:
                 # Small dict: compact values recursively
-                return {k: self._compact_large_structure(v, max_items, max_depth, current_depth + 1) for k, v in obj.items()}
+                return {
+                    k: self._compact_large_structure(
+                        v, max_items, max_depth, current_depth + 1
+                    )
+                    for k, v in obj.items()
+                }
             else:
                 # Large dict: show schema with sample
                 sample_keys = list(obj.keys())[:max_items]
                 return {
                     "_summary": f"Dict with {len(obj)} keys",
                     "_sample_keys": sample_keys,
-                    **{k: self._compact_large_structure(obj[k], max_items, max_depth, current_depth + 1) for k in sample_keys}
+                    **{
+                        k: self._compact_large_structure(
+                            obj[k], max_items, max_depth, current_depth + 1
+                        )
+                        for k in sample_keys
+                    },
                 }
-        
+
         elif isinstance(obj, list):
             if len(obj) <= max_items:
                 # Small list: compact items recursively
-                return [self._compact_large_structure(item, max_items, max_depth, current_depth + 1) for item in obj]
+                return [
+                    self._compact_large_structure(
+                        item, max_items, max_depth, current_depth + 1
+                    )
+                    for item in obj
+                ]
             else:
                 # Large list: show count with sample
                 return {
                     "_summary": f"Array with {len(obj)} items",
-                    "_sample": [self._compact_large_structure(obj[i], max_items, max_depth, current_depth + 1) for i in range(min(max_items, len(obj)))]
+                    "_sample": [
+                        self._compact_large_structure(
+                            obj[i], max_items, max_depth, current_depth + 1
+                        )
+                        for i in range(min(max_items, len(obj)))
+                    ],
                 }
-        
+
         elif isinstance(obj, str):
             # Truncate very long strings
             if len(obj) > 200:
                 return obj[:200] + f"... ({len(obj)} chars total)"
             return obj
-        
+
         else:
             # Primitive types: return as-is
             return obj
@@ -2355,7 +2456,7 @@ class WorkflowEngine:
 
         Intelligently compacts nested structures (lists, dicts) while preserving
         key metadata (counts, keys, samples) so agents can make informed decisions.
-        
+
         Args:
             result_json: JSON string result from tool
             max_size: Maximum size in bytes; results larger than this get summarized
@@ -2369,36 +2470,40 @@ class WorkflowEngine:
         # Try to parse and summarize
         try:
             data = json.loads(result_json)
-            
+
             # Apply recursive compaction to the data
             compacted = self._compact_large_structure(data, max_items=3, max_depth=3)
-            
+
             # Add metadata about the compaction
             summary = {
                 "_compacted": True,
                 "_original_size_bytes": len(result_json),
-                "_note": "Large result compacted. Use get_workflow_context tool with specific filters to retrieve full data."
+                "_note": "Large result compacted. Use get_workflow_context tool with specific filters to retrieve full data.",
             }
-            
+
             # Merge compacted data with summary metadata
             if isinstance(compacted, dict):
                 summary.update(compacted)
             else:
                 summary["data"] = compacted
-            
+
             result = json.dumps(summary, ensure_ascii=False, default=str)
-            
+
             # If compaction didn't help enough, be more aggressive
             if len(result) > max_size * 2:
-                return json.dumps({
-                    "_compacted": True,
-                    "_original_size_bytes": len(result_json),
-                    "_summary": "Very large result. Structure too complex to summarize inline.",
-                    "_note": "Use get_workflow_context tool to query specific fields."
-                }, ensure_ascii=False, default=str)
-            
+                return json.dumps(
+                    {
+                        "_compacted": True,
+                        "_original_size_bytes": len(result_json),
+                        "_summary": "Very large result. Structure too complex to summarize inline.",
+                        "_note": "Use get_workflow_context tool to query specific fields.",
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+
             return result
-            
+
         except Exception as exc:
             # If parsing fails, return a generic summary
             logger.debug(f"[WorkflowEngine] Error compacting tool result: {exc}")
@@ -2407,7 +2512,7 @@ class WorkflowEngine:
                     "_compacted": True,
                     "_original_size_bytes": len(result_json),
                     "_summary": "Large tool result. Data omitted to reduce message size.",
-                    "_note": "Refine your query with specific path or field parameters."
+                    "_note": "Refine your query with specific path or field parameters.",
                 },
                 ensure_ascii=False,
             )

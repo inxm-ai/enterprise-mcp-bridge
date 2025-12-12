@@ -2365,3 +2365,371 @@ async def test_arg_resolution_failure_stops_workflow(tmp_path):
     # First agent context exists with error content; second agent never ran
     assert "generate_inputs" in state.context.get("agents", {})
     assert "should_not_run" not in state.context.get("agents", {})
+
+
+@pytest.mark.asyncio
+async def test_stop_point_halts_workflow_execution(tmp_path, monkeypatch):
+    """Test that a stop_point agent halts execution and prevents subsequent agents from running."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "workflow_with_stop",
+        "root_intent": "TEST_STOP_POINT",
+        "agents": [
+            {
+                "agent": "summarize_result",
+                "description": "Summarize result",
+                "stop_point": True,
+            },
+            {
+                "agent": "should_not_run",
+                "description": "This should not run",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "summarize_result": "Summary complete",
+            "should_not_run": "This should not be called",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="test")],
+        model="test-model",
+        stream=True,
+        use_workflow="workflow_with_stop",
+        workflow_execution_id="exec-stop",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    output = "".join([chunk async for chunk in stream])
+
+    # Stop point message should appear
+    assert "Stop point reached" in output
+    assert "summarize_result" in output
+
+    # Verify that only the first agent ran
+    state = engine.state_store.load_execution("exec-stop")
+    assert state.completed is True
+    assert "summarize_result" in state.context.get("agents", {})
+    assert "should_not_run" not in state.context.get("agents", {})
+
+    # Verify LLM was only called once (for summarize_result, not should_not_run)
+    assert len(llm.calls) == 2  # routing_intent + summarize_result
+    assert "should_not_run" not in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_point_with_reroute_flow(tmp_path, monkeypatch):
+    """Test that stop_point works correctly with a reroute flow (e.g., error summary)."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "workflow_with_error_stop",
+        "root_intent": "TEST_ERROR_STOP",
+        "agents": [
+            {
+                "agent": "process_data",
+                "description": "Process data",
+                "reroute": [
+                    {
+                        "on": ["ERROR"],
+                        "to": "summarize_error",
+                    }
+                ],
+            },
+            {
+                "agent": "summarize_error",
+                "description": "Summarize error",
+                "stop_point": True,
+            },
+            {
+                "agent": "cleanup",
+                "description": "Cleanup resources",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "process_data": "<reroute>ERROR</reroute>",
+            "summarize_error": "Error summary",
+            "cleanup": "Cleanup done",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="test")],
+        model="test-model",
+        stream=True,
+        use_workflow="workflow_with_error_stop",
+        workflow_execution_id="exec-error-stop",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    output = "".join([chunk async for chunk in stream])
+
+    # Should have rerouted and then stopped
+    assert "Rerouting to summarize_error" in output
+    assert "Stop point reached" in output
+
+    # Verify the state
+    state = engine.state_store.load_execution("exec-error-stop")
+    assert state.completed is True
+    assert "process_data" in state.context.get("agents", {})
+    assert "summarize_error" in state.context.get("agents", {})
+    assert "cleanup" not in state.context.get("agents", {})
+
+    # Verify LLM calls: routing_intent, process_data, summarize_error (but NOT cleanup)
+    assert "cleanup" not in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_point_without_stop_allows_continuation(tmp_path, monkeypatch):
+    """Test that workflows without stop_point continue to the next agent."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "workflow_without_stop",
+        "root_intent": "TEST_NO_STOP",
+        "agents": [
+            {
+                "agent": "first",
+                "description": "First agent",
+            },
+            {
+                "agent": "second",
+                "description": "Second agent",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first": "First output",
+            "second": "Second output",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="test")],
+        model="test-model",
+        stream=True,
+        use_workflow="workflow_without_stop",
+        workflow_execution_id="exec-no-stop",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    output = "".join([chunk async for chunk in stream])
+
+    # Should NOT have a stop point message
+    assert "Stop point reached" not in output
+
+    # Both agents should have run
+    state = engine.state_store.load_execution("exec-no-stop")
+    assert state.completed is True
+    assert "first" in state.context.get("agents", {})
+    assert "second" in state.context.get("agents", {})
+
+    # Both agents should have been called
+    assert "first" in llm.calls
+    assert "second" in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_return_tags_capture_into_agent_context(tmp_path, monkeypatch):
+    """Inline <return> tags should populate agent context without tools."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "return_capture_flow",
+        "root_intent": "TEST_RETURN_CAPTURE",
+        "agents": [
+            {
+                "agent": "collect",
+                "description": "Collect plan options.",
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "collect": "<return name=\"plan_list\">[1,2]</return><return name='meta.author'>alice</return>Here you go"
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="return_capture_flow",
+        workflow_execution_id="exec-return-capture",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    state = engine.state_store.load_execution("exec-return-capture")
+    agent_ctx = state.context["agents"]["collect"]
+    assert agent_ctx["plan_list"] == "[1,2]"
+    assert agent_ctx["meta"]["author"] == "alice"
+    assert agent_ctx["content"] == "Here you go"
+    # Ensure the shared context was not polluted automatically
+    assert "plan_list" not in state.context
+
+
+@pytest.mark.asyncio
+async def test_reroute_with_shared_plan_id(tmp_path, monkeypatch):
+    """
+    Reroute config with 'with' should copy return-tag values to shared context
+    so downstream tools can consume them via top-level arg mappings.
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "return_with_flow",
+        "root_intent": "TEST_RETURN_WITH",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate a matching plan.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_PERFECT_MATCH"],
+                        "to": "get_plan",
+                        "with": ["plan_id"],
+                    }
+                ],
+            },
+            {
+                "agent": "get_plan",
+                "description": "Fetch the plan details.",
+                "depends_on": ["find_plan"],
+                "tools": [{"get_plan": {"args": {"plan_id": "plan_id"}}}],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"plan_id": {"type": "string"}},
+                    "required": ["plan_id"],
+                },
+            },
+        }
+    ]
+
+    class RerouteLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "find_plan": '<return name="plan_id">plan-abc</return><reroute>FOUND_PERFECT_MATCH</reroute>',
+                    "get_plan": "<passthrough>Done</passthrough>",
+                }
+            )
+            self._emitted_tool = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+
+            if agent_marker == "get_plan" and not self._emitted_tool:
+                self._emitted_tool = True
+
+                async def _gen_tool():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "get_plan",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool()
+
+            return super().stream_completion(request, access_token, span)
+
+    class CaptureSession(StubSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tool_calls: list[dict[str, Any]] = []
+
+        async def call_tool(self, name: str, args: dict, access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(
+                        text=json.dumps({"plan": {"id": args.get("plan_id")}})
+                    )
+                ],
+            )
+
+    llm = RerouteLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="return_with_flow",
+        workflow_execution_id="exec-return-with",
+    )
+
+    session = CaptureSession(tools=tools)
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    # plan_id should be copied to shared context and used for arg injection
+    state = store.load_execution("exec-return-with")
+    assert state.context.get("plan_id") == "plan-abc"
+    assert state.context["agents"]["find_plan"]["plan_id"] == "plan-abc"
+    assert session.tool_calls
+    assert session.tool_calls[0]["args"].get("plan_id") == "plan-abc"
