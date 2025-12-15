@@ -2733,3 +2733,167 @@ async def test_reroute_with_shared_plan_id(tmp_path, monkeypatch):
     assert state.context["agents"]["find_plan"]["plan_id"] == "plan-abc"
     assert session.tool_calls
     assert session.tool_calls[0]["args"].get("plan_id") == "plan-abc"
+
+
+@pytest.mark.asyncio
+async def test_feedback_resume_preserves_reroute_with_context(tmp_path, monkeypatch):
+    """
+    After resuming from user feedback, reroute `with` values should still be
+    copied into shared context so downstream agents can inject tool args.
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "plan_run",
+        "root_intent": "CREATE_OR_RUN_PLAN",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate a matching plan.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_MULTIPLE_MATCHES"],
+                        "to": "ask_user_to_select_plan",
+                        "with": ["plan_ids"],
+                    }
+                ],
+            },
+            {
+                "agent": "ask_user_to_select_plan",
+                "description": "Ask which plan to run.",
+                "depends_on": ["find_plan"],
+                "pass_through": True,
+                "reroute": [
+                    {
+                        "on": ["PLAN_SELECTED"],
+                        "to": "get_plan",
+                        "with": ["plan_id"],
+                    }
+                ],
+            },
+            {
+                "agent": "get_plan",
+                "description": "Fetch the selected plan.",
+                "depends_on": ["find_plan"],
+                "context": ["plan_id"],
+                "tools": [{"get_plan": {"args": {"plan_id": "plan_id"}}}],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "plan_run", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"plan_id": {"type": "string"}},
+                    "required": ["plan_id"],
+                },
+            },
+        }
+    ]
+
+    class FeedbackRerouteLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "find_plan": '<return name="plan_ids">["plan-1","plan-2"]</return><reroute>FOUND_MULTIPLE_MATCHES</reroute>',
+                    "ask_user_to_select_plan": [
+                        "<user_feedback_needed>Select a plan to run.</user_feedback_needed>",
+                        '<return name="plan_id">plan-1</return><reroute>PLAN_SELECTED</reroute>',
+                    ],
+                    "get_plan": "<passthrough>Plan loaded</passthrough>",
+                }
+            )
+            self._emitted_tool = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+            if agent_marker == "get_plan" and not self._emitted_tool:
+                self._emitted_tool = True
+
+                async def _gen_tool():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "get_plan",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool()
+            return super().stream_completion(request, access_token, span)
+
+    class CaptureSession(StubSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tool_calls: list[dict[str, Any]] = []
+
+        async def call_tool(self, name: str, args: dict, access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(
+                        text=json.dumps({"plan": {"id": args.get("plan_id")}})
+                    )
+                ],
+            )
+
+    llm = FeedbackRerouteLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+    session = CaptureSession(tools=tools)
+
+    exec_id = "plan-run-feedback"
+    first_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="plan_run",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(session, first_request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    paused_state = store.load_execution(exec_id)
+    assert paused_state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Use plan-1")],
+        model="test-model",
+        stream=True,
+        use_workflow="plan_run",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        session, resume_request, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
+    assert final_state.context.get("plan_id") == "plan-1"
+    assert session.tool_calls
+    assert session.tool_calls[0]["args"].get("plan_id") == "plan-1"
