@@ -104,8 +104,14 @@ class WorkflowEngine:
         self.chunk_formatter.ensure_task_id(state)
         user_message = self._extract_user_message(request)
         self._append_user_message(state, user_message)
+
+        # Apply optional start_with prefill once at the beginning of an execution
+        if request.start_with and not state.context.get("_start_with_applied"):
+            self._apply_start_with(state, workflow_def, request.start_with)
+
         self.state_store.save_state(state)
         no_reroute = self._has_no_reroute(user_message)
+        return_full_state = bool(request.return_full_state)
 
         async def _runner():
             # Always emit execution id first
@@ -115,9 +121,10 @@ class WorkflowEngine:
                 status="submitted",
                 role="system",
             )
-            # Replay stored events for resume
-            for event in state.events:
-                yield event
+            # Replay stored events for resume only when requested
+            if return_full_state:
+                for event in state.events:
+                    yield event
 
             if state.completed:
                 yield "data: [DONE]\n\n"
@@ -169,6 +176,11 @@ class WorkflowEngine:
             if state.awaiting_feedback:
                 if user_message_local:
                     self._merge_feedback(state, user_message_local)
+                    if "_resume_agent" not in state.context:
+                        resume_target = self._find_feedback_agent(state)
+                        if resume_target:
+                            state.context["_resume_agent"] = resume_target
+                            self.state_store.save_state(state)
                     # New feedback should start a fresh task id thread
                     self.chunk_formatter.ensure_task_id(state, reset=True)
                     self.state_store.save_state(state)
@@ -211,6 +223,76 @@ class WorkflowEngine:
 
         return _runner()
 
+    def _find_feedback_agent(self, state: WorkflowExecutionState) -> Optional[str]:
+        """
+        Identify an agent that requested feedback so we can resume it first.
+        """
+        agents_ctx = state.context.get("agents", {}) or {}
+        for name, ctx in agents_ctx.items():
+            if not isinstance(ctx, dict):
+                continue
+            if ctx.get("awaiting_feedback") or ctx.get("had_feedback"):
+                return name
+        return None
+
+    def _apply_start_with(
+        self,
+        state: WorkflowExecutionState,
+        workflow_def: WorkflowDefinition,
+        payload: dict,
+    ) -> None:
+        """
+        Prefill workflow context and optionally force a starting agent.
+
+        Expected payload shape:
+          {"args": {...}, "agent": "agent_name"}
+        """
+        if not isinstance(payload, dict):
+            return
+
+        args = payload.get("args")
+        if isinstance(args, dict):
+            for key, value in args.items():
+                state.context[key] = value
+
+        target_agent = payload.get("agent")
+        if target_agent:
+            self._complete_dependencies_for_agent(state, workflow_def, target_agent)
+            state.context["_resume_agent"] = target_agent
+
+        state.context["_start_with_applied"] = True
+        self.state_store.save_state(state)
+
+    def _complete_dependencies_for_agent(
+        self,
+        state: WorkflowExecutionState,
+        workflow_def: WorkflowDefinition,
+        agent_name: str,
+    ) -> None:
+        """
+        Mark dependent agents as completed so a forced start agent can run even if
+        it normally depends on earlier steps.
+        """
+        agents_map = {a.agent: a for a in workflow_def.agents}
+        visited: set[str] = set()
+
+        def _mark(name: str) -> None:
+            if name in visited:
+                return
+            visited.add(name)
+            agent_def = agents_map.get(name)
+            if not agent_def:
+                return
+            for dep in agent_def.depends_on or []:
+                _mark(dep)
+                ctx = state.context.setdefault("agents", {}).setdefault(
+                    dep, {"content": "", "pass_through": False}
+                )
+                ctx.setdefault("reason", "start_with_prefill")
+                ctx["completed"] = True
+
+        _mark(agent_name)
+
     def _select_workflow(
         self, request: ChatCompletionRequest
     ) -> Optional[WorkflowDefinition]:
@@ -240,12 +322,29 @@ class WorkflowEngine:
         agents_ctx = state.context.get("agents", {}) or {}
         for agent_def in workflow_def.agents:
             ctx = agents_ctx.get(agent_def.agent, {})
-            if ctx.get("awaiting_feedback"):
+            awaiting = ctx.get("awaiting_feedback")
+            completed_flag = ctx.get("completed")
+            if awaiting:
+                logger.debug(
+                    "[WorkflowEngine] Agent '%s' is awaiting_feedback, not completed",
+                    agent_def.agent,
+                )
                 continue
-            if ctx.get("completed") is False:
+            if completed_flag is False:
+                logger.debug(
+                    "[WorkflowEngine] Agent '%s' has completed=False, not completed",
+                    agent_def.agent,
+                )
                 continue
             if ctx:
                 completed.add(agent_def.agent)
+                logger.debug(
+                    "[WorkflowEngine] Agent '%s' marked as completed (ctx exists, awaiting_feedback=%s, completed=%s)",
+                    agent_def.agent,
+                    awaiting,
+                    completed_flag,
+                )
+        logger.info("[WorkflowEngine] Completed agents: %s", completed)
         return completed
 
     async def _run_agents(
@@ -262,6 +361,24 @@ class WorkflowEngine:
         completed_agents = self._get_completed_agents(workflow_def, state)
         forced_next: Optional[str] = None
 
+        # When resuming after feedback, prioritize rerunning the agent that
+        # requested it so the new user message is incorporated before moving on.
+        resume_agent = state.context.pop("_resume_agent", None)
+        if resume_agent:
+            logger.info(
+                "[WorkflowEngine._run_agents] Resume agent found: '%s', "
+                "is in completed_agents: %s, completed_agents: %s",
+                resume_agent,
+                resume_agent in completed_agents,
+                completed_agents,
+            )
+        if resume_agent and resume_agent not in completed_agents:
+            forced_next = resume_agent
+            logger.info(
+                "[WorkflowEngine._run_agents] Setting forced_next to resume agent: '%s'",
+                forced_next,
+            )
+
         last_visible_output: Optional[str] = None
 
         # Keep looping while there are unfinished agents OR a reroute target to honor
@@ -277,6 +394,11 @@ class WorkflowEngine:
                 if agent_def.agent in completed_agents:
                     continue
                 if forced_next and agent_def.agent != forced_next:
+                    logger.debug(
+                        "[WorkflowEngine._run_agents] Skipping agent '%s' because forced_next='%s'",
+                        agent_def.agent,
+                        forced_next,
+                    )
                     continue
 
                 if agent_def.depends_on and not set(agent_def.depends_on).issubset(
@@ -327,6 +449,12 @@ class WorkflowEngine:
                         continue
 
                     status = result.get("status")
+                    logger.debug(
+                        "[WorkflowEngine._run_agents] Agent '%s' yielded status: %s, target: %s",
+                        agent_def.agent,
+                        status,
+                        result.get("target"),
+                    )
                     if (
                         status == "done"
                         and result.get("content")
@@ -334,10 +462,19 @@ class WorkflowEngine:
                     ):
                         last_visible_output = result.get("content")
                     if status == "feedback":
+                        logger.info(
+                            "[WorkflowEngine._run_agents] Agent '%s' requested feedback, pausing workflow",
+                            agent_def.agent,
+                        )
                         return
                     if status == "reroute":
                         forced_next = result.get("target")
                         if forced_next:
+                            logger.info(
+                                "[WorkflowEngine._run_agents] Agent '%s' rerouting to '%s'",
+                                agent_def.agent,
+                                forced_next,
+                            )
                             yield self._record_event(
                                 state,
                                 f"\nRerouting to {forced_next}\n",
@@ -476,6 +613,11 @@ class WorkflowEngine:
     ) -> AsyncGenerator[Any, None]:
         state.current_agent = agent_def.agent
 
+        logger.info(
+            "[WorkflowEngine._execute_agent] Starting execution of agent '%s'",
+            agent_def.agent,
+        )
+
         start_text = self._start_text(agent_def)
         yield self._record_event(state, start_text)
 
@@ -488,8 +630,52 @@ class WorkflowEngine:
         was_awaiting_feedback = bool(agent_context.pop("awaiting_feedback", None))
         had_feedback = bool(agent_context.pop("had_feedback", None))
 
+        logger.info(
+            "[WorkflowEngine._execute_agent] Agent '%s' state: "
+            "was_awaiting_feedback=%s, had_feedback=%s, stored_content_length=%d",
+            agent_def.agent,
+            was_awaiting_feedback,
+            had_feedback,
+            len(agent_context.get("content", "")),
+        )
+
         system_prompt = await self._resolve_prompt(session, agent_def)
+
+        # If this agent just received feedback, modify the prompt to tell it to PROCESS
+        # the feedback instead of asking for it again
+        if had_feedback:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "IMPORTANT: You have already requested user feedback and the user has responded. "
+                "Your previous content and the user's response are included in your context. "
+                "DO NOT ask for feedback again. Instead, process the user's response, extract any "
+                "required information (like IDs, selections, etc.), and emit the appropriate "
+                "<reroute> and <return> tags to continue the workflow."
+            )
+            logger.info(
+                "[WorkflowEngine._execute_agent] Agent '%s' received feedback, modifying prompt to process it",
+                agent_def.agent,
+            )
         agent_context_payload = self._build_agent_context(agent_def, state)
+
+        logger.info(
+            "[WorkflowEngine._execute_agent] Agent '%s' context keys: %s",
+            agent_def.agent,
+            (
+                list(agent_context_payload.keys())
+                if isinstance(agent_context_payload, dict)
+                else "non-dict"
+            ),
+        )
+        if (
+            isinstance(agent_context_payload, dict)
+            and "agents" in agent_context_payload
+        ):
+            logger.info(
+                "[WorkflowEngine._execute_agent] Agent '%s' has context from agents: %s",
+                agent_def.agent,
+                list(agent_context_payload["agents"].keys()),
+            )
 
         # Instead of embedding full context, provide a summary and tool access
         # Full context can grow to hundreds of KB with accumulated agent results
@@ -934,6 +1120,7 @@ class WorkflowEngine:
                 return
 
         agent_context["completed"] = True
+        agent_context.pop("had_feedback", None)
         agent_context.pop("return_attempts", None)
         self.state_store.save_state(state)
         yield {
@@ -1154,11 +1341,24 @@ class WorkflowEngine:
         Extract only the requested references from prior agent contexts.
         """
         selected: dict[str, Any] = {"agents": {}}
+        logger.info(
+            "[WorkflowEngine._select_context_references] Selecting references: %s",
+            references,
+        )
         for ref in references:
             if not isinstance(ref, str):
                 continue
             value = self.agent_executor.resolve_arg_reference(ref, full_context)
+            logger.info(
+                "[WorkflowEngine._select_context_references] Reference '%s' resolved to: %s",
+                ref,
+                str(value)[:200] if value else None,
+            )
             if value is None:
+                logger.warning(
+                    "[WorkflowEngine._select_context_references] Reference '%s' is None",
+                    ref,
+                )
                 continue
             parts = ref.split(".")
             if len(parts) < 2:
@@ -1812,9 +2012,22 @@ class WorkflowEngine:
             return
         for field in fields:
             value = self._get_path_value(agent_context, field)
+            logger.info(
+                "[WorkflowEngine._apply_reroute_with] Copying field '%s' from agent context to workflow context, value: %s",
+                field,
+                str(value)[:200] if value else None,
+            )
             if value is None:
+                logger.warning(
+                    "[WorkflowEngine._apply_reroute_with] Field '%s' is None, not copying",
+                    field,
+                )
                 continue
             self._set_path_value(state_context, field, value)
+            logger.info(
+                "[WorkflowEngine._apply_reroute_with] Successfully set '%s' in workflow context",
+                field,
+            )
 
     def _extract_passthrough_content(self, text: str) -> str:
         """
@@ -2059,12 +2272,33 @@ class WorkflowEngine:
             agent_entry = state.context["agents"].setdefault(
                 state.current_agent, {"content": "", "pass_through": False}
             )
+            logger.info(
+                "[WorkflowEngine._merge_feedback] Agent '%s' receiving feedback. "
+                "Before merge - completed: %s, awaiting_feedback: %s, had_feedback: %s, reroute_reason: %s",
+                state.current_agent,
+                agent_entry.get("completed"),
+                agent_entry.get("awaiting_feedback"),
+                agent_entry.get("had_feedback"),
+                agent_entry.get("reroute_reason"),
+            )
             agent_entry["content"] = (
                 agent_entry.get("content", "") + f" {feedback}"
             ).strip()
             agent_entry.pop("awaiting_feedback", None)
             agent_entry["completed"] = False
             agent_entry["had_feedback"] = True
+            # Clear any stored reroute reason so the agent can make a fresh decision
+            # based on the user's feedback
+            agent_entry.pop("reroute_reason", None)
+            # Remember which agent should resume first after feedback
+            state.context["_resume_agent"] = state.current_agent
+            logger.info(
+                "[WorkflowEngine._merge_feedback] Agent '%s' after merge - "
+                "completed: %s, _resume_agent set to: %s",
+                state.current_agent,
+                agent_entry.get("completed"),
+                state.context.get("_resume_agent"),
+            )
         state.context.setdefault("feedback", []).append(feedback)
         self.state_store.save_state(state)
 

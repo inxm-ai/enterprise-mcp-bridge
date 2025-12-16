@@ -55,7 +55,9 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     use_workflow: Optional[Union[bool, str]] = None
     workflow_execution_id: Optional[str] = None
+    return_full_state: Optional[bool] = None
     persist_inner_thinking: Optional[bool] = None
+    start_with: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None

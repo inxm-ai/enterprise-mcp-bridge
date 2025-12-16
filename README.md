@@ -819,6 +819,9 @@ This captures the nested value at `payload.result` from the tool response and st
 - `from`: Only capture from this specific tool (ignores results from other tools)
 - `as` (optional): Store the value under this alias instead of the original field path
 
+Notes:
+- If the same agent emits multiple tool results for the same `returns` target (e.g., calling `resolve_mcp_properties_defaults` several times with `{ "as": "properties" }`), the value is overwritten each time and only the last call is kept in context.
+
 **Complete example with tool-specific captures:**
 ```json
 {
@@ -871,8 +874,10 @@ Rerouting and feedback:
 Runtime behavior:
 - `use_workflow: "<flow_id>"` forces that workflow; `use_workflow: true` auto-selects by matching `root_intent` to the user request.
 - Optional `workflow_execution_id` resumes a prior execution (state is persisted in SQLite). Without it, a new execution id is generated.
+- Optional `return_full_state: true` replays the stored workflow event history when resuming; omit or set to `false` to stream only newly generated events.
 - The routing agent streams status events; agents marked `pass_through: true` stream their content to the user.
 - `persist_inner_thinking` (boolean, optional) controls how much agent output is stored in workflow context for later turns. Defaults to `false`, which keeps only pass-through content and explicit returns, trimming internal reasoning to avoid oversized LLM payloads. Set to `true` if you need full agent transcripts preserved across resumes.
+- `start_with` (object, optional) lets you prefill workflow context and optionally jump directly to a specific agent. Shape: `{"args": {"plan_id": "abc"}, "agent": "get_plan"}`. `args` are copied into the workflow context (top-level keys), and `agent` forces the first runnable agent; its declared dependencies are marked completed with reason `start_with_prefill` so it can run immediately.
 - Agent-level `context` controls how much prior workflow state each agent sees: set to `false` to omit context entirely, or provide a list of references (e.g., `["plan.steps", "detect.intent"]`) to send only selected values using the same notation as arg mappings.
 
 #### Example: start or resume a workflow
@@ -886,6 +891,23 @@ curl -X POST http://localhost:8000/tgi/v1/chat/completions \
     "messages": [{"role": "user", "content": "What can I do today in SF?"}],
     "use_workflow": "what_can_i_do_today",
     "workflow_execution_id": "my-session-123"
+  }'
+```
+
+#### Example: prefill and start at a specific agent
+```bash
+curl -X POST http://localhost:8000/tgi/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Run the plan"}],
+    "use_workflow": "plan_run",
+    "start_with": {
+      "args": { "plan_id": "plan-123" },
+      "agent": "get_plan"
+    }
   }'
 ```
 
