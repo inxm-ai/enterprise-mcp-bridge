@@ -41,6 +41,12 @@ class ReturnFailureAnalysis:
     messages: list[str]
 
 
+@dataclass
+class ParsedTag:
+    content: Optional[str]
+    attrs: dict[str, str]
+
+
 class WorkflowEngine:
     """
     Executes workflows by streaming agent outputs and persisting state for resumption.
@@ -89,6 +95,7 @@ class WorkflowEngine:
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
+        workflow_chain: Optional[list[str]] = None,
     ) -> Optional[AsyncGenerator[str, None]]:
         workflow_def = self._select_workflow(request)
         if not workflow_def:
@@ -97,6 +104,10 @@ class WorkflowEngine:
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
         state = self.state_store.get_or_create(execution_id, workflow_def.flow_id)
         state.context.setdefault("agents", {})
+        chain = list(workflow_chain or state.context.get("_workflow_chain") or [])
+        if workflow_def.flow_id not in chain:
+            chain.append(workflow_def.flow_id)
+        state.context["_workflow_chain"] = chain
         persist_inner_thinking = self._should_persist_inner_thinking(request, state)
         if not persist_inner_thinking:
             self._prune_inner_thinking(state, workflow_def)
@@ -112,6 +123,7 @@ class WorkflowEngine:
         self.state_store.save_state(state)
         no_reroute = self._has_no_reroute(user_message)
         return_full_state = bool(request.return_full_state)
+        handoff_state: dict[str, bool] = {"workflow_handoff": False}
 
         async def _runner():
             # Always emit execution id first
@@ -215,10 +227,12 @@ class WorkflowEngine:
                 span,
                 persist_inner_thinking=persist_inner_thinking,
                 no_reroute=no_reroute,
+                workflow_chain=chain,
+                handoff_state=handoff_state,
             ):
                 yield event
 
-            if state.completed:
+            if state.completed and not handoff_state.get("workflow_handoff"):
                 yield "data: [DONE]\n\n"
 
         return _runner()
@@ -357,7 +371,13 @@ class WorkflowEngine:
         span,
         persist_inner_thinking: bool = False,
         no_reroute: bool = False,
+        workflow_chain: Optional[list[str]] = None,
+        handoff_state: Optional[dict[str, bool]] = None,
     ) -> AsyncGenerator[str, None]:
+        workflow_chain = list(
+            workflow_chain or state.context.get("_workflow_chain") or []
+        )
+        handoff_state = handoff_state or {"workflow_handoff": False}
         completed_agents = self._get_completed_agents(workflow_def, state)
         forced_next: Optional[str] = None
 
@@ -480,6 +500,76 @@ class WorkflowEngine:
                                 f"\nRerouting to {forced_next}\n",
                                 status="reroute",
                             )
+                    elif status == "workflow_reroute":
+                        target_workflow = result.get("target_workflow")
+                        start_with_payload = result.get("start_with")
+                        metadata: dict[str, Any] = {"target_workflow": target_workflow}
+                        if start_with_payload is not None:
+                            metadata["start_with"] = start_with_payload
+                        if not target_workflow:
+                            state.completed = True
+                            self.state_store.save_state(state)
+                            yield self._record_event(
+                                state,
+                                "\nWorkflow reroute target was not provided.\n",
+                                status="error",
+                                metadata=metadata,
+                            )
+                            handoff_state["workflow_handoff"] = True
+                            yield "data: [DONE]\n\n"
+                            return
+                        yield self._record_event(
+                            state,
+                            f"\nRerouting to workflow '{target_workflow}'\n",
+                            status="reroute",
+                            metadata=metadata,
+                        )
+                        if target_workflow in workflow_chain:
+                            state.completed = True
+                            self.state_store.save_state(state)
+                            yield self._record_event(
+                                state,
+                                (
+                                    f"\nWorkflow reroute loop detected for '{target_workflow}'. "
+                                    "Aborting.\n"
+                                ),
+                                status="error",
+                                metadata={
+                                    "target_workflow": target_workflow,
+                                    "workflow_chain": workflow_chain,
+                                },
+                            )
+                            handoff_state["workflow_handoff"] = True
+                            yield "data: [DONE]\n\n"
+                            return
+                        state.completed = True
+                        self.state_store.save_state(state)
+                        new_chain = list(workflow_chain)
+                        new_chain.append(target_workflow)
+                        new_request = self._build_workflow_reroute_request(
+                            request, target_workflow, start_with_payload
+                        )
+                        new_stream = await self.start_or_resume_workflow(
+                            session,
+                            new_request,
+                            access_token,
+                            span,
+                            workflow_chain=new_chain,
+                        )
+                        if not new_stream:
+                            yield self._record_event(
+                                state,
+                                f"\nWorkflow '{target_workflow}' is not defined.\n",
+                                status="error",
+                                metadata={"target_workflow": target_workflow},
+                            )
+                            handoff_state["workflow_handoff"] = True
+                            yield "data: [DONE]\n\n"
+                            return
+                        handoff_state["workflow_handoff"] = True
+                        async for new_event in new_stream:
+                            yield new_event
+                        return
                     elif status == "retry":
                         retry_triggered = True
                         progress_made = True
@@ -1005,7 +1095,9 @@ class WorkflowEngine:
             yield "data: [DONE]\n\n"
             return
 
-        reroute_reason = self._extract_tag(content_text, "reroute")
+        reroute_tag = self._extract_tag_with_attrs(content_text, "reroute")
+        reroute_reason = reroute_tag.content
+        reroute_start_with = self._parse_start_with(reroute_tag.attrs.get("start_with"))
         feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
         inline_returns = self._extract_return_values(content_text)
         cleaned_content = self._strip_tags(content_text)
@@ -1034,6 +1126,8 @@ class WorkflowEngine:
 
         if reroute_reason:
             agent_context["reroute_reason"] = reroute_reason
+        if reroute_start_with is not None:
+            agent_context["reroute_start_with"] = reroute_start_with
 
         # Capture inline <return name="...">value</return> tags into agent context
         for name, value in inline_returns:
@@ -1055,6 +1149,15 @@ class WorkflowEngine:
 
         if reroute_reason and not no_reroute:
             agent_context["completed"] = True
+            workflow_target = self._parse_workflow_reroute_target(reroute_reason)
+            if workflow_target:
+                self.state_store.save_state(state)
+                yield {
+                    "status": "workflow_reroute",
+                    "target_workflow": workflow_target,
+                    "start_with": reroute_start_with,
+                }
+                return
             target, with_fields = self._match_reroute_target(
                 agent_def.reroute, reroute_reason
             )
@@ -1542,12 +1645,49 @@ class WorkflowEngine:
         except Exception:
             return False
 
-    def _extract_tag(self, text: str, tag: str) -> Optional[str]:
+    def _extract_tag_with_attrs(self, text: str, tag: str) -> ParsedTag:
         match = re.search(
-            f"<{tag}>(.*?)</{tag}>", text or "", re.IGNORECASE | re.DOTALL
+            rf"<{tag}([^>]*)>(?P<content>.*?)</{tag}>",
+            text or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ParsedTag(None, {})
+        attrs_raw = match.group(1) or ""
+        attrs: dict[str, str] = {}
+        for attr_match in re.finditer(r'(\w+)\s*=\s*(["\'])(.*?)\2', attrs_raw):
+            attrs[attr_match.group(1)] = attr_match.group(3)
+        content = match.group("content").strip() if match.group("content") else None
+        return ParsedTag(content, attrs)
+
+    def _extract_tag(self, text: str, tag: str) -> Optional[str]:
+        parsed = self._extract_tag_with_attrs(text, tag)
+        return parsed.content
+
+    def _parse_start_with(self, value: Optional[str]) -> Optional[dict]:
+        if value is None:
+            return None
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as exc:  # pragma: no cover - defensive log only
+            logger.debug("[WorkflowEngine] Failed to parse start_with payload: %s", exc)
+        return None
+
+    def _parse_workflow_reroute_target(
+        self, reroute_reason: Optional[str]
+    ) -> Optional[str]:
+        if not reroute_reason:
+            return None
+        normalized = reroute_reason.strip()
+        match = re.match(
+            r"^workflows\[\s*(?P<name>[^\]]+)\s*\]$",
+            normalized,
+            re.IGNORECASE,
         )
         if match:
-            return match.group(1).strip()
+            return match.group("name").strip()
         return None
 
     def _tool_result_has_error(self, content: str) -> bool:
@@ -1958,9 +2098,28 @@ class WorkflowEngine:
                 return cfg.get("to"), [w for w in with_fields if isinstance(w, str)]
         return None, []
 
+    def _build_workflow_reroute_request(
+        self,
+        base_request: ChatCompletionRequest,
+        target_workflow: str,
+        start_with: Optional[dict[str, Any]],
+    ) -> ChatCompletionRequest:
+        copier = getattr(base_request, "model_copy", None)
+        new_request = (
+            copier(deep=True) if callable(copier) else base_request.copy(deep=True)
+        )
+        new_request.use_workflow = target_workflow
+        new_request.workflow_execution_id = None
+        new_request.return_full_state = False
+        new_request.start_with = start_with if isinstance(start_with, dict) else None
+        new_request.stream = True
+        return new_request
+
     def _strip_tags(self, text: str) -> str:
         stripped = re.sub(
-            r"<(/?)(reroute|user_feedback_needed|passthrough)>", "", text or ""
+            r"<(/?)(reroute|user_feedback_needed|passthrough)([^>]*)>",
+            "",
+            text or "",
         )
         stripped = re.sub(
             r"<return\b[^>]*>(.*?)</return>",

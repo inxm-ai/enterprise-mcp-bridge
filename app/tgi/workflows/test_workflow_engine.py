@@ -735,6 +735,142 @@ async def test_missing_reroute_target_emits_error_and_completes(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "first_flow",
+        "root_intent": "FIRST",
+        "agents": [{"agent": "first_agent", "description": "First"}],
+    }
+    second_flow = {
+        "flow_id": "second_flow",
+        "root_intent": "SECOND",
+        "agents": [{"agent": "second_agent", "description": "Second"}],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first_agent": '<reroute start_with=\'{"args":{"prefill":"set"}}\'>workflows[second_flow]</reroute>',
+            "second_agent": "Second workflow complete",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start handoff")],
+        model="test-model",
+        stream=True,
+        use_workflow="first_flow",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    assert "Rerouting to workflow 'second_flow'" in payload
+    assert "Second workflow complete" in payload
+    assert "first_agent" in llm.calls
+    assert "second_agent" in llm.calls
+    assert llm.calls.index("first_agent") < llm.calls.index("second_agent")
+
+    with engine.state_store._connect() as conn:
+        rows = conn.execute(
+            "SELECT execution_id, flow_id, context_json FROM workflow_executions"
+        ).fetchall()
+    assert {row[1] for row in rows} == {"first_flow", "second_flow"}
+    second_ctx = next(json.loads(row[2]) for row in rows if row[1] == "second_flow")
+    assert second_ctx.get("prefill") == "set"
+
+
+@pytest.mark.asyncio
+async def test_workflow_reroute_loop_detection(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "loop_a",
+        "root_intent": "A",
+        "agents": [{"agent": "first", "description": "First"}],
+    }
+    second_flow = {
+        "flow_id": "loop_b",
+        "root_intent": "B",
+        "agents": [{"agent": "second", "description": "Second"}],
+    }
+    _write_workflow(workflows_dir, "a", first_flow)
+    _write_workflow(workflows_dir, "b", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first": "<reroute>workflows[loop_b]</reroute>",
+            "second": "<reroute>workflows[loop_a]</reroute>",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="loop")],
+        model="test-model",
+        stream=True,
+        use_workflow="loop_a",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    payload = "\n".join([chunk async for chunk in stream])
+
+    assert "Workflow reroute loop detected" in payload
+    assert llm.calls.count("first") == 1
+    assert llm.calls.count("second") == 1
+
+    with engine.state_store._connect() as conn:
+        rows = conn.execute("SELECT flow_id FROM workflow_executions").fetchall()
+    assert {row[0] for row in rows} == {"loop_a", "loop_b"}
+
+
+@pytest.mark.asyncio
+async def test_workflow_reroute_to_missing_flow(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "primary_flow",
+        "root_intent": "PRIMARY",
+        "agents": [{"agent": "first_agent", "description": "First"}],
+    }
+    _write_workflow(workflows_dir, "primary", first_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient({"first_agent": "<reroute>workflows[ghost_flow]</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="missing")],
+        model="test-model",
+        stream=True,
+        use_workflow="primary_flow",
+    )
+
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    payload = "\n".join([chunk async for chunk in stream])
+
+    assert "Workflow 'ghost_flow' is not defined." in payload
+    assert llm.calls.count("first_agent") == 1
+
+    with engine.state_store._connect() as conn:
+        rows = conn.execute("SELECT flow_id FROM workflow_executions").fetchall()
+    assert {row[0] for row in rows} == {"primary_flow"}
+
+
+@pytest.mark.asyncio
 async def test_reroute_to_completed_agent_fails_even_with_dependencies_met(
     tmp_path, monkeypatch
 ):

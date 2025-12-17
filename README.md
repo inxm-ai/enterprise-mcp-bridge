@@ -712,6 +712,7 @@ Field reference:
   - `depends_on` (array[string]): Agent names that must complete before this agent runs.
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
+    - You can also hand off to another workflow by emitting `<reroute start_with='{"args": {...}}'>workflows[target_flow]</reroute>`. The engine completes the current workflow, starts a new execution for `target_flow` (optionally applying the provided `start_with` payload), and continues streaming from the new workflow. Looping reroutes between workflows are detected and aborted.
     - If a reroute target is missing, has unmet dependencies, or was already completed earlier in the run, the engine stops and emits an error chunk explaining the reason (e.g., missing dependencies, already completed).
   - `tools` (array, optional): Limit available tools for this agent. Can be:
     - Array of strings: Simple tool names (e.g., `["get_weather", "search"]`)
