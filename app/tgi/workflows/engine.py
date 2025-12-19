@@ -187,7 +187,9 @@ class WorkflowEngine:
             # If we are waiting for user feedback, either resume with it or pause again
             if state.awaiting_feedback:
                 if user_message_local:
-                    self._merge_feedback(state, user_message_local)
+                    await self._merge_feedback(
+                        state, user_message_local, request, access_token, span
+                    )
                     if "_resume_agent" not in state.context:
                         resume_target = self._find_feedback_agent(state)
                         if resume_target:
@@ -771,7 +773,9 @@ class WorkflowEngine:
         # Full context can grow to hundreds of KB with accumulated agent results
         context_summary = self._create_context_summary(agent_context_payload)
 
-        user_prompt = self._extract_user_message(request) or ""
+        user_prompt = (
+            state.context.get("user_query") or self._extract_user_message(request) or ""
+        )
         history_messages = state.context.get("user_messages", [])
         history_text = (
             "\n".join(history_messages[-10:]) if history_messages else "<none>"
@@ -1134,6 +1138,8 @@ class WorkflowEngine:
             self._set_path_value(agent_context, name, value)
 
         if feedback_needed:
+            if cleaned_content:
+                agent_context["feedback_prompt"] = cleaned_content
             agent_context["awaiting_feedback"] = True
             agent_context["completed"] = False
             state.awaiting_feedback = True
@@ -1149,8 +1155,18 @@ class WorkflowEngine:
 
         if reroute_reason and not no_reroute:
             agent_context["completed"] = True
+            target, with_fields = self._match_reroute_target(
+                agent_def.reroute, reroute_reason
+            )
             workflow_target = self._parse_workflow_reroute_target(reroute_reason)
+            if not workflow_target and target:
+                workflow_target = self._parse_workflow_reroute_target(target)
             if workflow_target:
+                if with_fields:
+                    self._apply_reroute_with(state.context, agent_context, with_fields)
+                    reroute_start_with = self._merge_start_with(
+                        reroute_start_with, agent_context, state.context, with_fields
+                    )
                 self.state_store.save_state(state)
                 yield {
                     "status": "workflow_reroute",
@@ -1158,9 +1174,6 @@ class WorkflowEngine:
                     "start_with": reroute_start_with,
                 }
                 return
-            target, with_fields = self._match_reroute_target(
-                agent_def.reroute, reroute_reason
-            )
             if target:
                 if with_fields:
                     self._apply_reroute_with(state.context, agent_context, with_fields)
@@ -1404,6 +1417,8 @@ class WorkflowEngine:
         history = state.context.setdefault("user_messages", [])
         if not history or history[-1] != message:
             history.append(message)
+        if not state.awaiting_feedback:
+            state.context["user_query"] = message
 
     def _get_original_user_prompt(self, state: WorkflowExecutionState) -> Optional[str]:
         """
@@ -2129,6 +2144,59 @@ class WorkflowEngine:
         )
         return re.sub(r"<no_reroute>", "", stripped, flags=re.IGNORECASE)
 
+    async def _summarize_user_query(
+        self,
+        base_query: Optional[str],
+        feedback: str,
+        feedback_prompt: Optional[str],
+        request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> Optional[str]:
+        base_query = (base_query or "").strip()
+        feedback = (feedback or "").strip()
+        feedback_prompt = (feedback_prompt or "").strip()
+        if not base_query and not feedback:
+            return None
+        prompt = (
+            "USER_QUERY_SUMMARY\n"
+            "You rewrite a conversation into a single, self-contained user request.\n"
+            "Combine the original user request, the assistant clarification question, "
+            "and the user's response. Resolve references like 'the first one' or 'that' "
+            "using the clarification question. Keep it concise and specific.\n"
+            "Return only the rewritten request with no extra text."
+        )
+        question_parts = []
+        if base_query:
+            question_parts.append(f"Original user request: {base_query}")
+        if feedback_prompt:
+            question_parts.append(f"Assistant clarification: {feedback_prompt}")
+        if feedback:
+            question_parts.append(f"User response: {feedback}")
+        question_parts.append("Rewritten request:")
+        question = "\n".join(question_parts)
+        summary = await self.llm_client.ask(
+            base_prompt=prompt,
+            base_request=request,
+            question=question,
+            access_token=access_token or "",
+            outer_span=span,
+        )
+        return self._normalize_user_query_summary(summary)
+
+    def _normalize_user_query_summary(self, summary: Optional[str]) -> Optional[str]:
+        if not summary:
+            return None
+        cleaned = summary.strip().strip("`")
+        cleaned = re.sub(
+            r"^(summary|combined query|rewritten request)\s*[:\-]\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = " ".join(cleaned.split())
+        return cleaned or None
+
     def _extract_return_values(self, text: str) -> list[tuple[str, str]]:
         """
         Extract all <return name="...">value</return> pairs from LLM output.
@@ -2160,6 +2228,18 @@ class WorkflowEngine:
             current = current[part]
         current[parts[-1]] = value
 
+    def _path_exists(self, data: dict, path: str) -> bool:
+        """Check if a dotted path exists in a dict."""
+        current: Any = data
+        parts = path.split(".")
+        for idx, part in enumerate(parts):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            if idx == len(parts) - 1:
+                return True
+            current = current.get(part)
+        return False
+
     def _apply_reroute_with(
         self, state_context: dict, agent_context: dict, fields: list[str]
     ) -> None:
@@ -2171,8 +2251,16 @@ class WorkflowEngine:
             return
         for field in fields:
             value = self._get_path_value(agent_context, field)
+            if value is None:
+                value = self._get_path_value(state_context, field)
+                if value is not None:
+                    logger.info(
+                        "[WorkflowEngine._apply_reroute_with] Field '%s' missing from agent context; using shared context value: %s",
+                        field,
+                        str(value)[:200],
+                    )
             logger.info(
-                "[WorkflowEngine._apply_reroute_with] Copying field '%s' from agent context to workflow context, value: %s",
+                "[WorkflowEngine._apply_reroute_with] Copying field '%s' into workflow context, value: %s",
                 field,
                 str(value)[:200] if value else None,
             )
@@ -2187,6 +2275,54 @@ class WorkflowEngine:
                 "[WorkflowEngine._apply_reroute_with] Successfully set '%s' in workflow context",
                 field,
             )
+
+    def _merge_start_with(
+        self,
+        start_with: Optional[dict[str, Any]],
+        agent_context: dict,
+        state_context: dict,
+        fields: list[str],
+    ) -> Optional[dict[str, Any]]:
+        """
+        Merge reroute `with` fields into a start_with payload for workflow handoff.
+        """
+        if not fields:
+            return start_with
+
+        payload: dict[str, Any] = (
+            dict(start_with) if isinstance(start_with, dict) else {}
+        )
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            args = {}
+            payload["args"] = args
+
+        for field in fields:
+            if self._path_exists(args, field):
+                continue
+            value = self._get_path_value(agent_context, field)
+            if value is None:
+                value = self._get_path_value(state_context, field)
+                if value is not None:
+                    logger.info(
+                        "[WorkflowEngine._merge_start_with] Field '%s' missing from agent context; using shared context value: %s",
+                        field,
+                        str(value)[:200],
+                    )
+            logger.info(
+                "[WorkflowEngine._merge_start_with] Copying field '%s' into start_with args, value: %s",
+                field,
+                str(value)[:200] if value else None,
+            )
+            if value is None:
+                logger.warning(
+                    "[WorkflowEngine._merge_start_with] Field '%s' is None, not copying",
+                    field,
+                )
+                continue
+            self._set_path_value(args, field, value)
+
+        return payload
 
     def _extract_passthrough_content(self, text: str) -> str:
         """
@@ -2425,12 +2561,20 @@ class WorkflowEngine:
         self.state_store.save_state(state)
         return event
 
-    def _merge_feedback(self, state: WorkflowExecutionState, feedback: str) -> None:
+    async def _merge_feedback(
+        self,
+        state: WorkflowExecutionState,
+        feedback: str,
+        request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> None:
         state.awaiting_feedback = False
         if state.current_agent:
             agent_entry = state.context["agents"].setdefault(
                 state.current_agent, {"content": "", "pass_through": False}
             )
+            prior_content = agent_entry.get("content", "")
             logger.info(
                 "[WorkflowEngine._merge_feedback] Agent '%s' receiving feedback. "
                 "Before merge - completed: %s, awaiting_feedback: %s, had_feedback: %s, reroute_reason: %s",
@@ -2458,6 +2602,24 @@ class WorkflowEngine:
                 agent_entry.get("completed"),
                 state.context.get("_resume_agent"),
             )
+            feedback_prompt = agent_entry.get("feedback_prompt") or prior_content
+            base_query = state.context.get("user_query")
+            if not base_query:
+                messages = state.context.get("user_messages") or []
+                if isinstance(messages, list) and len(messages) >= 2:
+                    base_query = str(messages[-2])
+                elif messages:
+                    base_query = str(messages[-1])
+            combined_query = await self._summarize_user_query(
+                base_query=base_query,
+                feedback=feedback,
+                feedback_prompt=feedback_prompt,
+                request=request,
+                access_token=access_token,
+                span=span,
+            )
+            if combined_query:
+                state.context["user_query"] = combined_query
         state.context.setdefault("feedback", []).append(feedback)
         self.state_store.save_state(state)
 

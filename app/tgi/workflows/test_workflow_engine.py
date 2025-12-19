@@ -47,13 +47,19 @@ class StubLLMClient:
     Minimal LLM stub that returns predetermined responses keyed by agent name.
     """
 
-    def __init__(self, responses: dict[str, str | list[str]]):
+    def __init__(
+        self,
+        responses: dict[str, str | list[str]],
+        ask_responses: dict[str, str] | None = None,
+    ):
         self.responses = responses
         self.calls: list[str] = []
         self.request_tools: list[list[str] | None] = []
         self.system_prompts: list[str] = []
         self.response_counters: dict[str, int] = {}
         self.user_messages: list[str] = []
+        self.ask_responses = ask_responses or {}
+        self.ask_calls: list[dict[str, str | None]] = []
 
     def stream_completion(
         self, request: ChatCompletionRequest, access_token: str, span: Any
@@ -120,6 +126,28 @@ class StubLLMClient:
             return text.split(f"{key}=", 1)[1].split("\n", 1)[0].strip()
         except Exception:
             return ""
+
+    async def ask(
+        self,
+        base_prompt: str,
+        base_request: ChatCompletionRequest,
+        outer_span,
+        question: str = None,
+        assistant_statement: str = None,
+        access_token: str = None,
+    ) -> str:
+        self.ask_calls.append(
+            {
+                "base_prompt": base_prompt,
+                "question": question,
+                "assistant": assistant_statement,
+            }
+        )
+        if "USER_QUERY_SUMMARY" in (base_prompt or ""):
+            response = self.ask_responses.get("user_query_summary")
+            if response is not None:
+                return response
+        return self.ask_responses.get("default", "")
 
 
 def _write_workflow(tmpdir: Path, name: str, payload: dict[str, Any]) -> None:
@@ -786,6 +814,295 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     assert {row[1] for row in rows} == {"first_flow", "second_flow"}
     second_ctx = next(json.loads(row[2]) for row in rows if row[1] == "second_flow")
     assert second_ctx.get("prefill") == "set"
+
+
+@pytest.mark.asyncio
+async def test_workflow_reroute_with_fields_prefills_new_context(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "select_run_mode_flow",
+        "root_intent": "SELECT_RUN_MODE",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Choose next action.",
+                "reroute": [
+                    {
+                        "on": ["workflows[plan_run]"],
+                        "to": "workflows[plan_run]",
+                        "with": ["plan_id"],
+                    }
+                ],
+            }
+        ],
+    }
+    second_flow = {
+        "flow_id": "plan_run",
+        "root_intent": "PLAN_RUN",
+        "agents": [
+            {
+                "agent": "get_plan",
+                "description": "Fetch the plan.",
+                "tools": [{"get_plan": {"args": {"plan_id": "plan_id"}}}],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"plan_id": {"type": "string"}},
+                    "required": ["plan_id"],
+                },
+            },
+        }
+    ]
+
+    class RerouteWorkflowLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "select_run_mode": '<return name="plan_id">plan-xyz</return><reroute>workflows[plan_run]</reroute>',
+                    "get_plan": "<passthrough>Done</passthrough>",
+                }
+            )
+            self._emitted_tool = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+
+            if agent_marker == "get_plan" and not self._emitted_tool:
+                self._emitted_tool = True
+
+                async def _gen_tool():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "get_plan",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool()
+
+            return super().stream_completion(request, access_token, span)
+
+    class CaptureSession(StubSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tool_calls: list[dict[str, Any]] = []
+
+        async def call_tool(self, name: str, args: dict, access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(
+                        text=json.dumps({"plan": {"id": args.get("plan_id")}})
+                    )
+                ],
+            )
+
+    llm = RerouteWorkflowLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="select_run_mode_flow",
+    )
+
+    session = CaptureSession(tools=tools)
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT flow_id, context_json FROM workflow_executions"
+        ).fetchall()
+    plan_run_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_run")
+    assert plan_run_ctx.get("plan_id") == "plan-xyz"
+    assert session.tool_calls
+    assert session.tool_calls[0]["args"].get("plan_id") == "plan-xyz"
+
+
+@pytest.mark.asyncio
+async def test_workflow_reroute_with_shared_context_value(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "select_plan_flow",
+        "root_intent": "SELECT_PLAN",
+        "agents": [
+            {
+                "agent": "select_plan",
+                "description": "Choose plan.",
+                "reroute": [
+                    {
+                        "on": ["PLAN_SELECTED"],
+                        "to": "select_run_mode",
+                        "with": ["plan_id"],
+                    }
+                ],
+            },
+            {
+                "agent": "select_run_mode",
+                "description": "Choose next action.",
+                "depends_on": ["select_plan"],
+                "reroute": [
+                    {
+                        "on": ["workflows[plan_run]"],
+                        "to": "workflows[plan_run]",
+                        "with": ["plan_id"],
+                    }
+                ],
+            },
+        ],
+    }
+    second_flow = {
+        "flow_id": "plan_run",
+        "root_intent": "PLAN_RUN",
+        "agents": [
+            {
+                "agent": "get_plan",
+                "description": "Fetch the plan.",
+                "tools": [{"get_plan": {"args": {"plan_id": "plan_id"}}}],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch plan",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"plan_id": {"type": "string"}},
+                    "required": ["plan_id"],
+                },
+            },
+        }
+    ]
+
+    class SharedContextWorkflowLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "select_plan": '<return name="plan_id">plan-xyz</return><reroute>PLAN_SELECTED</reroute>',
+                    "select_run_mode": "<reroute>workflows[plan_run]</reroute>",
+                    "get_plan": "<passthrough>Done</passthrough>",
+                }
+            )
+            self._emitted_tool = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+
+            if agent_marker == "get_plan" and not self._emitted_tool:
+                self._emitted_tool = True
+
+                async def _gen_tool():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "get_plan",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool()
+
+            return super().stream_completion(request, access_token, span)
+
+    class CaptureSession(StubSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tool_calls: list[dict[str, Any]] = []
+
+        async def call_tool(self, name: str, args: dict, access_token: str):
+            self.tool_calls.append({"name": name, "args": args})
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(
+                        text=json.dumps({"plan": {"id": args.get("plan_id")}})
+                    )
+                ],
+            )
+
+    llm = SharedContextWorkflowLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="select_plan_flow",
+    )
+
+    session = CaptureSession(tools=tools)
+    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    _ = [chunk async for chunk in stream]
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT flow_id, context_json FROM workflow_executions"
+        ).fetchall()
+    plan_run_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_run")
+    assert plan_run_ctx.get("plan_id") == "plan-xyz"
+    assert session.tool_calls
+    assert session.tool_calls[0]["args"].get("plan_id") == "plan-xyz"
 
 
 @pytest.mark.asyncio
@@ -1591,6 +1908,78 @@ async def test_feedback_resume_without_client_history_uses_state(tmp_path, monke
     assert "Set up Teams notifications for my monitoring plan." in resumed_user_content
     assert "Use chat ID 12345" in resumed_user_content
     assert llm.calls[-1] == "finalize"
+
+
+@pytest.mark.asyncio
+async def test_feedback_updates_user_query_with_selection(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "newsletter_flow",
+        "root_intent": "RUN_NEWSLETTER",
+        "agents": [
+            {"agent": "select_newsletter", "description": "Select newsletter."},
+            {
+                "agent": "finalize",
+                "description": "Finalize newsletter run.",
+                "depends_on": ["select_newsletter"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "newsletter", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_newsletter": [
+                "<user_feedback_needed>I found two, Weekly Security Newsletter and Monthly Security newsletter. Which one?</user_feedback_needed>",
+                "Running it now.",
+            ],
+            "finalize": "Done.",
+        },
+        ask_responses={"user_query_summary": "Run the Weekly Security Newsletter"},
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-newsletter"
+    initial_request = ChatCompletionRequest(
+        messages=[
+            Message(role=MessageRole.USER, content="Run Security Newsletter now")
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="newsletter_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    first_stream = await engine.start_or_resume_workflow(
+        StubSession(), initial_request, None, None
+    )
+    assert first_stream is not None
+    _ = [chunk async for chunk in first_stream]
+
+    state = engine.state_store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="The first one")],
+        model="test-model",
+        stream=True,
+        use_workflow="newsletter_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None
+    )
+    assert resume_stream is not None
+    _ = [chunk async for chunk in resume_stream]
+
+    updated_state = engine.state_store.load_execution(exec_id)
+    user_query = updated_state.context.get("user_query", "")
+    assert user_query == "Run the Weekly Security Newsletter"
+    assert llm.ask_calls
 
 
 @pytest.mark.asyncio
