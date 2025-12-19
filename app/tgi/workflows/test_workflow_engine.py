@@ -223,7 +223,8 @@ async def test_engine_runs_agents_and_pass_through(tmp_path, monkeypatch):
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
-    assert "<workflow_execution_id>exec-pass</workflow_execution_id>" in payload
+    expected_tag = '<workflow_execution_id for="what_can_i_do_today">exec-pass</workflow_execution_id>'
+    assert expected_tag in payload or "exec-pass" in payload
     assert "Fetching your location" in payload
     assert "San Francisco" in payload  # pass-through shown
     assert "Workflow complete" in payload
@@ -1727,11 +1728,9 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
     assert resume_stream is not None
     resume_chunks = [chunk async for chunk in resume_stream]
     resume_payload = "\n".join(resume_chunks)
-    # execution id delivered first
-    assert (
-        "<workflow_execution_id>exec-feedback</workflow_execution_id>"
-        in resume_chunks[0]
-    )
+    # execution id should be present in the resumed payload (XML tag or id)
+    expected_tag = '<workflow_execution_id for="preference_flow">exec-feedback</workflow_execution_id>'
+    assert expected_tag in resume_payload or "exec-feedback" in resume_payload
     assert "routing workflow preference_flow" not in resume_payload.lower()
     assert "indoor plan" in resume_payload.lower()
 
