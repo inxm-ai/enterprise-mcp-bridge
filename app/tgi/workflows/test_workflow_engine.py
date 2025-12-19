@@ -147,6 +147,12 @@ class StubLLMClient:
             response = self.ask_responses.get("user_query_summary")
             if response is not None:
                 return response
+            return ""
+        if "FEEDBACK_RERUN_DECISION" in (base_prompt or ""):
+            response = self.ask_responses.get("feedback_rerun_decision")
+            if response is not None:
+                return response
+            return "RERUN"
         return self.ask_responses.get("default", "")
 
 
@@ -1979,6 +1985,76 @@ async def test_feedback_updates_user_query_with_selection(tmp_path, monkeypatch)
     user_query = updated_state.context.get("user_query", "")
     assert user_query == "Run the Weekly Security Newsletter"
     assert llm.ask_calls
+
+
+@pytest.mark.asyncio
+async def test_feedback_confirmation_skips_agent_rerun(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "confirm_flow",
+        "root_intent": "CONFIRM_ACTION",
+        "agents": [
+            {"agent": "perform_action", "description": "Perform action."},
+            {
+                "agent": "finalize",
+                "description": "Finalize the workflow.",
+                "depends_on": ["perform_action"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "confirm", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "perform_action": [
+                "<user_feedback_needed>I synced project Alpha. Does that look right?</user_feedback_needed>"
+            ],
+            "finalize": "Done.",
+        },
+        ask_responses={
+            "user_query_summary": "Confirm the sync for project Alpha",
+            "feedback_rerun_decision": "USE_PREVIOUS",
+        },
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    exec_id = "exec-confirm"
+    initial_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Sync project Alpha")],
+        model="test-model",
+        stream=True,
+        use_workflow="confirm_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    first_stream = await engine.start_or_resume_workflow(
+        StubSession(), initial_request, None, None
+    )
+    assert first_stream is not None
+    _ = [chunk async for chunk in first_stream]
+
+    state = engine.state_store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Yes, that's correct.")],
+        model="test-model",
+        stream=True,
+        use_workflow="confirm_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None
+    )
+    assert resume_stream is not None
+    _ = [chunk async for chunk in resume_stream]
+
+    assert llm.calls.count("perform_action") == 1
+    assert llm.calls[-1] == "finalize"
 
 
 @pytest.mark.asyncio

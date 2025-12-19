@@ -2197,6 +2197,72 @@ class WorkflowEngine:
         cleaned = " ".join(cleaned.split())
         return cleaned or None
 
+    async def _should_rerun_feedback_agent(
+        self,
+        base_query: Optional[str],
+        feedback: str,
+        feedback_prompt: Optional[str],
+        agent_name: str,
+        agent_context: dict[str, Any],
+        request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> bool:
+        prompt = (
+            "FEEDBACK_RERUN_DECISION\n"
+            "Decide if the agent needs to run again after user feedback.\n"
+            "Return only one token: USE_PREVIOUS or RERUN.\n"
+            "Use USE_PREVIOUS only when the user is simply confirming or approving"
+            " the prior output and no new data, choices, or corrections were provided.\n"
+            "Use RERUN when the assistant asked the user to choose among options,"
+            " provide missing details, clarify preferences, supply IDs/dates/times,"
+            " or when the response changes or adds information that should alter"
+            " the agent output or downstream routing.\n"
+            "Example (options): If the assistant listed options and asked which one"
+            " to pick, the user's reply should always result in RERUN.\n"
+            "Example (confirmation): If the assistant asked 'Does that look right?'"
+            " and the user replied 'Yes', return USE_PREVIOUS."
+        )
+        context_snapshot = {}
+        if agent_context:
+            filtered = {
+                key: value
+                for key, value in agent_context.items()
+                if key not in {"_full_tool_results"}
+            }
+            context_snapshot = self._compact_large_structure(
+                filtered, max_items=3, max_depth=2
+            )
+        question = "\n".join(
+            [
+                f"Agent: {agent_name}",
+                f"Original user request: {base_query or ''}",
+                f"Assistant question: {feedback_prompt or ''}",
+                f"User response: {feedback}",
+                f"Agent context snapshot: {json.dumps(context_snapshot, ensure_ascii=False, default=str)}",
+                "Decision:",
+            ]
+        )
+        response = await self.llm_client.ask(
+            base_prompt=prompt,
+            base_request=request,
+            question=question,
+            access_token=access_token or "",
+            outer_span=span,
+        )
+        decision = self._normalize_feedback_rerun_decision(response)
+        return decision != "USE_PREVIOUS"
+
+    def _normalize_feedback_rerun_decision(self, response: Optional[str]) -> str:
+        if not response:
+            return "RERUN"
+        text = response.strip().upper()
+        if "USE_PREVIOUS" in text or "USE PREVIOUS" in text or "SKIP" in text:
+            return "USE_PREVIOUS"
+        if "RERUN" in text or "RE-RUN" in text or "RUN AGAIN" in text:
+            return "RERUN"
+        return "RERUN"
+
     def _extract_return_values(self, text: str) -> list[tuple[str, str]]:
         """
         Extract all <return name="...">value</return> pairs from LLM output.
@@ -2593,15 +2659,6 @@ class WorkflowEngine:
             # Clear any stored reroute reason so the agent can make a fresh decision
             # based on the user's feedback
             agent_entry.pop("reroute_reason", None)
-            # Remember which agent should resume first after feedback
-            state.context["_resume_agent"] = state.current_agent
-            logger.info(
-                "[WorkflowEngine._merge_feedback] Agent '%s' after merge - "
-                "completed: %s, _resume_agent set to: %s",
-                state.current_agent,
-                agent_entry.get("completed"),
-                state.context.get("_resume_agent"),
-            )
             feedback_prompt = agent_entry.get("feedback_prompt") or prior_content
             base_query = state.context.get("user_query")
             if not base_query:
@@ -2620,6 +2677,30 @@ class WorkflowEngine:
             )
             if combined_query:
                 state.context["user_query"] = combined_query
+            should_rerun = await self._should_rerun_feedback_agent(
+                base_query=base_query,
+                feedback=feedback,
+                feedback_prompt=feedback_prompt,
+                agent_name=state.current_agent,
+                agent_context=agent_entry,
+                request=request,
+                access_token=access_token,
+                span=span,
+            )
+            if should_rerun:
+                # Remember which agent should resume first after feedback
+                state.context["_resume_agent"] = state.current_agent
+                logger.info(
+                    "[WorkflowEngine._merge_feedback] Agent '%s' set to rerun after feedback",
+                    state.current_agent,
+                )
+            else:
+                agent_entry["completed"] = True
+                agent_entry["skip_feedback_rerun"] = True
+                logger.info(
+                    "[WorkflowEngine._merge_feedback] Agent '%s' will reuse prior output after feedback",
+                    state.current_agent,
+                )
         state.context.setdefault("feedback", []).append(feedback)
         self.state_store.save_state(state)
 
