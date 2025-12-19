@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator
 
+import jwt
 import pytest
 
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
@@ -160,6 +161,17 @@ def _write_workflow(tmpdir: Path, name: str, payload: dict[str, Any]) -> None:
     (tmpdir / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _make_access_token(user_id: str) -> str:
+    token = jwt.encode(
+        {"sub": user_id, "email": f"{user_id}@example.com"},
+        "secret",
+        algorithm="HS256",
+    )
+    if isinstance(token, bytes):
+        return token.decode("utf-8")
+    return token
+
+
 def test_repository_loads_and_matches(monkeypatch, tmp_path):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
@@ -186,6 +198,45 @@ def test_repository_loads_and_matches(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError):
         WorkflowRepository(workflows_path=str(workflows_dir / "missing"))
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_requires_same_user(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "locked_flow",
+        "root_intent": "LOCKED",
+        "agents": [{"agent": "only_agent", "description": "Run once."}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient({"only_agent": "ok"})
+    engine = WorkflowEngine(repo, store, llm)
+
+    token_owner = _make_access_token("alice")
+    token_other = _make_access_token("bob")
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Start")],
+        use_workflow="locked_flow",
+        workflow_execution_id="exec-locked",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, token_owner, None
+    )
+    assert stream is not None
+    await stream.aclose()
+
+    with pytest.raises(PermissionError, match="different user"):
+        await engine.start_or_resume_workflow(StubSession(), request, token_other, None)
+
+    with pytest.raises(PermissionError, match="Access token required"):
+        await engine.start_or_resume_workflow(StubSession(), request, None, None)
 
 
 @pytest.mark.asyncio

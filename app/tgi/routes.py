@@ -84,6 +84,36 @@ def _extract_request_id(raw_body: Any) -> str:
     return "unknown"
 
 
+def _select_group_exception(
+    exc_group: BaseExceptionGroup, expected_type: type[BaseException]
+) -> BaseException:
+    exceptions = getattr(exc_group, "exceptions", None) or []
+    for exc in exceptions:
+        if isinstance(exc, expected_type):
+            return exc
+    return exceptions[0] if exceptions else exc_group
+
+
+def _permission_status_code(exc: PermissionError) -> int:
+    message = str(exc).lower()
+    if (
+        "invalid access token" in message
+        or "access token required" in message
+        or "user identifier" in message
+    ):
+        return 401
+    return 403
+
+
+def _permission_error_payload(exc: PermissionError) -> dict[str, Any]:
+    status_code = _permission_status_code(exc)
+    return {
+        "error": "unauthorized" if status_code == 401 else "access_denied",
+        "detail": str(exc),
+        "status": status_code,
+    }
+
+
 def _coerce_a2a_request(raw_body: Any) -> A2ARequest:
     """Coerces various payload shapes into an A2ARequest."""
     if not isinstance(raw_body, dict):
@@ -144,6 +174,8 @@ async def _handle_chat_completion(
             detail="Environment variable TGI_URL not configured. This is a prerequisite for this endpoint to work.",
         )
 
+    incoming_headers = dict(request.headers)
+    user_token = incoming_headers.get("x-auth-request-access-token", None)
     # Check if streaming is requested
     accept_header = request.headers.get("accept", "")
     chat_request.stream = chat_request.stream or "text/event-stream" in accept_header
@@ -174,7 +206,7 @@ async def _handle_chat_completion(
                 incoming_headers,
             ) as session:
                 result = await tgi_service.chat_completion(
-                    session, chat_request, access_token, prompt
+                    session, chat_request, user_token, access_token, prompt
                 )
 
                 # If the service returned an async-iterable (stream), forward chunks
@@ -196,13 +228,22 @@ async def _handle_chat_completion(
 
                     async for chunk in _single():
                         yield chunk
-        except Exception as exc:
-            logger.error(f"[TGI] Streaming chat error: {exc}", exc_info=True)
+        except* PermissionError as exc_group:
+            permission_exc = _select_group_exception(exc_group, PermissionError)
+            logger.warning(f"[TGI] Workflow access denied: {permission_exc}")
             if is_streaming:
-                error_payload = {"error": "internal_error", "detail": str(exc)}
+                error_payload = _permission_error_payload(permission_exc)
                 yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
             else:
-                raise
+                raise permission_exc
+        except* Exception as exc_group:
+            first_exc = _select_group_exception(exc_group, Exception)
+            logger.error(f"[TGI] Streaming chat error: {first_exc}", exc_info=True)
+            if is_streaming:
+                error_payload = {"error": "internal_error", "detail": str(first_exc)}
+                yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+            else:
+                raise first_exc
         finally:
             if is_streaming and not done_sent:
                 yield "data: [DONE]\n\n"
@@ -228,6 +269,7 @@ async def chat_completions(
     OpenAI-compatible chat completions endpoint with MCP integration.
     """
     incoming_headers = dict(request.headers)
+    user_token = incoming_headers.get("x-auth-request-access-token", None)
     try:
         # Validate required environment
         if not os.environ.get("TGI_URL", None):
@@ -278,7 +320,7 @@ async def chat_completions(
                 incoming_headers,
             ) as session:
                 result = await tgi_service.chat_completion(
-                    session, chat_request, access_token, prompt
+                    session, chat_request, user_token, access_token, prompt
                 )
 
                 if _is_async_iterable(result):
@@ -295,6 +337,11 @@ async def chat_completions(
 
     except HTTPException as e:
         raise e
+    except PermissionError as e:
+        status_code = _permission_status_code(e)
+        detail = str(e)
+        logger.warning(f"[TGI] Access denied ({status_code}): {detail}")
+        raise HTTPException(status_code=status_code, detail=detail)
     except UserLoggedOutException as e:
         logger.warning(f"[TGI] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
@@ -491,6 +538,12 @@ async def a2a_chat_completion(
                 code=-32600,
                 message=f"Invalid Request: {error_detail}",
                 request_id=a2a_request.id,
+            ).model_dump()
+        )
+    except PermissionError as e:
+        return JSONResponse(
+            content=_create_a2a_error_response(
+                code=-32000, message=f"Access denied: {str(e)}", request_id=a2a_request.id
             ).model_dump()
         )
     except UserLoggedOutException as e:

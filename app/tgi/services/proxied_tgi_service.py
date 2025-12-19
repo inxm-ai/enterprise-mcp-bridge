@@ -133,6 +133,7 @@ class ProxiedTGIService:
         self,
         session: MCPSessionBase,
         request: ChatCompletionRequest,
+        user_token: Optional[str] = None,
         access_token: Optional[str] = None,
         prompt: Optional[str] = None,
     ) -> Union[ChatCompletionResponse, AsyncGenerator[str, None]]:
@@ -150,9 +151,13 @@ class ProxiedTGIService:
             )
 
             if self.workflow_engine and request.use_workflow:
+                if user_token is None:
+                    raise ValueError(
+                        "User token is required for workflow-based chat completions"
+                    )
                 request.stream = True
                 workflow_result = await self.workflow_engine.start_or_resume_workflow(
-                    session, request, access_token, span
+                    session, request, user_token, access_token, span
                 )
                 if workflow_result is not None:
                     return workflow_result

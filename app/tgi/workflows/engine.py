@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional
 
+from app.oauth.user_info import UserInfoExtractor
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.prompt_service import PromptService
@@ -53,6 +54,7 @@ class WorkflowEngine:
     """
 
     MAX_RETURN_RETRIES = 3
+    WORKFLOW_OWNER_KEY = "_workflow_owner_id"
 
     def __init__(
         self,
@@ -72,6 +74,7 @@ class WorkflowEngine:
         self.tool_service = tool_service or ToolService()
         self.chunk_formatter = chunk_formatter or WorkflowChunkFormatter()
         self.agent_executor = agent_executor or AgentExecutor()
+        self.user_info_extractor = UserInfoExtractor()
         self.passthrough_filter = PassThroughFilter(
             llm_client=self.llm_client,
             model_name=TGI_MODEL_NAME,
@@ -93,6 +96,7 @@ class WorkflowEngine:
         self,
         session: Any,
         request: ChatCompletionRequest,
+        user_token: str,
         access_token: Optional[str],
         span,
         workflow_chain: Optional[list[str]] = None,
@@ -102,7 +106,12 @@ class WorkflowEngine:
             return None
 
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
-        state = self.state_store.get_or_create(execution_id, workflow_def.flow_id)
+        state = self.state_store.load_execution(execution_id)
+        if state:
+            self._enforce_workflow_owner(state, user_token)
+        else:
+            state = WorkflowExecutionState.new(execution_id, workflow_def.flow_id)
+            self._enforce_workflow_owner(state, user_token)
         state.context.setdefault("agents", {})
         chain = list(workflow_chain or state.context.get("_workflow_chain") or [])
         if workflow_def.flow_id not in chain:
@@ -250,6 +259,45 @@ class WorkflowEngine:
             if ctx.get("awaiting_feedback") or ctx.get("had_feedback"):
                 return name
         return None
+
+    def _resolve_request_user_id(self, user_token: str) -> Optional[str]:
+        try:
+            user_info = self.user_info_extractor.extract_user_info(user_token)
+        except Exception as exc:
+            logger.warning(
+                "[WorkflowEngine] Failed to extract user info for workflow access: %s",
+                exc,
+            )
+            raise PermissionError(
+                "Invalid access token; unable to identify workflow owner."
+            ) from exc
+        user_id = user_info.get("user_id")
+        if not user_id:
+            raise PermissionError(
+                "Access token did not include a user identifier for workflow access."
+            )
+        return str(user_id)
+
+    def _enforce_workflow_owner(
+        self, state: WorkflowExecutionState, user_token: str
+    ) -> None:
+        stored_owner = state.context.get(self.WORKFLOW_OWNER_KEY)
+        if not user_token:
+            if stored_owner:
+                raise PermissionError(
+                    "Access token required to resume this workflow execution."
+                )
+            return
+
+        current_user_id = self._resolve_request_user_id(user_token)
+        if stored_owner:
+            if current_user_id != stored_owner:
+                raise PermissionError(
+                    f"Workflow execution '{state.execution_id}' belongs to a different user."
+                )
+            return
+        if current_user_id:
+            state.context[self.WORKFLOW_OWNER_KEY] = current_user_id
 
     def _apply_start_with(
         self,
