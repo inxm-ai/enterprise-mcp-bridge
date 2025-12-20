@@ -234,6 +234,7 @@ class WorkflowEngine:
                 state,
                 session,
                 request,
+                user_token,
                 access_token,
                 span,
                 persist_inner_thinking=persist_inner_thinking,
@@ -417,6 +418,7 @@ class WorkflowEngine:
         state: WorkflowExecutionState,
         session: Any,
         request: ChatCompletionRequest,
+        user_token: str,
         access_token: Optional[str],
         span,
         persist_inner_thinking: bool = False,
@@ -602,6 +604,7 @@ class WorkflowEngine:
                         new_stream = await self.start_or_resume_workflow(
                             session,
                             new_request,
+                            user_token,
                             access_token,
                             span,
                             workflow_chain=new_chain,
