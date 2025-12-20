@@ -847,7 +847,9 @@ async def test_engine_handles_pass_through_guideline(tmp_path, monkeypatch):
         workflow_execution_id="exec-guideline",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     # Check that the guideline was included in the system prompt
@@ -905,7 +907,9 @@ async def test_engine_streams_only_passthrough_content(tmp_path, monkeypatch):
         workflow_execution_id="exec-passthrough-stream",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
 
     # Combine all chunks to check what was streamed
@@ -960,7 +964,9 @@ async def test_engine_streams_all_content_for_boolean_pass_through(
         workflow_execution_id="exec-bool-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     combined = "".join(chunks)
 
@@ -1017,7 +1023,9 @@ async def test_passthrough_blocks_separated_by_newlines(tmp_path, monkeypatch):
         workflow_execution_id="exec-multi-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
 
     contents = _extract_delta_contents(chunks)
@@ -1087,7 +1095,9 @@ async def test_passthrough_streams_before_completion(tmp_path, monkeypatch):
         workflow_execution_id="exec-streaming-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
 
     contents = _extract_delta_contents(chunks)

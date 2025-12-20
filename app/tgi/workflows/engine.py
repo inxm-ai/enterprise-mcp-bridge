@@ -138,7 +138,7 @@ class WorkflowEngine:
             # Always emit execution id first
             yield self.chunk_formatter.format_chunk(
                 state=state,
-                content=f"<workflow_execution_id for=\"{workflow_def.flow_id}\">{execution_id}</workflow_execution_id>\n",
+                content=f'<workflow_execution_id for="{workflow_def.flow_id}">{execution_id}</workflow_execution_id>\n',
                 status="submitted",
                 role="system",
             )

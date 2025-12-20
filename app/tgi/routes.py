@@ -543,7 +543,9 @@ async def a2a_chat_completion(
     except PermissionError as e:
         return JSONResponse(
             content=_create_a2a_error_response(
-                code=-32000, message=f"Access denied: {str(e)}", request_id=a2a_request.id
+                code=-32000,
+                message=f"Access denied: {str(e)}",
+                request_id=a2a_request.id,
             ).model_dump()
         )
     except UserLoggedOutException as e:

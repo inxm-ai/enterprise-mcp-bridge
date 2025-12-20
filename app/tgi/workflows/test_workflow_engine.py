@@ -233,7 +233,9 @@ async def test_workflow_resume_requires_same_user(tmp_path, monkeypatch):
     await stream.aclose()
 
     with pytest.raises(PermissionError, match="different user"):
-        await engine.start_or_resume_workflow(StubSession(), request, token_other, None, None)
+        await engine.start_or_resume_workflow(
+            StubSession(), request, token_other, None, None
+        )
 
     with pytest.raises(PermissionError, match="Access token required"):
         await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
@@ -275,7 +277,9 @@ async def test_engine_runs_agents_and_pass_through(tmp_path, monkeypatch):
         workflow_execution_id="exec-pass",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     assert stream is not None
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
@@ -319,7 +323,9 @@ async def test_routing_agent_blocks_intent_mismatch(tmp_path, monkeypatch):
         workflow_execution_id="exec-intent",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     output = "".join([chunk async for chunk in stream])
     assert "<reroute>INTENT_MISMATCH</reroute>" in output
     state = engine.state_store.load_execution("exec-intent")
@@ -362,7 +368,9 @@ async def test_agent_context_can_be_disabled(tmp_path, monkeypatch):
         workflow_execution_id="exec-context-toggle",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     second_idx = llm.calls.index("second")
@@ -409,7 +417,9 @@ async def test_agent_context_can_be_scoped(tmp_path, monkeypatch):
         workflow_execution_id="exec-context-scoped",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     second_idx = llm.calls.index("second")
@@ -455,7 +465,9 @@ async def test_agent_context_can_use_original_user_prompt(tmp_path, monkeypatch)
         workflow_execution_id="exec-context-user-prompt",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     second_idx = llm.calls.index("second")
@@ -503,7 +515,9 @@ async def test_when_condition_via_routing_agent(tmp_path, monkeypatch):
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     state = engine.state_store.load_execution(exec_id)
     # Agent skipped due to routing decision
@@ -573,7 +587,9 @@ async def test_when_eval_beats_routing_when_for_mutually_exclusive_agents(
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     state = engine.state_store.load_execution(exec_id)
 
@@ -715,7 +731,9 @@ async def test_no_reroute_override(tmp_path, monkeypatch):
         use_workflow="reroute_flow",
         workflow_execution_id=exec_id,
     )
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     state = engine.state_store.load_execution(exec_id)
     # Reroute was suppressed; current agent content recorded, but next agent still executed in order
@@ -759,7 +777,9 @@ async def test_dynamic_reroute_decision(tmp_path, monkeypatch):
         use_workflow="dynamic_reroute",
         workflow_execution_id=exec_id,
     )
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     state = engine.state_store.load_execution(exec_id)
     assert state.context["agents"]["first"]["reroute_reason"] == "GO_TO_SECOND"
@@ -797,7 +817,9 @@ async def test_missing_reroute_target_emits_error_and_completes(tmp_path, monkey
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -855,7 +877,9 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
         use_workflow="first_flow",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -1198,7 +1222,9 @@ async def test_workflow_reroute_loop_detection(tmp_path, monkeypatch):
         use_workflow="loop_a",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     payload = "\n".join([chunk async for chunk in stream])
 
     assert "Workflow reroute loop detected" in payload
@@ -1234,7 +1260,9 @@ async def test_workflow_reroute_to_missing_flow(tmp_path, monkeypatch):
         use_workflow="primary_flow",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     payload = "\n".join([chunk async for chunk in stream])
 
     assert "Workflow 'ghost_flow' is not defined." in payload
@@ -1297,7 +1325,9 @@ async def test_reroute_to_completed_agent_fails_even_with_dependencies_met(
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -1340,7 +1370,9 @@ async def test_no_runnable_agents_produces_terminal_error(tmp_path, monkeypatch)
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -1393,7 +1425,9 @@ async def test_list_reroute_config(tmp_path, monkeypatch):
         use_workflow="list_reroute_flow",
         workflow_execution_id=exec_id,
     )
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     state = engine.state_store.load_execution(exec_id)
     # reroute reason captured and the matching target agent executed; unmatched agent skipped
@@ -1628,7 +1662,9 @@ async def test_agent_prompt_includes_feedback_guidelines(tmp_path, monkeypatch):
         use_workflow="guidelines_flow",
         workflow_execution_id="exec-guidelines",
     )
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
     # First system prompt is routing_agent; second is agent prompt with guidelines
     assert any("user_feedback_needed" in prompt for prompt in llm.system_prompts)
@@ -2292,7 +2328,9 @@ async def test_missing_returns_retry_then_abort(tmp_path, monkeypatch):
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -2338,7 +2376,9 @@ async def test_missing_returns_with_error_aborts_immediately(tmp_path, monkeypat
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -2492,7 +2532,9 @@ async def test_missing_returns_recoverable_error_retries_with_summary(
         workflow_execution_id=exec_id,
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     chunks = [chunk async for chunk in stream]
     payload = "\n".join(chunks)
 
@@ -2963,7 +3005,8 @@ async def test_explicit_reroute_takes_precedence_over_on_tool_error(
     )
 
     stream = await engine.start_or_resume_workflow(
-        StubSession(tools=tools), request, None, None, None)
+        StubSession(tools=tools), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     state = engine.state_store.load_execution(exec_id)
@@ -3131,7 +3174,9 @@ async def test_stop_point_halts_workflow_execution(tmp_path, monkeypatch):
         workflow_execution_id="exec-stop",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     output = "".join([chunk async for chunk in stream])
 
     # Stop point message should appear
@@ -3201,7 +3246,9 @@ async def test_stop_point_with_reroute_flow(tmp_path, monkeypatch):
         workflow_execution_id="exec-error-stop",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     output = "".join([chunk async for chunk in stream])
 
     # Should have rerouted and then stopped
@@ -3259,7 +3306,9 @@ async def test_stop_point_without_stop_allows_continuation(tmp_path, monkeypatch
         workflow_execution_id="exec-no-stop",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     output = "".join([chunk async for chunk in stream])
 
     # Should NOT have a stop point message
@@ -3311,7 +3360,9 @@ async def test_return_tags_capture_into_agent_context(tmp_path, monkeypatch):
         workflow_execution_id="exec-return-capture",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     state = engine.state_store.load_execution("exec-return-capture")
@@ -3599,7 +3650,9 @@ async def test_feedback_resume_preserves_reroute_with_context(tmp_path, monkeypa
         use_workflow="plan_run",
         workflow_execution_id=exec_id,
     )
-    stream = await engine.start_or_resume_workflow(session, first_request, None, None, None)
+    stream = await engine.start_or_resume_workflow(
+        session, first_request, None, None, None
+    )
     _ = [chunk async for chunk in stream]
 
     paused_state = store.load_execution(exec_id)
