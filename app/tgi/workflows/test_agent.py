@@ -797,7 +797,7 @@ async def test_engine_handles_returns_field(tmp_path, monkeypatch):
     )
 
     session = StubSession(tools=tools)
-    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
     state = engine.state_store.load_execution("exec-returns")
@@ -847,7 +847,7 @@ async def test_engine_handles_pass_through_guideline(tmp_path, monkeypatch):
         workflow_execution_id="exec-guideline",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
     _ = [chunk async for chunk in stream]
 
     # Check that the guideline was included in the system prompt
@@ -905,7 +905,7 @@ async def test_engine_streams_only_passthrough_content(tmp_path, monkeypatch):
         workflow_execution_id="exec-passthrough-stream",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
     chunks = [chunk async for chunk in stream]
 
     # Combine all chunks to check what was streamed
@@ -960,7 +960,7 @@ async def test_engine_streams_all_content_for_boolean_pass_through(
         workflow_execution_id="exec-bool-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
     chunks = [chunk async for chunk in stream]
     combined = "".join(chunks)
 
@@ -1017,7 +1017,7 @@ async def test_passthrough_blocks_separated_by_newlines(tmp_path, monkeypatch):
         workflow_execution_id="exec-multi-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
     chunks = [chunk async for chunk in stream]
 
     contents = _extract_delta_contents(chunks)
@@ -1087,7 +1087,7 @@ async def test_passthrough_streams_before_completion(tmp_path, monkeypatch):
         workflow_execution_id="exec-streaming-passthrough",
     )
 
-    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None)
+    stream = await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
     chunks = [chunk async for chunk in stream]
 
     contents = _extract_delta_contents(chunks)
@@ -1226,7 +1226,7 @@ async def test_passthrough_history_provided_to_progress_agent(tmp_path, monkeypa
     )
 
     stream = await engine.start_or_resume_workflow(
-        StubSession(tools=tools), request, None, None
+        StubSession(tools=tools), request, None, None, None
     )
     _ = [chunk async for chunk in stream]
 
@@ -1572,7 +1572,7 @@ async def test_engine_handles_tool_object_config(tmp_path, monkeypatch):
     )
 
     session = StubSession(tools=tools)
-    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
     state = engine.state_store.load_execution("exec-tool-config")
@@ -1770,7 +1770,7 @@ async def test_engine_modifies_tool_schema_for_mapped_args(tmp_path, monkeypatch
     )
 
     session = ReturnSession(tools=tools)
-    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
     # Find the schema for "plan" tool in captured schemas
@@ -2131,7 +2131,7 @@ async def test_engine_injects_args_from_context_into_tool_calls(tmp_path, monkey
     )
 
     session = StubSession(tools=tools)
-    stream = await engine.start_or_resume_workflow(session, request, None, None)
+    stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
     # Find the plan tool call
