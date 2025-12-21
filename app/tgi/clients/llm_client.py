@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import uuid
+import re
 from typing import AsyncGenerator, List, Optional
 import aiohttp
 from app.vars import LLM_MAX_PAYLOAD_BYTES, TGI_MODEL_NAME
@@ -87,6 +88,45 @@ class LLMClient:
         payload.pop("persist_inner_thinking", None)
         return payload
 
+    def _normalize_schema_name(self, name: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", (name or "").strip()).strip("_")
+        if not cleaned:
+            return "response_schema"
+        return cleaned[:64]
+
+    def _ensure_json_schema_name(self, payload: dict) -> None:
+        response_format = payload.get("response_format")
+        if not isinstance(response_format, dict):
+            return
+        if response_format.get("type") != "json_schema":
+            return
+        json_schema = response_format.get("json_schema")
+        if not isinstance(json_schema, dict):
+            return
+        if isinstance(json_schema.get("schema"), dict):
+            schema = json_schema["schema"]
+            name = json_schema.get("name")
+            if not (isinstance(name, str) and name.strip()):
+                candidate = (
+                    schema.get("title")
+                    or schema.get("$id")
+                    or schema.get("id")
+                    or "response_schema"
+                )
+                json_schema["name"] = self._normalize_schema_name(str(candidate))
+            response_format["json_schema"] = json_schema
+            return
+
+        candidate = (
+            json_schema.get("name")
+            or json_schema.get("title")
+            or json_schema.get("$id")
+            or json_schema.get("id")
+            or "response_schema"
+        )
+        normalized = self._normalize_schema_name(str(candidate))
+        response_format["json_schema"] = {"name": normalized, "schema": json_schema}
+
     async def _prepare_payload(
         self, request: ChatCompletionRequest, access_token: str = ""
     ) -> tuple[dict, str, int]:
@@ -142,6 +182,7 @@ class LLMClient:
         self.model_format.prepare_request(request)
 
         payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
+        self._ensure_json_schema_name(payload)
 
         # tool_choice is only valid when tools are specified
         # OpenAI API returns 400 error if tool_choice is sent without tools
@@ -216,7 +257,7 @@ class LLMClient:
                         error_text = await response.text()
                         error_msg = f"LLM API error: {response.status} {error_text}"
                         self.logger.error(f"[LLMClient] {error_msg}")
-                        self.logger.debug(f"[LLMClient] Payload: {serialized_payload}")
+                        self.logger.info(f"[LLMClient] Payload: {serialized_payload}")
                         if parent_span is not None:
                             parent_span.set_attribute("error", True)
                             parent_span.set_attribute("error.message", error_msg)

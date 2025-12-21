@@ -11,6 +11,7 @@ from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.sse import sse_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
 from app.mcp_server.server_params import get_server_params
@@ -223,17 +224,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             token_type = (
                 token_result.get("token_type") if token_result else "Bearer"
             ) or "Bearer"
-            oauth_token = OAuthToken(
-                access_token=token_value,
-                token_type=token_type,
-                expires_in=(token_result.get("expires_in") if token_result else None),
-                scope=(token_result.get("scope") if token_result else None),
-                refresh_token=(
-                    token_result.get("refresh_token") if token_result else None
-                ),
-            )
-            client_info = self._initial_client_info()
-            self._token_storage = _EphemeralTokenStorage(oauth_token, client_info)
+            # Normalize token_type to proper case (Bearer, not bearer)
+            if token_type.lower() == "bearer":
+                token_type = "Bearer"
             authorization_value = f"{token_type} {token_value}"
         else:
             self._prepare_fallback_headers()
@@ -338,18 +331,64 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
         headers = self.headers or None
-        async with streamablehttp_client(
-            self.url,
-            headers=headers,
-            auth=self._auth_provider,
-        ) as (read, write, get_session_id):
-            async with ClientSession(
-                read, write, logging_callback=_log_mcp_notification
-            ) as session:
-                await session.initialize()
-                if get_session_id:
-                    setattr(session, "get_remote_session_id", get_session_id)
-                yield session
+        logger.info(f"[RemoteMCP] Creating session with URL: {self.url}")
+        logger.info(
+            f"[RemoteMCP] Headers keys: {list(headers.keys()) if headers else 'None'}"
+        )
+        if headers and "Authorization" in headers:
+            logger.info(
+                f"[RemoteMCP] Authorization header present: {headers['Authorization'][:20]}..."
+            )
+
+        # Detect if this is an SSE-only endpoint (like Atlassian)
+        # SSE endpoints typically end with /sse or only support GET+SSE
+        use_sse_only = self.url.endswith("/sse")
+
+        if use_sse_only:
+            logger.info("[RemoteMCP] Using SSE-only client (detected /sse endpoint)")
+            async with sse_client(
+                self.url,
+                headers=headers,
+            ) as (read, write):
+                async with ClientSession(
+                    read, write, logging_callback=_log_mcp_notification
+                ) as session:
+                    try:
+                        await session.initialize()
+                    except Exception as e:
+                        logger.error(
+                            f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
+                        )
+                        logger.error(f"[RemoteMCP] URL: {self.url}")
+                        logger.error(
+                            f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
+                        )
+                        raise
+                    yield session
+        else:
+            logger.info("[RemoteMCP] Using StreamableHTTP client (full protocol)")
+            async with streamablehttp_client(
+                self.url,
+                headers=headers,
+                auth=self._auth_provider,
+            ) as (read, write, get_session_id):
+                async with ClientSession(
+                    read, write, logging_callback=_log_mcp_notification
+                ) as session:
+                    try:
+                        await session.initialize()
+                    except Exception as e:
+                        logger.error(
+                            f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
+                        )
+                        logger.error(f"[RemoteMCP] URL: {self.url}")
+                        logger.error(
+                            f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
+                        )
+                        raise
+                    if get_session_id:
+                        setattr(session, "get_remote_session_id", get_session_id)
+                    yield session
 
 
 def build_mcp_client_strategy(

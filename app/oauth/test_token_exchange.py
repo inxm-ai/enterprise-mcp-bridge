@@ -53,7 +53,7 @@ def test_retrieve_token_refresh(monkeypatch, retriever):
     monkeypatch.setattr(
         retriever,
         "_refresh_provider_token",
-        lambda td: {
+        lambda td, kt: {
             "access_token": "newtoken",
             "token_type": "Bearer",
             "expires_in": 3600,
@@ -134,7 +134,7 @@ def test_refresh_provider_token_success(monkeypatch, retriever):
         "expires_in": 3600,
     }
     with patch("requests.post", return_value=mock_response):
-        result = retriever._refresh_provider_token(token_data.copy())
+        result = retriever._refresh_provider_token(token_data.copy(), "keycloak_token")
         assert result["access_token"] == "newtoken"
         assert result["token_type"] == "Bearer"
         assert result["expires_in"] == 3600
@@ -147,7 +147,7 @@ def test_refresh_provider_token_failure(monkeypatch, retriever):
     mock_response.text = "fail"
     with patch("requests.post", return_value=mock_response):
         with pytest.raises(UserLoggedOutException):
-            retriever._refresh_provider_token(token_data.copy())
+            retriever._refresh_provider_token(token_data.copy(), "keycloak_token")
 
 
 def test_refresh_provider_token_no_refresh(monkeypatch, retriever):
@@ -187,7 +187,9 @@ def test_force_token_refresh_refresh(monkeypatch, retriever):
         retriever, "_get_stored_provider_token", lambda t: {"refresh_token": "refresh"}
     )
     monkeypatch.setattr(
-        retriever, "_refresh_provider_token", lambda td: {"access_token": "newtoken"}
+        retriever,
+        "_refresh_provider_token",
+        lambda td, kt: {"access_token": "newtoken"},
     )
     result = retriever.force_token_refresh("tok")
     assert result["success"] is True

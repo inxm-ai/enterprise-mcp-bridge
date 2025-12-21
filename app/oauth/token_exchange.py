@@ -9,14 +9,16 @@ from app.vars import (
     AUTH_BASE_URL,
     AUTH_PROVIDER,
     KEYCLOAK_PROVIDER_ALIAS,
+    KEYCLOAK_PROVIDER_REFRESH_MODE,
     KEYCLOAK_REALM,
+    LOG_TOKEN_VALUES,
 )
 import jwt
 from jwt import DecodeError, InvalidTokenError
 
 import requests
 
-from app.utils import mask_token
+from app.utils import mask_token, token_fingerprint
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -78,9 +80,20 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     "success": False,
                     "error": f"Failed to retrieve {self.provider_alias} token from Keycloak",
                 }
+            self.logger.info(
+                "[Keycloak] Stored provider access token: %s",
+                token_fingerprint(provider_tokens.get("access_token")),
+            )
+            if LOG_TOKEN_VALUES:
+                self.logger.info(
+                    "[Keycloak] Stored provider access token (raw): %s",
+                    provider_tokens.get("access_token"),
+                )
             # Check if token needs refresh
             if self._token_needs_refresh(provider_tokens):
-                provider_tokens = self._refresh_provider_token(provider_tokens)
+                provider_tokens = self._refresh_provider_token(
+                    provider_tokens, keycloak_token
+                )
             self.logger.info(
                 f"Successfully retrieved {self.provider_alias} token from Keycloak"
             )
@@ -209,42 +222,58 @@ class KeyCloakTokenRetriever(TokenRetriever):
 
         return exp_time <= datetime.now() + timedelta(seconds=60)
 
-    def _refresh_provider_token(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Refresh provider token using Keycloak's token refresh endpoint"""
+    def _refresh_provider_token(
+        self, token_data: Dict[str, Any], keycloak_token: str
+    ) -> Dict[str, Any]:
+        """Refresh provider token using appropriate strategy based on provider type"""
         refresh_token = token_data.get("refresh_token")
         if not refresh_token:
-            raise Exception("No refresh token available")
-        url = f"{self.keycloak_base_url}/realms/{self.realm}/protocol/openid-connect/token"
-        payload = {
-            "grant_type": "refresh_token",
-            "client_id": self.provider_alias,
-            "refresh_token": refresh_token,
-        }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        response = requests.post(
-            url, data=payload, headers=headers, verify=not self.allow_unsafe_cert
-        )
-        self.logger.info(
-            f"Refreshing {self.provider_alias} token: {response.status_code}"
-        )
-        if response.status_code == 200:
-            refreshed_tokens = response.json()
-            token_data.update(refreshed_tokens)
-            return token_data
-        else:
-            if response.status_code == 401:
-                raise UserLoggedOutException("User is logged out or unauthorized")
-            self.logger.error(
-                mask_token(
-                    f"Failed to refresh token: {response.status_code} - {response.text}",
-                    refresh_token,
-                )
+            self.logger.info(
+                f"No refresh token available for {self.provider_alias}; re-fetching from broker"
             )
-            # for now we return the user is logged out exception there too
-            #  might also be an error that keycloak is not configured for token refresh
-            #  so this might be confusing. It should be somewhat clear from the
-            #  error message though.
-            raise UserLoggedOutException("Failed to refresh token")
+            return self._force_broker_refresh(keycloak_token)
+
+        refresh_mode = KEYCLOAK_PROVIDER_REFRESH_MODE
+
+        # For external OAuth2 identity providers (mode='broker'), refresh via broker endpoint
+        # For OIDC providers registered as clients (mode='oidc'), use Keycloak's token endpoint
+        if refresh_mode == "broker":
+            self.logger.info(
+                f"Refreshing {self.provider_alias} token via broker endpoint (mode=broker)"
+            )
+            return self._force_broker_refresh(keycloak_token)
+        else:
+            # Default OIDC mode: use Keycloak's token endpoint with provider alias as client_id
+            self.logger.info(
+                f"Refreshing {self.provider_alias} token via OIDC endpoint (mode=oidc)"
+            )
+            url = f"{self.keycloak_base_url}/realms/{self.realm}/protocol/openid-connect/token"
+            payload = {
+                "grant_type": "refresh_token",
+                "client_id": self.provider_alias,
+                "refresh_token": refresh_token,
+            }
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            response = requests.post(
+                url, data=payload, headers=headers, verify=not self.allow_unsafe_cert
+            )
+            self.logger.info(
+                f"Refreshing {self.provider_alias} token: {response.status_code}"
+            )
+            if response.status_code == 200:
+                refreshed_tokens = response.json()
+                token_data.update(refreshed_tokens)
+                return token_data
+            else:
+                if response.status_code == 401:
+                    raise UserLoggedOutException("User is logged out or unauthorized")
+                self.logger.error(
+                    mask_token(
+                        f"Failed to refresh token: {response.status_code} - {response.text}",
+                        refresh_token,
+                    )
+                )
+                raise UserLoggedOutException("Failed to refresh token")
 
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""
@@ -257,7 +286,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 return {"success": True, "access_token": keycloak_token}
             current_tokens = self._get_stored_provider_token(keycloak_token)
             if current_tokens and current_tokens.get("refresh_token"):
-                new_token = self._refresh_provider_token(current_tokens)
+                new_token = self._refresh_provider_token(current_tokens, keycloak_token)
                 self.logger.info(
                     f"[REFRESH]Forced refresh successful using refresh token: {str(new_token)}"
                 )

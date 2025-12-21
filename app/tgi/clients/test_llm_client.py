@@ -438,6 +438,57 @@ def test_model_parameter_required_not_empty_string():
     assert payload["model"] == "valid-model"
 
 
+def test_json_schema_response_format_adds_name_from_title():
+    """JSON schema response format should include a name derived from title."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    req = ChatCompletionRequest(messages=messages, model="m")
+    req.response_format = {
+        "type": "json_schema",
+        "json_schema": {"title": "Intent Response", "type": "object"},
+    }
+
+    payload = client._generate_llm_payload(req)
+
+    wrapper = payload["response_format"]["json_schema"]
+    assert wrapper["name"] == "Intent_Response"
+    assert wrapper["schema"]["title"] == "Intent Response"
+
+
+def test_json_schema_response_format_preserves_name():
+    """JSON schema response format should keep provided name unchanged."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    req = ChatCompletionRequest(messages=messages, model="m")
+    req.response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "keep_me", "title": "Ignored", "type": "object"},
+    }
+
+    payload = client._generate_llm_payload(req)
+
+    wrapper = payload["response_format"]["json_schema"]
+    assert wrapper["name"] == "keep_me"
+    assert wrapper["schema"]["type"] == "object"
+
+
+def test_json_schema_response_format_uses_fallback_name():
+    """JSON schema response format should use fallback when no title or id."""
+    client = llm.LLMClient(model_format=ChatGPTModelFormat())
+    messages = [Message(role=MessageRole.USER, content="hi")]
+    req = ChatCompletionRequest(messages=messages, model="m")
+    req.response_format = {
+        "type": "json_schema",
+        "json_schema": {"type": "object"},
+    }
+
+    payload = client._generate_llm_payload(req)
+
+    wrapper = payload["response_format"]["json_schema"]
+    assert wrapper["name"] == "response_schema"
+    assert wrapper["schema"]["type"] == "object"
+
+
 def test_claude_with_existing_system_appends():
     """Claude format injects tool descriptors into existing system prompts."""
     client = llm.LLMClient(model_format=ClaudeModelFormat())

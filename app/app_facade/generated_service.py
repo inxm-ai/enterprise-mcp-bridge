@@ -98,6 +98,16 @@ generation_ui_schema = {
 }
 
 
+def _generation_response_format() -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "generated_ui",
+            "schema": generation_ui_schema,
+        },
+    }
+
+
 @dataclass(frozen=True)
 class Scope:
     kind: str  # "group" or "user"
@@ -336,10 +346,7 @@ class GeneratedUIService:
                 messages=messages,
                 tools=allowed_tools if allowed_tools else None,
                 stream=True,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": generation_ui_schema,
-                },
+                response_format=_generation_response_format(),
             )
             self._maybe_dump_chat_request(
                 chat_request=chat_request,
@@ -745,10 +752,7 @@ class GeneratedUIService:
             messages=messages,
             tools=allowed_tools if allowed_tools else None,
             stream=True,
-            response_format={
-                "type": "json_schema",
-                "json_schema": generation_ui_schema,
-            },
+            response_format=_generation_response_format(),
         )
         self._maybe_dump_chat_request(
             chat_request=chat_request,

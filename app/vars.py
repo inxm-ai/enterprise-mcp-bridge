@@ -32,8 +32,12 @@ AUTH_BASE_URL = os.getenv("AUTH_BASE_URL", "")
 AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "keycloak").lower()
 KEYCLOAK_PROVIDER_ALIAS = os.getenv("KEYCLOAK_PROVIDER_ALIAS", "")
 KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "inxm")
+KEYCLOAK_PROVIDER_REFRESH_MODE = os.getenv(
+    "KEYCLOAK_PROVIDER_REFRESH_MODE", "oidc"
+).lower()
 
 AUTH_ALLOW_UNSAFE_CERT = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
+LOG_TOKEN_VALUES = os.getenv("LOG_TOKEN_VALUES", "false").lower() == "true"
 
 MCP_SESSION_MANAGER = os.getenv("MCP_SESSION_MANAGER", "InMemorySessionManager")
 MCP_GROUP_DATA_ACCESS_TEMPLATE = os.getenv(

@@ -1,0 +1,46 @@
+{
+  "flow_id": "sprint_status_update",
+  "root_intent": "CHECK_SPRINT_STATUS_AND_UPDATE_PAGE",
+  "agents": [
+    {
+      "agent": "resolve_status_inputs",
+      "description": "You are collecting the Jira project key or name (all if none specified), the board or sprint context (all sprints if none specified) if needed, and the Confluence space + page title (default to \"Status Update\"). If any required detail is missing, ask the user and emit <user_feedback_needed> with the questions. Use Atlassian tools to list projects, boards, sprints, or pages when helpful. Summarize the resolved inputs in a short bullet list. Don't reroute to yourself after <user_feedback_needed>, just run the tools. Once you collected the inputs, emit <SUMMARIZE> to proceed.",
+      "reroute": [
+        { "on": "SUMMARIZE", "to": "summarize_sprint"  }
+      ],
+      "pass_through": true
+    },
+    {
+      "agent": "summarize_sprint",
+      "context": true,
+      "description": "Using the resolved Jira project/sprint inputs, fetch the active sprint status. Gather issue counts by status, highlight blockers, and note any risks. Return a concise summary paragraph followed by a Metrics list (To Do, In Progress, Done, Blocked).",
+      "pass_through": "Provide the user with a short summary of the sprint status and the Metrics list.",
+      "on_tool_error": "summarize_failure",
+      "reroute": [
+        { "on": "SUMMARIZE_COMPLETE", "to": "update_status_page" }
+      ]
+    },
+    {
+      "agent": "update_status_page",
+      "description": "Update the Confluence page titled \"Status Update\" in the resolved space. Append a new section with today's date, the sprint summary, and the Metrics list from the previous step. If the page does not exist, create it. Confirm the update with the page link or id.",
+      "context": "Give a brief summary of the Confluence page update action taken, including the page link or id.",
+      "pass_through": true,
+      "on_tool_error": "summarize_failure"
+    },
+    {
+      "agent": "final_response",
+      "description": "Provide the user with a final confirmation message that the sprint status update has been posted to Confluence, including the page link or id.",
+      "context": true,
+      "tools": [],
+      "pass_through": "Create a friendly confirmation message including the Confluence page link or id and a high level summary.",
+      "stop_point": true
+    },
+    {
+      "agent": "summarize_failure",
+      "description": "Explain what failed, include any error details, and ask the user for missing access or identifiers so the workflow can be retried.",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    }
+  ]
+}

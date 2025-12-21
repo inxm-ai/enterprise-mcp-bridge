@@ -1,0 +1,237 @@
+services:
+  ingress:
+    container_name: inxm.ingress
+    image: nginx:latest
+    volumes:
+      - ./nginx/ingress-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dev-local-certs/auth.inxm.local.crt:/etc/nginx/certs/auth.inxm.local.crt:ro
+      - ./dev-local-certs/auth.inxm.local.key:/etc/nginx/certs/auth.inxm.local.key:ro
+      - ./dev-local-certs/inxm.local.crt:/etc/nginx/certs/inxm.local.crt:ro
+      - ./dev-local-certs/inxm.local.key:/etc/nginx/certs/inxm.local.key:ro
+    ports:
+      - "443:443"
+    depends_on:
+      auth-keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k --resolve auth.inxm.local:443:127.0.0.1 https://auth.inxm.local:443/realms/inxm || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    networks:
+      default: {}
+      private:
+        aliases:
+          - inxm.local
+          - auth.inxm.local
+
+  auth-keycloak:
+    image: quay.io/keycloak/keycloak:25.0.2
+    container_name: inxm.keycloak
+    command: >
+      start-dev --import-realm --hostname="auth.inxm.local" --https-port=443 --proxy=edge --hostname-strict=false --hostname-strict-https=false --hostname-strict-backchannel=false
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_FEATURES: token-exchange,hostname
+      KC_LOG_LEVEL: "INFO,org.keycloak.broker.oauth2:DEBUG,org.keycloak.broker:DEBUG,org.keycloak.connections.httpclient:DEBUG,org.apache.http.wire:DEBUG"
+      KEYCLOAK_IMPORT: /opt/keycloak/data/import/realm-atlassian.json
+    volumes:
+      - ./keycloak/realm-export:/opt/keycloak/data/import
+      - ./keycloak/providers:/opt/keycloak/providers
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/sh -c 'exec 3<> /dev/tcp/localhost/8080 || exit 1'"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 30
+    networks:
+      - private
+
+  auth-oauth2-proxy:
+    container_name: inxm.oauth2-proxy
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
+    environment:
+      OAUTH2_PROXY_LOG_LEVEL: debug
+      OAUTH2_PROXY_PROVIDER: "keycloak-oidc"
+      OAUTH2_PROXY_CLIENT_ID: "frontend-client"
+      OAUTH2_PROXY_CLIENT_SECRET: "this-is-not-a-secret"
+      OAUTH2_PROXY_COOKIE_SECRET: "1234567890abcdef"
+      OAUTH2_PROXY_COOKIE_SECURE: "false"
+      OAUTH2_PROXY_REDIRECT_URL: "https://inxm.local/oauth2/callback"
+      OAUTH2_PROXY_UPSTREAMS: "http://app-nginx:3099/"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: "https://auth.inxm.local/realms/inxm"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_OIDC_EXTRA_PARAMS: "kc_idp_hint=atlassian"
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: "redis://auth-redis:6379"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "false"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "false"
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "false"
+      OAUTH2_PROXY_SCOPE: "openid profile email roles"
+      OAUTH2_PROXY_SKIP_CLAIMS_FROM_PROFILE_URL: "true"
+      OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"
+      OAUTH2_PROXY_PASS_BASIC_AUTH: "false"
+      OAUTH2_PROXY_COOKIE_REFRESH: "5m"
+      OAUTH2_PROXY_COOKIE_EXPIRE: "60m"
+      OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY: "true"
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:3098"
+      OAUTH2_PROXY_UPSTREAM_TIMEOUT: "30s"
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true"
+      OAUTH2_PROXY_SET_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_SESSION_STORE_TYPE: "redis"
+    ports:
+      - "3098:3098"
+    depends_on:
+      auth-keycloak:
+        condition: service_healthy
+      app-nginx:
+        condition: service_healthy
+      ingress:
+        condition: service_healthy
+      auth-redis:
+        condition: service_started
+    networks:
+      - private
+
+  auth-redis:
+    container_name: inxm.redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - private
+
+  app-nginx:
+    container_name: inxm.app-ingress
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile.nginx
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "3099:3099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3099/ || exit 1"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      app-frontend:
+        condition: service_started
+      app-mcp-rest:
+        condition: service_healthy
+    environment:
+      - OAI_HOST=${OAI_HOST}
+      - OAI_BASE_URL=${OAI_BASE_URL}
+      - OAI_API_TOKEN=${OAI_API_TOKEN}
+      - OAI_MODEL_NAME=${OAI_MODEL_NAME}
+    networks:
+      - private
+
+  app-frontend:
+    container_name: inxm.frontend
+    image: node:22-alpine
+    working_dir: /usr/src/app
+    command: sh -c "npx --yes http-server -p 3001 ."
+    volumes:
+      - ./web:/usr/src/app:ro
+    depends_on:
+      - app-mcp-rest
+    ports:
+      - "3001:3001"
+    labels:
+      - "oauth2-proxy.enable=true"
+    networks:
+      - private
+
+  app-mcp-rest:
+    container_name: inxm.remote-bridge
+    image: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      SERVICE_NAME: mcp-atlassian-remote
+      AUTH_PROVIDER: keycloak
+      AUTH_ALLOW_UNSAFE_CERT: true
+      AUTH_BASE_URL: https://auth.inxm.local
+      KEYCLOAK_REALM: inxm
+      KEYCLOAK_PROVIDER_ALIAS: atlassian
+      LOG_TOKEN_VALUES: "true"
+      KEYCLOAK_PROVIDER_REFRESH_MODE: broker
+      TOKEN_NAME: X-Forwarded-Access-Token
+      MCP_BASE_PATH: /api/mcp/atlassian
+      AGENT_CARD_CACHE_FILE: /data/agent-card-cache.json
+      MCP_REMOTE_SERVER: "${ATLASSIAN_MCP_SERVER:-https://mcp.atlassian.com/v1/sse}"
+      MCP_REMOTE_SCOPE: "${ATLASSIAN_MCP_SCOPE:-}"
+      MCP_REMOTE_CLIENT_ID: "${ATLASSIAN_MCP_CLIENT_ID:-}"
+      MCP_REMOTE_CLIENT_SECRET: "${ATLASSIAN_MCP_CLIENT_SECRET:-}"
+      MCP_REMOTE_REDIRECT_URI: "${ATLASSIAN_MCP_REDIRECT_URI:-https://inxm.local/oauth2/callback}"
+      INCLUDE_TOOLS: ""
+      EXCLUDE_TOOLS: ""
+      WORKFLOWS_PATH: /workflows
+      WORKFLOW_DB_PATH: /workflows/workflow_state.db
+      TGI_URL: ${OAI_BASE_URL}
+      TGI_TOKEN: ${OAI_API_TOKEN}
+      DEFAULT_MODEL: ${OAI_MODEL_NAME}
+      SYSTEM_DEFINED_PROMPTS: >
+        [
+          {
+            "name": "system",
+            "title": "Specialized Atlassian Agent",
+            "description": "Acts as a specialized Atlassian agent for Jira and Confluence. Prefer tool calls unless delivering the final response.",
+            "arguments": [],
+            "template": {
+              "role": "system",
+              "content": "You are a highly specialized Atlassian agent. Your primary function is to respond to user requests by identifying and executing the correct Jira and Confluence tool calls.\n\nYour workflow is strictly as follows:\n1.  **Analyze the user's request.** Determine the user's intent and identify which of your available tools are required.\n2.  **Generate a tool call.** Based on your analysis, construct the appropriate tool call. All values must adhere strictly to the Atlassian API specifications.\n3.  **Strictly adhere to these rules:**\n    * **Prioritize tool calls:** Always respond with a tool call unless you have sufficient information to provide a final, complete answer to the user.\n    * **Use simple requests:** Only provide the minimum required parameters for a tool call. Do not guess or add unnecessary values.\n    * **Correct data types:** If a parameter requires a boolean, use `true` or `false`, not a string. If a parameter requires a number, use a number, not a string.\n    * **If you are failing to call the tool successfully,** review the error message and adjust your request accordingly. Try to remove failing parameters to simplify the request, and expand them in a second pass if they are successful and you know more.\n    * **Final response:** Only provide a final human-readable response when the user's request is fully resolved and no further tool calls are needed.\n\nIf a tool call fails, you will receive an error message. Use this information to correct the tool call in your next turn. Do not generate conversational text or explanations during the tool-calling process; the only exceptions are in a final, complete response or if you are specifically asked to \"think.\"\n"
+            }
+          },
+          {
+            "name": "sprint_status_update",
+            "title": "Sprint Status Update Routing Prompt",
+            "description": "Routing prompt for the sprint status update workflow. Decide if the workflow should run, otherwise reroute.",
+            "arguments": [],
+            "template": {
+              "role": "system",
+              "content": "You are the routing_agent for the sprint status update workflow.\n\nGoal: If the user's request is about checking sprint status and/or updating a Confluence status update page, allow the workflow to run. Only emit <reroute> when the request is clearly unrelated to sprint status updates.\n\nNormal cases: Respond only with <run>true</run> and do not emit <reroute>.\nMismatch cases: Respond only with <reroute>INTENT_MISMATCH</reroute>.\n\nIf you are unsure, prefer <run>true</run> to allow the workflow to proceed.\n"
+            }
+          }
+        ]
+    depends_on:
+      auth-keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 1s
+      timeout: 30s
+      retries: 10
+      start_period: 1s
+    volumes:
+      - ./data:/data
+      - ./workflows:/workflows
+    ports:
+      - "8001:8000"
+    labels:
+      - "oauth2-proxy.enable=true"
+    networks:
+      - private
+
+  app-dummy-llm:
+    container_name: inxm.dummy-llm
+    build:
+      context: ../token-exchange-m365/dummy-llm
+      dockerfile: Dockerfile
+    ports:
+      - "8766:8765"
+    networks:
+      - private
+
+networks:
+  default:
+    name: inxm-demo-net
+  private:
+    name: inxm-private-net

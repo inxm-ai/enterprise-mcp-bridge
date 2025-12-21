@@ -8,6 +8,8 @@ from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.services.tool_chat_runner import ToolChatRunner
 from app.tgi.services.tool_service import ToolService
 from app.tgi.services.tools.tool_resolution import ParsedToolCall, ToolCallFormat
+from app.tgi.clients.llm_client import LLMClient
+from app.tgi.models.model_formats import ChatGPTModelFormat
 
 
 class StubLLM:
@@ -62,6 +64,57 @@ def _parsed(name: str, idx: int = 0) -> ParsedToolCall:
         format=ToolCallFormat.OPENAI_JSON,
         raw_content="",
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_response_format():
+    class InspectingLLM:
+        def __init__(self):
+            self.requests: List[ChatCompletionRequest] = []
+            self.client = LLMClient(model_format=ChatGPTModelFormat())
+
+        def stream_completion(
+            self, request: ChatCompletionRequest, access_token: str, span: Any
+        ) -> AsyncGenerator[str, None]:
+            self.requests.append(request)
+            payload = self.client._generate_llm_payload(request)
+            assert payload["response_format"]["json_schema"][
+                "name"
+            ], "expected response_format.json_schema.name"
+
+            async def _gen():
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    llm = InspectingLLM()
+    tool_resolution = StubToolResolution(responses=[[]])
+    runner = ToolChatRunner(
+        llm_client=llm,
+        tool_service=ToolService(),
+        tool_resolution=tool_resolution,
+        logger_obj=None,
+        message_summarization_service=None,
+    )
+
+    stream = runner.stream_chat_with_tools(
+        session=None,
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        available_tools=[],
+        chat_request=ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            stream=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {}},
+            },
+        ),
+        access_token="",
+        parent_span=None,
+        emit_think_messages=False,
+    )
+    _ = [chunk async for chunk in stream]
 
 
 @pytest.mark.asyncio

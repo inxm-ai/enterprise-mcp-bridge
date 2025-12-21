@@ -34,7 +34,7 @@ from app.tgi.protocols.chunk_reader import (
     ChunkFormat,
     accumulate_content,
 )
-from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME
+from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME, TOKEN_NAME
 from app.oauth.token_dependency import get_access_token
 
 # Initialize components
@@ -82,6 +82,13 @@ def _extract_request_id(raw_body: Any) -> str:
             if value is not None:
                 return str(value)
     return "unknown"
+
+
+def _resolve_user_token(
+    incoming_headers: dict[str, str], access_token: Optional[str]
+) -> Optional[str]:
+    header_name = TOKEN_NAME.lower()
+    return incoming_headers.get(header_name) or access_token
 
 
 def _select_group_exception(
@@ -175,7 +182,7 @@ async def _handle_chat_completion(
         )
 
     incoming_headers = dict(request.headers)
-    user_token = incoming_headers.get("x-auth-request-access-token", None)
+    user_token = _resolve_user_token(incoming_headers, access_token)
     # Check if streaming is requested
     accept_header = request.headers.get("accept", "")
     chat_request.stream = chat_request.stream or "text/event-stream" in accept_header
@@ -269,7 +276,7 @@ async def chat_completions(
     OpenAI-compatible chat completions endpoint with MCP integration.
     """
     incoming_headers = dict(request.headers)
-    user_token = incoming_headers.get("x-auth-request-access-token", None)
+    user_token = _resolve_user_token(incoming_headers, access_token)
     try:
         # Validate required environment
         if not os.environ.get("TGI_URL", None):

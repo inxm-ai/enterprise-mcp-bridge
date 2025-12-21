@@ -281,6 +281,7 @@ uvicorn app.server:app --reload</code></pre>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg active" data-tab="minimal" onclick="showExampleTab('minimal')">Minimal Example</button>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="memory-group" onclick="showExampleTab('memory-group')">Memory Group Access</button>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="github-remote" onclick="showExampleTab('github-remote')">Remote GitHub MCP</button>
+                        <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="atlassian-remote" onclick="showExampleTab('atlassian-remote')">Remote Atlassian MCP</button>
                         <button class="example-tab-btn nav-button px-3 py-1.5 text-sm rounded-lg" data-tab="token-exchange" onclick="showExampleTab('token-exchange')">Token Exchange (M365)</button>
                     </div>
 
@@ -507,6 +508,25 @@ Calling the add tool with {"a": 2, "b": 1}
                         <h4 class="text-lg font-bold text-white mb-2 mt-6">Clean up</h4>
                         <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
                         <p class="text-gray-400 mt-2">Stops the containers and removes the GitHub-specific resources created for the demo.</p>
+                    </div>
+
+                    <!-- Tab: Remote Atlassian MCP -->
+                    <div class="example-content hidden" data-tab="atlassian-remote">
+                        <h3 class="text-xl font-bold text-white mb-4">Remote Atlassian MCP (Rovo Workflow)</h3>
+                        <p class="text-gray-400 mb-4">This scenario lives in <a href="https://github.com/inxm-ai/enterprise-mcp-bridge/tree/main/example/remote-mcp-atlassian" title="Remote Atlassian MCP example">example/remote-mcp-atlassian</a>. It connects the Enterprise MCP Bridge to the Atlassian Rovo MCP server (Jira + Confluence) and ships with an workflow that checks sprint status and posts a summary to a "Status Update" Confluence page.</p>
+                        <p class="text-gray-400 mb-4">Why it's awesome:</p>
+                        <ul class="list-disc list-inside space-y-2 text-gray-400 pl-4">
+                            <li><strong>Atlassian Rovo access:</strong> The bridge talks to your Atlassian Rovo MCP server over HTTP.</li>
+                            <li><strong>Workflow in action:</strong> The <code>sprint_status_update</code> flow coordinates Jira sprint metrics and Confluence publishing.</li>
+                            <li><strong>Brokered OAuth:</strong> Keycloak + oauth2-proxy handle Atlassian login and forward tokens to tool calls.</li>
+                        </ul>
+                        <h4 class="text-lg font-bold text-white mb-2 mt-6">Run the stack</h4>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">cd example/remote-mcp-atlassian
+./start.sh</code></pre>
+                        <p class="text-gray-400 mt-4">Open <a href="https://inxm.local" class="hover:underline">https://inxm.local</a> to log in via Atlassian, then trigger the workflow from the UI or call the chat endpoint with <code>use_workflow: "sprint_status_update"</code>. The workflow definition lives in <code>workflows/sprint-status-update.json</code>.</p>
+                        <h4 class="text-lg font-bold text-white mb-2 mt-6">Clean up</h4>
+                        <pre class="rounded-lg p-4 text-sm overflow-x-auto text-gray-200 theme-code"><code class="language-bash">./stop.sh</code></pre>
+                        <p class="text-gray-400 mt-2">Stops the containers and removes the local configuration created for the demo.</p>
                     </div>
                 </div>
             </section>

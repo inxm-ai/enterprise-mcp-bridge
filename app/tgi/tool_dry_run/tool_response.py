@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -49,6 +50,10 @@ async def get_tool_dry_run_response(
             )
     output_schema = tool.get("outputSchema", None)
 
+    def _normalize_schema_name(value: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", (value or "").strip()).strip("_")
+        return cleaned or "tool_response"
+
     prompts = PromptService()
     # PromptService APIs are async; be tolerant and await if coroutine returned.
     prompt = await prompts.find_prompt_by_name_or_role(
@@ -81,9 +86,13 @@ async def get_tool_dry_run_response(
         stream=True,
     )
     if output_schema:
+        schema_name = _normalize_schema_name(tool.get("name") or "tool_response")
         request.response_format = {
             "type": "json_schema",
-            "json_schema": output_schema,
+            "json_schema": {
+                "name": schema_name,
+                "schema": output_schema,
+            },
         }
 
     client = LLMClient()

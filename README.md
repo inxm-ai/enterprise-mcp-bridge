@@ -186,6 +186,7 @@ volumes:
 - `example/memory-group-access` – demonstrates group-aware data routing.
 - `example/token-exchange-m365` – complete token-exchange stack with monitoring and tracing.
 - `example/remote-mcp-github` – Use the remote github mcp server with integrated token exchange.
+- `example/remote-mcp-atlassian` – Atlassian MCP workflow demo (Jira + Confluence).
 
 ### Security checklist
 - Terminate TLS and place an auth proxy in front of the bridge (expects `_oauth2_proxy` or the `X-Auth-Request-Access-Token` header).

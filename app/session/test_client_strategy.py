@@ -82,7 +82,7 @@ async def test_remote_strategy_uses_token_exchange(monkeypatch):
     )
 
     assert isinstance(strategy, client_strategy.RemoteMCPClientStrategy)
-    assert strategy._token_storage is not None
+    assert strategy._token_storage is None
     assert strategy.headers["Authorization"] == "Bearer provider-token"
     assert strategy._auth_provider is None
 

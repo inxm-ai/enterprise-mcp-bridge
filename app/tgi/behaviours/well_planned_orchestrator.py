@@ -143,7 +143,10 @@ class WellPlannedOrchestrator:
         plan_text = ""
         request.response_format = {
             "type": "json_schema",
-            "json_schema": intent_response_schema,
+            "json_schema": {
+                "name": "intent_response",
+                "schema": intent_response_schema,
+            },
         }
         try:
             plan_stream = self.llm_client.stream_completion(
