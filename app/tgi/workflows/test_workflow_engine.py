@@ -2296,6 +2296,325 @@ async def test_on_tool_error_reroutes_to_failure_handler(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tool_success_reroutes_via_reroute_config(tmp_path, monkeypatch):
+    """Tool success triggers reroute config without explicit <reroute> output."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "tool_reroute_success",
+        "root_intent": "GET_PLAN",
+        "agents": [
+            {
+                "agent": "get_plan",
+                "description": "Fetch the plan using tools.",
+                "tools": ["get_plan"],
+                "reroute": [
+                    {"on": ["tool:get_plan:success"], "to": "analyse_plan"},
+                    {"on": ["tool:get_plan:error"], "to": "get_plan_failed"},
+                ],
+            },
+            {
+                "agent": "analyse_plan",
+                "description": "Analyse the plan.",
+                "tools": [],
+                "when": "context.get('agents', {}).get('get_plan', {}).get('reroute_reason') == 'tool:get_plan:success'",
+            },
+            {
+                "agent": "get_plan_failed",
+                "description": "Handle tool failure.",
+                "tools": [],
+                "when": "context.get('agents', {}).get('get_plan', {}).get('reroute_reason') == 'tool:get_plan:error'",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch a plan",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class ToolSuccessLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "analyse_plan": "Analysed plan.",
+                    "get_plan_failed": "Plan fetch failed.",
+                }
+            )
+            self.tool_payload_seen = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            if any(m.role == MessageRole.TOOL for m in request.messages):
+                self.tool_payload_seen = True
+
+            if "ROUTING_INTENT_CHECK" in last_message:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":""},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            if any(m.role == MessageRole.TOOL for m in request.messages):
+
+                async def _gen_after_tool():
+                    yield 'data: {"choices":[{"delta":{"content":"Plan retrieved."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_after_tool()
+
+            if "<agent:get_plan>" in last_message:
+
+                async def _gen_tool_call():
+                    yield (
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                        '"function":{"name":"get_plan","arguments":"{}"}}]},"index":0}]}\n\n'
+                    )
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool_call()
+
+            if "<agent:analyse_plan>" in last_message:
+
+                async def _gen_analyse():
+                    yield 'data: {"choices":[{"delta":{"content":"Analysis complete."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_analyse()
+
+            if "<agent:get_plan_failed>" in last_message:
+
+                async def _gen_failed():
+                    yield 'data: {"choices":[{"delta":{"content":"Failed to get plan."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_failed()
+
+            return super().stream_completion(request, access_token, span)
+
+    tool_service = ToolService()
+
+    async def mock_execute_tool_calls(*_args, **kwargs):
+        success_content = '{"success": true, "plan": {"id": "plan-1"}}'
+        tool_message = Message(
+            role=MessageRole.TOOL,
+            content=success_content,
+            name="get_plan",
+            tool_call_id="call_1",
+        )
+        raw_result = {
+            "name": "get_plan",
+            "tool_call_id": "call_1",
+            "content": success_content,
+        }
+        if kwargs.get("return_raw_results"):
+            return ([tool_message], True, [raw_result])
+        return ([tool_message], True)
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
+
+    llm = ToolSuccessLLM()
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    exec_id = "exec-tool-success"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="get my plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="tool_reroute_success",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    state = engine.state_store.load_execution(exec_id)
+
+    assert (
+        state.context["agents"]["get_plan"]["reroute_reason"] == "tool:get_plan:success"
+    )
+    assert state.context["agents"]["analyse_plan"]["completed"] is True
+    assert "rerouting to analyse_plan" in payload.lower()
+    assert llm.tool_payload_seen is False
+
+
+@pytest.mark.asyncio
+async def test_tool_error_reroute_config_precedes_on_tool_error(tmp_path, monkeypatch):
+    """Tool error triggers reroute config before on_tool_error fallback."""
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "tool_reroute_error",
+        "root_intent": "GET_PLAN",
+        "agents": [
+            {
+                "agent": "get_plan",
+                "description": "Fetch the plan using tools.",
+                "tools": ["get_plan"],
+                "reroute": [{"on": ["tool:get_plan:error"], "to": "get_plan_failed"}],
+                "on_tool_error": "fallback_failure",
+            },
+            {
+                "agent": "get_plan_failed",
+                "description": "Handle tool failure.",
+                "tools": [],
+                "when": "context.get('agents', {}).get('get_plan', {}).get('reroute_reason') == 'tool:get_plan:error'",
+            },
+            {
+                "agent": "fallback_failure",
+                "description": "Fallback error handler.",
+                "tools": [],
+                "when": "context.get('agents', {}).get('get_plan', {}).get('reroute_reason') == 'TOOL_ERROR'",
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_plan",
+                "description": "Fetch a plan",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    class ToolErrorRerouteLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "get_plan_failed": "Plan failed.",
+                    "fallback_failure": "Fallback failed.",
+                }
+            )
+            self.tool_payload_seen = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            if any(m.role == MessageRole.TOOL for m in request.messages):
+                self.tool_payload_seen = True
+
+            if "ROUTING_INTENT_CHECK" in last_message:
+
+                async def _gen():
+                    yield 'data: {"choices":[{"delta":{"content":""},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            if any(m.role == MessageRole.TOOL for m in request.messages):
+
+                async def _gen_after_tool():
+                    yield 'data: {"choices":[{"delta":{"content":"Tried tool."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_after_tool()
+
+            if "<agent:get_plan>" in last_message:
+
+                async def _gen_tool_call():
+                    yield (
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                        '"function":{"name":"get_plan","arguments":"{}"}}]},"index":0}]}\n\n'
+                    )
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool_call()
+
+            if "<agent:get_plan_failed>" in last_message:
+
+                async def _gen_failed():
+                    yield 'data: {"choices":[{"delta":{"content":"Handled error."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_failed()
+
+            if "<agent:fallback_failure>" in last_message:
+
+                async def _gen_fallback():
+                    yield 'data: {"choices":[{"delta":{"content":"Fallback handler."},"index":0}]}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return _gen_fallback()
+
+            return super().stream_completion(request, access_token, span)
+
+    tool_service = ToolService()
+
+    async def mock_execute_tool_calls(*_args, **kwargs):
+        error_content = '{"error": "Boom"}'
+        tool_message = Message(
+            role=MessageRole.TOOL,
+            content=error_content,
+            name="get_plan",
+            tool_call_id="call_1",
+        )
+        raw_result = {
+            "name": "get_plan",
+            "tool_call_id": "call_1",
+            "content": error_content,
+        }
+        if kwargs.get("return_raw_results"):
+            return ([tool_message], False, [raw_result])
+        return ([tool_message], False)
+
+    tool_service.execute_tool_calls = mock_execute_tool_calls
+
+    llm = ToolErrorRerouteLLM()
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+        tool_service=tool_service,
+    )
+
+    exec_id = "exec-tool-error-config"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="get my plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="tool_reroute_error",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(tools=tools), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    payload = "\n".join(chunks)
+
+    state = engine.state_store.load_execution(exec_id)
+
+    assert (
+        state.context["agents"]["get_plan"]["reroute_reason"] == "tool:get_plan:error"
+    )
+    assert state.context["agents"]["get_plan_failed"]["completed"] is True
+    assert state.context["agents"]["fallback_failure"].get("skipped") is True
+    assert "rerouting to get_plan_failed" in payload.lower()
+    assert llm.tool_payload_seen is False
+
+
+@pytest.mark.asyncio
 async def test_missing_returns_retry_then_abort(tmp_path, monkeypatch):
     """Agents with required returns should retry up to 3 times before aborting."""
     workflows_dir = tmp_path / "flows"
@@ -3056,6 +3375,7 @@ async def test_arg_resolution_failure_stops_workflow(tmp_path):
             arg_injector=None,
             tools_for_validation=None,
             streaming_tools=None,
+            stop_after_tool_results=None,
         ):
             async def _gen():
                 # Simulate an argument mapping failure before any output is streamed

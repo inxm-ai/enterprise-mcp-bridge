@@ -531,7 +531,11 @@ class ToolService:
         return "\n\n".join(formatted_messages)
 
     async def create_result_message(
-        self, format: ToolCallFormat, tool_result: Dict[str, Any]
+        self,
+        format: ToolCallFormat,
+        tool_result: Dict[str, Any],
+        *,
+        summarize: bool = True,
     ) -> Message:
         """Create a Message object from a tool result dictionary.
 
@@ -554,7 +558,11 @@ class ToolService:
                 text_content = str(content)
 
         # If content is very large and we have an llm client, try to summarize it.
-        if len(text_content) > TOOL_CHUNK_SIZE and getattr(self, "llm_client", None):
+        if (
+            summarize
+            and len(text_content) > TOOL_CHUNK_SIZE
+            and getattr(self, "llm_client", None)
+        ):
             try:
                 # Create a minimal ChatCompletionRequest to allow summarize_text
                 base_request = ChatCompletionRequest(messages=[], model=TGI_MODEL_NAME)
@@ -637,6 +645,8 @@ class ToolService:
             Callable[[float, Optional[float], Optional[str], Optional[str]], Any]
         ] = None,
         log_callback: Optional[Callable[[str, Any, Optional[str]], Any]] = None,
+        summarize_tool_results: bool = True,
+        build_messages: bool = True,
     ) -> Tuple[List[Message], bool] | Tuple[List[Message], bool, List[Dict[str, Any]]]:
         """Execute multiple tool calls and return tool result messages.
 
@@ -646,6 +656,9 @@ class ToolService:
                 capture structured data from tool results.
             progress_callback: Optional async callback for progress updates from tools.
             log_callback: Optional async callback for log events from tools.
+            summarize_tool_results: If False, skip LLM-backed summarization of
+                large tool outputs when building tool messages.
+            build_messages: If False, skip creating tool result messages entirely.
 
         Returns:
             If return_raw_results is False: (messages, success)
@@ -671,10 +684,13 @@ class ToolService:
                     result = await self._handle_describe_tool(tool_call)
                     if return_raw_results:
                         raw_results.append(result)
-                    tool_message = await self.create_result_message(
-                        tool_call_format, result
-                    )
-                    tool_results.append(tool_message)
+                    if build_messages:
+                        tool_message = await self.create_result_message(
+                            tool_call_format,
+                            result,
+                            summarize=summarize_tool_results,
+                        )
+                        tool_results.append(tool_message)
                     continue
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
                 result = await self.execute_tool_call(
@@ -691,10 +707,13 @@ class ToolService:
                 if self._result_has_error(result):
                     success = False
 
-                tool_message = await self.create_result_message(
-                    tool_call_format, result
-                )
-                tool_results.append(tool_message)
+                if build_messages:
+                    tool_message = await self.create_result_message(
+                        tool_call_format,
+                        result,
+                        summarize=summarize_tool_results,
+                    )
+                    tool_results.append(tool_message)
             except Exception as e:
                 # If tool execution fails completely, create an error message
                 error_msg = f"Failed to execute tool {getattr(tool_call.function, 'name', 'unknown')}: {str(e)}"
@@ -714,11 +733,13 @@ class ToolService:
                 }
                 if return_raw_results:
                     raw_results.append(error_result)
-                error_message = await self.create_result_message(
-                    tool_call_format,
-                    error_result,
-                )
-                tool_results.append(error_message)
+                if build_messages:
+                    error_message = await self.create_result_message(
+                        tool_call_format,
+                        error_result,
+                        summarize=summarize_tool_results,
+                    )
+                    tool_results.append(error_message)
                 parsed_errors = self._parse_json_array_from_message(error_msg)
                 if tool_call_format != ToolCallFormat.CLAUDE_XML:
                     user_asks_for_correction = Message(

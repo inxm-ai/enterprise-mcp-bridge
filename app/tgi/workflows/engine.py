@@ -881,6 +881,14 @@ class WorkflowEngine:
             else None
         )
 
+        stop_after_tool_results = None
+        if not no_reroute and self._has_tool_reroute(agent_def.reroute):
+
+            def stop_after_tool_results(raw_results: list[dict[str, Any]]) -> bool:
+                return self._should_stop_after_tool_results(
+                    agent_def.reroute, raw_results
+                )
+
         runner_stream = self.tool_chat_runner.stream_chat_with_tools(
             session=session,
             messages=agent_request.messages,
@@ -892,6 +900,7 @@ class WorkflowEngine:
             arg_injector=arg_injector_fn,
             tools_for_validation=tools_for_validation,
             streaming_tools=streaming_tools if streaming_tools else None,
+            stop_after_tool_results=stop_after_tool_results,
         )
 
         # For string-based pass_through, we need to extract content from <passthrough> tags
@@ -907,6 +916,8 @@ class WorkflowEngine:
         END_TAG = "</passthrough>"
         # Track tool errors for automatic rerouting
         tool_errors: list[dict[str, Any]] = []
+        # Track tool outcomes for reroute-on-result behavior
+        tool_outcomes: list[dict[str, str]] = []
         # Track a cancellable task for progress updates so newer updates
         # can pre-empt older, still-running LLM summaries.
         progress_task: Optional[asyncio.Task[list[str]]] = None
@@ -988,7 +999,15 @@ class WorkflowEngine:
                         tool_result_name = parsed.tool_result.get("name")
 
                         # Check for tool errors
-                        if self._tool_result_has_error(tool_result_content):
+                        tool_error = self._tool_result_has_error(tool_result_content)
+                        if tool_result_name:
+                            tool_outcomes.append(
+                                {
+                                    "name": tool_result_name,
+                                    "status": "error" if tool_error else "success",
+                                }
+                            )
+                        if tool_error:
                             tool_errors.append(
                                 {
                                     "name": tool_result_name,
@@ -1152,6 +1171,14 @@ class WorkflowEngine:
 
         reroute_tag = self._extract_tag_with_attrs(content_text, "reroute")
         reroute_reason = reroute_tag.content
+        reroute_source: Optional[str] = "llm" if reroute_reason else None
+        if not reroute_reason and tool_outcomes:
+            tool_reroute_reason = self._match_tool_reroute_reason(
+                agent_def.reroute, tool_outcomes
+            )
+            if tool_reroute_reason:
+                reroute_reason = tool_reroute_reason
+                reroute_source = "tool"
         reroute_start_with = self._parse_start_with(reroute_tag.attrs.get("start_with"))
         feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
         inline_returns = self._extract_return_values(content_text)
@@ -1231,21 +1258,22 @@ class WorkflowEngine:
                 self.state_store.save_state(state)
                 yield {"status": "reroute", "target": target}
                 return
-            dynamic_target = await self._routing_decide_next_agent(
-                session,
-                workflow_def,
-                agent_def,
-                reroute_reason,
-                state.context,
-                request,
-                access_token,
-                span,
-                execution_id=state.execution_id,
-            )
-            if dynamic_target:
-                self.state_store.save_state(state)
-                yield {"status": "reroute", "target": dynamic_target}
-                return
+            if reroute_source != "tool":
+                dynamic_target = await self._routing_decide_next_agent(
+                    session,
+                    workflow_def,
+                    agent_def,
+                    reroute_reason,
+                    state.context,
+                    request,
+                    access_token,
+                    span,
+                    execution_id=state.execution_id,
+                )
+                if dynamic_target:
+                    self.state_store.save_state(state)
+                    yield {"status": "reroute", "target": dynamic_target}
+                    return
 
         # Check for automatic tool error reroute if no explicit reroute was emitted
         if tool_errors and agent_def.on_tool_error and not no_reroute:
@@ -2137,6 +2165,107 @@ class WorkflowEngine:
                 }
             )
         return normalized
+
+    def _parse_tool_reroute_trigger(
+        self, value: Optional[str]
+    ) -> Optional[tuple[str, str]]:
+        if not value:
+            return None
+        parts = [part.strip() for part in value.split(":")]
+        if len(parts) != 3:
+            return None
+        prefix, tool_name, status = parts
+        if prefix.lower() != "tool" or not tool_name:
+            return None
+        status_norm = status.lower()
+        if status_norm not in ("success", "error"):
+            return None
+        return tool_name, status_norm
+
+    def _match_tool_reroute_reason(
+        self, reroute_config: Any, tool_outcomes: list[dict[str, str]]
+    ) -> Optional[str]:
+        """
+        Check reroute config for tool-result triggers and return the first
+        matching reroute reason (e.g., "tool:plan:success") based on config order.
+        """
+        if not reroute_config or not tool_outcomes:
+            return None
+        tool_status: dict[str, str] = {}
+        for entry in tool_outcomes:
+            name = entry.get("name")
+            status = entry.get("status")
+            if name and status:
+                tool_status[name] = status
+        available = {(name, status) for name, status in tool_status.items()}
+        if not available:
+            return None
+        configs = (
+            reroute_config if isinstance(reroute_config, list) else [reroute_config]
+        )
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                continue
+            reroute_on = cfg.get("on") or []
+            if isinstance(reroute_on, str):
+                reroute_on = [reroute_on]
+            for candidate in reroute_on:
+                if not isinstance(candidate, str):
+                    continue
+                parsed = self._parse_tool_reroute_trigger(candidate)
+                if not parsed:
+                    continue
+                tool_name, status = parsed
+                if (tool_name, status) in available:
+                    return candidate
+        return None
+
+    def _has_tool_reroute(self, reroute_config: Any) -> bool:
+        if not reroute_config:
+            return False
+        configs = (
+            reroute_config if isinstance(reroute_config, list) else [reroute_config]
+        )
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                continue
+            reroute_on = cfg.get("on") or []
+            if isinstance(reroute_on, str):
+                reroute_on = [reroute_on]
+            for candidate in reroute_on:
+                if not isinstance(candidate, str):
+                    continue
+                if self._parse_tool_reroute_trigger(candidate):
+                    return True
+        return False
+
+    def _build_tool_outcomes_from_results(
+        self, raw_results: list[dict[str, Any]]
+    ) -> list[dict[str, str]]:
+        tool_outcomes: list[dict[str, str]] = []
+        for raw_result in raw_results or []:
+            tool_name = raw_result.get("name")
+            if not tool_name:
+                continue
+            content = raw_result.get("content", "")
+            if not isinstance(content, str):
+                try:
+                    content = json.dumps(
+                        content, ensure_ascii=False, separators=(",", ":")
+                    )
+                except Exception:
+                    content = str(content)
+            status = "error" if self._tool_result_has_error(content) else "success"
+            tool_outcomes.append({"name": tool_name, "status": status})
+        return tool_outcomes
+
+    def _should_stop_after_tool_results(
+        self, reroute_config: Any, raw_results: list[dict[str, Any]]
+    ) -> bool:
+        if not reroute_config or not raw_results:
+            return False
+        tool_outcomes = self._build_tool_outcomes_from_results(raw_results)
+        return bool(self._match_tool_reroute_reason(reroute_config, tool_outcomes))
 
     def _match_reroute_target(
         self, reroute_config: Any, reroute_reason: Optional[str]

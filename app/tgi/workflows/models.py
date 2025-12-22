@@ -18,6 +18,8 @@ class WorkflowAgentDef:
         depends_on: List of agent names that must complete before this agent runs.
         when: Optional condition expression for whether this agent should run.
         reroute: Configuration for rerouting to other agents based on conditions.
+            Supports tool-result triggers with `on` entries like
+            "tool:tool_name:success" or "tool:tool_name:error".
         tools: Tool configurations. Can be:
             - None: Use all available tools
             - []: Disable tools

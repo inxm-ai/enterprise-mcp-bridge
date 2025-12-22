@@ -1326,6 +1326,7 @@ async def test_progress_updates_cancel_previous(tmp_path):
             arg_injector=None,
             tools_for_validation=None,
             streaming_tools=None,
+            stop_after_tool_results=None,
         ):
             async def _gen():
                 yield 'data: {"type":"progress","progress":0.1,"message":"first"}\n\n'
@@ -2064,6 +2065,8 @@ async def test_engine_injects_args_from_context_into_tool_calls(tmp_path, monkey
             span,
             available_tools=None,
             return_raw_results=False,
+            summarize_tool_results=True,
+            build_messages=True,
         ):
             for tc, _ in tool_calls:
                 captured_tool_calls.append(

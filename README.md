@@ -713,6 +713,7 @@ Field reference:
   - `depends_on` (array[string]): Agent names that must complete before this agent runs.
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
+    - Tool-result reroutes are supported via `on` entries like `tool:tool_name:success` or `tool:tool_name:error`. These trigger reroutes immediately after tool results are processed, even if the LLM does not emit a `<reroute>` tag.
     - You can also hand off to another workflow by emitting `<reroute start_with='{"args": {...}}'>workflows[target_flow]</reroute>`. The engine completes the current workflow, starts a new execution for `target_flow` (optionally applying the provided `start_with` payload), and continues streaming from the new workflow. Looping reroutes between workflows are detected and aborted.
     - If a reroute target is missing, has unmet dependencies, or was already completed earlier in the run, the engine stops and emits an error chunk explaining the reason (e.g., missing dependencies, already completed).
   - `tools` (array, optional): Limit available tools for this agent. Can be:
@@ -755,8 +756,27 @@ Configure `on_tool_error` on any agent that uses tools which may fail:
 Behavior:
 - When `save_plan` tool returns an error, the workflow automatically reroutes to `summarize_creation_failure`
 - If the LLM emits an explicit `<reroute>` tag, that takes precedence over `on_tool_error`
+- If a `reroute.on` tool trigger matches (e.g., `tool:save_plan:error`), it takes precedence over `on_tool_error`
 - Error detection recognizes common patterns: HTTP status codes (4xx, 5xx), "Error:", "Failed:", exception messages, etc.
 - The error details are stored in the agent's context and available to the failure handler
+
+##### Tool-result reroutes
+
+You can also reroute directly on tool outcomes without requiring the LLM to emit `<reroute>`:
+
+```json
+{
+  "agent": "get_plan",
+  "description": "Fetch the plan",
+  "tools": ["get_plan"],
+  "reroute": [
+    { "on": ["tool:get_plan:success"], "to": "analyse_plan" },
+    { "on": ["tool:get_plan:error"], "to": "get_plan_failed" }
+  ]
+}
+```
+
+When a tool-result reroute matches, the engine skips the post-tool LLM turn, so the tool payload isn't sent back to the model.
 
 ##### Advanced tool configuration
 

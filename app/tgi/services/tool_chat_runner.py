@@ -13,6 +13,7 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
+from app.tgi.services.tools.tool_resolution import ToolCallFormat
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.vars import TGI_MODEL_NAME
 
@@ -58,6 +59,7 @@ class ToolChatRunner:
         arg_injector: Optional[Callable[[str, dict], dict]] = None,
         tools_for_validation: Optional[List[dict]] = None,
         streaming_tools: Optional[set[str]] = None,
+        stop_after_tool_results: Optional[Callable[[List[dict]], bool]] = None,
     ) -> AsyncGenerator[str, None]:
         messages_history = messages.copy()
         if chat_request.messages and chat_request.messages is not messages:
@@ -315,6 +317,16 @@ class ToolChatRunner:
                                 kwargs["progress_callback"] = _handle_progress
                             if "log_callback" in sig.parameters:
                                 kwargs["log_callback"] = _handle_log
+                            if (
+                                stop_after_tool_results
+                                and "summarize_tool_results" in sig.parameters
+                            ):
+                                kwargs["summarize_tool_results"] = False
+                            if (
+                                stop_after_tool_results
+                                and "build_messages" in sig.parameters
+                            ):
+                                kwargs["build_messages"] = False
                             normal_results, normal_success, normal_raw = (
                                 await execute_fn(
                                     session,
@@ -340,6 +352,12 @@ class ToolChatRunner:
                                 access_token=access_token,
                                 progress_callback=_handle_progress,
                                 log_callback=_handle_log,
+                                summarize_tool_results=(
+                                    False if stop_after_tool_results else True
+                                ),
+                                build_messages=(
+                                    False if stop_after_tool_results else True
+                                ),
                             )
                             tool_results.extend(streaming_results)
                             raw_results.extend(streaming_raw)
@@ -428,6 +446,35 @@ class ToolChatRunner:
                         "tool_calls.executed_count", len(tool_results)
                     )
 
+                    stop_after_tools = False
+                    if stop_after_tool_results:
+                        try:
+                            stop_after_tools = stop_after_tool_results(raw_results)
+                        except Exception as exc:
+                            if logger:
+                                logger.debug(
+                                    "[ToolChatRunner] stop_after_tool_results failed: %s",
+                                    exc,
+                                )
+
+                    if stop_after_tool_results and not stop_after_tools:
+                        format_by_id = {tc.id: fmt for tc, fmt in tool_calls_to_execute}
+                        format_by_name = {
+                            tc.function.name: fmt for tc, fmt in tool_calls_to_execute
+                        }
+                        tool_results = []
+                        for raw_result in raw_results:
+                            fmt = format_by_id.get(raw_result.get("tool_call_id"))
+                            if not fmt:
+                                fmt = format_by_name.get(
+                                    raw_result.get("name"), ToolCallFormat.OPENAI_JSON
+                                )
+                            tool_results.append(
+                                await self.tool_service.create_result_message(
+                                    fmt, raw_result
+                                )
+                            )
+
                     # Emit tool result events for workflow engines to capture
                     # Use raw_results to get unsummarized content for structured data extraction
                     for raw_result in raw_results:
@@ -458,19 +505,23 @@ class ToolChatRunner:
                         }
                         yield f"data: {json.dumps(tool_result_event)}\n\n"
 
-                    messages_history.extend(tool_results)
-                    self._deduplicate_retry_hints(messages_history)
+                    if not stop_after_tools:
+                        messages_history.extend(tool_results)
+                        self._deduplicate_retry_hints(messages_history)
 
                     if success:
-                        if emit_think_messages:
+                        if emit_think_messages and not stop_after_tools:
                             success_msg = "<think>I executed the tools successfully, resuming response generation</think>\n\n"
                             yield f"data: {json.dumps({'choices':[{'delta':{'content': success_msg},'index':0}]})}\n\n"
                         tool_span.set_attribute("tool_calls.success", True)
                     else:
-                        if emit_think_messages:
+                        if emit_think_messages and not stop_after_tools:
                             failure_report = "<think>The tool call failed. I will try to adjust my approach</think>\n\n"
                             yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\n\n"
                         tool_span.set_attribute("tool_calls.success", False)
+
+                    if stop_after_tools:
+                        break
 
                     should_continue = (
                         bool(tool_results) or len(tool_calls_to_execute) == 1
@@ -494,6 +545,8 @@ class ToolChatRunner:
             Callable[[float, Optional[float], Optional[str], Optional[str]], Any]
         ] = None,
         log_callback: Optional[Callable[[str, Any, Optional[str]], Any]] = None,
+        summarize_tool_results: bool = True,
+        build_messages: bool = True,
     ) -> tuple[list, bool, list]:
         """
         Execute a single tool via the streaming endpoint and normalize results.
@@ -511,6 +564,8 @@ class ToolChatRunner:
                 None,
                 available_tools=None,
                 return_raw_results=True,
+                summarize_tool_results=summarize_tool_results,
+                build_messages=build_messages,
             )
             return fallback_results, fallback_success, fallback_raw
 
@@ -538,10 +593,14 @@ class ToolChatRunner:
                     separators=(",", ":"),
                 ),
             }
-            msg = await self.tool_service.create_result_message(
-                tool_call_format, error_payload
-            )
-            return [msg], False, [error_payload]
+            if build_messages:
+                msg = await self.tool_service.create_result_message(
+                    tool_call_format,
+                    error_payload,
+                    summarize=summarize_tool_results,
+                )
+                return [msg], False, [error_payload]
+            return [], False, [error_payload]
 
         try:
             async for event in stream:
@@ -585,7 +644,11 @@ class ToolChatRunner:
 
                 result_data = event.get("data")
                 raw_results.append(
-                    {"name": tool_call.function.name, "content": result_data}
+                    {
+                        "name": tool_call.function.name,
+                        "tool_call_id": tool_call.id,
+                        "content": result_data,
+                    }
                 )
 
                 try:
@@ -606,10 +669,13 @@ class ToolChatRunner:
                     "tool_call_id": tool_call.id,
                     "content": content_str,
                 }
-                msg = await self.tool_service.create_result_message(
-                    tool_call_format, result_payload
-                )
-                tool_results.append(msg)
+                if build_messages:
+                    msg = await self.tool_service.create_result_message(
+                        tool_call_format,
+                        result_payload,
+                        summarize=summarize_tool_results,
+                    )
+                    tool_results.append(msg)
                 try:
                     if self.tool_service._result_has_error(result_data):
                         success = False
