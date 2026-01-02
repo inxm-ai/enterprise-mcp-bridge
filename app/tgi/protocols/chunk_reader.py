@@ -106,6 +106,8 @@ class ChunkReader:
         # Tool call accumulator: {index: {id, name, arguments}}
         self._tool_call_chunks: Dict[int, dict] = {}
         self._tool_call_ready: Set[int] = set()
+        self._tool_call_index_by_id: Dict[str, int] = {}
+        self._next_tool_call_index: int = 0
 
     async def __aenter__(self):
         """Enter the async context."""
@@ -137,9 +139,30 @@ class ChunkReader:
             return
 
         for tc in tool_calls:
-            tc_index = tc.get("index")
+            tc_index = None
+            raw_index = tc.get("index")
+            if raw_index is not None:
+                try:
+                    tc_index = int(raw_index)
+                except (TypeError, ValueError):
+                    tc_index = None
+
             if tc_index is None:
-                continue
+                tc_id = tc.get("id")
+                if tc_id and tc_id in self._tool_call_index_by_id:
+                    tc_index = self._tool_call_index_by_id[tc_id]
+                else:
+                    tc_index = self._next_tool_call_index
+                    self._next_tool_call_index += 1
+                    if tc_id:
+                        self._tool_call_index_by_id[tc_id] = tc_index
+                tc["index"] = tc_index
+            else:
+                if tc_index >= self._next_tool_call_index:
+                    self._next_tool_call_index = tc_index + 1
+                tc_id = tc.get("id")
+                if tc_id and tc_id not in self._tool_call_index_by_id:
+                    self._tool_call_index_by_id[tc_id] = tc_index
 
             if tc_index not in self._tool_call_chunks:
                 self._tool_call_chunks[tc_index] = {
@@ -155,16 +178,28 @@ class ChunkReader:
             # Accumulate function name and arguments (concatenate for streaming)
             tc_func = tc.get("function", {})
             if "name" in tc_func and tc_func["name"]:
-                self._tool_call_chunks[tc_index]["name"] += tc_func["name"]
-            if "arguments" in tc_func and tc_func["arguments"]:
-                self._tool_call_chunks[tc_index]["arguments"] += tc_func["arguments"]
+                self._tool_call_chunks[tc_index]["name"] += str(tc_func["name"])
+            if "arguments" in tc_func and tc_func["arguments"] is not None:
+                tc_args = tc_func["arguments"]
+                if isinstance(tc_args, str):
+                    existing_args = self._tool_call_chunks[tc_index]["arguments"]
+                    if isinstance(existing_args, str):
+                        self._tool_call_chunks[tc_index]["arguments"] = (
+                            existing_args + tc_args
+                        )
+                    else:
+                        self._tool_call_chunks[tc_index]["arguments"] = tc_args
+                else:
+                    self._tool_call_chunks[tc_index]["arguments"] = tc_args
 
             # Mark as ready if we have both name and arguments
-            if (
-                self._tool_call_chunks[tc_index]["name"]
-                and self._tool_call_chunks[tc_index]["arguments"]
-                and tc_index not in self._tool_call_ready
-            ):
+            name_ready = bool(self._tool_call_chunks[tc_index]["name"])
+            args_value = self._tool_call_chunks[tc_index]["arguments"]
+            if isinstance(args_value, str):
+                args_ready = bool(args_value)
+            else:
+                args_ready = args_value is not None
+            if name_ready and args_ready and tc_index not in self._tool_call_ready:
                 self._tool_call_ready.add(tc_index)
 
     def get_accumulated_tool_calls(self) -> Dict[int, dict]:
@@ -189,6 +224,8 @@ class ChunkReader:
         """Clear accumulated tool calls (useful when starting a new iteration)."""
         self._tool_call_chunks.clear()
         self._tool_call_ready.clear()
+        self._tool_call_index_by_id.clear()
+        self._next_tool_call_index = 0
 
     def _normalize_chunk(self, raw_chunk: Any) -> str:
         """

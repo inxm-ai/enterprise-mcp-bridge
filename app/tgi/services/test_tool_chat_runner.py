@@ -7,7 +7,11 @@ import pytest
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.services.tool_chat_runner import ToolChatRunner
 from app.tgi.services.tool_service import ToolService
-from app.tgi.services.tools.tool_resolution import ParsedToolCall, ToolCallFormat
+from app.tgi.services.tools.tool_resolution import (
+    ParsedToolCall,
+    ToolCallFormat,
+    ToolResolutionStrategy,
+)
 from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.model_formats import ChatGPTModelFormat
 
@@ -77,8 +81,9 @@ async def test_runner_preserves_response_format():
             self, request: ChatCompletionRequest, access_token: str, span: Any
         ) -> AsyncGenerator[str, None]:
             self.requests.append(request)
-            payload = self.client._generate_llm_payload(request)
-            assert payload["response_format"]["json_schema"][
+            # Verify response_format is preserved in the request
+            assert request.response_format is not None
+            assert request.response_format["json_schema"][
                 "name"
             ], "expected response_format.json_schema.name"
 
@@ -107,7 +112,11 @@ async def test_runner_preserves_response_format():
             stream=True,
             response_format={
                 "type": "json_schema",
-                "json_schema": {"type": "object", "properties": {}},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "name": "test_schema",
+                },
             },
         ),
         access_token="",
@@ -204,6 +213,94 @@ async def test_runner_executes_tool_calls_and_loops():
 
     # execute_tool_calls should have been invoked once, and we should have looped twice
     assert len(llm.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_executes_tool_calls_without_index():
+    llm = StubLLM(
+        streams=[
+            [
+                'data: {"choices":[{"delta":{"tool_calls":[{"id":"call1","function":{"name":"search","arguments":"{}"}}]},"index":0}]}\n\n'
+            ]
+        ]
+    )
+    tool_service = ToolService()
+    executed = {"count": 0}
+
+    async def _exec(*_args, **_kwargs):
+        executed["count"] += 1
+        if _kwargs.get("return_raw_results"):
+            return ([], True, [])
+        return ([], True)
+
+    tool_service.execute_tool_calls = _exec  # type: ignore
+
+    runner = ToolChatRunner(
+        llm_client=llm,
+        tool_service=tool_service,
+        tool_resolution=ToolResolutionStrategy(),
+        logger_obj=None,
+        message_summarization_service=None,
+    )
+
+    stream = runner.stream_chat_with_tools(
+        session=None,
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        available_tools=[_tool("search")],
+        chat_request=ChatCompletionRequest(
+            messages=[], model="test-model", stream=True
+        ),
+        access_token="",
+        parent_span=None,
+        emit_think_messages=False,
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert executed["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_fallbacks_to_single_tool_from_json_content():
+    llm = StubLLM(
+        streams=[
+            [
+                'data: {"choices":[{"delta":{"content":"{\\"start_url\\":\\"https://example.com\\",\\"max_depth\\":3}"},"index":0}]}\n\n'
+            ]
+        ]
+    )
+    tool_service = ToolService()
+    executed = {"count": 0}
+
+    async def _exec(*_args, **_kwargs):
+        executed["count"] += 1
+        if _kwargs.get("return_raw_results"):
+            return ([], True, [])
+        return ([], True)
+
+    tool_service.execute_tool_calls = _exec  # type: ignore
+
+    runner = ToolChatRunner(
+        llm_client=llm,
+        tool_service=tool_service,
+        tool_resolution=ToolResolutionStrategy(),
+        logger_obj=None,
+        message_summarization_service=None,
+    )
+
+    stream = runner.stream_chat_with_tools(
+        session=None,
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        available_tools=[_tool("crawl")],
+        chat_request=ChatCompletionRequest(
+            messages=[], model="test-model", stream=True
+        ),
+        access_token="",
+        parent_span=None,
+        emit_think_messages=False,
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert executed["count"] == 1
 
 
 @pytest.mark.asyncio

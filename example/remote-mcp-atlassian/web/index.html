@@ -293,67 +293,90 @@
         import { TGI } from "./chat.js";
         import { pfusch, html, script } from 'https://matthiaskainer.github.io/pfusch/pfusch.js';
 
-        function replaceTags(tag, map) { return { tag, map }; }
-
-        function parseTagSegments(text, tag) {
-            const OPEN = `<${tag}>`;
-            const CLOSE = `</${tag}>`;
-            const segments = [];
+        function parseAndMap(text, mapping) {
+            if (!text) return [];
+            const root = [];
+            const stack = [{ tag: null, children: root }];
             let i = 0;
             while (i < text.length) {
-                const start = text.indexOf(OPEN, i);
-                if (start === -1) {
-                    const tail = text.slice(i);
-                    if (tail) segments.push({ type: 'text', value: tail });
+                const lt = text.indexOf('<', i);
+                if (lt === -1) {
+                    stack[stack.length - 1].children.push(text.slice(i));
                     break;
                 }
-                if (start > i) {
-                    const normal = text.slice(i, start);
-                    if (normal) segments.push({ type: 'text', value: normal });
-                }
-                const afterOpen = start + OPEN.length;
-                const end = text.indexOf(CLOSE, afterOpen);
-                if (end === -1) {
-                    segments.push({ type: 'text', value: text.slice(start) });
-                    break;
-                }
-                const inner = text.slice(afterOpen, end);
-                segments.push({ type: 'tag', tag, inner });
-                i = end + CLOSE.length;
-            }
-            return segments;
-        }
-
-        function applyTransforms(nodes, transforms) {
-            if (!transforms || transforms.length === 0) return nodes;
-            const [current, ...rest] = transforms;
-            const out = [];
-            for (const node of nodes) {
-                if (typeof node !== 'string') {
-                    out.push(node);
+                if (lt > i) {
+                    stack[stack.length - 1].children.push(text.slice(i, lt));
+                    i = lt;
                     continue;
                 }
-                const parts = parseTagSegments(node, current.tag);
-                for (const part of parts) {
-                    if (part.type === 'text') {
-                        out.push(part.value);
+                // at a '<'
+                const gt = text.indexOf('>', i + 1);
+                if (gt === -1) {
+                    // incomplete tag — keep rest as text (chunking case)
+                    stack[stack.length - 1].children.push(text.slice(i));
+                    break;
+                }
+                const inside = text.slice(i + 1, gt).trim();
+                if (inside.startsWith('/')) {
+                    // closing tag
+                    const closeName = inside.slice(1).split(/\s+/)[0];
+                    // find a matching open tag in the stack
+                    let idx = stack.length - 1;
+                    while (idx > 0 && stack[idx].tag !== closeName) idx--;
+                    if (idx === 0) {
+                        // no matching open tag — treat as literal text
+                        stack[stack.length - 1].children.push(text.slice(i, gt + 1));
                     } else {
-                        const children = applyTransforms([part.inner], rest);
-                        out.push(current.map(children));
+                        // pop frames until the matching one
+                        const frame = stack.pop();
+                        const parent = stack[stack.length - 1];
+                        const children = frame.children.map(c => c);
+                        let mapped;
+                        if (mapping && typeof mapping[frame.tag] === 'function') {
+                            mapped = mapping[frame.tag](children);
+                        } else if (html[frame.tag]) {
+                            mapped = html[frame.tag](...children);
+                        } else {
+                            mapped = html.div(...children);
+                        }
+                        parent.children.push(mapped);
+                    }
+                    i = gt + 1;
+                } else {
+                    // opening tag (ignore attributes)
+                    const parts = inside.split(/\s+/);
+                    const tagName = parts[0];
+                    if (!/^[A-Za-z0-9_-]+$/.test(tagName)) {
+                        // not a simple tag name — treat as literal
+                        stack[stack.length - 1].children.push(text.slice(i, gt + 1));
+                        i = gt + 1;
+                    } else {
+                        // push a new frame for this tag
+                        stack.push({ tag: tagName, children: [] });
+                        i = gt + 1;
                     }
                 }
             }
-            return rest.length ? applyTransforms(out, rest) : out;
+            // If there are unclosed tags, return the original text as a single string
+            if (stack.length > 1) return [String(text)];
+            return root;
         }
 
-        function renderRichContent(content) {
+        function renderRichContent(content, metadata) {
             if (content == null) return [];
-            const transforms = [
-                replaceTags('think', children => html.p(html.i(...children))),
-                replaceTags('code', children => html.code(...children)),
-            ];
-            const result = applyTransforms([String(content)], transforms)
-                .map(node => typeof node !== 'string' ? node : html.div(node));
+            let { todo } = metadata || {};
+
+            const mapping = {
+                think: children => html.p(html.i(...children)),
+                code: children => html.code(...children),
+                details: children => html.details(...children),
+                summary: children => html.summary(...children),
+                p: children => html.p(...children),
+                workflow_execution_id: children => html.pre(...children),
+            };
+
+            const nodes = parseAndMap(String(content), mapping);
+            const result = nodes.map(node => (typeof node !== 'string' ? node : html.div(node)));
             return result;
         }
 
@@ -372,13 +395,17 @@
             return lastMatch ? lastMatch.trim() : null;
         }
 
-        pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], loading: true, workflowExecutionId: undefined, useWorkflow: false }, (state, trigger) => [
+        pfusch("chat-with-mcp", { model: "", messages: [], availableTools: [], tool_results: [], loading: true, workflowExecutionId: undefined, useWorkflow: false }, (state, trigger) => [
             script(async () => {
                 state.model = await otelFetch('/settings.json', { credentials: 'include' }).then(r => r.json()).then(json => json.OAI_MODEL_NAME);
                 state.availableTools = await otelFetch('/api/mcp/atlassian/tools', { credentials: 'include' }).then(r => r.json());
                 state.loading = false;
             }),
-            html.div({ id: 'chat-history' }, state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, ...renderRichContent(m.content)))),
+            html.div({ id: 'chat-history' }, 
+                state.messages.map(m => html.div({ class: 'chat-message ' + m.role }, 
+                    ...renderRichContent(m.content, m.metadata))
+                )
+            ),
             html.form({
                 id: 'chat-form', submit: async e => {
                     e.preventDefault();
@@ -392,15 +419,49 @@
                     e.target.querySelector('input[name="chat-input"]').value = "";
                     state.loading = true;
                     state.streaming = "";
-                    state.messages = [...state.messages, { role: 'user', content: input }];
+                    const formMessages = [
+                        ...state.messages,
+                        ...state.tool_results.map(tr => ({ role: 'tool', content: tr.content, metadata: { name : tr.name } })),
+                        { role: 'user', content: input }
+                    ];
+                    state.messages = [
+                        ...state.messages,
+                        { role: 'user', content: input }
+                    ];
                     const originalState = [...state.messages];
                     try {
                         const tgiInstance = new TGI(state.availableTools, state.model);
+                        let last_todo = null;
                         await tgiInstance.send(
-                            input,
+                            formMessages,
                             { useWorkflow, workflowExecutionId },
-                            chunk => {
-                                state.streaming += chunk;
+                            (chunk, metadata) => {
+                                const {todo, context} = metadata || {};
+                                if (todo) {
+                                    var current_message = state.streaming;
+                                    const {id, name, goal} = todo;
+                                    // If there's no last tool yet, or the tool id changed, start a new details block
+                                    if (last_todo === null || last_todo.id !== id) {
+                                        last_todo = todo;
+                                        current_message += `\n<details><summary>${name}</summary><p>Goal: ${goal}</p>${chunk}</details>\n`;
+                                    } else {
+                                        // Same todo streaming: insert the chunk before the last closing </details>
+                                        const closingTag = '</details>';
+                                        const idx = current_message.lastIndexOf(closingTag);
+                                        if (idx !== -1) {
+                                            current_message = current_message.slice(0, idx) + chunk + current_message.slice(idx);
+                                        } else {
+                                            // Fallback: append if no closing tag found
+                                            current_message += chunk;
+                                        }
+                                    }
+                                    state.streaming = current_message;
+                                } else {
+                                    state.streaming += chunk;
+                                }
+                                if (context && context.tool_results) {
+                                    state.tool_results = [...state.tool_results || [], ...context.tool_results];
+                                }
                                 const nextWorkflowId = extractWorkflowExecutionId(state.streaming);
                                 if (nextWorkflowId) {
                                     state.workflowExecutionId = nextWorkflowId;

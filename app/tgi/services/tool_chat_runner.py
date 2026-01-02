@@ -13,7 +13,7 @@ from app.tgi.models import (
     ToolCall,
     ToolCallFunction,
 )
-from app.tgi.services.tools.tool_resolution import ToolCallFormat
+from app.tgi.services.tools.tool_resolution import ToolCallFormat, ParsedToolCall
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.vars import TGI_MODEL_NAME
 
@@ -138,6 +138,13 @@ class ToolChatRunner:
                 parsed_tool_calls, _ = self.tool_resolution.resolve_tool_calls(
                     content_message, tool_call_chunks
                 )
+
+                if not parsed_tool_calls and not tool_call_chunks:
+                    fallback_call = self._infer_single_tool_call(
+                        content_message, available_tools
+                    )
+                    if fallback_call:
+                        parsed_tool_calls = [fallback_call]
 
                 if parsed_tool_calls:
                     tool_span.set_attribute(
@@ -534,6 +541,61 @@ class ToolChatRunner:
                 break
 
         yield "data: [DONE]\n\n"
+
+    @staticmethod
+    def _infer_single_tool_call(
+        content: str, available_tools: Optional[List[dict]]
+    ) -> Optional[ParsedToolCall]:
+        if not available_tools or len(available_tools) != 1:
+            return None
+
+        if not content or not content.strip():
+            return None
+
+        tool = available_tools[0]
+        tool_name = None
+        tool_params = None
+        if isinstance(tool, dict):
+            tool_name = tool.get("function", {}).get("name") or tool.get("name")
+            tool_params = tool.get("function", {}).get("parameters")
+        else:
+            func = getattr(tool, "function", None)
+            tool_name = (
+                getattr(func, "name", None) if func else getattr(tool, "name", None)
+            )
+            tool_params = getattr(func, "parameters", None) if func else None
+        if not tool_name:
+            return None
+
+        content_str = content.strip()
+        decoder = json.JSONDecoder()
+        try:
+            parsed_args, end_idx = decoder.raw_decode(content_str)
+        except json.JSONDecodeError:
+            return None
+        if content_str[end_idx:].strip():
+            return None
+
+        if isinstance(parsed_args, dict):
+            props = None
+            if isinstance(tool_params, dict):
+                props = tool_params.get("properties")
+            if isinstance(props, dict) and props:
+                arg_keys = set(parsed_args.keys())
+                prop_keys = set(props.keys())
+                if arg_keys and not arg_keys.issubset(prop_keys):
+                    return None
+        else:
+            parsed_args = {"raw": parsed_args}
+
+        return ParsedToolCall(
+            id=f"content_{tool_name}",
+            index=0,
+            name=tool_name,
+            arguments=parsed_args,
+            format=ToolCallFormat.OPENAI_JSON,
+            raw_content=content_str,
+        )
 
     async def _run_streaming_tool(
         self,

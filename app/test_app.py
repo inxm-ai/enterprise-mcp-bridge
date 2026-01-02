@@ -2,6 +2,7 @@ import pytest
 import subprocess
 import time
 import os
+import sys
 
 import requests
 
@@ -30,7 +31,16 @@ def fastapi_app():
     env = os.environ.copy()
     env["PYTHONPATH"] = os.path.dirname(__file__) + "/.."
     proc = subprocess.Popen(
-        ["uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", f"{port}"],
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.server:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            f"{port}",
+        ],
         cwd=os.path.dirname(__file__) + "/..",
         env=env,
         stdout=subprocess.PIPE,

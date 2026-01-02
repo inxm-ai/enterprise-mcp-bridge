@@ -1,6 +1,6 @@
 import pytest
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, AsyncMock
 
 from app.tgi.models import (
     ChatCompletionRequest,
@@ -139,23 +139,21 @@ class TestProxiedTGIService:
             service = ProxiedTGIService()
             assert service.llm_client.tgi_url == "https://api.test.com"
 
-    def test_get_headers_with_token(self, proxied_tgi_service):
-        """Test header generation with token."""
-        headers = proxied_tgi_service.llm_client._get_headers()
+    def test_client_initialization_with_token(self, proxied_tgi_service):
+        """Test OpenAI client initialization with token."""
+        assert proxied_tgi_service.llm_client.client.api_key == "test-token-123"
+        assert (
+            str(proxied_tgi_service.llm_client.client.base_url)
+            == "https://api.test-llm.com/v1/"
+        )
 
-        assert headers["Content-Type"] == "application/json"
-        assert headers["Authorization"] == "Bearer test-token-123"
-        assert "User-Agent" in headers
-
-    def test_get_headers_without_token(self, proxied_tgi_service_no_token):
-        """Test header generation without token."""
-        headers = proxied_tgi_service_no_token.llm_client._get_headers()
-
-        assert headers["Content-Type"] == "application/json"
-        # the api always requires an auth token, so if we don't have one, provide a fake
-        assert "Authorization" in headers
-        assert headers["Authorization"] == "Bearer fake"
-        assert "User-Agent" in headers
+    def test_client_initialization_without_token(self, proxied_tgi_service_no_token):
+        """Test OpenAI client initialization without token."""
+        assert proxied_tgi_service_no_token.llm_client.client.api_key == "fake-token"
+        assert (
+            str(proxied_tgi_service_no_token.llm_client.client.base_url)
+            == "https://api.test-llm.com/v1/"
+        )
 
     @pytest.mark.asyncio
     async def test_find_prompt_by_name_success(self, proxied_tgi_service, mock_prompts):
@@ -426,64 +424,63 @@ class TestProxiedTGIServiceLLMCalls:
     async def test_non_stream_llm_completion_success(self, proxied_tgi_service):
         """Test successful non-streaming LLM completion."""
         # Mock response data
-        mock_response_data = {
-            "id": "chatcmpl-test123",
-            "object": "chat.completion",
-            "created": 1234567890,
-            "model": "test-model",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello! How can I help you today?",
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
-        }
+        mock_response = Mock()
+        mock_response.id = "chatcmpl-test123"
+        mock_response.object = "chat.completion"
+        mock_response.created = 1234567890
+        mock_response.model = "test-model"
+        mock_response.choices = [
+            Mock(
+                index=0,
+                message=Mock(
+                    role="assistant",
+                    content="Hello! How can I help you today?",
+                    tool_calls=None,
+                ),
+                finish_reason="stop",
+            )
+        ]
+        mock_response.usage = Mock(
+            prompt_tokens=10, completion_tokens=8, total_tokens=18
+        )
+        # Add model_dump method to mock response and its components
+        mock_response.model_dump = Mock(
+            return_value={
+                "id": "chatcmpl-test123",
+                "object": "chat.completion",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello! How can I help you today?",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "total_tokens": 18,
+                },
+            }
+        )
 
-        # Create mock request
         request = ChatCompletionRequest(
             messages=[Message(role=MessageRole.USER, content="Hello")],
             model="test-model",
             stream=False,
         )
 
-        # Create a proper context manager mock
-        class MockResponse:
-            def __init__(self):
-                self.ok = True
-                self.status = 200
+        with patch.object(
+            proxied_tgi_service.llm_client.client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+        ) as mock_create:
+            mock_create.return_value = mock_response
 
-            async def json(self):
-                return mock_response_data
-
-            async def text(self):
-                return "OK"
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        # Create a proper session mock
-        class MockSession:
-            def __init__(self):
-                pass
-
-            def post(self, *args, **kwargs):
-                return MockResponse()
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        with patch("app.tgi.llm_client.aiohttp.ClientSession", MockSession):
             with patch("opentelemetry.trace.get_tracer") as mock_tracer:
                 mock_span = Mock()
                 mock_span.set_attribute = Mock()
@@ -514,39 +511,13 @@ class TestProxiedTGIServiceLLMCalls:
             stream=False,
         )
 
-        # Create a proper error context manager mock
-        class MockErrorResponse:
-            def __init__(self):
-                self.ok = False
-                self.status = 400
+        with patch.object(
+            proxied_tgi_service.llm_client.client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+        ) as mock_create:
+            mock_create.side_effect = Exception("API Error")
 
-            async def json(self):
-                return {"error": "Bad request"}
-
-            async def text(self):
-                return "Bad request"
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        # Create a proper session mock
-        class MockErrorSession:
-            def __init__(self):
-                pass
-
-            def post(self, *args, **kwargs):
-                return MockErrorResponse()
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        with patch("app.tgi.llm_client.aiohttp.ClientSession", MockErrorSession):
             with patch("opentelemetry.trace.get_tracer") as mock_tracer:
                 mock_span = Mock()
                 mock_span.set_attribute = Mock()
@@ -557,9 +528,7 @@ class TestProxiedTGIServiceLLMCalls:
                     Mock(return_value=None)
                 )
 
-                with pytest.raises(
-                    Exception
-                ):  # Should raise HTTPException but we'll catch general exception
+                with pytest.raises(Exception):
                     await proxied_tgi_service.llm_client.non_stream_completion(
                         request, None, mock_span
                     )
@@ -573,63 +542,34 @@ class TestProxiedTGIServiceLLMCalls:
             stream=True,
         )
 
-        # Mock streaming response data
-        mock_stream_data = [
-            b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
-            b'data: {"choices":[{"delta":{"content":"!"}}]}\n\n',
-            b"data: [DONE]\n\n",
+        # Mock streaming chunks
+        chunk1 = Mock()
+        chunk1.choices = [
+            Mock(delta=Mock(content="Hello", tool_calls=None), finish_reason=None)
         ]
+        chunk1.model_dump = Mock(
+            return_value={"choices": [{"delta": {"content": "Hello"}}]}
+        )
 
-        # Create a proper async iterator mock
-        class MockAsyncIterator:
-            def __init__(self, items):
-                self.items = items
-                self.index = 0
+        chunk2 = Mock()
+        chunk2.choices = [
+            Mock(delta=Mock(content="!", tool_calls=None), finish_reason="stop")
+        ]
+        chunk2.model_dump = Mock(
+            return_value={"choices": [{"delta": {"content": "!"}}]}
+        )
 
-            def __aiter__(self):
-                return self
+        async def async_generator():
+            yield chunk1
+            yield chunk2
 
-            async def __anext__(self):
-                if self.index >= len(self.items):
-                    raise StopAsyncIteration
-                item = self.items[self.index]
-                self.index += 1
-                return item
+        with patch.object(
+            proxied_tgi_service.llm_client.client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+        ) as mock_create:
+            mock_create.return_value = async_generator()
 
-        # Create a proper streaming response mock
-        class MockStreamResponse:
-            def __init__(self):
-                self.ok = True
-                self.status = 200
-                self.content = MockAsyncIterator(mock_stream_data)
-
-            async def json(self):
-                return {}
-
-            async def text(self):
-                return "OK"
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        # Create a proper session mock
-        class MockStreamSession:
-            def __init__(self):
-                pass
-
-            def post(self, *args, **kwargs):
-                return MockStreamResponse()
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-        with patch("app.tgi.llm_client.aiohttp.ClientSession", MockStreamSession):
             with patch("opentelemetry.trace.get_tracer") as mock_tracer:
                 mock_span = Mock()
                 mock_span.set_attribute = Mock()
@@ -647,9 +587,9 @@ class TestProxiedTGIServiceLLMCalls:
                     chunks.append(chunk)
 
                 assert len(chunks) > 0
-                # Check that the content from mock data appears in chunks
                 full_content = "".join(chunks)
-                assert "Hello" in full_content or "[DONE]" in full_content
+                assert "Hello" in full_content
+                assert "!" in full_content
 
     @pytest.mark.asyncio
     async def test_non_stream_chat_with_tools(self, proxied_tgi_service, mock_tools):

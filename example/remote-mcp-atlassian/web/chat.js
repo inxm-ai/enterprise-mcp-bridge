@@ -77,7 +77,7 @@ export class TGI {
     this.messages = [];
   }
 
-  async send(prompt, options = undefined, onStream = () => {}) {
+  async send(promptOrMessages, options = undefined, onStream = () => {}) {
     let toolChoice = undefined;
     let useWorkflow = undefined;
     let workflowExecutionId = undefined;
@@ -92,7 +92,11 @@ export class TGI {
       workflowExecutionId = options.workflowExecutionId;
     }
 
-    this.messages.push({ role: 'user', content: prompt });
+    if (Array.isArray(promptOrMessages)) {
+      this.messages = promptOrMessages;
+    } else {
+      this.messages.push({ role: 'user', content: promptOrMessages });
+    }
 
     let messages = this.messages.length > 5 ? [this.messages[0], ...this.messages.slice(-4)] : this.messages;
 
@@ -147,14 +151,15 @@ export class TGI {
           try {
             const chunk = JSON.parse(data);
             if (chunk.error) {
-              onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`);
+              onStream(`[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`, {});
               fullContent += `[${chunk.error.http_status_code ?? 500}] ${chunk.error.message}`;
               break;
             }
             const delta = chunk.choices[0].delta;
+            const metadata = chunk.metadata || {};
             if (delta.content) {
               fullContent += delta.content;
-              onStream(delta.content);
+              onStream(delta.content, metadata);
             }
           } catch (error) {
             console.error('Error parsing stream data chunk:', error, 'Chunk:', data);

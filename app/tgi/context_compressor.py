@@ -556,25 +556,23 @@ class AdaptiveCompressor(CompressionStrategy):
                         )
         return request
 
-    def _find_oldest_droppable_message_index(
+    def _find_oldest_droppable_message_span(
         self, request: ChatCompletionRequest
-    ) -> Optional[int]:
-        """Find the oldest message that can be safely dropped."""
-        for idx, message in enumerate(request.messages or []):
+    ) -> Optional[tuple[int, int]]:
+        """Find the oldest message span that can be safely dropped."""
+        messages = request.messages or []
+        for idx, message in enumerate(messages):
             if idx == 0:
                 continue  # keep first message (likely system)
-            if message.role == MessageRole.TOOL:
-                return idx
-        for idx, message in enumerate(request.messages or []):
-            if idx == 0:
-                continue
             if message.role == MessageRole.ASSISTANT and bool(message.tool_calls):
-                return idx
-        for idx, message in enumerate(request.messages or []):
-            if idx == 0:
-                continue
+                end = idx + 1
+                while end < len(messages) and messages[end].role == MessageRole.TOOL:
+                    end += 1
+                return idx, end
+            if message.role == MessageRole.TOOL:
+                return idx, idx + 1
             if getattr(message, "name", None) == "mcp_tool_retry_hint":
-                return idx
+                return idx, idx + 1
         return None
 
     def _drop_oldest_messages(
@@ -584,14 +582,17 @@ class AdaptiveCompressor(CompressionStrategy):
         current_size = self._get_payload_size_from_request(request)
 
         while current_size > max_size and len(request.messages or []) > 1:
-            drop_index = self._find_oldest_droppable_message_index(request)
-            if drop_index is None:
+            drop_span = self._find_oldest_droppable_message_span(request)
+            if drop_span is None:
                 break
-            dropped = request.messages.pop(drop_index)
-            self.logger.debug(
-                f"[AdaptiveCompressor] Dropped message: role={dropped.role}, "
-                f"name={getattr(dropped, 'name', 'N/A')}"
+            start, end = drop_span
+            dropped = request.messages[start:end]
+            del request.messages[start:end]
+            dropped_desc = ", ".join(
+                f"role={msg.role}, name={getattr(msg, 'name', 'N/A')}"
+                for msg in dropped
             )
+            self.logger.debug(f"[AdaptiveCompressor] Dropped messages: {dropped_desc}")
             current_size = self._get_payload_size_from_request(request)
 
         return request

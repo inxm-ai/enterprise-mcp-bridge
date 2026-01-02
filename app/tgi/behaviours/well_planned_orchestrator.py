@@ -34,7 +34,23 @@ todo_response_schema = {
                     "id": {"type": "string"},
                     "name": {"type": "string"},
                     "goal": {"type": "string"},
-                    "needed_info": {"type": ["string", "null"]},
+                    "needed_info": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "null"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "required_from_user": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "context": {"type": ["string", "null"]},
+                                },
+                                "additionalProperties": False,
+                            },
+                        ]
+                    },
                     "expected_result": {"type": ["string", "null"]},
                     "tools": {"type": "array", "items": {"type": "string"}},
                 },
@@ -256,6 +272,72 @@ class WellPlannedOrchestrator:
 
         return _generator()
 
+    def _create_metadata_chunk(
+        self,
+        content: str,
+        metadata: dict,
+        model_name: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+    ) -> str:
+        chunk_dict = {
+            "id": chunk_id or self.llm_client.create_completion_id(),
+            "model": model_name or self.model_name,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": content},
+                    "finish_reason": None,
+                }
+            ],
+            "metadata": metadata,
+        }
+        return f"data: {json.dumps(chunk_dict, ensure_ascii=False)}\n\n"
+
+    def _todo_metadata(self, todo: TodoItem) -> dict:
+        return {
+            "id": todo.id,
+            "name": todo.name,
+            "goal": todo.goal,
+            "needed_info": todo.needed_info,
+            "expected_result": todo.expected_result,
+            "tools": list(todo.tools),
+            "state": getattr(todo.state, "value", str(todo.state)),
+        }
+
+    def _attach_metadata_to_chunk(self, chunk: str, metadata: dict) -> str:
+        if not metadata or not chunk:
+            return chunk
+
+        chunk_str = chunk.strip()
+        if chunk_str == "[DONE]" or chunk_str == "data: [DONE]":
+            return chunk
+
+        if chunk_str.startswith("data:"):
+            payload = chunk_str[len("data:") :].strip()
+        else:
+            return chunk
+
+        if payload == "[DONE]":
+            return chunk
+
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            return chunk
+
+        if not isinstance(parsed, dict):
+            return chunk
+
+        existing = parsed.get("metadata")
+        if isinstance(existing, dict):
+            merged = {**existing, **metadata}
+        else:
+            merged = dict(metadata)
+        parsed["metadata"] = merged
+        return f"data: {json.dumps(parsed, ensure_ascii=False)}\n\n"
+
     def _create_todo_manager(self, todos_json: list) -> TodoManager:
         todo_manager = TodoManager()
         todo_items: List[TodoItem] = []
@@ -382,14 +464,23 @@ class WellPlannedOrchestrator:
                     )
                 )
 
-        if todo.needed_info:
+        needed_info = self._normalize_needed_info(todo.needed_info)
+        if needed_info:
             focused_messages.append(
                 Message(
                     role=MessageRole.USER,
-                    content=f"Needed info: {todo.needed_info}",
+                    content=f"Needed info: {needed_info}",
                 )
             )
         else:
+            context_info = self._normalize_needed_info_context(todo.needed_info)
+            if context_info:
+                focused_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=f"Context: {context_info}",
+                    )
+                )
             focused_messages.append(
                 Message(
                     role=MessageRole.USER,
@@ -415,6 +506,75 @@ class WellPlannedOrchestrator:
         pattern = r"<think>.*?</think>\s*"
         return re.sub(pattern, "", text, flags=re.DOTALL)
 
+    def _normalize_needed_info(self, needed_info: Optional[Any]) -> Optional[str]:
+        if not needed_info:
+            return None
+        if isinstance(needed_info, dict):
+            required = (
+                needed_info.get("required_from_user")
+                or needed_info.get("required")
+                or needed_info.get("from_user")
+                or []
+            )
+            if isinstance(required, str):
+                required = [required]
+            if not isinstance(required, list):
+                required = []
+            required = [
+                str(item).strip()
+                for item in required
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ]
+            if not required:
+                return None
+            return ". ".join(required)
+
+        if isinstance(needed_info, list):
+            required = [
+                str(item).strip()
+                for item in needed_info
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ]
+            if not required:
+                return None
+            return ". ".join(required)
+
+        text = str(needed_info).strip()
+        if not text:
+            return None
+        lowered = text.lower().strip().strip(".")
+        if lowered in {"none", "n/a", "na", "n.a", "null", "no", "not applicable"}:
+            return None
+        return None
+
+    def _normalize_needed_info_context(
+        self, needed_info: Optional[Any]
+    ) -> Optional[str]:
+        if isinstance(needed_info, dict):
+            context = needed_info.get("context") or needed_info.get("from_previous")
+        elif isinstance(needed_info, str):
+            context = needed_info
+        else:
+            return None
+        if isinstance(context, list):
+            context = ". ".join(
+                [str(item).strip() for item in context if str(item).strip()]
+            )
+        if isinstance(context, str):
+            context = context.strip()
+            lowered = context.lower().strip().strip(".")
+            if lowered in {"none", "n/a", "na", "n.a", "null", "no", "not applicable"}:
+                return None
+        return context or None
+
+    def _format_needed_info_question(self, needed_info: str) -> str:
+        text = needed_info.strip()
+        if not text:
+            return ""
+        if "?" in text:
+            return text
+        return f"Before I can continue, I need:\n{text}"
+
     def _strip_tool_call_blocks(
         self, text: str, tool_names: Optional[List[str]]
     ) -> str:
@@ -434,6 +594,119 @@ class WellPlannedOrchestrator:
         text = re.sub(open_tag, "", text, flags=re.IGNORECASE)
         text = re.sub(close_tag, "", text, flags=re.IGNORECASE)
         return text
+
+    def _extract_tag_content(self, text: str, tag: str) -> Optional[str]:
+        match = re.search(
+            rf"<{tag}[^>]*>(?P<content>.*?)</{tag}>",
+            text or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return None
+        content = match.group("content").strip() if match.group("content") else None
+        return content or None
+
+    def _looks_like_question(self, text: str) -> bool:
+        if not text:
+            return False
+        stripped = text.strip()
+        if "?" not in stripped:
+            return False
+        if stripped.startswith("{") or stripped.startswith("["):
+            return False
+        if len(stripped) <= 500:
+            return True
+        lowered = stripped.lower()
+        triggers = (
+            "please",
+            "clarif",
+            "confirm",
+            "specify",
+            "which",
+            "what",
+            "how",
+            "when",
+            "where",
+            "do you",
+            "can you",
+            "could you",
+            "would you",
+        )
+        return any(trigger in lowered for trigger in triggers)
+
+    def _extract_feedback_from_text(
+        self, text: Optional[str], tool_names: List[str]
+    ) -> Optional[str]:
+        if not text:
+            return None
+        cleaned = self._strip_tool_call_blocks(self._strip_think_tags(text), tool_names)
+        tag_content = self._extract_tag_content(cleaned, "user_feedback_needed")
+        if tag_content:
+            return tag_content
+        if self._looks_like_question(cleaned):
+            return cleaned.strip()
+        return None
+
+    def _try_parse_json(self, text: str) -> Optional[Any]:
+        if not isinstance(text, str):
+            return None
+        stripped = text.strip()
+        if not stripped or stripped[0] not in "{[":
+            return None
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return None
+
+    def _extract_feedback_from_result(
+        self, result: Any, tool_names: List[str]
+    ) -> Optional[str]:
+        if result is None:
+            return None
+
+        if isinstance(result, ChatCompletionResponse):
+            choice = result.choices[0] if result.choices else None
+            message = choice.message if choice else None
+            return self._extract_feedback_from_text(
+                message.content if message else None, tool_names
+            )
+
+        if isinstance(result, str):
+            return self._extract_feedback_from_text(result, tool_names)
+
+        if isinstance(result, list):
+            for item in result:
+                found = self._extract_feedback_from_result(item, tool_names)
+                if found:
+                    return found
+            return None
+
+        if isinstance(result, dict):
+            for key in ("user_feedback_needed", "question", "needed_info"):
+                val = result.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+
+            for key in ("response", "answer", "content", "message"):
+                val = result.get(key)
+                if isinstance(val, str):
+                    found = self._extract_feedback_from_text(val, tool_names)
+                    if found:
+                        return found
+                    parsed = self._try_parse_json(val)
+                    if parsed is not None:
+                        found = self._extract_feedback_from_result(parsed, tool_names)
+                        if found:
+                            return found
+
+            tool_results = result.get("tool_results")
+            if isinstance(tool_results, list):
+                for entry in tool_results:
+                    found = self._extract_feedback_from_result(entry, tool_names)
+                    if found:
+                        return found
+
+        return None
 
     def _visible_text_delta(
         self, chunk: str, state: dict, tool_names: List[str]
@@ -528,14 +801,27 @@ class WellPlannedOrchestrator:
             return
 
         final_todo = todos[-1]
+        if final_todo and final_todo.tools:
+            todo_manager.add_todos(
+                [
+                    TodoItem(
+                        id=str(uuid.uuid4()),
+                        name="final-answer",
+                        goal=f"Use only the existing information to answer the user's request: {user_goal}",
+                        needed_info=None,
+                        expected_result="A concise final answer with no tool calls.",
+                        tools=[],
+                    )
+                ]
+            )
+            return
+
         if final_todo and len(todos) > 1:
             final_todo.goal = f"Use only the existing information to answer the user's request: {user_goal}"
             final_todo.expected_result = final_todo.expected_result or (
                 "A concise final answer with no tool calls."
             )
-            final_todo.tools = (
-                []
-            )  # Must not call tools in the last step if there are multiple todos
+            final_todo.tools = []
 
     def _well_planned_streaming(
         self,
@@ -563,10 +849,25 @@ class WellPlannedOrchestrator:
             for idx, todo in enumerate(todos):
                 is_last_todo = idx == len(todos) - 1
                 todo_manager.start_todo(todo.id)
-                yield create_response_chunk(
+                todo_metadata = None if is_last_todo else self._todo_metadata(todo)
+                todo_meta_wrapper = (
+                    {"todo": todo_metadata} if todo_metadata is not None else {}
+                )
+                todo_status_chunk = create_response_chunk(
                     f"mcp-{str(uuid.uuid4())}",
                     f"<think>I marked '{todo.name}' as current todo, and will work on the following goal: {todo.goal}</think>",
                 )
+                yield self._attach_metadata_to_chunk(
+                    todo_status_chunk, todo_meta_wrapper
+                )
+
+                needed_info = self._normalize_needed_info(todo.needed_info)
+                if needed_info:
+                    question = self._format_needed_info_question(needed_info)
+                    todo_manager.finish_todo(todo.id, question)
+                    yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", question)
+                    yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
+                    return
 
                 focused_messages, focused_request = self._build_focused_request(
                     todo_manager,
@@ -607,15 +908,31 @@ class WellPlannedOrchestrator:
                     )
 
                     aggregated = ""
+                    tool_results = []
                     think_extractor = ThinkExtractor()
 
                     async for parsed in read_todo_stream(stream_gen):
                         think_chunk = think_extractor.feed(parsed.content or "")
                         if think_chunk and think_chunk.strip():
-                            yield think_chunk
+                            yield self._attach_metadata_to_chunk(
+                                think_chunk, todo_meta_wrapper
+                            )
 
                         if parsed.content:
                             aggregated += parsed.content
+                        if parsed.tool_result:
+                            tool_result = dict(parsed.tool_result)
+                            content = tool_result.get("content")
+                            if not isinstance(content, str):
+                                try:
+                                    tool_result["content"] = json.dumps(
+                                        content,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                except Exception:
+                                    tool_result["content"] = str(content)
+                            tool_results.append(tool_result)
 
                         if is_last_todo:
                             delta = self._visible_text_delta(
@@ -629,6 +946,7 @@ class WellPlannedOrchestrator:
 
                     # Once the stream completes, turn the aggregated content into
                     # a stored result. If no content was aggregated, mark an error.
+                    result = None
                     if aggregated:
                         try:
                             # Attempt to interpret aggregated as a JSON
@@ -638,7 +956,16 @@ class WellPlannedOrchestrator:
                                 result = aggregated
                         except Exception as exc:
                             result = {"error": str(exc)}
-                    else:
+                    if tool_results:
+                        if isinstance(result, dict):
+                            existing = result.get("tool_results")
+                            if isinstance(existing, list):
+                                existing.extend(tool_results)
+                            else:
+                                result["tool_results"] = tool_results
+                        else:
+                            result = {"response": result, "tool_results": tool_results}
+                    if result is None:
                         result = "No content returned from step."
                 except Exception as exc:
                     result = {"error": str(exc)}
@@ -650,6 +977,24 @@ class WellPlannedOrchestrator:
                     )
                 else:
                     cleaned_result = stringified
+
+                if not is_last_todo:
+                    feedback = self._extract_feedback_from_result(
+                        result, all_tool_names
+                    )
+                    if not feedback and isinstance(cleaned_result, str):
+                        feedback = self._extract_feedback_from_text(
+                            cleaned_result, all_tool_names
+                        )
+                    if feedback:
+                        todo_manager.finish_todo(todo.id, feedback)
+                        yield create_response_chunk(
+                            f"mcp-{str(uuid.uuid4())}", feedback
+                        )
+                        yield create_response_chunk(
+                            f"mcp-{str(uuid.uuid4())}", "[DONE]"
+                        )
+                        return
 
                 todo_manager.finish_todo(todo.id, cleaned_result)
                 visible_accum = visible_state.get("clean", visible_accum)
@@ -664,8 +1009,17 @@ class WellPlannedOrchestrator:
                             )
                             visible_accum = cleaned_result
 
+                metadata_context = (
+                    result if isinstance(result, (dict, list)) else cleaned_result
+                )
                 summary = f"<think>I have completed the todo '{todo.name}'. Result summary: {self._stringify_result(cleaned_result)[:200]}...</think>"
-                yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", summary)
+                summary_metadata = {"context": metadata_context, **todo_meta_wrapper}
+                yield self._create_metadata_chunk(
+                    summary,
+                    summary_metadata,
+                    model_name=request.model or self.model_name,
+                    chunk_id=f"mcp-{str(uuid.uuid4())}",
+                )
 
             # yield the result of the final todo as a last chunk
             final_result = todos[-1].result if todos else "No todos were processed."
@@ -694,6 +1048,12 @@ class WellPlannedOrchestrator:
         for idx, todo in enumerate(todos):
             is_last_todo = idx == len(todos) - 1
             todo_manager.start_todo(todo.id)
+
+            needed_info = self._normalize_needed_info(todo.needed_info)
+            if needed_info:
+                question = self._format_needed_info_question(needed_info)
+                todo_manager.finish_todo(todo.id, question)
+                return self._single_message_response(question, request)
 
             focused_messages, focused_request = self._build_focused_request(
                 todo_manager,
@@ -733,6 +1093,14 @@ class WellPlannedOrchestrator:
                 stored_result = self._strip_tool_call_blocks(
                     self._strip_think_tags(stored_result), all_tool_names
                 )
+            feedback = self._extract_feedback_from_result(result, all_tool_names)
+            if not feedback and isinstance(stored_result, str):
+                feedback = self._extract_feedback_from_text(
+                    stored_result, all_tool_names
+                )
+            if feedback:
+                todo_manager.finish_todo(todo.id, feedback)
+                return self._single_message_response(feedback, request)
             todo_manager.finish_todo(todo.id, stored_result)
 
             results_payload.append(
@@ -807,8 +1175,12 @@ class WellPlannedOrchestrator:
             "the user's goal. Each todo should be specific, build on previous results, avoid "
             "repeating the same tool unless necessary, list "
             "only the tools it needs (using exact names), and include an 'expected_result' "
-            "field with examples of success/failure. Do not repeat information already "
-            "provided by the user in the needed_info field. If no tools are required, use an empty array. "
+            "field with examples of success/failure. Use the 'needed_info' field only for "
+            "user-provided inputs that are missing. If user input is required, set needed_info "
+            "to an object with required_from_user (array of strings). If info should come from "
+            "previous steps/tools, put it in needed_info.context instead of required_from_user. "
+            "If nothing is needed from the user and no context is required, set needed_info to null. "
+            "If no tools are required, use an empty array. "
             "If more then one todo is needed, ensure the final todo delivers a clear user-facing answer. "
             f"Available tools: {tool_list_text}.\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"

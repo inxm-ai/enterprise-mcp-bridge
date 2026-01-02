@@ -12,7 +12,7 @@ from app.tgi.services.tool_service import (
     parse_and_clean_tool_call,
     extract_tool_call_from_streamed_content,
 )
-from app.tgi.models.model_formats import ChatGPTModelFormat, ClaudeModelFormat
+from app.tgi.models.model_formats import ChatGPTModelFormat
 
 
 class DummySession:
@@ -726,33 +726,6 @@ async def test_create_result_message_basic():
     assert msg.content == "result content"
     assert msg.tool_call_id == "abc123"
     assert msg.name == "my_tool"
-
-
-@pytest.mark.asyncio
-async def test_create_result_message_claude_xml():
-    service = ToolService(model_format=ClaudeModelFormat())
-    tool_result = {
-        "content": "42",
-        "tool_call_id": "id789",
-        "name": "sum_numbers",
-    }
-    msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
-    assert isinstance(msg, Message)
-    assert msg.role == MessageRole.ASSISTANT
-    assert msg.tool_call_id == "id789"
-    assert msg.name == "sum_numbers"
-    assert msg.content == "<sum_numbers_result>42</sum_numbers_result><stop/>"
-
-
-@pytest.mark.asyncio
-async def test_create_result_message_claude_xml_missing_fields():
-    service = ToolService(model_format=ClaudeModelFormat())
-    tool_result = {}
-    msg = await service.create_result_message(ToolCallFormat.CLAUDE_XML, tool_result)
-    assert msg.role == MessageRole.ASSISTANT
-    assert msg.content == "<None_result></None_result><stop/>"
-    assert msg.tool_call_id is None
-    assert msg.name is None
 
 
 @pytest.mark.asyncio

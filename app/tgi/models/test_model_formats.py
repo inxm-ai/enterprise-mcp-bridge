@@ -1,9 +1,6 @@
-import pytest
 
-from app.tgi import model_formats
 from app.tgi.models.model_formats import (
     ChatGPTModelFormat,
-    ClaudeModelFormat,
     get_model_format_for,
 )
 from app.tgi.models import ChatCompletionRequest
@@ -27,33 +24,9 @@ def test_chatgpt_model_format_preserves_control_strings():
         assert req.tool_choice == val.lower()
 
 
-@pytest.mark.parametrize(
-    "env_value,expected",
-    [
-        ("", ChatGPTModelFormat),
-        ("chat-gpt/v1", ChatGPTModelFormat),
-        ("claude/v1", ClaudeModelFormat),
-    ],
-)
-def test_get_model_format_respects_env(monkeypatch, env_value, expected):
-    monkeypatch.setattr(model_formats, "TGI_MODEL_FORMAT", env_value)
-    monkeypatch.setattr(model_formats, "TOOL_INJECTION_MODE", "openai")
-
+def test_get_model_format_always_returns_chatgpt():
     fmt = get_model_format_for()
-    assert isinstance(fmt, expected)
-
-
-def test_get_model_format_prefers_model_name(monkeypatch):
-    monkeypatch.setattr(model_formats, "TGI_MODEL_FORMAT", "")
-    monkeypatch.setattr(model_formats, "TOOL_INJECTION_MODE", "openai")
+    assert isinstance(fmt, ChatGPTModelFormat)
 
     fmt = get_model_format_for("claude-3-haiku")
-    assert isinstance(fmt, ClaudeModelFormat)
-
-
-def test_legacy_tool_injection_mode(monkeypatch):
-    monkeypatch.setattr(model_formats, "TGI_MODEL_FORMAT", "")
-    monkeypatch.setattr(model_formats, "TOOL_INJECTION_MODE", "claude")
-
-    fmt = get_model_format_for()
-    assert isinstance(fmt, ClaudeModelFormat)
+    assert isinstance(fmt, ChatGPTModelFormat)

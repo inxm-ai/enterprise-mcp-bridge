@@ -117,6 +117,134 @@ def _parse_stream_json(chunk: str):
         return None
 
 
+def test_enforce_final_answer_appends_when_last_todo_has_tools():
+    class DummyLLM:
+        def create_completion_id(self):
+            return "dummy"
+
+        def create_usage_stats(self):
+            return {}
+
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=DummyLLM(),
+        prompt_service=None,
+        tool_service=None,
+        non_stream_chat_with_tools_callable=lambda *a, **k: None,
+        stream_chat_with_tools_callable=lambda *a, **k: None,
+        tool_resolution=None,
+        logger_obj=None,
+        model_name="test-model",
+    )
+
+    todo_manager = TodoManager()
+    todo_manager.add_todos(
+        [
+            TodoItem(
+                id="t1",
+                name="get-account",
+                goal="Fetch account metadata",
+                tools=["get_account"],
+            ),
+            TodoItem(
+                id="t2",
+                name="query-jira",
+                goal="Query Jira for open issues",
+                tools=["search_jira"],
+            ),
+        ]
+    )
+
+    orchestrator._enforce_final_answer_step(todo_manager, "List my open issues")
+
+    todos = todo_manager.list_todos()
+    assert len(todos) == 3
+    assert todos[-1].name == "final-answer"
+    assert todos[-1].tools == []
+    assert todos[-2].name == "query-jira"
+    assert todos[-2].tools == ["search_jira"]
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_includes_tool_results_in_next_step():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "search-issues",
+            "goal": "Search for issues",
+            "needed_info": None,
+            "tools": ["search_issues"],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Summarize issues",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            tool_result_event = {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_result": {
+                                "name": "search_issues",
+                                "content": '{"issues":[{"key":"ISSUE-1"}]}',
+                            }
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+            yield "data: " + json.dumps(tool_result_event) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        history = "\n".join(
+            [m.content or "" for m in messages if m.role == MessageRole.ASSISTANT]
+        )
+        assert "search_issues" in history
+        assert "ISSUE-1" in history
+
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "Final answer"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List issues")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    async for _chunk in gen:
+        pass
+
+
 @pytest.mark.asyncio
 async def test_well_planned_streaming_flow():
     service = ProxiedTGIService()
@@ -180,6 +308,378 @@ async def test_well_planned_streaming_flow():
     choice0 = first_obj["choices"][0]
     assert "delta" in choice0
     assert "content" in choice0["delta"]
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_stops_for_needed_info():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "needs-input",
+            "goal": "Search for issues",
+            "needed_info": {
+                "required_from_user": ["Confirm what counts as open"],
+                "context": None,
+            },
+            "tools": ["search_issues"],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Summarize issues",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "should not run"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List open issues")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] == 0
+    contents = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                contents.append(content)
+    assert any("Confirm what counts as open" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_ignores_previous_step_needed_info():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "fetch-cloud",
+            "goal": "Fetch cloudId",
+            "needed_info": None,
+            "tools": ["get_cloud"],
+        },
+        {
+            "id": "t2",
+            "name": "query-issues",
+            "goal": "Query open issues",
+            "needed_info": {
+                "required_from_user": [],
+                "context": "cloudId from previous step. Optional: confirm preferred JQL.",
+            },
+            "tools": ["search_issues"],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "ok"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List issues")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] >= 1
+    contents = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                contents.append(content)
+    assert any(c == "ok" for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_ignores_todo_reference_needed_info():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "fetch-cloud",
+            "goal": "Fetch cloudId",
+            "needed_info": None,
+            "tools": ["get_cloud"],
+        },
+        {
+            "id": "t2",
+            "name": "query-issues",
+            "goal": "Query open issues",
+            "needed_info": {"required_from_user": [], "context": "cloudId from todo_1"},
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "ok"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List issues")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] == 2
+    contents = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                contents.append(content)
+    assert not any("Before I can continue" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_ignores_crawl_needed_info():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "crawl-site",
+            "goal": "Crawl site",
+            "needed_info": None,
+            "tools": ["crawl"],
+        },
+        {
+            "id": "t2",
+            "name": "summarize",
+            "goal": "Summarize",
+            "needed_info": {
+                "required_from_user": [],
+                "context": (
+                    "Content from the crawled blog including posts, "
+                    "biographical information, and any personal or professional details"
+                ),
+            },
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "ok"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Summarize the blog")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] == 2
+    contents = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                contents.append(content)
+    assert not any("Before I can continue" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_stops_on_user_feedback_tag():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "step1",
+            "goal": "Do step one",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "step2",
+            "goal": "Do step two",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "extra"}, "index": 0}]}
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        yield "data: " + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "<user_feedback_needed>Please choose a project</user_feedback_needed>"
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Please do X")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] == 1
+    contents = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                contents.append(content)
+    assert any("Please choose a project" in c for c in contents)
 
 
 @pytest.mark.asyncio

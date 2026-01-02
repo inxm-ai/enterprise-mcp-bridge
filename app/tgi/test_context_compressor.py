@@ -421,6 +421,71 @@ class TestAdaptiveCompressor:
         assert "drop" in stats.metadata.get("steps_used", [])
 
     @pytest.mark.asyncio
+    async def test_drop_step_preserves_tool_call_pairs(self):
+        """Ensure drop step does not orphan tool calls."""
+        compressor = AdaptiveCompressor(chunk_tokens=1000, window_size=50)
+        messages = [
+            Message(role=MessageRole.SYSTEM, content="System"),
+            Message(role=MessageRole.USER, content="User"),
+            Message(
+                role=MessageRole.ASSISTANT,
+                content="Calling tools",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        function=ToolCallFunction(name="tool_a", arguments="{}"),
+                    ),
+                    ToolCall(
+                        id="call_2",
+                        function=ToolCallFunction(name="tool_b", arguments="{}"),
+                    ),
+                ],
+            ),
+            Message(
+                role=MessageRole.TOOL,
+                content="tool_result_" + ("a" * 200),
+                tool_call_id="call_1",
+            ),
+            Message(
+                role=MessageRole.TOOL,
+                content="tool_result_" + ("b" * 200),
+                tool_call_id="call_2",
+            ),
+            Message(role=MessageRole.USER, content="Follow up"),
+        ]
+        request = ChatCompletionRequest(messages=messages)
+        request_without_first_tool = ChatCompletionRequest(messages=list(messages))
+        request_without_first_tool.messages.pop(3)
+        original_size = compressor._get_payload_size_from_request(request)
+        size_without_first_tool = compressor._get_payload_size_from_request(
+            request_without_first_tool
+        )
+        max_size = size_without_first_tool + 1
+        assert max_size < original_size
+
+        async def summarize_fn(base_request, content, access_token, outer_span):
+            return content
+
+        compressed, _stats = await compressor.compress(
+            request, max_size=max_size, summarize_fn=summarize_fn
+        )
+
+        for idx, message in enumerate(compressed.messages or []):
+            if message.role != MessageRole.ASSISTANT or not message.tool_calls:
+                continue
+            tool_ids = [tc.id for tc in message.tool_calls if tc.id]
+            if not tool_ids:
+                continue
+            response_ids = []
+            for next_msg in compressed.messages[idx + 1 :]:
+                if next_msg.role != MessageRole.TOOL:
+                    break
+                if next_msg.tool_call_id:
+                    response_ids.append(next_msg.tool_call_id)
+            for tool_id in tool_ids:
+                assert tool_id in response_ids
+
+    @pytest.mark.asyncio
     async def test_compression_ratio_calculation(self, compressor, mock_summarize_fn):
         """Test that compression ratio is calculated correctly."""
         request = self._create_complex_request()

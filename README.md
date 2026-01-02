@@ -537,7 +537,7 @@ Example
 ```sh
 export EFFECT_TOOLS='add'
 export TGI_URL='https://api.example.com/v1'
-export TGI_API_TOKEN="your_api_token"
+export TGI_TOKEN="your_api_token"
 uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
 curl -X POST http://localhost:8000/tools/add \
   -H 'Content-Type: application/json' \
@@ -644,8 +644,8 @@ curl -b cookies.txt \
 ### Enable agent endpoints
 Set the following environment variables to expose OpenAI-compatible agent endpoints:
 
-- `TGI_API_URL` – Base URL of your OpenAI-compatible endpoint.
-- `TGI_API_TOKEN` – Optional API token if the provider requires authentication.
+- `TGI_URL` – Base URL of your OpenAI-compatible endpoint.
+- `TGI_TOKEN` – Optional API token if the provider requires authentication.
 - `TGI_MODEL_NAME` – Default model name used for completions.
 
 ### Endpoints
@@ -664,7 +664,7 @@ It is not a full-featured orchestration engine, but it is useful for coordinatin
 You can let the bridge orchestrate simple multi-agent workflows. Configure:
 - `WORKFLOWS_PATH`: Directory containing workflow JSON files (one per file).
 - `WORKFLOW_DB_PATH` (optional): SQLite file for execution state (defaults to `<WORKFLOWS_PATH>/workflow_state.db`).
-- Existing agent settings (`TGI_URL`, `TGI_API_TOKEN`, `TGI_MODEL_NAME`) still apply for LLM calls.
+- Existing agent settings (`TGI_URL`, `TGI_TOKEN`, `TGI_MODEL_NAME`) still apply for LLM calls.
 
 Each workflow file must include `flow_id`, `root_intent`, and an ordered `agents` list, for example:
 ```json
@@ -988,7 +988,7 @@ export GENERATED_WEB_PATH="/data/generated-apps"
 
 # Required: LLM endpoint (already required for agent mode)
 export TGI_URL="https://api.openai.com/v1"
-export TGI_API_TOKEN="your-api-token"
+export TGI_TOKEN="your-api-token"
 export TGI_MODEL_NAME="gpt-4o"
 ```
 

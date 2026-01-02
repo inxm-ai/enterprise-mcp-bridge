@@ -741,21 +741,20 @@ class ToolService:
                     )
                     tool_results.append(error_message)
                 parsed_errors = self._parse_json_array_from_message(error_msg)
-                if tool_call_format != ToolCallFormat.CLAUDE_XML:
-                    user_asks_for_correction = Message(
-                        role=MessageRole.USER,
-                        name="mcp_tool_retry_hint",
-                        content=(
-                            self._format_errors(parsed_errors)
-                            if parsed_errors
-                            else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {getattr(tool_call.function, 'name', 'unknown')} with the corrected arguments again."
-                        ),
+                user_asks_for_correction = Message(
+                    role=MessageRole.USER,
+                    name="mcp_tool_retry_hint",
+                    content=(
+                        self._format_errors(parsed_errors)
+                        if parsed_errors
+                        else f"Please fix the error, or use any other available tools you have to get the required information, and call the tool {getattr(tool_call.function, 'name', 'unknown')} with the corrected arguments again."
+                    ),
+                )
+                if user_asks_for_correction.content:
+                    user_asks_for_correction.content = _compact_text(
+                        user_asks_for_correction.content
                     )
-                    if user_asks_for_correction.content:
-                        user_asks_for_correction.content = _compact_text(
-                            user_asks_for_correction.content
-                        )
-                    tool_results.append(user_asks_for_correction)
+                tool_results.append(user_asks_for_correction)
                 success = False
                 break
 

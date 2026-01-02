@@ -17,9 +17,7 @@ HOST = os.environ.get("HOSTNAME", "")
 PORT = os.environ.get("PORT", "")
 
 TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", os.environ.get("DEFAULT_MODEL", ""))
-TGI_MODEL_FORMAT = os.getenv("TGI_MODEL_FORMAT", "")
 
-TOOL_INJECTION_MODE = os.getenv("TOOL_INJECTION_MODE", "openai")
 TOOL_CHUNK_SIZE = int(os.getenv("TOOL_CHUNK_SIZE", "10000"))
 AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 

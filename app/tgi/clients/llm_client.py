@@ -6,9 +6,8 @@ import logging
 import os
 import time
 import uuid
-import re
 from typing import AsyncGenerator, List, Optional
-import aiohttp
+from openai import AsyncOpenAI, APIConnectionError
 from app.vars import LLM_MAX_PAYLOAD_BYTES, TGI_MODEL_NAME
 from opentelemetry import trace
 
@@ -26,7 +25,6 @@ from app.utils import mask_token
 from fastapi import HTTPException
 
 from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
-from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.context_compressor import get_default_compressor
 
 logger = logging.getLogger("uvicorn.error")
@@ -57,79 +55,35 @@ class LLMClient:
         else:
             self.logger.info("[LLMClient] No authentication token configured")
 
-    def _get_headers(self, access_token="fake") -> dict[str, str]:
-        """Get headers for API requests."""
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "mcp-rest-server/1.0",
-        }
+        self.client = AsyncOpenAI(
+            api_key=self.tgi_token or "fake-token", base_url=self.tgi_url
+        )
 
-        if self.tgi_token:
-            headers["Authorization"] = f"Bearer {self.tgi_token}"
-        else:
-            headers["Authorization"] = f"Bearer {access_token}"
-
-        return headers
-
-    def _serialize_payload(self, payload: dict) -> str:
-        """Serialize payload to JSON."""
+    def _payload_size(self, request: ChatCompletionRequest) -> int:
+        """Calculate payload size in bytes."""
         import json
 
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return len(json.dumps(request.model_dump(exclude_none=True)).encode("utf-8"))
 
-    def _payload_size(self, serialized_payload: str) -> int:
-        """Calculate payload size in bytes."""
-        return len(serialized_payload.encode("utf-8"))
+    def _sanitize_message_contents(self, request: ChatCompletionRequest) -> None:
+        """Ensure all message contents are strings to satisfy API validation."""
+        for message in request.messages or []:
+            if message.content is None:
+                message.content = ""
 
-    def _filter_llm_payload(self, payload: dict) -> dict:
-        """
-        Remove non-LLM fields from the outgoing payload to avoid API errors.
-        """
-        payload.pop("persist_inner_thinking", None)
-        return payload
-
-    def _normalize_schema_name(self, name: str) -> str:
-        cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", (name or "").strip()).strip("_")
-        if not cleaned:
-            return "response_schema"
-        return cleaned[:64]
-
-    def _ensure_json_schema_name(self, payload: dict) -> None:
-        response_format = payload.get("response_format")
-        if not isinstance(response_format, dict):
-            return
-        if response_format.get("type") != "json_schema":
-            return
-        json_schema = response_format.get("json_schema")
-        if not isinstance(json_schema, dict):
-            return
-        if isinstance(json_schema.get("schema"), dict):
-            schema = json_schema["schema"]
-            name = json_schema.get("name")
-            if not (isinstance(name, str) and name.strip()):
-                candidate = (
-                    schema.get("title")
-                    or schema.get("$id")
-                    or schema.get("id")
-                    or "response_schema"
-                )
-                json_schema["name"] = self._normalize_schema_name(str(candidate))
-            response_format["json_schema"] = json_schema
-            return
-
-        candidate = (
-            json_schema.get("name")
-            or json_schema.get("title")
-            or json_schema.get("$id")
-            or json_schema.get("id")
-            or "response_schema"
-        )
-        normalized = self._normalize_schema_name(str(candidate))
-        response_format["json_schema"] = {"name": normalized, "schema": json_schema}
+    def _build_request_params(self, request: ChatCompletionRequest) -> dict:
+        """Build OpenAI request params, removing invalid tool fields."""
+        self._sanitize_message_contents(request)
+        params = request.model_dump(exclude_none=True)
+        if not params.get("tools"):
+            params.pop("tool_choice", None)
+            params.pop("tools", None)
+        params.pop("persist_inner_thinking", None)
+        return params
 
     async def _prepare_payload(
         self, request: ChatCompletionRequest, access_token: str = ""
-    ) -> tuple[dict, str, int]:
+    ) -> ChatCompletionRequest:
         """
         Prepare and compress payload if needed using adaptive compression strategy.
 
@@ -138,14 +92,17 @@ class LLMClient:
             access_token: Access token for summarization operations
 
         Returns:
-            Tuple of (payload_dict, serialized_payload, payload_size)
+            ChatCompletionRequest
         """
-        payload = self._generate_llm_payload(request)
-        serialized = self._serialize_payload(payload)
-        size = self._payload_size(serialized)
+        # Ensure model is set
+        if not request.model:
+            request.model = TGI_MODEL_NAME
+        self._sanitize_message_contents(request)
+
+        size = self._payload_size(request)
 
         if size <= LLM_MAX_PAYLOAD_BYTES:
-            return payload, serialized, size
+            return request
 
         # Payload exceeds limit, apply compression
         self.logger.warning(
@@ -162,9 +119,7 @@ class LLMClient:
         )
         request = compressed_request
 
-        payload = self._generate_llm_payload(request)
-        serialized = self._serialize_payload(payload)
-        size = self._payload_size(serialized)
+        size = self._payload_size(request)
 
         self.logger.info(f"[LLMClient] Compression result: {stats.summary()}")
 
@@ -174,27 +129,7 @@ class LLMClient:
                 detail=f"LLM payload size {size} remains above limit {LLM_MAX_PAYLOAD_BYTES} after compression",
             )
 
-        return payload, serialized, size
-
-    def _generate_llm_payload(self, request: ChatCompletionRequest) -> dict:
-        """Generate the payload for the LLM API request."""
-
-        self.model_format.prepare_request(request)
-
-        payload = self._filter_llm_payload(request.model_dump(exclude_none=True))
-        self._ensure_json_schema_name(payload)
-
-        # tool_choice is only valid when tools are specified
-        # OpenAI API returns 400 error if tool_choice is sent without tools
-        if not payload.get("tools"):
-            payload.pop("tool_choice", None)
-
-        # model parameter must not be empty string
-        # OpenAI API returns 400 error "you must provide a model parameter"
-        if payload.get("model") == "" or payload.get("model") is None:
-            payload["model"] = TGI_MODEL_NAME
-
-        return payload
+        return request
 
     def create_completion_id(self) -> str:
         """Generate a unique completion ID."""
@@ -221,122 +156,38 @@ class LLMClient:
         try:
             # Prepare payload with size-aware compression
             self.logger.info("[LLMClient] Preparing payload for streaming request")
-            payload, serialized_payload, payload_size = await self._prepare_payload(
-                request, access_token
-            )
-            self.logger.debug(
-                "[LLMClient] Prepared streaming payload (bytes=%s, messages=%s)",
-                payload_size,
-                len(payload.get("messages", [])),
-            )
+            request = await self._prepare_payload(request, access_token)
 
-            self.logger.debug(
-                f"[LLMClient] Opening HTTP session to {self.tgi_url}/chat/completions"
-            )
-            async with aiohttp.ClientSession() as session:
-                self.logger.debug("[LLMClient] Sending POST request to LLM")
-                async with session.post(
-                    f"{self.tgi_url}/chat/completions",
-                    headers=self._get_headers(access_token),
-                    data=serialized_payload,
-                ) as response:
-                    self.logger.debug(
-                        f"[LLMClient] Received response, status={response.status}"
-                    )
-                    self.logger.debug(
-                        f"[LLMClient] Response headers: {dict(getattr(response, 'headers', {}))}"
-                    )
-                    self.logger.debug(
-                        f"[LLMClient] Response content-type: {getattr(response, 'content_type', None)}"
-                    )
-                    self.logger.debug(
-                        f"[LLMClient] Response content-length: {getattr(response, 'content_length', None)}"
-                    )
+            self.logger.debug(f"[LLMClient] Opening stream to {self.tgi_url}")
 
-                    if not response.ok:
-                        error_text = await response.text()
-                        error_msg = f"LLM API error: {response.status} {error_text}"
-                        self.logger.error(f"[LLMClient] {error_msg}")
-                        self.logger.info(f"[LLMClient] Payload: {serialized_payload}")
-                        if parent_span is not None:
-                            parent_span.set_attribute("error", True)
-                            parent_span.set_attribute("error.message", error_msg)
+            # Convert Pydantic model to dict and filter invalid tool fields
+            params = self._build_request_params(request)
+            params["stream"] = True
 
-                        # Return error as streaming response
-                        error_chunk = ChatCompletionChunk(
-                            id=self.create_completion_id(),
-                            created=int(time.time()),
-                            model=request.model or TGI_MODEL_NAME,
-                            choices=[
-                                Choice(
-                                    index=0,
-                                    delta=DeltaMessage(content=f"Error: {error_msg}"),
-                                    finish_reason="stop",
-                                )
-                            ],
-                        )
-                        yield f"data: {error_chunk.model_dump_json()}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
+            stream = await self.client.chat.completions.create(**params)
 
-                    # Stream chunks immediately without buffering
-                    # Ensure proper SSE format by adding \n if not already present
-                    chunk_count = 0
-                    self.logger.info(
-                        f"[LLMClient] Response OK, starting to stream chunks (model={request.model})"
-                    )
-                    self.logger.debug(
-                        "[LLMClient] About to iterate over response.content"
-                    )
-                    self.logger.debug(
-                        f"[LLMClient] Response content object: {response.content}"
-                    )
+            async for chunk in stream:
+                # chunk is a ChatCompletionChunk object from openai library
+                # We need to convert it to the format expected by the frontend (SSE)
+                # The frontend expects: data: {json}\n\n
 
-                    async for chunk in response.content:
-                        self.logger.debug(
-                            "[LLMClient] Received raw chunk from HTTP response"
-                        )
-                        chunk_str = chunk.decode("utf-8")
-                        if chunk_str:
-                            chunk_count += 1
-                            if chunk_count == 1:
-                                self.logger.debug(
-                                    f"[LLMClient] Received first chunk from LLM, length={len(chunk_str)}"
-                                )
-                            if chunk_count % 10 == 0:
-                                self.logger.info(
-                                    f"[LLMClient] Received {chunk_count} chunks so far"
-                                )
-                            self.logger.debug(
-                                f"[LLMClient] Chunk {chunk_count}: {chunk_str[:100]}..."
-                            )
-                            # Ensure proper SSE format with \n\n terminator
-                            # Most chunks will end with \n, so we add one more \n
-                            if not chunk_str.endswith("\n\n"):
-                                if chunk_str.endswith("\n"):
-                                    chunk_str += "\n"
-                                else:
-                                    chunk_str += "\n\n"
-                            yield chunk_str
-                        else:
-                            self.logger.debug(
-                                "[LLMClient] Received empty chunk, skipping"
-                            )
+                # Convert openai chunk to dict
+                chunk_dict = chunk.model_dump(mode="json", exclude_none=True)
 
-                    self.logger.info(
-                        f"[LLMClient] Streaming completed, total chunks={chunk_count}"
-                    )
+                # Yield formatted SSE
+                import json
+
+                yield f"data: {json.dumps(chunk_dict)}\n\n"
+
+            yield "data: [DONE]\n\n"
 
         except GeneratorExit:
-            # Handle generator closure (e.g., client disconnect or normal completion)
-            # This is normal when streaming completes or when starting a new iteration in tool execution
             self.logger.debug(
                 "[LLMClient] Generator closed - normal completion or iteration change"
             )
-            # Don't re-raise - this is expected behavior during tool execution iterations
             return
 
-        except ConnectionError as e:
+        except APIConnectionError as e:
             error_msg = "Connection error occurred while streaming from LLM."
             self.logger.error(f"[LLMClient] {error_msg}: {str(e)}")
             raise
@@ -361,8 +212,6 @@ class LLMClient:
             yield f"data: {error_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
 
-        # Method end - no span cleanup needed
-
     async def non_stream_completion(
         self,
         request: ChatCompletionRequest,
@@ -375,46 +224,23 @@ class LLMClient:
             span.set_attribute("llm.model", request.model or TGI_MODEL_NAME)
 
             try:
-                # Convert request to dict for JSON serialization, ensure stream=False
                 request.stream = False
-                payload, serialized_payload, payload_size = await self._prepare_payload(
-                    request, access_token
-                )
-                self.logger.debug(
-                    "[LLMClient] Prepared non-stream payload (bytes=%s, messages=%s)",
-                    payload_size,
-                    len(payload.get("messages", [])),
-                )
+                request = await self._prepare_payload(request, access_token)
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.tgi_url}/chat/completions",
-                        headers=self._get_headers(access_token),
-                        data=serialized_payload,
-                    ) as response:
+                params = self._build_request_params(request)
 
-                        if not response.ok:
-                            error_text = await response.text()
-                            error_msg = f"LLM API error: {response.status} {error_text}"
-                            self.logger.error(f"[LLMClient] {error_msg}")
-                            span.set_attribute("error", True)
-                            span.set_attribute("error.message", error_msg)
-                            raise HTTPException(
-                                status_code=response.status, detail=error_msg
-                            )
+                response = await self.client.chat.completions.create(**params)
 
-                        # Parse response
-                        response_data = await response.json()
-                        return ChatCompletionResponse(**response_data)
+                # Convert openai ChatCompletion to our ChatCompletionResponse
+                return ChatCompletionResponse(**response.model_dump(mode="json"))
 
-            except HTTPException:
-                raise
             except Exception as e:
-                error_msg = f"Error calling LLM: {str(e)}"
-                self.logger.error(f"[LLMClient] {error_msg}", exc_info=True)
+                self.logger.error(
+                    f"[LLMClient] Error in non-stream completion: {e}", exc_info=True
+                )
                 span.set_attribute("error", True)
                 span.set_attribute("error.message", str(e))
-                raise HTTPException(status_code=500, detail=error_msg)
+                raise
 
     async def summarize_conversation(
         self,
@@ -436,15 +262,9 @@ class LLMClient:
         """
 
         def stringify_messages(messages: List[Message]) -> str:
-            return "\n".join(
-                [
-                    f"## {message.role.value.capitalize()}\n{message.content}"
-                    for message in messages
-                    if message.content and message.role != MessageRole.SYSTEM
-                ]
-            )
+            return "\n".join([f"{m.role}: {m.content}" for m in messages])
 
-        await self.ask(
+        return await self.ask(
             base_prompt="# System Prompt: Summarization Expert\n\nYou are a **summarization expert**. Your task is to read the **user's question** and the **assistant's reply** (which may include tool outputs), and then produce a concise, accurate summary of the reply that directly addresses the user's question.  \n\n---\n\n## Key Instructions\n\n### 1. Stay Aligned with the User's Question\n- Only summarize the information that is relevant to what the user asked.  \n- If the assistant's reply contains extraneous content (e.g., HTML markup in emails, raw metadata, or formatting noise), **ignore it** unless the user explicitly requested it.  \n\n### 2. Context-Sensitive Relevance\n- If the user asked about the *content* (e.g., “Summarize the email”), focus only on the meaningful text.  \n- If the user asked about *structure or metadata* (e.g., “Which senders use HTML emails?”), then the presence of HTML or metadata details is essential and should be included in the summary.  \n\n### 3. Clarity & Brevity\n- Rewrite in plain, natural language.  \n- Strip out technical noise, boilerplate, or irrelevant tool artifacts.  \n- Preserve essential details (facts, names, actions, outcomes).  \n\n### 4. Prioritization\n- Always privilege the **user's intent** over the assistant's full reply.  \n- Keep summaries **short but complete**: capture the key points, not every detail.  \n\n---\n\n## Examples\n\n- **User asks:** “Summarize this email.”  \n  - **Assistant reply (tool output):** Includes full HTML source.  \n  - **Your summary:** Only the human-readable body text of the email.  \n\n- **User asks:** “Which senders use HTML emails?”  \n  - **Assistant reply:** Includes headers and HTML details.\n  - **Your summary:** Mention the senders and the fact they use HTML formatting.\n",
             base_request=base_request,
             question=stringify_messages(conversation),
@@ -471,10 +291,18 @@ class LLMClient:
         Returns:
             Summarized text
         """
-        await self.ask(
-            base_prompt="# System Prompt: Summarization Expert\n\nYou are a **summarization expert**. Your task is to read the **user's question** and the **assistant's reply** (which may include tool outputs), and then produce a concise, accurate summary of the reply that directly addresses the user's question.  \n\n---\n\n## Key Instructions\n\n### 1. Stay Aligned with the User's Question\n- Only summarize the information that is relevant to what the user asked.  \n- If the assistant's reply contains extraneous content (e.g., HTML markup in emails, raw metadata, or formatting noise), **ignore it** unless the user explicitly requested it.  \n\n### 2. Context-Sensitive Relevance\n- If the user asked about the *content* (e.g., “Summarize the email”), focus only on the meaningful text.  \n- If the user asked about *structure or metadata* (e.g., “Which senders use HTML emails?”), then the presence of HTML or metadata details is essential and should be included in the summary.  \n\n### 3. Clarity & Brevity\n- Rewrite in plain, natural language.  \n- Strip out technical noise, boilerplate, or irrelevant tool artifacts.  \n- Preserve essential details (facts, names, actions, outcomes).  \n\n### 4. Prioritization\n- Always privilege the **user's intent** over the assistant's full reply.  \n- Keep summaries **short but complete**: capture the key points, not every detail.  \n\n---\n\n## Examples\n\n- **User asks:** “Summarize this email.”  \n  - **Assistant reply (tool output):** Includes full HTML source.  \n  - **Your summary:** Only the human-readable body text of the email.  \n\n- **User asks:** “Which senders use HTML emails?”  \n  - **Assistant reply:** Includes headers and HTML details.\n  - **Your summary:** Mention the senders and the fact they use HTML formatting.\n",
+        return await self.ask(
+            base_prompt=(
+                "# System Prompt: Content Summarization\n\n"
+                "You are a **summarization expert**. Summarize the content provided by "
+                "the user. Preserve key facts, identifiers, lists, tables, and any "
+                "structured data. If the content includes JSON or other structured "
+                "data, keep the structure and retain all items; do not invent new "
+                "data or claim data is missing. Use concise, plain language when "
+                "summarizing narrative text.\n"
+            ),
             base_request=base_request,
-            assistant_statement=content,
+            question=content,
             access_token=access_token,
             outer_span=outer_span,
         )
@@ -515,22 +343,18 @@ class LLMClient:
                 Message(role=MessageRole.ASSISTANT, content=assistant_statement)
             )
 
-        llm_request = ChatCompletionRequest(
+        request = ChatCompletionRequest(
+            model=base_request.model,
             messages=messages_history,
-            model=base_request.model or TGI_MODEL_NAME,
-            stream=True,
-            temperature=base_request.temperature,
-            max_tokens=base_request.max_tokens,
-            top_p=base_request.top_p,
+            stream=False,
         )
 
-        llm_stream_generator = self.stream_completion(
-            llm_request, access_token, outer_span
-        )
+        response = await self.non_stream_completion(request, access_token, outer_span)
 
-        result = ""
-        async with chunk_reader(llm_stream_generator) as reader:
-            async for content_piece in reader.as_str():
-                result += content_piece
+        # Handle response which is now a dict
+        if isinstance(response, dict):
+            choices = response.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "")
 
-        return result
+        return ""

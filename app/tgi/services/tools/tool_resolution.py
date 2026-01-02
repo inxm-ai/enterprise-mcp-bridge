@@ -4,12 +4,9 @@ Tool resolution module for handling different tool call formats from various AI 
 This module provides a unified way to detect, parse, and combine tool calls from different
 formats including:
 - OpenAI-style tool calls in JSON format
-- Claude-style XML tags (<function_name>, <create_entities>, etc.)
-- Mixed formats and edge cases
 """
 
 import json
-import re
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -22,8 +19,6 @@ class ToolCallFormat(Enum):
     """Enum representing different tool call formats."""
 
     OPENAI_JSON = "openai_json"
-    CLAUDE_XML = "claude_xml"
-    MIXED = "mixed"
     UNKNOWN = "unknown"
 
 
@@ -44,27 +39,6 @@ class ToolResolutionStrategy:
 
     def __init__(self):
         self.logger = logger
-        self._xml_tag_patterns = [
-            # Generic function call patterns
-            # Allow tag names with non-alpha characters (e.g. create-entities, create+entity)
-            r"<([^>]+)>(.*?)</\1>",
-            # Function call with explicit arguments
-            r'<function_calls?>\s*<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>\s*</function_calls?>',
-        ]
-        # Tags that are part of workflow control flow and should never be treated as tools
-        self._non_tool_tags = {
-            "think",
-            "reasoning",
-            "analysis",
-            "p",
-            "div",
-            "span",
-            "invoke",
-            "passthrough",
-            "user_feedback_needed",
-            "reroute",
-            "no_reroute",
-        }
 
     def detect_format(
         self, content: str, tool_call_chunks: Optional[Dict] = None
@@ -82,51 +56,16 @@ class ToolResolutionStrategy:
         has_openai_format = bool(tool_call_chunks) or self._has_openai_json_format(
             content
         )
-        has_claude_format = self._has_claude_xml_format(content)
 
-        if has_openai_format and has_claude_format:
-            return ToolCallFormat.MIXED
-        elif has_openai_format:
+        if has_openai_format:
             return ToolCallFormat.OPENAI_JSON
-        elif has_claude_format:
-            return ToolCallFormat.CLAUDE_XML
         else:
+            logger.warning(
+                "[ToolResolution] No known tool call format detected. Chunks: %s - Content: %s",
+                tool_call_chunks,
+                content,
+            )
             return ToolCallFormat.UNKNOWN
-
-    def _normalize_tool_name(self, tag_name: str) -> str:
-        """
-        Normalize a tool name by stripping common prefixes.
-
-        Some LLMs generate tool calls with prefixes like 'tool:plan' instead of 'plan'.
-        This method strips those prefixes to get the actual tool name.
-
-        Args:
-            tag_name: The raw tag name from XML parsing
-
-        Returns:
-            Normalized tool name with prefixes removed
-        """
-        if not tag_name:
-            return tag_name
-
-        # Strip 'tool:' prefix if present
-        if ":" in tag_name and tag_name.split(":", 1)[0].lower() == "tool":
-            return tag_name.split(":", 1)[1]
-
-        return tag_name
-
-    def _is_non_tool_tag(self, tag_name: str) -> bool:
-        """
-        Determine if a tag should be ignored for tool resolution.
-
-        Workflow control tags like <passthrough> or <user_feedback_needed> are not tool
-        calls and should be skipped to avoid spurious tool resolution attempts.
-        """
-        if not tag_name:
-            return False
-        # Normalize the tag name before checking (strip 'tool:' prefix)
-        normalized_tag = self._normalize_tool_name(tag_name)
-        return normalized_tag.lower() in self._non_tool_tags
 
     def resolve_tool_calls(
         self, content: str, tool_call_chunks: Optional[Dict] = None
@@ -149,13 +88,6 @@ class ToolResolutionStrategy:
 
             if format_type == ToolCallFormat.OPENAI_JSON:
                 tool_calls = self._resolve_openai_format(content, tool_call_chunks)
-            elif format_type == ToolCallFormat.CLAUDE_XML:
-                tool_calls = self._resolve_claude_xml_format(content)
-            elif format_type == ToolCallFormat.MIXED:
-                # Combine both formats
-                openai_calls = self._resolve_openai_format(content, tool_call_chunks)
-                claude_calls = self._resolve_claude_xml_format(content)
-                tool_calls = self._merge_tool_calls(openai_calls, claude_calls)
 
             success = len(tool_calls) > 0
             self.logger.debug(f"[ToolResolution] Resolved {len(tool_calls)} tool calls")
@@ -173,26 +105,6 @@ class ToolResolutionStrategy:
         for json_obj in json_objects:
             if self._is_valid_openai_tool_call(json_obj):
                 return True
-        return False
-
-    def _has_claude_xml_format(self, content: str) -> bool:
-        """Check if content contains Claude-style XML tags."""
-        for pattern in self._xml_tag_patterns:
-            matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
-            if not matches:
-                continue
-
-            # Invoke pattern returns tuples of (function_name, content)
-            if pattern == self._xml_tag_patterns[1]:
-                for func_name, _ in matches:
-                    if not self._is_non_tool_tag(func_name):
-                        return True
-                continue
-
-            # Generic pattern returns tuples of (tag_name, content)
-            for tag_name, _ in matches:
-                if not self._is_non_tool_tag(tag_name):
-                    return True
         return False
 
     def _resolve_openai_format(
@@ -244,108 +156,6 @@ class ToolResolutionStrategy:
                     )
 
         return tool_calls
-
-    def _resolve_claude_xml_format(self, content: str) -> List[ParsedToolCall]:
-        """Resolve Claude-style XML tool calls."""
-        tool_calls = []
-
-        # First, handle Anthropic-style function invocations (highest priority)
-        invoke_matches = re.findall(
-            self._xml_tag_patterns[1], content, re.DOTALL | re.IGNORECASE
-        )
-
-        # Keep track of function_calls content that was processed by invoke pattern
-        processed_invoke_content = set()
-
-        for function_name, function_content in invoke_matches:
-            if self._is_non_tool_tag(function_name):
-                continue
-            try:
-                # Normalize the function name to strip prefixes like 'tool:'
-                normalized_name = self._normalize_tool_name(function_name)
-                arguments = self._parse_xml_content(function_content.strip())
-
-                parsed_call = ParsedToolCall(
-                    id=f"claude_invoke_{normalized_name}_{len(tool_calls)}",
-                    index=len(tool_calls),
-                    name=normalized_name,
-                    arguments=arguments,
-                    format=ToolCallFormat.CLAUDE_XML,
-                    raw_content=f'<invoke name="{function_name}">{function_content}</invoke>',
-                )
-                tool_calls.append(parsed_call)
-
-                # Mark this content as processed to avoid double-processing
-                processed_invoke_content.add(function_content.strip())
-            except Exception as e:
-                self.logger.warning(
-                    f"[ToolResolution] Error parsing invoke call {function_name}: {e}"
-                )
-
-        generic_matches = re.findall(
-            self._xml_tag_patterns[0], content, re.DOTALL | re.IGNORECASE
-        )
-
-        for tag_name, tag_content in generic_matches:
-            # Skip if this is a function_calls tag that was handled by invoke pattern
-            lower_tag = tag_name.lower()
-            if lower_tag == "function_calls" and invoke_matches:
-                continue
-
-            # Skip common HTML/XML tags that aren't function calls
-            if self._is_non_tool_tag(tag_name):
-                continue
-
-            try:
-                # Normalize the tag name to strip prefixes like 'tool:'
-                normalized_name = self._normalize_tool_name(tag_name)
-                arguments = self._parse_xml_content(tag_content.strip())
-
-                parsed_call = ParsedToolCall(
-                    id=f"claude_{normalized_name}_{len(tool_calls)}",
-                    index=len(tool_calls),
-                    name=normalized_name,
-                    arguments=arguments,
-                    format=ToolCallFormat.CLAUDE_XML,
-                    raw_content=f"<{tag_name}>{tag_content}</{tag_name}>",
-                )
-                tool_calls.append(parsed_call)
-            except Exception as e:
-                self.logger.warning(
-                    f"[ToolResolution] Error parsing generic XML call {tag_name}: {e}"
-                )
-
-        return tool_calls
-
-    def _merge_tool_calls(
-        self, openai_calls: List[ParsedToolCall], claude_calls: List[ParsedToolCall]
-    ) -> List[ParsedToolCall]:
-        """Merge tool calls from different formats, removing duplicates."""
-        all_calls = openai_calls + claude_calls
-
-        # Simple deduplication based on name and arguments similarity
-        unique_calls = []
-        seen_signatures = set()
-
-        for call in all_calls:
-            # Create a signature based on name and arguments
-            signature = (
-                f"{call.name}:{hash(json.dumps(call.arguments, sort_keys=True))}"
-            )
-
-            if signature not in seen_signatures:
-                seen_signatures.add(signature)
-                unique_calls.append(call)
-            else:
-                self.logger.debug(
-                    f"[ToolResolution] Skipping duplicate tool call: {call.name}"
-                )
-
-        # Re-index the calls
-        for i, call in enumerate(unique_calls):
-            call.index = i
-
-        return unique_calls
 
     def _extract_json_objects(self, content: str) -> List[Dict]:
         """Extract all valid JSON objects from content, respecting quoted strings."""
@@ -419,58 +229,3 @@ class ToolResolutionStrategy:
             return {}
 
         return parsed
-
-    def _parse_xml_content(self, content: str) -> Dict[str, Any]:
-        """Parse XML tag content into arguments dictionary."""
-        content = content.strip()
-
-        if not content:
-            return {}
-
-        # Try parsing as JSON first
-        try:
-            if content.startswith("{") and content.endswith("}"):
-                return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-
-        # Try parsing as key-value pairs
-        try:
-            # Look for parameter tags
-            param_pattern = r'<parameter\s+name="([^"]+)">(.*?)</parameter>'
-            param_matches = re.findall(
-                param_pattern, content, re.DOTALL | re.IGNORECASE
-            )
-
-            if param_matches:
-                result = {}
-                for param_name, param_value in param_matches:
-                    param_value = param_value.strip()
-                    # Only parse obvious JSON structures (objects, arrays, quoted strings), leave other values as strings
-                    try:
-                        if param_value.startswith(("{", "[", '"')):
-                            result[param_name] = json.loads(param_value)
-                        else:
-                            # Keep as string to match test expectations
-                            result[param_name] = param_value
-                    except json.JSONDecodeError:
-                        result[param_name] = param_value
-                return result
-        except Exception:
-            pass
-
-        # Try parsing as comma-separated key=value pairs
-        try:
-            if "=" in content and ("," in content or content.count("=") == 1):
-                pairs = content.split(",")
-                result = {}
-                for pair in pairs:
-                    if "=" in pair:
-                        key, value = pair.split("=", 1)
-                        result[key.strip()] = value.strip()
-                return result
-        except Exception:
-            pass
-
-        # Fallback to raw content
-        return {"raw": content}
