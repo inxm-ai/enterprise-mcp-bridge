@@ -169,12 +169,12 @@ class LLMClient:
             # Convert Pydantic model to dict and filter invalid tool fields
             params = self._build_request_params(request)
             params["stream"] = True
-            self.logger.info(f"[LLMClient] Streaming request params: {params}")
+            self.logger.debug(f"[LLMClient] Streaming request params: {params}")
 
             stream = await self.client.chat.completions.create(**params)
 
             async for chunk in stream:
-                self.logger.info(f"[LLMClient] Received openai chunk: {chunk}")
+                self.logger.debug(f"[LLMClient] Received openai chunk: {chunk}")
                 # Convert openai chunk to dict
                 chunk_dict = chunk.model_dump(mode="json", exclude_none=True)
 
