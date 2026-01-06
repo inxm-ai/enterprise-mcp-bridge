@@ -365,6 +365,9 @@ async def test_runner_logs_progress_and_log_events():
         def error(self, msg, *_, **__):
             self.entries.append(("error", msg))
 
+        def debug(self, msg, *_, **__):
+            self.entries.append(("debug", msg))
+
     logger = _Logger()
 
     async def _exec(

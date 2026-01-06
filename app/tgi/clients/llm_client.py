@@ -75,7 +75,13 @@ class LLMClient:
         """Build OpenAI request params, removing invalid tool fields."""
         self._sanitize_message_contents(request)
         params = request.model_dump(exclude_none=True)
-        if not params.get("tools"):
+        tools = params.get("tools")
+        if tools and not params.get("tool_choice"):
+            if len(tools) == 1:
+                params["tool_choice"] = tools[0]
+            else:
+                params["tool_choice"] = "auto"
+        if not tools:
             params.pop("tool_choice", None)
             params.pop("tools", None)
         params.pop("persist_inner_thinking", None)
@@ -155,7 +161,7 @@ class LLMClient:
         # Remove all tracing to avoid context cleanup issues with async generators
         try:
             # Prepare payload with size-aware compression
-            self.logger.info("[LLMClient] Preparing payload for streaming request")
+            self.logger.info("[LLMClient] Preparing payload for streaming request.")
             request = await self._prepare_payload(request, access_token)
 
             self.logger.debug(f"[LLMClient] Opening stream to {self.tgi_url}")
@@ -163,14 +169,12 @@ class LLMClient:
             # Convert Pydantic model to dict and filter invalid tool fields
             params = self._build_request_params(request)
             params["stream"] = True
+            self.logger.info(f"[LLMClient] Streaming request params: {params}")
 
             stream = await self.client.chat.completions.create(**params)
 
             async for chunk in stream:
-                # chunk is a ChatCompletionChunk object from openai library
-                # We need to convert it to the format expected by the frontend (SSE)
-                # The frontend expects: data: {json}\n\n
-
+                self.logger.info(f"[LLMClient] Received openai chunk: {chunk}")
                 # Convert openai chunk to dict
                 chunk_dict = chunk.model_dump(mode="json", exclude_none=True)
 

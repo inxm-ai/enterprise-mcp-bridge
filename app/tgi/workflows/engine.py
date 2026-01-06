@@ -891,7 +891,7 @@ class WorkflowEngine:
 
         runner_stream = self.tool_chat_runner.stream_chat_with_tools(
             session=session,
-            messages=agent_request.messages,
+            messages=[],
             available_tools=tools_available,
             chat_request=agent_request,
             access_token=access_token or "",

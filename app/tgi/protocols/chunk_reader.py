@@ -339,6 +339,7 @@ class ChunkReader:
             try:
                 async for raw_chunk in self.source:
                     chunk_count += 1
+                    logger.info("[ChunkReader] Processing raw chunk: %s", raw_chunk)
                     chunk_str = self._normalize_chunk(raw_chunk)
                     parsed = self._parse_sse_chunk(chunk_str)
                     if parsed:

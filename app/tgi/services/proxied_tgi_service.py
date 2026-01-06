@@ -100,6 +100,7 @@ class ProxiedTGIService:
         messages = await self.prompt_service.prepare_messages(
             session, request.messages, prompt, span
         )
+        request.messages = []
 
         # Get available tools from the session
         available_tools = await self.tool_service.get_all_mcp_tools(session, span)
