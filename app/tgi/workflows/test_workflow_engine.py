@@ -4117,3 +4117,252 @@ async def test_start_with_prefills_context_and_forces_agent(tmp_path, monkeypatc
     assert session.tool_calls
     assert session.tool_calls[0]["args"].get("plan_id") == "plan-123"
     assert "find_plan" not in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_routing_agent_tool_result_includes_tool_call_id(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "routing_flow",
+        "root_intent": "ROUTING_TEST",
+        "agents": [{"agent": "only_agent", "description": "Run once."}],
+    }
+    _write_workflow(workflows_dir, "routing", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class RoutingToolLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({"only_agent": "ok"})
+            self.tool_call_id_seen = None
+            self._routing_called = False
+
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            if "ROUTING_INTENT_CHECK" in last_message and not self._routing_called:
+                self._routing_called = True
+
+                async def _gen_tool():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "Need context.",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "get_workflow_context",
+                                                "arguments": '{"operation":"summary"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_tool()
+
+            for message in request.messages:
+                if message.role == MessageRole.TOOL:
+                    self.tool_call_id_seen = message.tool_call_id
+                    break
+
+            return super().stream_completion(request, access_token, span)
+
+    llm = RoutingToolLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        model="test-model",
+        stream=True,
+        use_workflow="routing_flow",
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert llm.tool_call_id_seen == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_scoped_context_summary_includes_large_return_values(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "plan_flow",
+        "root_intent": "PLAN_FLOW",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Find matching plans.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_MULTIPLE_MATCHES"],
+                        "to": "ask_user_to_select_plan",
+                    }
+                ],
+            },
+            {
+                "agent": "ask_user_to_select_plan",
+                "description": "Ask which plan to run.",
+                "depends_on": ["find_plan"],
+                "pass_through": True,
+                "context": ["find_plan.plans"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "plan_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    plans = [
+        {
+            "id": f"plan-{idx}",
+            "description": "Summary " + ("x" * 120),
+        }
+        for idx in range(30)
+    ]
+    llm = StubLLMClient(
+        {
+            "find_plan": (
+                f'<return name="plans">{json.dumps(plans)}</return>'
+                "<reroute>FOUND_MULTIPLE_MATCHES</reroute>"
+            ),
+            "ask_user_to_select_plan": (
+                "<user_feedback_needed>Select a plan.</user_feedback_needed>"
+            ),
+        }
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Find a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="plan_flow",
+        workflow_execution_id="plan-flow-exec",
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    prompt = next(
+        message
+        for message in llm.user_messages
+        if "<agent:ask_user_to_select_plan>" in message
+    )
+    assert "plan-29" in prompt
+
+
+@pytest.mark.asyncio
+async def test_workflow_handoff_preserves_user_query_and_messages(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    welcome_flow = {
+        "flow_id": "welcome_flow",
+        "root_intent": "WELCOME",
+        "agents": [
+            {"agent": "find_plan", "description": "Find matching plans."},
+            {
+                "agent": "ask_user_to_select_plan",
+                "description": "Ask which plan to run.",
+                "depends_on": ["find_plan"],
+                "pass_through": True,
+            },
+        ],
+    }
+    plan_create_flow = {
+        "flow_id": "plan_create",
+        "root_intent": "CREATE_PLAN",
+        "agents": [{"agent": "select_tools", "description": "Select tools."}],
+    }
+    _write_workflow(workflows_dir, "welcome", welcome_flow)
+    _write_workflow(workflows_dir, "plan_create", plan_create_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class HandoffLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__(
+                {
+                    "find_plan": (
+                        '<return name="plans">[]</return>'
+                        "<reroute>FOUND_MULTIPLE_MATCHES</reroute>"
+                    ),
+                    "ask_user_to_select_plan": [
+                        "<user_feedback_needed>Select a plan.</user_feedback_needed>",
+                        "<reroute>workflows[plan_create]</reroute>",
+                    ],
+                    "select_tools": "<passthrough>selecting</passthrough>",
+                },
+                ask_responses={
+                    "user_query_summary": "Create a new plan to summarize the last 24 hours of news.",
+                    "feedback_rerun_decision": "RERUN",
+                },
+            )
+
+    llm = HandoffLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "welcome-exec"
+    first_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content="Generate a plan to create a news summary for the last 24 hours",
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="welcome_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), first_request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    paused_state = store.load_execution(exec_id)
+    assert paused_state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Create a new one please")],
+        model="test-model",
+        stream=True,
+        use_workflow="welcome_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    with engine.state_store._connect() as conn:
+        rows = conn.execute(
+            "SELECT flow_id, context_json FROM workflow_executions"
+        ).fetchall()
+    plan_ctx = next(
+        json.loads(row[1]) for row in rows if row[0] == "plan_create"
+    )
+    assert (
+        plan_ctx.get("user_query")
+        == "Create a new plan to summarize the last 24 hours of news."
+    )
+    assert plan_ctx.get("user_messages") == [
+        "Generate a plan to create a news summary for the last 24 hours",
+        "Create a new one please",
+    ]

@@ -555,6 +555,9 @@ class WorkflowEngine:
                     elif status == "workflow_reroute":
                         target_workflow = result.get("target_workflow")
                         start_with_payload = result.get("start_with")
+                        start_with_payload = self._augment_workflow_handoff_start_with(
+                            start_with_payload, state
+                        )
                         metadata: dict[str, Any] = {"target_workflow": target_workflow}
                         if start_with_payload is not None:
                             metadata["start_with"] = start_with_payload
@@ -822,7 +825,10 @@ class WorkflowEngine:
 
         # Instead of embedding full context, provide a summary and tool access
         # Full context can grow to hundreds of KB with accumulated agent results
-        context_summary = self._create_context_summary(agent_context_payload)
+        scoped_context = isinstance(agent_def.context, list)
+        context_summary = self._create_context_summary(
+            agent_context_payload, scoped=scoped_context
+        )
 
         user_prompt = (
             state.context.get("user_query") or self._extract_user_message(request) or ""
@@ -1578,7 +1584,9 @@ class WorkflowEngine:
             current = current[part]
         current[path_parts[-1]] = value
 
-    def _create_context_summary(self, context: dict, max_full_size: int = 2000) -> str:
+    def _create_context_summary(
+        self, context: dict, max_full_size: int = 2000, scoped: bool = False
+    ) -> str:
         """
         Create a compact summary of context instead of serializing the entire thing.
 
@@ -1595,6 +1603,8 @@ class WorkflowEngine:
         Returns:
             Compact JSON string with metadata only for large contexts, or full for small/scoped ones
         """
+        if scoped:
+            max_full_size = max(max_full_size, 10000)
         # For small or scoped contexts, include full data
         # Scoped contexts typically have only "agents" with a few selected fields
         context_json = json.dumps(context, ensure_ascii=False, default=str)
@@ -2570,6 +2580,40 @@ class WorkflowEngine:
 
         return payload
 
+    def _augment_workflow_handoff_start_with(
+        self,
+        start_with: Optional[dict[str, Any]],
+        state: WorkflowExecutionState,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Ensure workflow handoffs keep the user's original request context.
+        """
+        has_start_with = isinstance(start_with, dict)
+        payload: dict[str, Any] = dict(start_with) if has_start_with else {}
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            args = {}
+            payload["args"] = args
+
+        added = False
+        user_query = state.context.get("user_query")
+        if "user_query" not in args and isinstance(user_query, str) and user_query:
+            args["user_query"] = user_query
+            added = True
+
+        user_messages = state.context.get("user_messages")
+        if (
+            "user_messages" not in args
+            and isinstance(user_messages, list)
+            and user_messages
+        ):
+            args["user_messages"] = list(user_messages)
+            added = True
+
+        if not has_start_with and not added:
+            return None
+        return payload
+
     def _extract_passthrough_content(self, text: str) -> str:
         """
         Extract content from <passthrough> tags for streaming.
@@ -3031,6 +3075,8 @@ class WorkflowEngine:
 
         # Track tool calls and results for multi-turn conversation
         messages_to_append = []
+        tool_call_id_overrides: dict[int, str] = {}
+        tool_call_chunks: dict[int, dict] = {}
 
         async with chunk_reader(stream, enable_tracing=False) as reader:
             async for parsed in reader.as_parsed():
@@ -3047,6 +3093,19 @@ class WorkflowEngine:
                             == "get_workflow_context"
                         ):
                             try:
+                                tool_call_index = tool_call.get("index")
+                                if tool_call_index is not None:
+                                    try:
+                                        tool_call_index = int(tool_call_index)
+                                    except (TypeError, ValueError):
+                                        tool_call_index = None
+                                tool_call_id = tool_call.get("id")
+                                if not tool_call_id:
+                                    tool_call_id = f"call_{len(messages_to_append)}"
+                                    if isinstance(tool_call_index, int):
+                                        tool_call_id_overrides[tool_call_index] = (
+                                            tool_call_id
+                                        )
                                 tool_input = json.loads(
                                     tool_call.get("function", {}).get("arguments", "{}")
                                 )
@@ -3064,7 +3123,7 @@ class WorkflowEngine:
                                 summary = self._summarize_tool_result(result)
                                 messages_to_append.append(
                                     {
-                                        "tool_call_id": tool_call.get("id"),
+                                        "tool_call_id": tool_call_id,
                                         "tool_name": "get_workflow_context",
                                         "result": summary,
                                         "full_result": result,  # Keep for potential inspection
@@ -3074,13 +3133,44 @@ class WorkflowEngine:
                                 logger.debug(
                                     f"[WorkflowEngine] Error processing tool call: {exc}"
                                 )
+            tool_call_chunks = reader.get_accumulated_tool_calls()
 
         # If the routing agent made tool calls and we have results,
         # continue the conversation with those results
         if messages_to_append and text.strip():
+            tool_calls_for_message = []
+            for index in sorted(tool_call_chunks):
+                chunk_data = tool_call_chunks.get(index) or {}
+                name = chunk_data.get("name")
+                if not name:
+                    continue
+                args = chunk_data.get("arguments")
+                if not isinstance(args, str):
+                    try:
+                        args = json.dumps(
+                            args, ensure_ascii=False, separators=(",", ":")
+                        )
+                    except Exception:
+                        args = "" if args is None else str(args)
+                tool_call_id = chunk_data.get("id") or tool_call_id_overrides.get(
+                    index
+                )
+                if not tool_call_id:
+                    tool_call_id = f"call_{index}"
+                tool_calls_for_message.append(
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": args or ""},
+                    }
+                )
             # Append the assistant's response with tool calls
             routing_request.messages.append(
-                Message(role=MessageRole.ASSISTANT, content=text)
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content=text,
+                    tool_calls=tool_calls_for_message or None,
+                )
             )
 
             # Append tool results so the agent can see them
@@ -3090,6 +3180,7 @@ class WorkflowEngine:
                         role=MessageRole.TOOL,
                         content=tool_result["result"],
                         name=tool_result["tool_name"],
+                        tool_call_id=tool_result.get("tool_call_id"),
                     )
                 )
 
