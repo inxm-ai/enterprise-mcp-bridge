@@ -10,9 +10,18 @@ permissions:
   packages: write 
   id-token: write
 
+env:
+  IMAGE_NAME: enterprise-mcp-bridge
+  PYTHON_VERSIONS: '["3.11","3.12"]'
+  DEFAULT_PYTHON_VERSION: "3.11"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(env.PYTHON_VERSIONS) }}
 
     steps:
       - name: Checkout Repository
@@ -33,11 +42,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/enterprise-mcp-bridge
+          images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha # Tag with the git commit SHA (short format)
-            type=raw,value=latest,enable={{is_default_branch}} # Tag with 'latest' only on default branch (main)
-            type=ref,event=tag # Tag with the Git tag if a tag is pushed
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && matrix.python-version == env.DEFAULT_PYTHON_VERSION }} # Tag 'latest' only for the default Python version on main
+            type=raw,value=latest-${{ matrix.python-version }},enable=${{ github.ref == 'refs/heads/main' }} # Tag latest per Python version on main
+            type=ref,event=tag,suffix=-${{ matrix.python-version }} # Tag with the Git tag and Python version if a tag is pushed
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -47,6 +56,8 @@ jobs:
           push: true 
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PYTHON_VERSION=${{ matrix.python-version }}
           cache-from: type=gha # Enable build cache from GitHub Actions
           cache-to: type=gha,mode=max # Save build cache to GitHub Actions 
           outputs: type=registry
@@ -99,13 +110,18 @@ jobs:
           script: |
             const tagName = context.ref.replace('refs/tags/', '');
             const commits = JSON.parse(process.env.COMMITS);
-            const dockerImageLink = `ghcr.io/inxm-ai/enterprise-mcp-bridge:${tagName}`;
+            const versions = JSON.parse(process.env.PYTHON_VERSIONS);
+            const imageBase = `ghcr.io/${context.repo.owner}/${process.env.IMAGE_NAME}`;
+            const dockerImageLinks = versions.map((version) => {
+              const imageRef = `${imageBase}:${tagName}-${version}`;
+              return `- [${imageRef}](https://${imageRef})`;
+            });
             console.log('Creating release for tag:', tagName);
-            console.log('Docker image link:', dockerImageLink);
+            console.log('Docker image links:', dockerImageLinks);
             console.log('Commits since last tag:', commits);
             const releaseBody = [
-              `### Docker image`,
-              `[${dockerImageLink}](https://ghcr.io/inxm-ai/enterprise-mcp-bridge:${tagName})`,
+              `### Docker images`,
+              ...dockerImageLinks,
               '',
               '### Commits since last tag',
               ...commits
