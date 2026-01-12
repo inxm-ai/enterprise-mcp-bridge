@@ -245,6 +245,7 @@ class ProxiedTGIService:
                 model=chat_request.model or TGI_MODEL_NAME,
                 tools=available_tools if available_tools else None,
                 tool_choice=chat_request.tool_choice,
+                response_format=chat_request.response_format,
                 stop=chat_request.stop,
                 stream=False,
                 temperature=chat_request.temperature,

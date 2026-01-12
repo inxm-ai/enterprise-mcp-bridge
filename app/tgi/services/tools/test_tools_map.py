@@ -103,6 +103,52 @@ def test_map_tools_nested_ref():
     ]
 
 
+def test_map_tools_ref_with_array_index():
+    tools = [
+        {
+            "name": "array_index_ref",
+            "description": "Tool with $ref into an anyOf array.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "object",
+                        "properties": {
+                            "timeConstraint": {
+                                "anyOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "timeSlots": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "end": {"type": "string"},
+                                                    },
+                                                },
+                                            }
+                                        },
+                                    },
+                                    {"type": "null"},
+                                ]
+                            },
+                            "refEnd": {
+                                "$ref": "#/properties/body/properties/timeConstraint/anyOf/0/properties/timeSlots/items/properties/end"
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    ]
+    result = map_tools(tools)
+    params = result[0]["function"]["parameters"]
+    assert (
+        params["properties"]["body"]["properties"]["refEnd"]["type"] == "string"
+    )
+
+
 def test_map_tools_cyclic_ref():
     tools = [
         {

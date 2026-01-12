@@ -52,6 +52,46 @@ def _to_tool_list(tools: Any) -> list:
         return []
 
 
+def get_tool_name(tool: Any) -> Optional[str]:
+    """Return the tool name from MCP or OpenAI-style tool definitions."""
+    if isinstance(tool, dict):
+        name = tool.get("name")
+        if not name:
+            func = tool.get("function") or {}
+            name = func.get("name")
+        return name
+
+    name = getattr(tool, "name", None)
+    if not name and hasattr(tool, "function"):
+        name = getattr(getattr(tool, "function"), "name", None)
+    return name
+
+
+def filter_tools(tools: Any) -> list:
+    """Filter tool definitions using INCLUDE_TOOLS and EXCLUDE_TOOLS rules."""
+    tool_list = _to_tool_list(tools)
+    filtered = []
+    for tool in tool_list:
+        name = get_tool_name(tool)
+        if not name:
+            continue
+        include_match = any(
+            matches_pattern(name, pattern) for pattern in INCLUDE_TOOLS if pattern
+        )
+        exclude_match = any(
+            matches_pattern(name, pattern) for pattern in EXCLUDE_TOOLS if pattern
+        )
+        logger.debug(
+            f"[Tools] Filter check -> Tool: {name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}"
+        )
+        if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
+            continue
+        if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
+            continue
+        filtered.append(tool)
+    return filtered
+
+
 def _cache_signature() -> dict:
     """
     Build a lightweight signature so the tools cache is invalidated when the
@@ -75,39 +115,41 @@ def matches_pattern(value, pattern):
 def map_tools(tools):
     """Map tools with INCLUDE_TOOLS and EXCLUDE_TOOLS filters applied."""
 
-    tool_list = _to_tool_list(tools)
+    tool_list = filter_tools(tools)
     filtered_tools = []
     for tool in tool_list:
-        name = (
-            getattr(tool, "name", None)
-            if not isinstance(tool, dict)
-            else tool.get("name")
-        )
+        name = get_tool_name(tool)
         if not name:
             continue
-        include_match = any(
-            matches_pattern(name, pattern) for pattern in INCLUDE_TOOLS if pattern
-        )
-        exclude_match = any(
-            matches_pattern(name, pattern) for pattern in EXCLUDE_TOOLS if pattern
-        )
-        logger.debug(
-            f"[Tools] Filter check -> Tool: {name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}"
-        )
-        if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
-            continue
-        if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
-            continue
+        if isinstance(tool, dict):
+            title = tool.get("title")
+            description = tool.get("description") or (
+                tool.get("function") or {}
+            ).get("description")
+            input_schema = tool.get("inputSchema")
+            if input_schema is None:
+                input_schema = (tool.get("function") or {}).get("parameters")
+            output_schema = tool.get("outputSchema")
+            if output_schema is None:
+                output_schema = (tool.get("function") or {}).get("outputSchema")
+            annotations = tool.get("annotations")
+            meta = tool.get("meta")
+        else:
+            title = getattr(tool, "title", None)
+            description = getattr(tool, "description", None)
+            if not description and hasattr(tool, "function"):
+                description = getattr(getattr(tool, "function"), "description", None)
+            input_schema = getattr(tool, "inputSchema", None)
+            if input_schema is None and hasattr(tool, "function"):
+                input_schema = getattr(getattr(tool, "function"), "parameters", None)
+            output_schema = getattr(tool, "outputSchema", None)
+            if output_schema is None and hasattr(tool, "function"):
+                output_schema = getattr(getattr(tool, "function"), "outputSchema", None)
+            annotations = getattr(tool, "annotations", None)
+            meta = getattr(tool, "meta", None)
 
-        input_schema = (
-            tool.inputSchema
-            if getattr(tool, "inputSchema", None) is not None
-            else (
-                tool.get("inputSchema", {})  # type: ignore[attr-defined]
-                if isinstance(tool, dict)
-                else {}
-            )
-        )
+        if input_schema is None:
+            input_schema = {}
         # make a shallow deepcopy to avoid mutating original tool objects
         try:
             import copy
@@ -132,32 +174,12 @@ def map_tools(tools):
         filtered_tools.append(
             {
                 "name": name,
-                "title": (
-                    getattr(tool, "title", None)
-                    if not isinstance(tool, dict)
-                    else tool.get("title")
-                ),
-                "description": (
-                    getattr(tool, "description", None)
-                    if not isinstance(tool, dict)
-                    else tool.get("description")
-                ),
+                "title": title,
+                "description": description,
                 "inputSchema": input_schema_copy,
-                "outputSchema": (
-                    getattr(tool, "outputSchema", None)
-                    if not isinstance(tool, dict)
-                    else tool.get("outputSchema")
-                ),
-                "annotations": (
-                    getattr(tool, "annotations", None)
-                    if not isinstance(tool, dict)
-                    else tool.get("annotations")
-                ),
-                "meta": (
-                    getattr(tool, "meta", None)
-                    if not isinstance(tool, dict)
-                    else tool.get("meta")
-                ),
+                "outputSchema": output_schema,
+                "annotations": annotations,
+                "meta": meta,
                 "url": f"{MCP_BASE_PATH}/tools/{name}",
             }
         )

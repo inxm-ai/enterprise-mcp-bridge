@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 import time
@@ -138,7 +139,12 @@ class WellPlannedOrchestrator:
         todos = intent_obj.get("todos")
 
         if not intent:
-            intent = "plan" if todos is not None else None
+            if todos is not None:
+                intent = "plan"
+            elif intent_obj.get("answer") is not None:
+                intent = "answer"
+            else:
+                intent = None
 
         if intent not in ("plan", "answer", "reroute"):
             return None
@@ -155,13 +161,15 @@ class WellPlannedOrchestrator:
         request: ChatCompletionRequest,
         access_token: Optional[str],
         span,
+        intent_schema: Optional[dict] = None,
     ) -> Tuple[Optional[dict], Optional[str]]:
         plan_text = ""
+        schema = intent_schema or intent_response_schema
         request.response_format = {
             "type": "json_schema",
             "json_schema": {
                 "name": "intent_response",
-                "schema": intent_response_schema,
+                "schema": schema,
             },
         }
         try:
@@ -247,6 +255,7 @@ class WellPlannedOrchestrator:
     def _single_message_response(
         self, content: str, request: ChatCompletionRequest
     ) -> ChatCompletionResponse:
+        payload = self._stringify_payload(content)
         return ChatCompletionResponse(
             id=self.llm_client.create_completion_id(),
             created=int(time.time()),
@@ -254,7 +263,7 @@ class WellPlannedOrchestrator:
             choices=[
                 Choice(
                     index=0,
-                    message=Message(role=MessageRole.ASSISTANT, content=str(content)),
+                    message=Message(role=MessageRole.ASSISTANT, content=payload),
                     finish_reason="stop",
                 )
             ],
@@ -262,9 +271,11 @@ class WellPlannedOrchestrator:
         )
 
     def _stream_single_message(self, content: str) -> AsyncGenerator[str, None]:
+        payload = self._stringify_payload(content)
+
         async def _generator():
             yield create_response_chunk(
-                self.llm_client.create_completion_id(), str(content)
+                self.llm_client.create_completion_id(), payload
             )
             yield create_response_chunk(
                 self.llm_client.create_completion_id(), "[DONE]"
@@ -411,6 +422,7 @@ class WellPlannedOrchestrator:
         base_request: ChatCompletionRequest,
         original_messages: Optional[List[Message]] = None,
         is_final_multistep_todo: bool = False,
+        is_final_step: bool = False,
     ):
         # Preserve any original system prompt from the base request/prepared messages
         original_system_content = None
@@ -496,6 +508,8 @@ class WellPlannedOrchestrator:
             max_tokens=base_request.max_tokens,
             top_p=base_request.top_p,
         )
+        if is_final_step and base_request.response_format:
+            focused_request.response_format = base_request.response_format
 
         return focused_messages, focused_request
 
@@ -875,6 +889,7 @@ class WellPlannedOrchestrator:
                     request,
                     original_messages,
                     is_final_multistep_todo=is_last_todo and len(todos) > 1,
+                    is_final_step=is_last_todo,
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
@@ -1030,6 +1045,38 @@ class WellPlannedOrchestrator:
 
         return _generator()
 
+    def _extract_response_format_schema(
+        self, response_format: Optional[dict]
+    ) -> Optional[dict]:
+        if not isinstance(response_format, dict):
+            return None
+        rtype = response_format.get("type")
+        if rtype == "json_schema":
+            json_schema = response_format.get("json_schema") or {}
+            schema = json_schema.get("schema")
+            return schema if isinstance(schema, dict) else None
+        if rtype == "json_object":
+            return {"type": "object"}
+        return None
+
+    def _build_intent_response_schema(
+        self, response_format: Optional[dict]
+    ) -> dict:
+        schema = copy.deepcopy(intent_response_schema)
+        answer_schema = self._extract_response_format_schema(response_format)
+        if answer_schema:
+            props = dict(schema.get("properties") or {})
+            props["answer"] = {"oneOf": [answer_schema, {"type": "null"}]}
+            schema["properties"] = props
+        return schema
+
+    def _stringify_payload(self, payload: Any) -> str:
+        if isinstance(payload, (dict, list)):
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if payload is None:
+            return ""
+        return str(payload)
+
     async def _well_planned_non_streaming(
         self,
         todo_manager: TodoManager,
@@ -1061,6 +1108,7 @@ class WellPlannedOrchestrator:
                 request,
                 original_messages,
                 is_final_multistep_todo=is_last_todo and len(todos) > 1,
+                is_final_step=is_last_todo,
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
@@ -1163,6 +1211,8 @@ class WellPlannedOrchestrator:
         tool_list_text = ", ".join(unique_tool_names) if unique_tool_names else "none"
         conversation_text = "\n".join([f"{m.role}: {m.content}" for m in messages])
 
+        intent_schema = self._build_intent_response_schema(request.response_format)
+
         intent_prompt = (
             "You are an assistant that must decide between three intents: "
             "'plan', 'answer', or 'reroute'. Always include the 'intent' property. "
@@ -1184,7 +1234,7 @@ class WellPlannedOrchestrator:
             "If more then one todo is needed, ensure the final todo delivers a clear user-facing answer. "
             f"Available tools: {tool_list_text}.\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
-            + json.dumps(intent_response_schema, ensure_ascii=False)
+            + json.dumps(intent_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
             + conversation_text
             + "\n\nReturn only the JSON object that matches the schema above."
@@ -1201,7 +1251,7 @@ class WellPlannedOrchestrator:
         )
 
         intent_result, plan_error = await self._stream_intent_decision(
-            plan_request, access_token, span
+            plan_request, access_token, span, intent_schema=intent_schema
         )
 
         if plan_error:
@@ -1230,9 +1280,15 @@ class WellPlannedOrchestrator:
             return self._single_message_response(message, request)
 
         if intent == "answer":
-            answer_text = self._strip_think_tags(
-                str((intent_result or {}).get("answer") or "")
-            )
+            answer_payload = (intent_result or {}).get("answer")
+            if isinstance(answer_payload, str):
+                answer_payload = self._strip_think_tags(answer_payload)
+                if request.response_format:
+                    try:
+                        answer_payload = json.loads(answer_payload)
+                    except Exception:
+                        pass
+            answer_text = self._stringify_payload(answer_payload)
             if request.stream:
                 return self._stream_single_message(answer_text)
             return self._single_message_response(answer_text, request)

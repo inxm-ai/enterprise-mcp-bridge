@@ -19,6 +19,7 @@ from app.tgi.services.tools.tool_argument_fixer_service import fix_tool_argument
 from app.tgi.services.tools.tool_resolution import ToolCallFormat
 from app.tgi.services.tools.tools_map import map_tools, inline_schema
 from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
+from app.session_manager.session_context import filter_tools, get_tool_name
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
@@ -82,16 +83,11 @@ class ToolService:
             try:
                 # Get available tools from MCP server
                 raw_tools = await session.list_tools()
+                filtered_tools = filter_tools(raw_tools)
                 # Build registry while handling both raw and already-mapped tools
                 self._tool_registry = {}
-                for tool in raw_tools:
-                    name = None
-                    if isinstance(tool, dict):
-                        name = tool.get("name") or tool.get("function", {}).get("name")
-                    else:
-                        name = getattr(tool, "name", None)
-                        if not name and hasattr(tool, "function"):
-                            name = getattr(getattr(tool, "function"), "name", None)
+                for tool in filtered_tools:
+                    name = get_tool_name(tool)
                     if name:
                         self._tool_registry[name] = tool
 
@@ -103,14 +99,14 @@ class ToolService:
                     func = getattr(tool, "function", None)
                     return bool(getattr(func, "name", None))
 
-                is_already_mapped = bool(raw_tools) and all(
-                    _is_mapped(t) for t in raw_tools
+                is_already_mapped = bool(filtered_tools) and all(
+                    _is_mapped(t) for t in filtered_tools
                 )
 
                 if is_already_mapped:
                     # Normalize to plain dicts for downstream consumers
                     normalized = []
-                    for tool in raw_tools:
+                    for tool in filtered_tools:
                         if hasattr(tool, "model_dump"):
                             normalized.append(tool.model_dump(exclude_none=True))
                         elif isinstance(tool, dict):
@@ -133,7 +129,7 @@ class ToolService:
                     tools_result = normalized
                 else:
                     tools_result = map_tools(
-                        raw_tools, include_output_schema=include_output_schema
+                        filtered_tools, include_output_schema=include_output_schema
                     )
                 if not tools_result:
                     self.logger.debug(
@@ -667,7 +663,9 @@ class ToolService:
         tool_results = []
         raw_results = []  # Track raw results before summarization
         success = True
-        mapped_tools = available_tools or map_tools(await session.list_tools())
+        mapped_tools = available_tools or map_tools(
+            filter_tools(await session.list_tools())
+        )
 
         def _coerce_tool_calls():
             # Allow legacy callers to pass just ToolCall objects

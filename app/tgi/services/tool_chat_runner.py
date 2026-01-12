@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, Callable, List, Optional
 
 from opentelemetry import trace
 
+from app.json.schema_validation import validate_schema
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
@@ -82,6 +83,13 @@ class ToolChatRunner:
         outer_span.set_attribute("chat.max_iterations", self.max_iterations)
         outer_span.set_attribute("chat.has_available_tools", bool(available_tools))
 
+        response_format = chat_request.response_format
+        response_type = self._response_format_type(response_format)
+        enforce_json = response_type in ("json_schema", "json_object")
+        emit_tool_events = not enforce_json
+        emit_think = emit_think_messages and not enforce_json
+        final_content_message = None
+
         while iteration < self.max_iterations:
             iteration += 1
 
@@ -109,7 +117,7 @@ class ToolChatRunner:
                     if parsed.is_done:
                         break
 
-                    if parsed.tool_calls and emit_think_messages:
+                    if parsed.tool_calls and emit_think:
                         for tc in parsed.tool_calls:
                             tc_index = tc.get("index")
                             tc_func = tc.get("function", {})
@@ -123,14 +131,16 @@ class ToolChatRunner:
 
                     if parsed.content:
                         content_message += parsed.content
-                        raw_chunk = (
-                            parsed.raw
-                            if parsed.raw.endswith("\n\n")
-                            else f"{parsed.raw}\n\n"
-                        )
-                        yield raw_chunk
+                        if not enforce_json:
+                            raw_chunk = (
+                                parsed.raw
+                                if parsed.raw.endswith("\n\n")
+                                else f"{parsed.raw}\n\n"
+                            )
+                            yield raw_chunk
 
-                    yield "\n\n"
+                    if not enforce_json:
+                        yield "\n\n"
 
             with tracer.start_as_current_span("execute_tool_calls") as tool_span:
                 tool_call_chunks = reader.get_accumulated_tool_calls()
@@ -219,7 +229,7 @@ class ToolChatRunner:
                         "tool_calls.execute_count", len(tool_calls_to_execute)
                     )
 
-                    if emit_think_messages:
+                    if emit_think:
 
                         def tool_arguments(tc):
                             try:
@@ -393,7 +403,7 @@ class ToolChatRunner:
                                 except Exception:
                                     event = None
                                 queue_get = asyncio.create_task(progress_queue.get())
-                                if isinstance(event, dict) and event:
+                                if emit_tool_events and isinstance(event, dict) and event:
                                     yield f"data: {json.dumps(event)}\n\n"
                                     yield "\n\n"
                                 continue
@@ -422,8 +432,11 @@ class ToolChatRunner:
                                 while not progress_queue.empty():
                                     try:
                                         leftover = progress_queue.get_nowait()
-                                        yield f"data: {json.dumps(leftover)}\n\n"
-                                        yield "\n\n"
+                                        if emit_tool_events:
+                                            yield (
+                                                f"data: {json.dumps(leftover)}\n\n"
+                                            )
+                                            yield "\n\n"
                                     except Exception:
                                         break
                                 break
@@ -484,45 +497,46 @@ class ToolChatRunner:
 
                     # Emit tool result events for workflow engines to capture
                     # Use raw_results to get unsummarized content for structured data extraction
-                    for raw_result in raw_results:
-                        tool_name = raw_result.get("name", "unknown")
-                        raw_content = raw_result.get("content", "")
-                        # Ensure content is a string for the event
-                        if not isinstance(raw_content, str):
-                            try:
-                                raw_content = json.dumps(
-                                    raw_content,
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            except Exception:
-                                raw_content = str(raw_content)
-                        tool_result_event = {
-                            "choices": [
-                                {
-                                    "delta": {
-                                        "tool_result": {
-                                            "name": tool_name,
-                                            "content": raw_content,
-                                        }
-                                    },
-                                    "index": 0,
-                                }
-                            ]
-                        }
-                        yield f"data: {json.dumps(tool_result_event)}\n\n"
+                    if emit_tool_events:
+                        for raw_result in raw_results:
+                            tool_name = raw_result.get("name", "unknown")
+                            raw_content = raw_result.get("content", "")
+                            # Ensure content is a string for the event
+                            if not isinstance(raw_content, str):
+                                try:
+                                    raw_content = json.dumps(
+                                        raw_content,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                except Exception:
+                                    raw_content = str(raw_content)
+                            tool_result_event = {
+                                "choices": [
+                                    {
+                                        "delta": {
+                                            "tool_result": {
+                                                "name": tool_name,
+                                                "content": raw_content,
+                                            }
+                                        },
+                                        "index": 0,
+                                    }
+                                ]
+                            }
+                            yield f"data: {json.dumps(tool_result_event)}\n\n"
 
                     if not stop_after_tools:
                         messages_history.extend(tool_results)
                         self._deduplicate_retry_hints(messages_history)
 
                     if success:
-                        if emit_think_messages and not stop_after_tools:
+                        if emit_think and not stop_after_tools:
                             success_msg = "<think>I executed the tools successfully, resuming response generation</think>\n\n"
                             yield f"data: {json.dumps({'choices':[{'delta':{'content': success_msg},'index':0}]})}\n\n"
                         tool_span.set_attribute("tool_calls.success", True)
                     else:
-                        if emit_think_messages and not stop_after_tools:
+                        if emit_think and not stop_after_tools:
                             failure_report = "<think>The tool call failed. I will try to adjust my approach</think>\n\n"
                             yield f"data: {json.dumps({'choices':[{'delta':{'content': failure_report},'index': 0}]})}\n\n"
                         tool_span.set_attribute("tool_calls.success", False)
@@ -538,9 +552,232 @@ class ToolChatRunner:
                     break
 
                 tool_span.set_attribute("tool_calls.resolved_count", 0)
+                if content_message and content_message.strip():
+                    final_content_message = content_message
                 break
 
+        if enforce_json and final_content_message:
+            formatted_json = await self._coerce_response_format(
+                final_content_message,
+                response_format,
+                access_token,
+                outer_span,
+                chat_request.model or TGI_MODEL_NAME,
+            )
+            if formatted_json:
+                yield self._build_content_chunk(formatted_json)
+
         yield "data: [DONE]\n\n"
+
+    @staticmethod
+    def _response_format_type(response_format: Optional[dict]) -> Optional[str]:
+        if not isinstance(response_format, dict):
+            return None
+        return response_format.get("type")
+
+    @staticmethod
+    def _response_format_schema(response_format: Optional[dict]) -> Optional[dict]:
+        if not isinstance(response_format, dict):
+            return None
+        if response_format.get("type") != "json_schema":
+            return None
+        json_schema = response_format.get("json_schema") or {}
+        schema = json_schema.get("schema")
+        return schema if isinstance(schema, dict) else None
+
+    @staticmethod
+    def _extract_json_block(text: str) -> Optional[str]:
+        start = None
+        stack: List[str] = []
+        in_string = False
+        escape = False
+
+        for idx, char in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if char == "\\" and in_string:
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char in "{[":
+                if not stack:
+                    start = idx
+                stack.append(char)
+                continue
+            if char in "}]":
+                if not stack:
+                    continue
+                opening = stack.pop()
+                if (opening == "{" and char != "}") or (
+                    opening == "[" and char != "]"
+                ):
+                    stack.clear()
+                    start = None
+                    continue
+                if not stack and start is not None:
+                    return text[start : idx + 1]
+        return None
+
+    @classmethod
+    def _parse_json_from_text(cls, text: str) -> tuple[Optional[Any], Optional[str]]:
+        if not text or not text.strip():
+            return None, "empty response"
+        payload = text.strip()
+        decoder = json.JSONDecoder()
+        try:
+            parsed, end_idx = decoder.raw_decode(payload)
+            remaining = payload[end_idx:].strip()
+            if remaining and logger:
+                logger.debug(
+                    "[ToolChatRunner] Trailing data after JSON response (len=%s)",
+                    len(remaining),
+                )
+            return parsed, None
+        except Exception as exc:
+            candidate = cls._extract_json_block(payload)
+            if candidate:
+                try:
+                    return json.loads(candidate), None
+                except Exception as inner_exc:
+                    return None, f"failed to parse extracted JSON: {inner_exc}"
+            return None, f"failed to parse JSON: {exc}"
+
+    @staticmethod
+    def _format_json_payload(payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _build_error_payload(error_message: str, raw_text: str) -> dict:
+        snippet = raw_text if len(raw_text) <= 2000 else raw_text[:2000]
+        return {"error": error_message, "raw": snippet}
+
+    @staticmethod
+    def _build_content_chunk(content: str) -> str:
+        return (
+            f"data: {json.dumps({'choices':[{'delta':{'content': content},'index':0}]})}\n\n"
+        )
+
+    async def _coerce_response_format(
+        self,
+        content: str,
+        response_format: Optional[dict],
+        access_token: Optional[str],
+        parent_span,
+        model_name: str,
+    ) -> Optional[str]:
+        response_type = self._response_format_type(response_format)
+        if response_type not in ("json_schema", "json_object"):
+            return content.strip()
+
+        schema = self._response_format_schema(response_format)
+        parsed, parse_error = self._parse_json_from_text(content)
+        validation_error = None
+
+        if parsed is not None:
+            if schema:
+                try:
+                    validate_schema(schema, parsed)
+                except Exception as exc:
+                    validation_error = str(exc)
+            if not validation_error:
+                return self._format_json_payload(parsed)
+
+        repair_attempt = await self._repair_response_format(
+            content,
+            response_format,
+            access_token,
+            parent_span,
+            model_name,
+        )
+        if repair_attempt:
+            repaired, repair_error = self._parse_json_from_text(repair_attempt)
+            if repaired is not None:
+                if schema:
+                    try:
+                        validate_schema(schema, repaired)
+                        return self._format_json_payload(repaired)
+                    except Exception as exc:
+                        validation_error = str(exc)
+                else:
+                    return self._format_json_payload(repaired)
+            parse_error = repair_error or parse_error
+
+        if parsed is not None:
+            if logger and validation_error:
+                logger.warning(
+                    "[ToolChatRunner] JSON output failed schema validation: %s",
+                    validation_error,
+                )
+            return self._format_json_payload(parsed)
+
+        error_msg = validation_error or parse_error or "failed to parse response as JSON"
+        if logger:
+            logger.warning("[ToolChatRunner] %s", error_msg)
+        return self._format_json_payload(self._build_error_payload(error_msg, content))
+
+    async def _repair_response_format(
+        self,
+        content: str,
+        response_format: Optional[dict],
+        access_token: Optional[str],
+        parent_span,
+        model_name: str,
+    ) -> Optional[str]:
+        response_type = self._response_format_type(response_format)
+        if response_type not in ("json_schema", "json_object"):
+            return None
+
+        if not hasattr(self.llm_client, "non_stream_completion"):
+            return None
+
+        schema = self._response_format_schema(response_format)
+        schema_text = (
+            json.dumps(schema, ensure_ascii=False) if schema else "a JSON object"
+        )
+        system_prompt = (
+            "You are a JSON repair assistant. Return only JSON that matches the "
+            "provided schema. Do not add commentary or markdown."
+        )
+        user_prompt = (
+            "Schema:\n"
+            f"{schema_text}\n\n"
+            "Source content (convert this into valid JSON that matches the schema):\n"
+            f"{content}"
+        )
+
+        repair_request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                Message(role=MessageRole.USER, content=user_prompt),
+            ],
+            model=model_name,
+            stream=False,
+            temperature=0,
+        )
+        repair_request.response_format = response_format
+
+        try:
+            response = await self.llm_client.non_stream_completion(
+                repair_request,
+                access_token or "",
+                parent_span,
+            )
+        except Exception as exc:
+            if logger:
+                logger.warning("[ToolChatRunner] JSON repair failed: %s", exc)
+            return None
+
+        if not response or not response.choices:
+            return None
+
+        message = response.choices[0].message if response.choices else None
+        content = message.content if message else None
+        return content.strip() if content else None
 
     @staticmethod
     def _infer_single_tool_call(

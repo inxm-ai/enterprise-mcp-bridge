@@ -97,8 +97,21 @@ def inline_schema(schema, top_level_schema, seen=None):
                 path_parts = ref_path[2:].split("/")
                 definition = top_level_schema
                 for part in path_parts:
+                    part = part.replace("~1", "/").replace("~0", "~")
                     if isinstance(definition, dict):
                         definition = definition.get(part)
+                    elif isinstance(definition, list):
+                        try:
+                            index = int(part)
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"Schema definition not found for ref: {ref_path}"
+                            ) from exc
+                        if index < 0 or index >= len(definition):
+                            raise ValueError(
+                                f"Schema definition not found for ref: {ref_path}"
+                            )
+                        definition = definition[index]
                     else:
                         raise ValueError(
                             f"Schema definition not found for ref: {ref_path}"

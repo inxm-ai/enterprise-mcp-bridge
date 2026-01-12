@@ -127,6 +127,75 @@ async def test_runner_preserves_response_format():
 
 
 @pytest.mark.asyncio
+async def test_runner_enforces_response_format_buffers_json():
+    class StubLLM:
+        def __init__(self):
+            self.requests: List[ChatCompletionRequest] = []
+
+        def stream_completion(
+            self, request: ChatCompletionRequest, access_token: str, span: Any
+        ) -> AsyncGenerator[str, None]:
+            self.requests.append(request)
+
+            async def _gen():
+                payload = {
+                    "choices": [
+                        {"delta": {"content": '{"foo":"bar"}'}, "index": 0}
+                    ]
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    llm = StubLLM()
+    tool_resolution = StubToolResolution(responses=[[]])
+    runner = ToolChatRunner(
+        llm_client=llm,
+        tool_service=ToolService(),
+        tool_resolution=tool_resolution,
+        logger_obj=None,
+        message_summarization_service=None,
+    )
+
+    stream = runner.stream_chat_with_tools(
+        session=None,
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        available_tools=[],
+        chat_request=ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            stream=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "test_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"foo": {"type": "string"}},
+                        "required": ["foo"],
+                    },
+                },
+            },
+        ),
+        access_token="",
+        parent_span=None,
+        emit_think_messages=True,
+    )
+
+    chunks = [chunk async for chunk in stream]
+    data_lines = [
+        line
+        for chunk in chunks
+        for line in chunk.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    assert len(data_lines) == 1
+    payload = json.loads(data_lines[0][6:])
+    assert payload["choices"][0]["delta"]["content"] == '{"foo":"bar"}'
+
+
+@pytest.mark.asyncio
 async def test_runner_emits_think_messages_on_tool_call():
     # First stream emits a tool call chunk only
     llm = StubLLM(

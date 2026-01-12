@@ -26,4 +26,16 @@ if [ "$ENV" == "dev" ]; then
     fi
   fi
 fi
+
+# If MCP_RUN_ON_START is set, run its command before starting the server
+if [ -n "$MCP_RUN_ON_START" ]; then
+  echo "Running MCP_RUN_ON_START: $MCP_RUN_ON_START"
+  # run in a clean environment and set HOME to a tmp dir so npm uses a separate cache
+  env -i HOME=/tmp PATH="$PATH" bash -lc "$MCP_RUN_ON_START"
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    echo "MCP_RUN_ON_START command failed with exit code $rc"
+  fi
+fi
+
 uvicorn app.server:app --host 0.0.0.0 --port 8000
