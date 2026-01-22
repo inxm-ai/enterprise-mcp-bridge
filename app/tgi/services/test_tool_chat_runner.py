@@ -139,9 +139,7 @@ async def test_runner_enforces_response_format_buffers_json():
 
             async def _gen():
                 payload = {
-                    "choices": [
-                        {"delta": {"content": '{"foo":"bar"}'}, "index": 0}
-                    ]
+                    "choices": [{"delta": {"content": '{"foo":"bar"}'}, "index": 0}]
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
                 yield "data: [DONE]\n\n"

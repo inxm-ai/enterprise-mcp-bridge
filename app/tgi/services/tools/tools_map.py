@@ -213,6 +213,11 @@ def map_tools(tools, include_output_schema=False):
             if not processed_schema.get("properties"):
                 processed_schema = {}
 
+        if not isinstance(processed_schema, dict) or not processed_schema:
+            processed_schema = {"type": "object"}
+        elif processed_schema.get("type") is None:
+            processed_schema["type"] = "object"
+
         mapped_tool = {
             "type": "function",
             "function": {

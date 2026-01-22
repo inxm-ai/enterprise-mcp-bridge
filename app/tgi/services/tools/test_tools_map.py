@@ -144,9 +144,7 @@ def test_map_tools_ref_with_array_index():
     ]
     result = map_tools(tools)
     params = result[0]["function"]["parameters"]
-    assert (
-        params["properties"]["body"]["properties"]["refEnd"]["type"] == "string"
-    )
+    assert params["properties"]["body"]["properties"]["refEnd"]["type"] == "string"
 
 
 def test_map_tools_cyclic_ref():
@@ -193,7 +191,7 @@ def test_map_tools_no_input_schema():
     tools = [{"name": "no_input", "description": "Tool with no inputSchema."}]
     result = map_tools(tools)
     params = result[0]["function"]["parameters"]
-    assert params == {}
+    assert params == {"type": "object"}
 
 
 def test_map_tools_list_with_ref():

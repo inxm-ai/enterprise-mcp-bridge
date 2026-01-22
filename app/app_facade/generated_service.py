@@ -1,14 +1,15 @@
 import logging
-import html as _html_escape
 import os
 import re
 import asyncio
 import json
-from contextlib import suppress
-from dataclasses import dataclass
+import subprocess
+import tempfile
+import shutil
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 from typing import AsyncIterator
 
 from fastapi import HTTPException
@@ -18,9 +19,20 @@ from app.vars import MCP_BASE_PATH, GENERATED_UI_PROMPT_DUMP
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+from app.app_facade.generated_output_factory import GeneratedUIOutputFactory
+from app.app_facade.generated_phase1 import run_phase1_attempt
+from app.app_facade.generated_phase2 import run_phase2_attempt
+from app.app_facade.generated_dummy_data import DummyDataGenerator
+from app.app_facade.generated_schemas import (
+    generation_response_format,
+)
+from app.app_facade.generated_storage import GeneratedUIStorage
+from app.app_facade.generated_types import (
+    Actor,
+    Scope,
+)
+from app.app_facade.test_fix_tools import run_tool_driven_test_fix
 
-
-IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -28,6 +40,10 @@ DEFAULT_DESIGN_PROMPT = (
     "Use lightweight, responsive layouts. Prefer utility-first styling via Tailwind "
     "CSS conventions when no explicit design system guidance is provided."
 )
+
+UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
+
+SCRIPT_KEYS = ("service_script", "components_script", "test_script", "dummy_data")
 
 
 def _load_pfusch_prompt() -> str:
@@ -43,141 +59,22 @@ def _load_pfusch_prompt() -> str:
         raise e
 
 
-# JSON Schema describing the expected structure of the generated UI payload.
-# This is intentionally permissive for fields the service will normalise later
-# (for example either `html.page` or `html.snippet` may be provided).
-generation_ui_schema = {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "title": "GeneratedUi",
-    "type": "object",
-    "properties": {
-        "html": {
-            "type": "object",
-            "description": "HTML output. Either a full `page` (document) or a `snippet` (embed) is acceptable.",
-            "properties": {
-                "page": {
-                    "type": "string",
-                    "description": "Complete HTML document as a string",
-                },
-                "snippet": {
-                    "type": "string",
-                    "description": "HTML fragment suitable for embedding",
-                },
-            },
-            "additionalProperties": True,
-        },
-        "metadata": {
-            "type": "object",
-            "description": "Auxiliary metadata about the generated ui",
-            "properties": {
-                "id": {"type": "string"},
-                "name": {"type": "string"},
-                "scope": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "enum": ["user", "group"]},
-                        "id": {"type": "string"},
-                    },
-                    "required": ["type", "id"],
-                    "additionalProperties": False,
-                },
-                "requirements": {"type": "string"},
-                "original_requirements": {"type": "string"},
-                "components": {"type": "array", "items": {"type": "string"}},
-                "pfusch_components": {"type": "array", "items": {"type": "string"}},
-                "created_by": {"type": "string"},
-                "created_at": {"type": "string", "format": "date-time"},
-                "updated_at": {"type": "string", "format": "date-time"},
-                "history": {"type": "array", "items": {"type": "object"}},
-            },
-            "additionalProperties": True,
-        },
-    },
-    "required": ["html"],
-    "additionalProperties": True,
-}
+def _load_pfusch_phase2_prompt() -> str:
+    """Load the pfusch phase 2 presentation prompt."""
+    prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_ui_phase2_prompt.md")
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt_content = f.read()
+        return prompt_content
+    except Exception as e:
+        logger.error(f"Error loading pfusch phase 2 prompt: {e}")
+        raise e
 
 
-def _generation_response_format() -> dict:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "generated_ui",
-            "schema": generation_ui_schema,
-        },
-    }
-
-
-@dataclass(frozen=True)
-class Scope:
-    kind: str  # "group" or "user"
-    identifier: str
-
-
-@dataclass(frozen=True)
-class Actor:
-    user_id: str
-    groups: Sequence[str]
-
-    def is_owner(self, scope: Scope) -> bool:
-        if scope.kind == "user":
-            return self.user_id == scope.identifier
-        return scope.identifier in set(self.groups or [])
-
-
-def validate_identifier(value: str, field_label: str) -> str:
-    if not value:
-        raise HTTPException(status_code=400, detail=f"{field_label} must not be empty")
-    if not IDENTIFIER_RE.fullmatch(value):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{field_label} must match pattern {IDENTIFIER_RE.pattern}",
-        )
-    return value
-
-
-class GeneratedUIStorage:
-    def __init__(self, base_path: str):
-        if not base_path:
-            raise ValueError("Generated ui storage path is required")
-        self.base_path = os.path.abspath(base_path)
-
-    def _ui_dir(self, scope: Scope, ui_id: str, name: str) -> str:
-        safe_scope = validate_identifier(scope.identifier, f"{scope.kind} id")
-        safe_ui_id = validate_identifier(ui_id, "ui id")
-        safe_name = validate_identifier(name, "ui name")
-        return os.path.join(
-            self.base_path, scope.kind, safe_scope, safe_ui_id, safe_name
-        )
-
-    def _file_path(self, scope: Scope, ui_id: str, name: str) -> str:
-        return os.path.join(self._ui_dir(scope, ui_id, name), "ui.json")
-
-    def read(self, scope: Scope, ui_id: str, name: str) -> Dict[str, Any]:
-        file_path = self._file_path(scope, ui_id, name)
-        try:
-            with open(file_path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except FileNotFoundError:
-            raise
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Stored ui payload at {file_path} is invalid JSON",
-            ) from exc
-
-    def write(
-        self, scope: Scope, ui_id: str, name: str, payload: Dict[str, Any]
-    ) -> None:
-        file_path = self._file_path(scope, ui_id, name)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        tmp_path = f"{file_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, file_path)
-
-    def exists(self, scope: Scope, ui_id: str, name: str) -> bool:
-        return os.path.exists(self._file_path(scope, ui_id, name))
+def _generation_response_format(
+    schema: Optional[Dict[str, Any]] = None, name: str = "generated_ui"
+) -> Dict[str, Any]:
+    return generation_response_format(schema=schema, name=name)
 
 
 class GeneratedUIService:
@@ -189,6 +86,159 @@ class GeneratedUIService:
     ):
         self.storage = storage
         self.tgi_service = tgi_service or ProxiedTGIService()
+        self.output_factory = GeneratedUIOutputFactory()
+        self.dummy_data_generator = DummyDataGenerator(self.tgi_service)
+
+    def _run_tests(
+        self,
+        service_code: str,
+        components_code: str,
+        test_code: str,
+        dummy_data: Optional[str] = None,
+    ) -> Tuple[bool, str]:
+        helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy helpers including pfusch.js
+            for filename in ["domstubs.js", "pfusch.js"]:
+                src = os.path.join(helpers_dir, filename)
+                dst = os.path.join(tmpdir, filename)
+                if os.path.exists(src):
+                    shutil.copy(src, dst)
+
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"type":"module"}\n')
+
+            mocked_components_code = (
+                (components_code or "")
+                .replace(
+                    "https://matthiaskainer.github.io/pfusch/pfusch.min.js",
+                    "./pfusch.js",
+                )
+                .replace(
+                    "https://matthiaskainer.github.io/pfusch/pfusch.js", "./pfusch.js"
+                )
+            )
+            combined_code = (service_code or "") + "\n\n" + mocked_components_code
+
+            with open(os.path.join(tmpdir, "app.js"), "w", encoding="utf-8") as f:
+                f.write(combined_code)
+
+            with open(os.path.join(tmpdir, "user_test.js"), "w", encoding="utf-8") as f:
+                f.write(test_code or "")
+
+            if dummy_data is not None:
+                with open(
+                    os.path.join(tmpdir, "dummy_data.js"), "w", encoding="utf-8"
+                ) as f:
+                    f.write(dummy_data or "")
+
+            test_wrapper = (
+                "import { setupDomStubs, pfuschTest } from './domstubs.js';\n"
+                "if (typeof globalThis.HTMLElement === 'undefined') {\n"
+                "  setupDomStubs();\n"
+                "}\n"
+                "await import('./user_test.js');\n"
+            )
+            with open(os.path.join(tmpdir, "test.js"), "w", encoding="utf-8") as f:
+                f.write(test_wrapper)
+
+            # Run node --test
+            try:
+                # set path to include current directory so imports work if needed
+                env = os.environ.copy()
+                env["NODE_PATH"] = tmpdir
+                result = subprocess.run(
+                    ["node", "--test", "test.js"],
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,  # Safety timeout
+                    env=env,
+                )
+                output = result.stdout + "\n" + result.stderr
+                if result.returncode != 0:
+                    output_tail = output[-4000:] if len(output) > 4000 else output
+                    if len(output) > 4000:
+                        output_tail = (
+                            f"...(trimmed {len(output) - 4000} chars)\n{output_tail}"
+                        )
+                    logger.error(
+                        "[GeneratedUI] Test run failed. Output tail:\n%s", output_tail
+                    )
+                return result.returncode == 0, output
+            except subprocess.TimeoutExpired:
+                return False, "Tests timed out after 30 seconds."
+            except Exception as e:
+                return False, f"Error running tests: {str(e)}"
+
+    async def _generate_dummy_data(
+        self,
+        *,
+        scope: Scope,
+        ui_id: str,
+        name: str,
+        prompt: str,
+        allowed_tools: Optional[List[Dict[str, Any]]],
+        access_token: Optional[str],
+    ) -> str:
+        if not allowed_tools:
+            return "export const dummyData = {};\n"
+
+        tool_specs: List[Dict[str, Any]] = []
+        for tool in allowed_tools or []:
+            if isinstance(tool, dict):
+                function = tool.get("function", {})
+                tool_name = function.get("name")
+                output_schema = function.get("outputSchema") or tool.get("outputSchema")
+            else:
+                function = getattr(tool, "function", None)
+                tool_name = None
+                output_schema = getattr(tool, "outputSchema", None)
+                if function and hasattr(function, "name"):
+                    tool_name = function.name
+                if function and hasattr(function, "outputSchema"):
+                    output_schema = getattr(function, "outputSchema")
+            if tool_name:
+                tool_specs.append(
+                    {
+                        "name": tool_name,
+                        "outputSchema": output_schema,
+                    }
+                )
+
+        return await self.dummy_data_generator.generate_dummy_data(
+            prompt=prompt,
+            tool_specs=tool_specs,
+            ui_model_headers=UI_MODEL_HEADERS,
+        )
+
+    async def _iterative_test_fix(
+        self,
+        *,
+        service_script: str,
+        components_script: str,
+        test_script: str,
+        dummy_data: Optional[str],
+        messages: List[Message],
+        allowed_tools: Optional[List[Dict[str, Any]]],
+        access_token: Optional[str],
+        max_attempts: int = 25,
+        event_queue: Optional[asyncio.Queue] = None,
+    ) -> Tuple[bool, str, str, str, Optional[str], List[Message]]:
+        return await run_tool_driven_test_fix(
+            tgi_service=self.tgi_service,
+            service_script=service_script,
+            components_script=components_script,
+            test_script=test_script,
+            dummy_data=dummy_data,
+            messages=messages,
+            allowed_tools=allowed_tools,
+            access_token=access_token,
+            max_attempts=max_attempts,
+            event_queue=event_queue,
+            extra_headers=UI_MODEL_HEADERS,
+        )
 
     async def create_ui(
         self,
@@ -232,6 +282,7 @@ class GeneratedUIService:
         )
 
         timestamp = self._now()
+        payload_scripts = self._changed_scripts(generated, None)
         record = {
             "metadata": {
                 "id": ui_id,
@@ -250,6 +301,7 @@ class GeneratedUIService:
                         generated_at=timestamp,
                         payload_metadata=generated.get("metadata", {}),
                         payload_html=generated.get("html", {}),
+                        payload_scripts=payload_scripts or None,
                     )
                 ],
             },
@@ -258,6 +310,54 @@ class GeneratedUIService:
 
         self.storage.write(scope, ui_id, name, record)
         return record
+
+    async def _phase_1_attempt(
+        self,
+        *,
+        attempt: int,
+        max_attempts: int,
+        messages: List[Message],
+        allowed_tools: List[Dict[str, Any]],
+        dummy_data: Optional[str],
+        access_token: Optional[str],
+    ) -> AsyncIterator[Union[bytes, Dict[str, Any]]]:
+        async for item in run_phase1_attempt(
+            attempt=attempt,
+            max_attempts=max_attempts,
+            messages=messages,
+            allowed_tools=allowed_tools,
+            dummy_data=dummy_data,
+            access_token=access_token,
+            tgi_service=self.tgi_service,
+            parse_json=self._parse_json,
+            run_tests=self._run_tests,
+            iterative_test_fix=self._iterative_test_fix,
+            chunk_reader=chunk_reader,
+            ui_model_headers=UI_MODEL_HEADERS,
+        ):
+            yield item
+
+    async def _phase_2_attempt(
+        self,
+        *,
+        system_prompt: str,
+        prompt: str,
+        logic_payload: Dict[str, Any],
+        access_token: Optional[str],
+        instruction: str,
+    ) -> AsyncIterator[Union[bytes, Dict[str, Any]]]:
+        async for item in run_phase2_attempt(
+            system_prompt=system_prompt,
+            prompt=prompt,
+            logic_payload=logic_payload,
+            access_token=access_token,
+            instruction=instruction,
+            tgi_service=self.tgi_service,
+            parse_json=self._parse_json,
+            chunk_reader=chunk_reader,
+            ui_model_headers=UI_MODEL_HEADERS,
+        ):
+            yield item
 
     async def stream_generate_ui(
         self,
@@ -275,8 +375,8 @@ class GeneratedUIService:
         Stream UI generation as Server-Sent Events (SSE).
 
         Yields bytes that are already formatted as SSE messages. The stream
-        will emit keepalive comments when the underlying stream yields parsed
-        items without content to avoid client timeouts.
+        will emit keepalive comments roughly every 10 seconds during idle
+        model streaming to avoid client timeouts.
         """
         logger.info(
             f"[stream_generate_ui] Starting stream for ui_id={ui_id}, name={name}, scope={scope.kind}:{scope.identifier}"
@@ -314,11 +414,22 @@ class GeneratedUIService:
         # Wrap initialization in try-catch to ensure we yield error messages
         # if anything fails before streaming starts
         logger.info("[stream_generate_ui] Building system prompt and selecting tools")
+
+        attempt = 0
+        max_attempts = 3
+        messages: List[Message] = []
+        allowed_tools: List[Dict[str, Any]] = []
+        payload_obj: Dict[str, Any] = {}
+        logic_payload: Dict[str, Any] = {}
+        dummy_data: Optional[str] = None
+
         try:
             system_prompt = await self._build_system_prompt(session)
             logger.info(
                 f"[stream_generate_ui] System prompt built, length={len(system_prompt)}"
             )
+
+            allowed_tools = await self._select_tools(session, requested_tools, prompt)
 
             message_payload = {
                 "ui": {
@@ -326,49 +437,114 @@ class GeneratedUIService:
                     "name": name,
                     "scope": {"type": scope.kind, "id": scope.identifier},
                 },
-                "request": {"prompt": prompt, "tools": requested_tools},
+                "request": {
+                    "prompt": prompt,
+                    "tools": [t["function"]["name"] for t in (allowed_tools or [])],
+                    "requested_tools": requested_tools,
+                },
             }
+
+            initial_message = Message(
+                role=MessageRole.USER,
+                content=json.dumps(message_payload, ensure_ascii=False),
+            )
 
             messages = [
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
-                Message(
-                    role=MessageRole.USER,
-                    content=json.dumps(message_payload, ensure_ascii=False),
-                ),
+                initial_message,
             ]
 
-            allowed_tools = await self._select_tools(session, requested_tools, prompt)
-            logger.info(
-                f"[stream_generate_ui] Selected {len(allowed_tools) if allowed_tools else 0} tools"
+            yield f"event: log\ndata: {json.dumps({'message': 'Generating dummy data for tests...'})}\n\n".encode(
+                "utf-8"
             )
 
-            chat_request = ChatCompletionRequest(
-                messages=messages,
-                tools=allowed_tools if allowed_tools else None,
-                stream=True,
-                response_format=_generation_response_format(),
-            )
-            self._maybe_dump_chat_request(
-                chat_request=chat_request,
+            dummy_data = await self._generate_dummy_data(
                 scope=scope,
                 ui_id=ui_id,
                 name=name,
                 prompt=prompt,
-                tools=requested_tools,
-                message_payload=message_payload,
-            )
-            logger.info(
-                "[stream_generate_ui] Chat request created, initiating LLM stream"
+                allowed_tools=allowed_tools,
+                access_token=access_token,
             )
 
-            # Stream source from LLM
-            content = ""
-            stream_source = self.tgi_service.llm_client.stream_completion(
-                chat_request, access_token or "", None
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Dummy data module for tests is available as ./dummy_data.js. "
+                        "Tests MUST import { dummyData } from './dummy_data.js' and use "
+                        "dummyData[toolName] as the mocked response.json(). "
+                        f"Tools: {[t['function']['name'] for t in (allowed_tools or [])]}"
+                    ),
+                )
             )
-            logger.info(
-                "[stream_generate_ui] LLM stream source created, starting to read chunks"
-            )
+
+            # --- PHASE 1: GENERATE LOGIC AND TESTS ---
+            phase1_success = False
+            while attempt < max_attempts:
+                attempt += 1
+                # Clone messages for this attempt to avoid polluting history on retry
+                attempt_messages = copy.deepcopy(messages)
+
+                async for item in self._phase_1_attempt(
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    messages=attempt_messages,
+                    allowed_tools=allowed_tools,
+                    dummy_data=dummy_data,
+                    access_token=access_token,
+                ):
+                    if isinstance(item, bytes):
+                        yield item
+                    elif isinstance(item, dict) and item.get("type") == "result":
+                        if item["success"]:
+                            phase1_success = True
+                            logic_payload = item["payload"]
+                            # Update main messages with the successful history
+                            messages = item["messages"]
+                        else:
+                            # Should we update messages here?
+                            # If we update messages here, we are keeping failed attempt history, which defeats "discarding".
+                            # The user requested "cleanly discarded once an attempt completed".
+                            # So we DO NOT update `messages` on failure.
+                            # The next attempt will start from original `messages` state (fresh retry).
+                            pass
+                        break
+
+                if phase1_success:
+                    break
+
+            if not phase1_success:
+                yield f"event: error\ndata: {json.dumps({'error': 'Failed to generate valid logic after 3 attempts'})}\n\n".encode(
+                    "utf-8"
+                )
+                return
+
+            # --- PHASE 2: GENERATE PRESENTATION ---
+            presentation_payload: Dict[str, Any] = {}
+            instruction = "Tests passed. Now generate the HTML page that uses these components. Return the `html` object and `metadata`."
+
+            phase2_system_prompt = await self._build_phase2_system_prompt(session)
+
+            async for item in self._phase_2_attempt(
+                system_prompt=phase2_system_prompt,
+                prompt=prompt,
+                logic_payload=logic_payload,
+                access_token=access_token,
+                instruction=instruction,
+            ):
+                if isinstance(item, bytes):
+                    yield item
+                elif isinstance(item, dict) and item.get("type") == "result":
+                    if item["success"]:
+                        presentation_payload = item["payload"]
+                    else:
+                        return
+
+            # Merge
+            payload_obj = {**logic_payload, **presentation_payload}
+            self._normalise_payload(payload_obj, scope, ui_id, name, prompt, None)
+
         except HTTPException as exc:
             logger.error(
                 f"[stream_generate_ui] HTTPException during initialization: {exc.detail}",
@@ -376,6 +552,9 @@ class GeneratedUIService:
             )
             payload = json.dumps({"error": exc.detail})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
             return
         except Exception as exc:
             logger.error(
@@ -384,147 +563,15 @@ class GeneratedUIService:
             )
             payload = json.dumps({"error": "Failed to initialize generation"})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
-            return
-
-        logger.info("[stream_generate_ui] Entering chunk reading loop")
-        chunk_count = 0
-        try:
-            logger.info("[stream_generate_ui] Opening chunk_reader context")
-            async with chunk_reader(stream_source) as reader:
-                logger.info(
-                    "[stream_generate_ui] chunk_reader opened, starting iteration"
-                )
-
-                # Create a task to read chunks and a timer for keepalives
-                chunk_iterator = reader.as_parsed()
-                pending_chunk: Optional[asyncio.Task] = None
-                keepalive_interval = 10  # seconds
-
-                try:
-                    while True:
-                        try:
-                            if pending_chunk is None:
-                                pending_chunk = asyncio.create_task(
-                                    chunk_iterator.__anext__()
-                                )
-
-                            try:
-                                parsed = await asyncio.wait_for(
-                                    asyncio.shield(pending_chunk),
-                                    timeout=keepalive_interval,
-                                )
-                                pending_chunk = None
-                            except asyncio.TimeoutError:
-                                if pending_chunk.done():
-                                    try:
-                                        parsed = pending_chunk.result()
-                                    except StopAsyncIteration:
-                                        pending_chunk = None
-                                        logger.info(
-                                            f"[stream_generate_ui] Iterator exhausted, total chunks={chunk_count}"
-                                        )
-                                        break
-                                    else:
-                                        pending_chunk = None
-                                else:
-                                    logger.debug(
-                                        f"[stream_generate_ui] Sending keepalive after {keepalive_interval}s timeout"
-                                    )
-                                    yield b": keepalive\n\n"
-                                    continue
-
-                            chunk_count += 1
-                            logger.info(
-                                f"[stream_generate_ui] Received chunk {chunk_count}, is_done={parsed.is_done}, has_content={bool(getattr(parsed, 'content', None))}, raw={parsed.raw[:100] if hasattr(parsed, 'raw') else 'N/A'}..."
-                            )
-
-                            # If the parsed chunk marks completion, stop looping
-                            if parsed.is_done:
-                                logger.info(
-                                    f"[stream_generate_ui] Stream completed, received {chunk_count} chunks"
-                                )
-                                break
-
-                            # When parsed contains content, append and send partial update
-                            if getattr(parsed, "content", None):
-                                content_piece = parsed.content
-                                content += content_piece
-                                logger.debug(
-                                    f"[stream_generate_ui] Chunk {chunk_count}: received {len(content_piece)} bytes, total={len(content)}"
-                                )
-                                # send a chunk SSE with the partial content
-                                # wrap it in a JSON object to make it easy for clients
-                                payload = json.dumps({"chunk": content_piece})
-                                yield f"data: {payload}\n\n".encode("utf-8")
-                            else:
-                                logger.debug(
-                                    f"[stream_generate_ui] Chunk {chunk_count}: keepalive"
-                                )
-                                # Emit a keepalive comment (SSE comment) so clients don't timeout.
-                                # Comments start with ':' and are ignored by SSE parsers but keep
-                                # the connection alive.
-                                yield b":\n\n"
-
-                        except StopAsyncIteration:
-                            # Iterator exhausted
-                            logger.info(
-                                f"[stream_generate_ui] Iterator exhausted, total chunks={chunk_count}"
-                            )
-                            break
-                finally:
-                    if pending_chunk is not None and not pending_chunk.done():
-                        pending_chunk.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await pending_chunk
-        except HTTPException as exc:
-            logger.error(
-                f"[stream_generate_ui] HTTPException during streaming after {chunk_count} chunks: {exc.detail}",
-                exc_info=exc,
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
             )
-            payload = json.dumps({"error": exc.detail})
-            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
-            return
-        except Exception as exc:
-            logger.error(
-                f"[stream_generate_ui] Exception during streaming after {chunk_count} chunks: {str(exc)}",
-                exc_info=exc,
-            )
-            payload = json.dumps({"error": "Streaming failed"})
-            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
-            return
-
-        logger.info(
-            f"[stream_generate_ui] Finished reading stream, total content length={len(content)}"
-        )
-        if not content:
-            # No content generated
-            logger.warning(
-                f"[stream_generate_ui] No content generated after {chunk_count} chunks"
-            )
-            payload = json.dumps({"error": "Generation response was empty"})
-            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
-            return
-
-        # Parse and normalise the final payload
-        logger.info("[stream_generate_ui] Parsing and normalizing payload")
-        try:
-            payload_obj = self._parse_json(content)
-            self._normalise_payload(payload_obj, scope, ui_id, name, prompt, None)
-            logger.info(
-                "[stream_generate_ui] Payload parsed and normalized successfully"
-            )
-        except HTTPException as exc:
-            logger.error(
-                f"[stream_generate_ui] HTTPException during payload parsing: {exc.detail}",
-                exc_info=exc,
-            )
-            payload = json.dumps({"error": exc.detail})
-            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
 
         # Build final record and persist
         logger.info("[stream_generate_ui] Building final record")
         timestamp = self._now()
+        payload_scripts = self._changed_scripts(payload_obj, None)
         record = {
             "metadata": {
                 "id": ui_id,
@@ -543,6 +590,7 @@ class GeneratedUIService:
                         generated_at=timestamp,
                         payload_metadata=payload_obj.get("metadata", {}),
                         payload_html=payload_obj.get("html", {}),
+                        payload_scripts=payload_scripts or None,
                     )
                 ],
             },
@@ -560,17 +608,281 @@ class GeneratedUIService:
             )
             payload = json.dumps({"error": f"Failed to persist generated ui: {str(e)}"})
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
             return
 
         # Final event with the created record
         logger.info("[stream_generate_ui] Sending final done event")
+
+        # We want to send the expanded record to the client so they can run it
+        expanded_record = record.copy()
+        expanded_record["current"] = self._expand_payload(record["current"])
+
         final_payload = json.dumps(
-            {"status": "created", "record": record}, ensure_ascii=False
+            {"status": "created", "record": expanded_record}, ensure_ascii=False
+        )
+        yield f"event: log\ndata: {json.dumps({'message': 'Page successfully generated'})}\n\n".encode(
+            "utf-8"
         )
         yield f"event: done\ndata: {final_payload}\n\n".encode("utf-8")
         # Send proper SSE done marker
         yield b"data: [DONE]\n\n"
         logger.info("[stream_generate_ui] Stream completed successfully")
+
+    async def stream_update_ui(
+        self,
+        *,
+        session: MCPSessionBase,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        prompt: str,
+        tools: Optional[Iterable[str]],
+        access_token: Optional[str],
+    ) -> AsyncIterator[bytes]:
+        """
+        Stream UI updates as Server-Sent Events (SSE).
+
+        Uses the same generation/test pipeline as create, but applies the
+        results to an existing UI record with update history.
+        """
+        logger.info(
+            f"[stream_update_ui] Starting stream for ui_id={ui_id}, name={name}, scope={scope.kind}:{scope.identifier}"
+        )
+        requested_tools = list(tools or [])
+
+        try:
+            existing = self.storage.read(scope, ui_id, name)
+        except FileNotFoundError:
+            logger.warning(f"[stream_update_ui] UI not found: {ui_id}/{name}")
+            payload = json.dumps({"error": "Ui not found"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+
+        try:
+            self._assert_scope_consistency(existing, scope, name)
+            self._ensure_update_permissions(existing, scope, actor)
+        except HTTPException as exc:
+            payload = json.dumps({"error": exc.detail})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+
+        attempt = 0
+        max_attempts = 3
+        messages: List[Message] = []
+        allowed_tools: List[Dict[str, Any]] = []
+        payload_obj: Dict[str, Any] = {}
+        logic_payload: Dict[str, Any] = {}
+        dummy_data: Optional[str] = None
+
+        try:
+            system_prompt = await self._build_system_prompt(session)
+            logger.info(
+                f"[stream_update_ui] System prompt built, length={len(system_prompt)}"
+            )
+
+            allowed_tools = await self._select_tools(session, requested_tools, prompt)
+
+            previous_metadata = existing.get("metadata", {})
+            message_payload = {
+                "ui": {
+                    "id": ui_id,
+                    "name": name,
+                    "scope": {"type": scope.kind, "id": scope.identifier},
+                },
+                "request": {
+                    "prompt": prompt,
+                    "tools": [t["function"]["name"] for t in (allowed_tools or [])],
+                    "requested_tools": requested_tools,
+                },
+                "context": {
+                    "original_prompt": self._initial_prompt(previous_metadata),
+                    "history": self._history_for_prompt(
+                        previous_metadata.get("history", [])
+                    ),
+                    "current_state": existing.get("current", {}),
+                },
+            }
+
+            initial_message = Message(
+                role=MessageRole.USER,
+                content=json.dumps(message_payload, ensure_ascii=False),
+            )
+
+            messages = [
+                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                initial_message,
+            ]
+
+            yield f"event: log\ndata: {json.dumps({'message': 'Generating dummy data for tests...'})}\n\n".encode(
+                "utf-8"
+            )
+
+            dummy_data = await self._generate_dummy_data(
+                scope=scope,
+                ui_id=ui_id,
+                name=name,
+                prompt=prompt,
+                allowed_tools=allowed_tools,
+                access_token=access_token,
+            )
+
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Dummy data module for tests is available as ./dummy_data.js. "
+                        "Tests MUST import { dummyData } from './dummy_data.js' and use "
+                        "dummyData[toolName] as the mocked response.json(). "
+                        f"Tools: {[t['function']['name'] for t in (allowed_tools or [])]}"
+                    ),
+                )
+            )
+
+            # --- PHASE 1: GENERATE LOGIC AND TESTS ---
+            phase1_success = False
+            while attempt < max_attempts:
+                attempt += 1
+                attempt_messages = copy.deepcopy(messages)
+
+                async for item in self._phase_1_attempt(
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    messages=attempt_messages,
+                    allowed_tools=allowed_tools,
+                    dummy_data=dummy_data,
+                    access_token=access_token,
+                ):
+                    if isinstance(item, bytes):
+                        yield item
+                    elif isinstance(item, dict) and item.get("type") == "result":
+                        if item["success"]:
+                            phase1_success = True
+                            logic_payload = item["payload"]
+                            messages = item["messages"]
+                        break
+
+                if phase1_success:
+                    break
+
+            if not phase1_success:
+                yield f"event: error\ndata: {json.dumps({'error': 'Failed to generate valid logic after 3 attempts'})}\n\n".encode(
+                    "utf-8"
+                )
+                return
+
+            # --- PHASE 2: GENERATE PRESENTATION ---
+            presentation_payload: Dict[str, Any] = {}
+            instruction = (
+                "Tests passed. Now update the HTML page that uses these components. "
+                "Return the `html` object and `metadata`."
+            )
+
+            phase2_system_prompt = await self._build_phase2_system_prompt(session)
+
+            async for item in self._phase_2_attempt(
+                system_prompt=phase2_system_prompt,
+                prompt=prompt,
+                logic_payload=logic_payload,
+                access_token=access_token,
+                instruction=instruction,
+            ):
+                if isinstance(item, bytes):
+                    yield item
+                elif isinstance(item, dict) and item.get("type") == "result":
+                    if item["success"]:
+                        presentation_payload = item["payload"]
+                    else:
+                        return
+
+            payload_obj = {**logic_payload, **presentation_payload}
+            self._normalise_payload(payload_obj, scope, ui_id, name, prompt, existing)
+
+        except HTTPException as exc:
+            logger.error(
+                f"[stream_update_ui] HTTPException during update: {exc.detail}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": exc.detail})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+        except Exception as exc:
+            logger.error(
+                f"[stream_update_ui] Exception during update: {str(exc)}",
+                exc_info=exc,
+            )
+            payload = json.dumps({"error": "Failed to update ui"})
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+
+        # Build final record and persist
+        logger.info("[stream_update_ui] Building updated record")
+        timestamp = self._now()
+        existing.setdefault("metadata", {})
+        metadata = existing["metadata"]
+        metadata["updated_at"] = timestamp
+        metadata["updated_by"] = actor.user_id
+        history = metadata.setdefault("history", [])
+        payload_scripts = self._changed_scripts(
+            payload_obj, existing.get("current", {})
+        )
+        history.append(
+            self._history_entry(
+                action="update",
+                prompt=prompt,
+                tools=list(tools or []),
+                user_id=actor.user_id,
+                generated_at=timestamp,
+                payload_metadata=payload_obj.get("metadata", {}),
+                payload_html=payload_obj.get("html", {}),
+                payload_scripts=payload_scripts or None,
+            )
+        )
+
+        existing["current"] = payload_obj
+
+        logger.info("[stream_update_ui] Persisting record to storage")
+        try:
+            self.storage.write(scope, ui_id, name, existing)
+            logger.info("[stream_update_ui] Record persisted successfully")
+        except Exception as exc:
+            logger.error(
+                f"[stream_update_ui] Failed to persist record: {str(exc)}",
+                exc_info=exc,
+            )
+            payload = json.dumps(
+                {"error": f"Failed to persist generated ui: {str(exc)}"}
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: log\ndata: {json.dumps({'message': 'Page creation failed'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+
+        logger.info("[stream_update_ui] Sending final done event")
+        expanded_record = existing.copy()
+        expanded_record["current"] = self._expand_payload(existing["current"])
+        final_payload = json.dumps(
+            {"status": "updated", "record": expanded_record}, ensure_ascii=False
+        )
+        yield f"event: log\ndata: {json.dumps({'message': 'Page successfully generated'})}\n\n".encode(
+            "utf-8"
+        )
+        yield f"event: done\ndata: {final_payload}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+        logger.info("[stream_update_ui] Stream completed successfully")
 
     async def update_ui(
         self,
@@ -609,6 +921,7 @@ class GeneratedUIService:
         metadata["updated_at"] = timestamp
         metadata["updated_by"] = actor.user_id
         history = metadata.setdefault("history", [])
+        payload_scripts = self._changed_scripts(generated, existing.get("current", {}))
         history.append(
             self._history_entry(
                 action="update",
@@ -618,6 +931,7 @@ class GeneratedUIService:
                 generated_at=timestamp,
                 payload_metadata=generated.get("metadata", {}),
                 payload_html=generated.get("html", {}),
+                payload_scripts=payload_scripts or None,
             )
         )
 
@@ -626,6 +940,9 @@ class GeneratedUIService:
         self.storage.write(scope, ui_id, name, existing)
         return existing
 
+    def _expand_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.output_factory.expand_payload(payload)
+
     def get_ui(
         self,
         *,
@@ -633,6 +950,7 @@ class GeneratedUIService:
         actor: Actor,
         ui_id: str,
         name: str,
+        expand: bool = False,
     ) -> Dict[str, Any]:
         try:
             existing = self.storage.read(scope, ui_id, name)
@@ -640,6 +958,11 @@ class GeneratedUIService:
             raise HTTPException(status_code=404, detail="Ui not found") from exc
 
         self._assert_scope_consistency(existing, scope, name)
+
+        # Only expand payload when explicitly requested (for HTML rendering)
+        if expand and "current" in existing:
+            existing["current"] = self._expand_payload(existing["current"])
+
         return existing
 
     def reset_last_change(
@@ -684,6 +1007,9 @@ class GeneratedUIService:
             "html": new_last_entry.get("payload_html", {}),
             "metadata": new_last_entry.get("payload_metadata", {}),
         }
+        scripts = self._scripts_from_history(history)
+        if scripts:
+            new_current.update(scripts)
 
         # Update timestamps
         timestamp = self._now()
@@ -748,11 +1074,32 @@ class GeneratedUIService:
 
         allowed_tools = await self._select_tools(session, tools, prompt)
 
+        dummy_data = await self._generate_dummy_data(
+            scope=scope,
+            ui_id=ui_id,
+            name=name,
+            prompt=prompt,
+            allowed_tools=allowed_tools,
+            access_token=access_token,
+        )
+        messages.append(
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    "Dummy data module for tests is available as ./dummy_data.js. "
+                    "Tests MUST import { dummyData } from './dummy_data.js' and use "
+                    "dummyData[toolName] as the mocked response.json(). "
+                    f"Tools: {[t['function']['name'] for t in (allowed_tools or [])]}"
+                ),
+            )
+        )
+
         chat_request = ChatCompletionRequest(
             messages=messages,
             tools=allowed_tools if allowed_tools else None,
             stream=True,
             response_format=_generation_response_format(),
+            extra_headers=UI_MODEL_HEADERS,
         )
         self._maybe_dump_chat_request(
             chat_request=chat_request,
@@ -781,6 +1128,7 @@ class GeneratedUIService:
             raise HTTPException(status_code=502, detail="Generation response was empty")
 
         payload = self._parse_json(content)
+        payload["dummy_data"] = payload.get("dummy_data") or dummy_data
         self._normalise_payload(payload, scope, ui_id, name, prompt, previous)
         return payload
 
@@ -802,6 +1150,26 @@ class GeneratedUIService:
 
         # Load the pfusch prompt from file and replace the design system placeholder
         pfusch_prompt = _load_pfusch_prompt()
+        return pfusch_prompt.replace("{{DESIGN_SYSTEM_PROMPT}}", combined_design)
+
+    async def _build_phase2_system_prompt(self, session: MCPSessionBase) -> str:
+        prompt_service = self.tgi_service.prompt_service
+        design_prompt_content = ""
+        try:
+            design_prompt = await prompt_service.find_prompt_by_name_or_role(
+                session, prompt_name="design-system"
+            )
+            if design_prompt:
+                design_prompt_content = await prompt_service.get_prompt_content(
+                    session, design_prompt
+                )
+        except Exception:
+            design_prompt_content = ""
+
+        combined_design = design_prompt_content or DEFAULT_DESIGN_PROMPT
+
+        # Load the pfusch phase 2 prompt from file and replace the design system placeholder
+        pfusch_prompt = _load_pfusch_phase2_prompt()
         return pfusch_prompt.replace("{{DESIGN_SYSTEM_PROMPT}}", combined_design)
 
     async def _select_tools(
@@ -1017,98 +1385,14 @@ class GeneratedUIService:
         prompt: str,
         previous: Optional[Dict[str, Any]],
     ) -> None:
-        if not isinstance(payload, dict):
-            raise HTTPException(
-                status_code=502,
-                detail="Generated payload must be a JSON object",
-            )
-
-        html_section = payload.get("html")
-
-        # If the model returned a bare string for the html section, accept it
-        if isinstance(html_section, str):
-            html_section = {"page": html_section}
-
-        # If there is no explicit `html` key, attempt to salvage common
-        # alternatives (top-level `page`, `snippet`, `content`, `body`, etc.)
-        if html_section is None:
-            maybe_page = (
-                payload.get("page")
-                or payload.get("html_page")
-                or payload.get("page_html")
-            )
-            maybe_snippet = (
-                payload.get("snippet")
-                or payload.get("body")
-                or payload.get("content")
-                or payload.get("text")
-            )
-
-            if isinstance(maybe_page, str) or isinstance(maybe_snippet, str):
-                html_section = {}
-                if isinstance(maybe_page, str):
-                    html_section["page"] = maybe_page
-                if isinstance(maybe_snippet, str):
-                    html_section["snippet"] = maybe_snippet
-            else:
-                # As a last resort, search the payload for a single string
-                # value that looks like HTML and treat it as a page.
-                for val in payload.values():
-                    if isinstance(val, str) and ("<" in val and ">" in val):
-                        html_section = {"page": val}
-                        break
-
-        if not isinstance(html_section, dict):
-            # As a last-resort fallback, synthesize a minimal HTML page using
-            # the original prompt so the API can return something usable
-            # instead of failing with 502. Log a warning so this can be
-            # investigated.
-            logger.warning(
-                "Generated payload missing 'html' object; synthesizing fallback page. payload keys: %s",
-                list(payload.keys()),
-            )
-            try:
-                prompt_snippet = _html_escape.escape(prompt or "")
-                synthesized_snippet = (
-                    f'<div class="generated-fallback">{prompt_snippet}</div>'
-                )
-                html_section = {
-                    "page": self._wrap_snippet(synthesized_snippet),
-                    "snippet": synthesized_snippet,
-                }
-            except Exception:
-                raise HTTPException(
-                    status_code=502,
-                    detail="Generated payload must include an 'html' object",
-                )
-
-        snippet = html_section.get("snippet")
-        page = html_section.get("page")
-
-        if not snippet and page:
-            snippet = self._extract_body(page) or page
-            html_section["snippet"] = snippet
-        if not page and snippet:
-            html_section["page"] = self._wrap_snippet(snippet)
-
-        payload["html"] = html_section
-
-        metadata = payload.setdefault("metadata", {})
-        metadata.setdefault("id", ui_id)
-        metadata.setdefault("name", name)
-        metadata.setdefault("scope", {"type": scope.kind, "id": scope.identifier})
-        metadata.setdefault("requirements", prompt)
-
-        if previous and "metadata" in previous:
-            previous_metadata = previous.get("metadata", {})
-            history = previous_metadata.get("history") or []
-            original_prompt = None
-            if history:
-                first_entry = history[0]
-                if isinstance(first_entry, dict):
-                    original_prompt = first_entry.get("prompt")
-            if original_prompt:
-                metadata.setdefault("original_requirements", original_prompt)
+        self.output_factory.normalise_payload(
+            payload=payload,
+            scope=scope,
+            ui_id=ui_id,
+            name=name,
+            prompt=prompt,
+            previous=previous,
+        )
 
     def _maybe_dump_chat_request(
         self,
@@ -1168,23 +1452,10 @@ class GeneratedUIService:
             )
 
     def _extract_body(self, html: str) -> Optional[str]:
-        match = re.search(
-            r"<body[^>]*>(.*?)</body>", html, flags=re.IGNORECASE | re.DOTALL
-        )
-        if match:
-            return match.group(1).strip()
-        return None
+        return self.output_factory.extract_body(html)
 
     def _wrap_snippet(self, snippet: str) -> str:
-        return (
-            '<!DOCTYPE html><html lang="en"><head>'
-            '<meta charset="utf-8"/>'
-            '<meta name="viewport" content="width=device-width, initial-scale=1"/>'
-            "<title>Generated Ui</title>"
-            "</head><body>"
-            f"{snippet}"
-            "</body></html>"
-        )
+        return self.output_factory.wrap_snippet(snippet)
 
     def _assert_scope_consistency(
         self, existing: Dict[str, Any], scope: Scope, name: str
@@ -1216,6 +1487,37 @@ class GeneratedUIService:
                 return first.get("prompt")
         return None
 
+    def _changed_scripts(
+        self,
+        new_payload: Dict[str, Any],
+        previous_payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        changed: Dict[str, Any] = {}
+        previous_payload = previous_payload or {}
+        for key in SCRIPT_KEYS:
+            if key not in new_payload and key not in previous_payload:
+                continue
+            new_value = new_payload.get(key)
+            old_value = previous_payload.get(key)
+            if new_value != old_value:
+                changed[key] = new_value
+        return changed
+
+    def _scripts_from_history(self, history_entries: Sequence[Any]) -> Dict[str, Any]:
+        scripts: Dict[str, Any] = {}
+        for entry in reversed(history_entries or []):
+            if not isinstance(entry, dict):
+                continue
+            payload_scripts = entry.get("payload_scripts")
+            if not isinstance(payload_scripts, dict):
+                continue
+            for key in SCRIPT_KEYS:
+                if key in payload_scripts and key not in scripts:
+                    scripts[key] = payload_scripts[key]
+            if len(scripts) == len(SCRIPT_KEYS):
+                break
+        return scripts
+
     def _history_entry(
         self,
         *,
@@ -1226,8 +1528,9 @@ class GeneratedUIService:
         generated_at: str,
         payload_metadata: Dict[str, Any],
         payload_html: Optional[Dict[str, Any]] = None,
+        payload_scripts: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        return {
+        entry = {
             "action": action,
             "prompt": prompt,
             "tools": tools,
@@ -1236,6 +1539,9 @@ class GeneratedUIService:
             "payload_metadata": payload_metadata,
             "payload_html": payload_html,
         }
+        if payload_scripts is not None:
+            entry["payload_scripts"] = payload_scripts
+        return entry
 
     def _history_for_prompt(
         self, history_entries: Sequence[Any]
@@ -1246,6 +1552,7 @@ class GeneratedUIService:
                 continue
             entry_copy = dict(entry)
             entry_copy.pop("payload_html", None)
+            entry_copy.pop("payload_scripts", None)
             sanitized.append(entry_copy)
         return sanitized
 

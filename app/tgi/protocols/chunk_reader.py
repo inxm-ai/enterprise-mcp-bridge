@@ -23,8 +23,10 @@ Usage:
             yield raw_chunk
 """
 
+import asyncio
 import json
 import logging
+from contextlib import suppress
 from datetime import datetime, timezone
 from enum import Enum
 import time
@@ -39,6 +41,7 @@ from opentelemetry import trace
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
+_KEEPALIVE_SENTINEL = object()
 
 
 class ChunkFormat(Enum):
@@ -63,6 +66,7 @@ class ParsedChunk:
         tool_calls: Optional[list] = None,
         finish_reason: Optional[str] = None,
         is_done: bool = False,
+        is_keepalive: bool = False,
         accumulated_tool_calls: Optional[Dict[int, dict]] = None,
         tool_result: Optional[dict] = None,
     ):
@@ -72,13 +76,23 @@ class ParsedChunk:
         self.tool_calls = tool_calls
         self.finish_reason = finish_reason
         self.is_done = is_done
+        self.is_keepalive = is_keepalive
         # Accumulated tool calls: {index: {id, name, arguments}}
         self.accumulated_tool_calls = accumulated_tool_calls or {}
         # Tool execution result: {name: str, content: str}
         self.tool_result = tool_result
 
     def __repr__(self):
-        return f"ParsedChunk(content={self.content!r}, is_done={self.is_done}, tool_calls={len(self.tool_calls or [])}, tool_result={self.tool_result is not None})"
+        return (
+            "ParsedChunk(content={!r}, is_done={}, is_keepalive={}, tool_calls={}, "
+            "tool_result={})"
+        ).format(
+            self.content,
+            self.is_done,
+            self.is_keepalive,
+            len(self.tool_calls or []),
+            self.tool_result is not None,
+        )
 
 
 class ChunkReader:
@@ -92,17 +106,24 @@ class ChunkReader:
     - as_parsed(): Get unified ParsedChunk objects
     """
 
-    def __init__(self, source: AsyncGenerator[Any, None], enable_tracing: bool = True):
+    def __init__(
+        self,
+        source: AsyncGenerator[Any, None],
+        enable_tracing: bool = True,
+        keepalive_interval: Optional[float] = 10.0,
+    ):
         """
         Initialize the chunk reader.
 
         Args:
             source: An async generator yielding raw chunks (str, bytes, or dict)
             enable_tracing: Whether to enable OpenTelemetry tracing (default: True)
+            keepalive_interval: Seconds between keepalive ticks while waiting for chunks
         """
         self.source = source
         self._entered = False
         self.enable_tracing = enable_tracing
+        self.keepalive_interval = keepalive_interval
         # Tool call accumulator: {index: {id, name, arguments}}
         self._tool_call_chunks: Dict[int, dict] = {}
         self._tool_call_ready: Set[int] = set()
@@ -244,6 +265,45 @@ class ChunkReader:
         else:
             return str(raw_chunk)
 
+    async def _iter_source_with_keepalive(self) -> AsyncGenerator[Any, None]:
+        if not self.keepalive_interval or self.keepalive_interval <= 0:
+            async for raw_chunk in self.source:
+                yield raw_chunk
+            return
+
+        pending_chunk: Optional[asyncio.Task] = None
+        try:
+            while True:
+                if pending_chunk is None:
+                    pending_chunk = asyncio.create_task(self.source.__anext__())
+
+                try:
+                    raw_chunk = await asyncio.wait_for(
+                        asyncio.shield(pending_chunk),
+                        timeout=self.keepalive_interval,
+                    )
+                    pending_chunk = None
+                    yield raw_chunk
+                except asyncio.TimeoutError:
+                    if pending_chunk.done():
+                        try:
+                            raw_chunk = pending_chunk.result()
+                        except StopAsyncIteration:
+                            pending_chunk = None
+                            return
+                        else:
+                            pending_chunk = None
+                            yield raw_chunk
+                    else:
+                        yield _KEEPALIVE_SENTINEL
+                except StopAsyncIteration:
+                    return
+        finally:
+            if pending_chunk is not None and not pending_chunk.done():
+                pending_chunk.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending_chunk
+
     def _parse_sse_chunk(self, chunk_str: str) -> Optional[ParsedChunk]:
         """
         Parse a Server-Sent Events (SSE) chunk.
@@ -337,7 +397,10 @@ class ChunkReader:
             chunks_with_content = 0
             chunks_with_tools = 0
             try:
-                async for raw_chunk in self.source:
+                async for raw_chunk in self._iter_source_with_keepalive():
+                    if raw_chunk is _KEEPALIVE_SENTINEL:
+                        yield ParsedChunk(raw=": keepalive\n\n", is_keepalive=True)
+                        continue
                     chunk_count += 1
                     logger.debug("[ChunkReader] Processing raw chunk: %s", raw_chunk)
                     chunk_str = self._normalize_chunk(raw_chunk)
@@ -377,7 +440,10 @@ class ChunkReader:
                 span.end()
         else:
             # No tracing version
-            async for raw_chunk in self.source:
+            async for raw_chunk in self._iter_source_with_keepalive():
+                if raw_chunk is _KEEPALIVE_SENTINEL:
+                    yield ParsedChunk(raw=": keepalive\n\n", is_keepalive=True)
+                    continue
                 chunk_str = self._normalize_chunk(raw_chunk)
                 parsed = self._parse_sse_chunk(chunk_str)
                 if parsed:
@@ -403,6 +469,8 @@ class ChunkReader:
             content_chunks = 0
             try:
                 async for parsed in self.as_parsed():
+                    if getattr(parsed, "is_keepalive", False):
+                        continue
                     if parsed.is_done:
                         break
                     if parsed.content:
@@ -417,6 +485,8 @@ class ChunkReader:
                 span.end()
         else:
             async for parsed in self.as_parsed():
+                if getattr(parsed, "is_keepalive", False):
+                    continue
                 if parsed.is_done:
                     break
                 if parsed.content:
@@ -473,6 +543,9 @@ class ChunkReader:
 
             try:
                 async for parsed in self.as_parsed():
+                    if getattr(parsed, "is_keepalive", False):
+                        yield ": keepalive\n\n"
+                        continue
                     if parsed.is_done:
                         if (
                             output_format == ChunkFormat.OPENAI
@@ -502,6 +575,9 @@ class ChunkReader:
                 span.end()
         else:
             async for parsed in self.as_parsed():
+                if getattr(parsed, "is_keepalive", False):
+                    yield ": keepalive\n\n"
+                    continue
                 if parsed.is_done:
                     if (
                         output_format == ChunkFormat.OPENAI
@@ -624,7 +700,9 @@ class ChunkReader:
 
 
 def chunk_reader(
-    source: AsyncGenerator[Any, None], enable_tracing: bool = True
+    source: AsyncGenerator[Any, None],
+    enable_tracing: bool = True,
+    keepalive_interval: Optional[float] = 10.0,
 ) -> ChunkReader:
     """
     Create a ChunkReader context manager.
@@ -632,6 +710,7 @@ def chunk_reader(
     Args:
         source: An async generator yielding raw chunks
         enable_tracing: Whether to enable OpenTelemetry tracing (default: True)
+        keepalive_interval: Seconds between keepalive ticks while waiting for chunks
 
     Returns:
         ChunkReader instance
@@ -641,7 +720,11 @@ def chunk_reader(
             async for content in reader.as_str():
                 print(content)
     """
-    return ChunkReader(source, enable_tracing=enable_tracing)
+    return ChunkReader(
+        source,
+        enable_tracing=enable_tracing,
+        keepalive_interval=keepalive_interval,
+    )
 
 
 async def accumulate_content(source: AsyncGenerator[Any, None]) -> str:

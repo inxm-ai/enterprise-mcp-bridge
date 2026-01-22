@@ -123,9 +123,9 @@ def map_tools(tools):
             continue
         if isinstance(tool, dict):
             title = tool.get("title")
-            description = tool.get("description") or (
-                tool.get("function") or {}
-            ).get("description")
+            description = tool.get("description") or (tool.get("function") or {}).get(
+                "description"
+            )
             input_schema = tool.get("inputSchema")
             if input_schema is None:
                 input_schema = (tool.get("function") or {}).get("parameters")

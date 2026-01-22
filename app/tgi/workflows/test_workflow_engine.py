@@ -4355,9 +4355,7 @@ async def test_workflow_handoff_preserves_user_query_and_messages(
         rows = conn.execute(
             "SELECT flow_id, context_json FROM workflow_executions"
         ).fetchall()
-    plan_ctx = next(
-        json.loads(row[1]) for row in rows if row[0] == "plan_create"
-    )
+    plan_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_create")
     assert (
         plan_ctx.get("user_query")
         == "Create a new plan to summarize the last 24 hours of news."

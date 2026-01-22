@@ -121,6 +121,45 @@ def _permission_error_payload(exc: PermissionError) -> dict[str, Any]:
     }
 
 
+def _extract_completion_content(result: Any) -> str:
+    if result is None:
+        return ""
+
+    if isinstance(result, str):
+        return result
+
+    if isinstance(result, dict):
+        choices = result.get("choices") or []
+        if choices:
+            choice = choices[0] or {}
+            delta = choice.get("delta") or {}
+            message = choice.get("message") or {}
+            content = delta.get("content") or message.get("content")
+            if content is not None:
+                return str(content)
+
+        if "result" in result:
+            payload = result.get("result")
+            if isinstance(payload, dict):
+                completion = payload.get("completion")
+                if completion is not None:
+                    return str(completion)
+            if isinstance(payload, str):
+                return payload
+
+        return json.dumps(result, ensure_ascii=False)
+
+    if isinstance(result, list):
+        parts = []
+        for item in result:
+            piece = _extract_completion_content(item)
+            if piece:
+                parts.append(piece)
+        return "".join(parts)
+
+    return str(result)
+
+
 def _coerce_a2a_request(raw_body: Any) -> A2ARequest:
     """Coerces various payload shapes into an A2ARequest."""
     if not isinstance(raw_body, dict):
@@ -182,6 +221,9 @@ async def _handle_chat_completion(
         )
 
     incoming_headers = dict(request.headers)
+    user_token = _resolve_user_token(incoming_headers, access_token)
+    user_token = _resolve_user_token(incoming_headers, access_token)
+    user_token = _resolve_user_token(incoming_headers, access_token)
     user_token = _resolve_user_token(incoming_headers, access_token)
     # Check if streaming is requested
     accept_header = request.headers.get("accept", "")
@@ -521,16 +563,22 @@ async def a2a_chat_completion(
             )
         else:
             chat_request.stream = False
-            stream_gen = _handle_chat_completion(
-                request,
-                chat_request,
-                access_token,
+            user_token = _resolve_user_token(incoming_headers, access_token)
+            async with mcp_session_context(
+                sessions,
                 x_inxm_mcp_session,
+                access_token,
                 group,
-                prompt,
                 incoming_headers,
-            )
-            full_response = await accumulate_content(stream_gen)
+            ) as session:
+                result = await tgi_service.chat_completion(
+                    session, chat_request, user_token, access_token, prompt
+                )
+
+            if _is_async_iterable(result):
+                full_response = await accumulate_content(result)  # type: ignore[arg-type]
+            else:
+                full_response = _extract_completion_content(result)
 
             return JSONResponse(
                 content=_create_a2a_response(

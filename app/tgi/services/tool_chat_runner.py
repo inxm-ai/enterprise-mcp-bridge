@@ -403,7 +403,11 @@ class ToolChatRunner:
                                 except Exception:
                                     event = None
                                 queue_get = asyncio.create_task(progress_queue.get())
-                                if emit_tool_events and isinstance(event, dict) and event:
+                                if (
+                                    emit_tool_events
+                                    and isinstance(event, dict)
+                                    and event
+                                ):
                                     yield f"data: {json.dumps(event)}\n\n"
                                     yield "\n\n"
                                 continue
@@ -433,9 +437,7 @@ class ToolChatRunner:
                                     try:
                                         leftover = progress_queue.get_nowait()
                                         if emit_tool_events:
-                                            yield (
-                                                f"data: {json.dumps(leftover)}\n\n"
-                                            )
+                                            yield (f"data: {json.dumps(leftover)}\n\n")
                                             yield "\n\n"
                                     except Exception:
                                         break
@@ -613,9 +615,7 @@ class ToolChatRunner:
                 if not stack:
                     continue
                 opening = stack.pop()
-                if (opening == "{" and char != "}") or (
-                    opening == "[" and char != "]"
-                ):
+                if (opening == "{" and char != "}") or (opening == "[" and char != "]"):
                     stack.clear()
                     start = None
                     continue
@@ -658,9 +658,7 @@ class ToolChatRunner:
 
     @staticmethod
     def _build_content_chunk(content: str) -> str:
-        return (
-            f"data: {json.dumps({'choices':[{'delta':{'content': content},'index':0}]})}\n\n"
-        )
+        return f"data: {json.dumps({'choices':[{'delta':{'content': content},'index':0}]})}\n\n"
 
     async def _coerce_response_format(
         self,
@@ -715,7 +713,9 @@ class ToolChatRunner:
                 )
             return self._format_json_payload(parsed)
 
-        error_msg = validation_error or parse_error or "failed to parse response as JSON"
+        error_msg = (
+            validation_error or parse_error or "failed to parse response as JSON"
+        )
         if logger:
             logger.warning("[ToolChatRunner] %s", error_msg)
         return self._format_json_payload(self._build_error_payload(error_msg, content))

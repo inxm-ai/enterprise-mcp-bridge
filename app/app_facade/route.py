@@ -296,6 +296,13 @@ async def get_generated_ui(
     actor = _extract_actor(access_token)
     service = _get_generated_service()
 
+    mode = (render_mode or "card").lower()
+    if mode not in {"card", "page", "snippet"}:
+        raise HTTPException(status_code=400, detail="Invalid render mode requested")
+
+    # Only expand payload when rendering HTML (not for card/JSON mode)
+    expand_payload = mode in {"page", "snippet"}
+
     with tracer.start_as_current_span("generated_ui.fetch") as span:
         span.set_attribute("ui.scope", scope.kind)
         span.set_attribute("ui.scope_id", scope.identifier)
@@ -306,14 +313,13 @@ async def get_generated_ui(
             actor=actor,
             ui_id=ui_id,
             name=name,
+            expand=expand_payload,
         )
 
-    html_section = (record.get("current") or {}).get("html") or {}
-    mode = (render_mode or "card").lower()
     if mode == "card":
         return JSONResponse(content=record)
-    if mode not in {"page", "snippet"}:
-        raise HTTPException(status_code=400, detail="Invalid render mode requested")
+
+    html_section = (record.get("current") or {}).get("html") or {}
     content = html_section.get(mode)
     if not content:
         raise HTTPException(
@@ -354,50 +360,89 @@ async def update_generated_ui(
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
-    try:
-        with tracer.start_as_current_span("generated_ui.update") as span:
-            span.set_attribute("ui.scope", scope.kind)
-            span.set_attribute("ui.scope_id", scope.identifier)
-            span.set_attribute("ui.id", ui_id)
-            span.set_attribute("ui.name", name)
-            async with mcp_session_context(
-                sessions,
-                session_key,
-                access_token,
-                requested_group,
-                incoming_headers,
-            ) as session_obj:
-                record = await service.update_ui(
-                    session=session_obj,
-                    scope=scope,
-                    actor=actor,
-                    ui_id=ui_id,
-                    name=name,
-                    prompt=prompt,
-                    tools=list(body.tools or []),
-                    access_token=access_token,
-                )
-    except HTTPException as exc:
-        raise exc
-    except BaseExceptionGroup as eg:  # type: ignore[misc]
-        # Handle ExceptionGroup from async context managers (Python 3.11+)
-        # Extract and re-raise HTTPException if present
-        for exc in eg.exceptions:
-            if isinstance(exc, HTTPException):
-                raise exc
-            # Recursively check nested ExceptionGroups
-            if isinstance(exc, BaseException) and hasattr(exc, "exceptions"):
-                for nested_exc in exc.exceptions:  # type: ignore[attr-defined]
-                    if isinstance(nested_exc, HTTPException):
-                        raise nested_exc
-        # If no HTTPException found, log and raise as 500
-        logger.error("Unexpected error during ui update", exc_info=eg)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-    except Exception as exc:
-        logger.error("Unexpected error during ui update", exc_info=exc)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    async def event_stream() -> AsyncIterator[bytes]:
+        logger.info("[update_generated_ui] Starting event stream generator")
+        try:
+            with tracer.start_as_current_span("generated_ui.update") as span:
+                span.set_attribute("ui.scope", scope.kind)
+                span.set_attribute("ui.scope_id", scope.identifier)
+                span.set_attribute("ui.id", ui_id)
+                span.set_attribute("ui.name", name)
+                async with mcp_session_context(
+                    sessions,
+                    session_key,
+                    access_token,
+                    requested_group,
+                    incoming_headers,
+                ) as session_obj:
+                    logger.info(
+                        "[update_generated_ui] MCP session established, calling stream_update_ui"
+                    )
+                    chunk_count = 0
+                    async for chunk in service.stream_update_ui(
+                        session=session_obj,
+                        scope=scope,
+                        actor=actor,
+                        ui_id=ui_id,
+                        name=name,
+                        prompt=prompt,
+                        tools=list(body.tools or []),
+                        access_token=access_token,
+                    ):  # pragma: no cover - streaming path
+                        chunk_count += 1
+                        logger.debug(
+                            f"[update_generated_ui] Yielding chunk {chunk_count}, size={len(chunk)}"
+                        )
+                        yield chunk
+                    logger.info(
+                        f"[update_generated_ui] Finished streaming, total chunks={chunk_count}"
+                    )
+        except Exception as eg:
+            if hasattr(eg, "exceptions"):
+                for exc in getattr(eg, "exceptions"):
+                    if isinstance(exc, HTTPException):
+                        payload = {"error": exc.detail}
+                        yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode(
+                            "utf-8"
+                        )
+                        return
+            logger.error(
+                f"[update_generated_ui] Exception (ExceptionGroup fallthrough): {str(eg)}",
+                exc_info=eg,
+            )
+            yield f"event: error\ndata: {json.dumps({'error': 'Internal Server Error'})}\n\n".encode(
+                "utf-8"
+            )
+            return
+        except HTTPException as exc:
+            logger.error(
+                f"[update_generated_ui] HTTPException in event_stream: {exc.detail}",
+                exc_info=exc,
+            )
+            payload = {"error": exc.detail}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+            return
+        except Exception as exc:
+            logger.error(
+                f"[update_generated_ui] Unexpected exception in event_stream: {str(exc)}",
+                exc_info=exc,
+            )
+            payload = {"error": "Internal Server Error"}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+            return
 
-    return JSONResponse(status_code=200, content=_format_ui_response(record))
+    logger.info("[update_generated_ui] Returning StreamingResponse")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+        },
+        status_code=200,
+    )
 
 
 @router.delete("/_generated/{target}/{ui_id}/{name}/reset")

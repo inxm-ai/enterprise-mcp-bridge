@@ -25,6 +25,20 @@ def _set_env(monkeypatch):
     monkeypatch.setattr("app.tgi.routes.DEFAULT_MODEL", "test-model")
 
 
+@pytest.fixture(autouse=True)
+def _mock_mcp_session_context(monkeypatch):
+    @asynccontextmanager
+    async def fake_mcp_context(
+        sessions, x_inxm_mcp_session, access_token, group, incoming_headers=None
+    ):
+        class DummySession:
+            pass
+
+        yield DummySession()
+
+    monkeypatch.setattr("app.tgi.routes.mcp_session_context", fake_mcp_context)
+
+
 @pytest.mark.asyncio
 async def test_a2a_chat_completion_streaming(monkeypatch):
     # Simulate streaming response via patching the service used by the router

@@ -63,6 +63,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     stop: Optional[List[str]] = None
     response_format: Optional[Any] = None
+    extra_headers: Optional[Dict[str, str]] = None
 
 
 class DeltaMessage(BaseModel):

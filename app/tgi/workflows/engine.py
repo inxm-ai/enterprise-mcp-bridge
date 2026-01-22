@@ -3152,9 +3152,7 @@ class WorkflowEngine:
                         )
                     except Exception:
                         args = "" if args is None else str(args)
-                tool_call_id = chunk_data.get("id") or tool_call_id_overrides.get(
-                    index
-                )
+                tool_call_id = chunk_data.get("id") or tool_call_id_overrides.get(index)
                 if not tool_call_id:
                     tool_call_id = f"call_{index}"
                 tool_calls_for_message.append(

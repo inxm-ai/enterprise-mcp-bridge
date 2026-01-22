@@ -274,9 +274,7 @@ class WellPlannedOrchestrator:
         payload = self._stringify_payload(content)
 
         async def _generator():
-            yield create_response_chunk(
-                self.llm_client.create_completion_id(), payload
-            )
+            yield create_response_chunk(self.llm_client.create_completion_id(), payload)
             yield create_response_chunk(
                 self.llm_client.create_completion_id(), "[DONE]"
             )
@@ -1059,9 +1057,7 @@ class WellPlannedOrchestrator:
             return {"type": "object"}
         return None
 
-    def _build_intent_response_schema(
-        self, response_format: Optional[dict]
-    ) -> dict:
+    def _build_intent_response_schema(self, response_format: Optional[dict]) -> dict:
         schema = copy.deepcopy(intent_response_schema)
         answer_schema = self._extract_response_format_schema(response_format)
         if answer_schema:

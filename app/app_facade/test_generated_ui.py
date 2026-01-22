@@ -82,7 +82,42 @@ class StubGeneratedService:
         updated["metadata"]["updated_at"] = "2024-01-02T00:00:00Z"
         return updated
 
-    def get_ui(self, *, scope, actor, ui_id, name):
+    async def stream_update_ui(self, **_kwargs):
+        """Provide a minimal streaming implementation for update tests."""
+        try:
+            session = _kwargs.get("session")
+            scope = _kwargs.get("scope")
+            actor = _kwargs.get("actor")
+            ui_id = _kwargs.get("ui_id")
+            name = _kwargs.get("name")
+            prompt = _kwargs.get("prompt")
+            tools = list(_kwargs.get("tools") or [])
+            access_token = _kwargs.get("access_token")
+            self.last_update = {
+                "session": session,
+                "scope": scope,
+                "actor": actor,
+                "ui_id": ui_id,
+                "name": name,
+                "prompt": prompt,
+                "tools": tools,
+                "access_token": access_token,
+            }
+        except Exception:
+            pass
+
+        metadata = dict(self.record.get("metadata", {}))
+        metadata["updated_at"] = "2024-01-02T00:00:00Z"
+        record = {
+            "metadata": metadata,
+            "current": self.record.get("current", {}),
+        }
+        payload = json.dumps(
+            {"status": "updated", "record": record}, ensure_ascii=False
+        )
+        yield f"event: done\ndata: {payload}\n\n".encode("utf-8")
+
+    def get_ui(self, *, scope, actor, ui_id, name, expand=False):
         return self.record
 
     async def stream_generate_ui(self, **_kwargs):
@@ -211,8 +246,16 @@ def test_update_generated_ui(client):
         headers={"X-Auth-Request-Access-Token": "token"},
     )
     assert response.status_code == 200
-    body = response.json()
-    assert body["updated_at"] == "2024-01-02T00:00:00Z"
+    content = response.content.decode("utf-8")
+    marker = "event: done\ndata: "
+    start = content.find(marker)
+    assert start != -1
+    start += len(marker)
+    end = content.find("\n\n", start)
+    assert end != -1
+    body = json.loads(content[start:end])
+    assert body["status"] == "updated"
+    assert body["record"]["metadata"]["updated_at"] == "2024-01-02T00:00:00Z"
     stub = client.stub_service  # type: ignore[attr-defined]
     assert stub.last_update["tools"] == ["insights_tool"]
 
@@ -221,6 +264,7 @@ def _make_streaming_client(monkeypatch, stream_impl, actor_override=None):
     """Helper to create a TestClient with a given streaming service implementation.
 
     stream_impl: an object implementing async def stream_generate_ui(...)
+                 or async def stream_update_ui(...)
     actor_override: optional Actor to return from _extract_actor
     """
     monkeypatch.setenv("TGI_URL", "https://example.com/tgi")
