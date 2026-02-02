@@ -154,6 +154,11 @@ class StubLLMClient:
             if response is not None:
                 return response
             return "RERUN"
+        if "USER_FEEDBACK_QUESTION" in (base_prompt or ""):
+            response = self.ask_responses.get("feedback_question")
+            if response is not None:
+                return response
+            return ""
         return self.ask_responses.get("default", "")
 
 
@@ -3875,6 +3880,192 @@ async def test_reroute_with_shared_plan_id(tmp_path, monkeypatch):
     assert state.context["agents"]["find_plan"]["plan_id"] == "plan-abc"
     assert session.tool_calls
     assert session.tool_calls[0]["args"].get("plan_id") == "plan-abc"
+
+
+@pytest.mark.asyncio
+async def test_reroute_ask_single_match_routes_on_user_feedback(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "ask_flow_single",
+        "root_intent": "ASK_SINGLE",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate a matching plan.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_PERFECT_MATCH"],
+                        "ask": {
+                            "question": "Present the plan and ask whether to proceed or create a new plan.",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "select_run_mode",
+                                        "with": ["plan_id"],
+                                    },
+                                    "create_new": {
+                                        "to": "workflows[plan_create]"
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "select_run_mode",
+                "description": "Select a run mode.",
+                "depends_on": ["find_plan"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "find_plan": '<return name="plan_id">plan-1</return><reroute>FOUND_PERFECT_MATCH</reroute>',
+            "select_run_mode": "<passthrough>ready</passthrough>",
+        },
+        ask_responses={"feedback_question": "Use the matching plan or create a new one?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-ask-single"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_single",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    output = "\n".join(chunks)
+    assert "<user_feedback_needed>" in output
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+    assert llm.calls.count("find_plan") == 1
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(role=MessageRole.USER, content="<user_feedback>select_run_mode</user_feedback>")
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_single",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
+    assert final_state.context.get("plan_id") == "plan-1"
+    assert "select_run_mode" in llm.calls
+    assert llm.calls.count("find_plan") == 1
+
+
+@pytest.mark.asyncio
+async def test_reroute_ask_multiple_match_assigns_selection(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "ask_flow_multi",
+        "root_intent": "ASK_MULTI",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate matching plans.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_MULTIPLE_MATCHES"],
+                        "ask": {
+                            "question": "Present matching plans and ask which to run.",
+                            "expected_responses": [
+                                {
+                                    "select_plan": {
+                                        "to": "select_run_mode",
+                                        "each": "plans",
+                                    },
+                                    "create_new": {
+                                        "to": "workflows[plan_create]"
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "select_run_mode",
+                "description": "Select a run mode.",
+                "depends_on": ["find_plan"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    plans = [
+        {"key": "plan-1", "value": "Plan one"},
+        {"key": "plan-2", "value": "Plan two"},
+    ]
+    llm = StubLLMClient(
+        {
+            "find_plan": (
+                f'<return name="plans">{json.dumps(plans)}</return>'
+                "<reroute>FOUND_MULTIPLE_MATCHES</reroute>"
+            ),
+            "select_run_mode": "<passthrough>ready</passthrough>",
+        },
+        ask_responses={"feedback_question": "Which plan should I run?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-ask-multi"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_multi",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content='<user_feedback>select_run_mode("plan-2")</user_feedback>',
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_multi",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
+    assert final_state.context.get("plan_id") == "plan-2"
+    assert "select_run_mode" in llm.calls
 
 
 @pytest.mark.asyncio

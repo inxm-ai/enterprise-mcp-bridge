@@ -792,6 +792,37 @@ class WorkflowEngine:
             len(agent_context.get("content", "")),
         )
 
+        pending_user_reroute = agent_context.pop("pending_user_reroute", None)
+        if pending_user_reroute:
+            assignments = pending_user_reroute.get("assignments") or {}
+            if isinstance(assignments, dict):
+                for key, value in assignments.items():
+                    self._set_path_value(agent_context, key, value)
+            with_fields = pending_user_reroute.get("with_fields") or []
+            if isinstance(with_fields, str):
+                with_fields = [with_fields]
+            with_fields = [w for w in with_fields if isinstance(w, str)]
+            if with_fields:
+                self._apply_reroute_with(state.context, agent_context, with_fields)
+            agent_context["completed"] = True
+            agent_context.pop("had_feedback", None)
+            agent_context.pop("awaiting_feedback", None)
+            self.state_store.save_state(state)
+            workflow_target = pending_user_reroute.get("workflow_target")
+            if workflow_target:
+                yield {
+                    "status": "workflow_reroute",
+                    "target_workflow": workflow_target,
+                    "start_with": pending_user_reroute.get("start_with"),
+                }
+                return
+            target = pending_user_reroute.get("target")
+            if target:
+                yield {"status": "reroute", "target": target}
+                return
+            yield {"status": "done", "content": "", "pass_through": False}
+            return
+
         system_prompt = await self._resolve_prompt(session, agent_def)
 
         # If this agent just received feedback, modify the prompt to tell it to PROCESS
@@ -1245,6 +1276,36 @@ class WorkflowEngine:
         agent_context.pop("awaiting_feedback", None)
 
         if reroute_reason and not no_reroute:
+            matched_cfg = self._match_reroute_entry(agent_def.reroute, reroute_reason)
+            ask_cfg = matched_cfg.get("ask") if isinstance(matched_cfg, dict) else None
+            if isinstance(ask_cfg, dict):
+                question = await self._render_feedback_question(
+                    ask_cfg,
+                    agent_context,
+                    state.context,
+                    request,
+                    access_token,
+                    span,
+                )
+                choices = self._build_feedback_choices(
+                    ask_cfg, agent_context, state.context
+                )
+                feedback_payload = self._build_feedback_payload(question, choices)
+                feedback_block = self._format_feedback_block(feedback_payload)
+                agent_context["feedback_prompt"] = question
+                agent_context["feedback_spec"] = feedback_payload
+                agent_context["feedback_choices"] = choices
+                agent_context["awaiting_feedback"] = True
+                agent_context["completed"] = False
+                state.awaiting_feedback = True
+                self.state_store.save_state(state)
+                yield self._record_event(
+                    state,
+                    feedback_block,
+                    status="waiting_for_feedback",
+                )
+                yield {"status": "feedback", "content": feedback_block}
+                return
             agent_context["completed"] = True
             target, with_fields = self._match_reroute_target(
                 agent_def.reroute, reroute_reason
@@ -1775,6 +1836,261 @@ class WorkflowEngine:
         parsed = self._extract_tag_with_attrs(text, tag)
         return parsed.content
 
+    def _format_feedback_block(self, payload: dict[str, Any]) -> str:
+        try:
+            serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            serialized = json.dumps({"question": payload.get("question") or ""})
+        return f"<user_feedback_needed>{serialized}</user_feedback_needed>"
+
+    def _infer_selection_field(self, name: str) -> Optional[str]:
+        if not name:
+            return None
+        normalized = name.strip()
+        if not normalized:
+            return None
+        lower = normalized.lower()
+        if lower.endswith("ies") and len(normalized) > 3:
+            singular = normalized[:-3] + "y"
+        elif lower.endswith("s") and not lower.endswith("ss") and len(normalized) > 1:
+            singular = normalized[:-1]
+        else:
+            singular = normalized
+        return f"{singular}_id"
+
+    def _resolve_feedback_each_value(
+        self,
+        each: Any,
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+    ) -> Any:
+        if each is None:
+            return None
+        if isinstance(each, list):
+            return each
+        if isinstance(each, dict):
+            return each
+        if not isinstance(each, str):
+            return None
+        value = self._get_path_value(agent_context, each)
+        if value is not None:
+            return value
+        value = self._get_path_value(shared_context, each)
+        if value is not None:
+            return value
+        agents_ctx = (
+            shared_context.get("agents") if isinstance(shared_context, dict) else None
+        )
+        if isinstance(agents_ctx, dict):
+            value = self._get_path_value(agents_ctx, each)
+            if value is not None:
+                return value
+        return None
+
+    def _normalize_feedback_option(self, item: Any) -> Optional[tuple[str, str]]:
+        if item is None:
+            return None
+        if isinstance(item, dict):
+            if "key" in item:
+                key = item.get("key")
+                value = item.get("value") or item.get("label") or item.get("name")
+                if value is None:
+                    value = key
+                return str(key), str(value)
+            if "id" in item:
+                key = item.get("id")
+                value = (
+                    item.get("name")
+                    or item.get("description")
+                    or item.get("label")
+                    or key
+                )
+                return str(key), str(value)
+            if item:
+                key, value = next(iter(item.items()))
+                return str(key), str(value)
+            return None
+        if isinstance(item, (str, int, float, bool)):
+            return str(item), str(item)
+        return None
+
+    def _normalize_feedback_options(self, items: Any) -> list[dict[str, str]]:
+        if not isinstance(items, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in items:
+            parsed = self._normalize_feedback_option(item)
+            if not parsed:
+                continue
+            key, value = parsed
+            normalized.append({"key": key, "value": value})
+        return normalized
+
+    def _build_feedback_choices(
+        self,
+        ask_config: dict[str, Any],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        choices: list[dict[str, Any]] = []
+        expected = ask_config.get("expected_responses") or []
+        if isinstance(expected, dict):
+            expected = [expected]
+        for group in expected:
+            if not isinstance(group, dict):
+                continue
+            for choice_id, cfg in group.items():
+                if not isinstance(cfg, dict):
+                    continue
+                target = cfg.get("to")
+                with_fields = cfg.get("with") or []
+                if isinstance(with_fields, str):
+                    with_fields = [with_fields]
+                with_fields = [w for w in with_fields if isinstance(w, str)]
+                each = cfg.get("each")
+                options_raw = self._resolve_feedback_each_value(
+                    each, agent_context, shared_context
+                )
+                options = self._normalize_feedback_options(options_raw)
+                if each and not with_fields:
+                    inferred = self._infer_selection_field(
+                        each if isinstance(each, str) else choice_id
+                    )
+                    if inferred:
+                        with_fields = [inferred]
+                choice_entry = {
+                    "id": str(choice_id),
+                    "to": target,
+                    "with": with_fields,
+                }
+                if each is not None:
+                    choice_entry["each"] = each
+                    choice_entry["options"] = options
+                choices.append(choice_entry)
+        return choices
+
+    def _build_feedback_payload(
+        self,
+        question: str,
+        choices: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        expected_responses: list[dict[str, Any]] = []
+        for choice in choices:
+            entry = {
+                "id": choice.get("id"),
+                "to": choice.get("to"),
+            }
+            if choice.get("with"):
+                entry["with"] = choice["with"]
+            if "options" in choice:
+                entry["options"] = choice.get("options") or []
+            expected_responses.append(entry)
+        return {"question": question, "expected_responses": expected_responses}
+
+    def _collect_feedback_context(
+        self,
+        ask_config: dict[str, Any],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        context_payload: dict[str, Any] = {}
+        expected = ask_config.get("expected_responses") or []
+        if isinstance(expected, dict):
+            expected = [expected]
+        for group in expected:
+            if not isinstance(group, dict):
+                continue
+            for choice_id, cfg in group.items():
+                if not isinstance(cfg, dict):
+                    continue
+                each = cfg.get("each")
+                if not each:
+                    continue
+                value = self._resolve_feedback_each_value(
+                    each, agent_context, shared_context
+                )
+                if value is not None:
+                    context_payload[str(choice_id)] = value
+        return context_payload
+
+    async def _render_feedback_question(
+        self,
+        ask_config: dict[str, Any],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+        request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> str:
+        instruction = (ask_config.get("question") or "").strip()
+        if not instruction:
+            return ""
+        logger.info(
+            "[WorkflowEngine] Rendering feedback question. Instruction=%s",
+            instruction,
+        )
+        prompt = (
+            "USER_FEEDBACK_QUESTION\n"
+            "Write a user-facing question based on the instruction and context.\n"
+            "Use the context to include relevant option details. Return only the question."
+        )
+        context_summary = self._create_context_summary(shared_context, scoped=True)
+        agent_snapshot = self._compact_large_structure(
+            agent_context, max_items=4, max_depth=3
+        )
+        plan_keys = [
+            key
+            for key in ("plan", "plans", "plan_id", "plan_ids")
+            if isinstance(agent_context, dict) and key in agent_context
+        ]
+        if plan_keys:
+            logger.info(
+                "[WorkflowEngine] Feedback question agent context has plan keys: %s",
+                plan_keys,
+            )
+        option_context = self._collect_feedback_context(
+            ask_config, agent_context, shared_context
+        )
+        question_parts = [
+            f"Instruction: {instruction}",
+            f"Context summary: {context_summary}",
+            f"Agent context: {json.dumps(agent_snapshot, ensure_ascii=False, default=str)}",
+        ]
+        if option_context:
+            question_parts.append(
+                f"Option context: {json.dumps(option_context, ensure_ascii=False, default=str)}"
+            )
+        question_parts.append("Question:")
+        question_payload = "\n".join(question_parts)
+        logger.info(
+            "[WorkflowEngine] Feedback question payload size=%d option_context=%s",
+            len(question_payload),
+            bool(option_context),
+        )
+        response = await self.llm_client.ask(
+            base_prompt=prompt,
+            base_request=request,
+            question=question_payload,
+            access_token=access_token or "",
+            outer_span=span,
+        )
+        cleaned = (response or "").strip()
+        if not cleaned:
+            logger.info(
+                "[WorkflowEngine] Feedback question LLM returned empty response; falling back to instruction."
+            )
+            return instruction
+        if cleaned == instruction:
+            logger.info(
+                "[WorkflowEngine] Feedback question LLM returned the instruction verbatim."
+            )
+        else:
+            logger.info(
+                "[WorkflowEngine] Feedback question rendered. Length=%d",
+                len(cleaned),
+            )
+        return cleaned or instruction
+
     def _parse_start_with(self, value: Optional[str]) -> Optional[dict]:
         if value is None:
             return None
@@ -2292,8 +2608,20 @@ class WorkflowEngine:
 
         Returns the matched target and any "with" fields to propagate.
         """
-        if not reroute_config or not reroute_reason:
+        cfg = self._match_reroute_entry(reroute_config, reroute_reason)
+        if not cfg:
             return None, []
+        with_fields = cfg.get("with") or []
+        if isinstance(with_fields, str):
+            with_fields = [with_fields]
+        return cfg.get("to"), [w for w in with_fields if isinstance(w, str)]
+        return None, []
+
+    def _match_reroute_entry(
+        self, reroute_config: Any, reroute_reason: Optional[str]
+    ) -> Optional[dict[str, Any]]:
+        if not reroute_config or not reroute_reason:
+            return None
         configs = (
             reroute_config if isinstance(reroute_config, list) else [reroute_config]
         )
@@ -2304,11 +2632,8 @@ class WorkflowEngine:
             if isinstance(reroute_on, str):
                 reroute_on = [reroute_on]
             if reroute_reason in reroute_on:
-                with_fields = cfg.get("with") or []
-                if isinstance(with_fields, str):
-                    with_fields = [with_fields]
-                return cfg.get("to"), [w for w in with_fields if isinstance(w, str)]
-        return None, []
+                return cfg
+        return None
 
     def _build_workflow_reroute_request(
         self,
@@ -2355,7 +2680,7 @@ class WorkflowEngine:
 
     def _strip_tags(self, text: str) -> str:
         stripped = re.sub(
-            r"<(/?)(reroute|user_feedback_needed|passthrough)([^>]*)>",
+            r"<(/?)(reroute|user_feedback_needed|user_feedback|passthrough)([^>]*)>",
             "",
             text or "",
         )
@@ -2919,59 +3244,242 @@ class WorkflowEngine:
                 agent_entry.get("had_feedback"),
                 agent_entry.get("reroute_reason"),
             )
-            agent_entry["content"] = (
-                agent_entry.get("content", "") + f" {feedback}"
-            ).strip()
-            agent_entry.pop("awaiting_feedback", None)
-            agent_entry["completed"] = False
-            agent_entry["had_feedback"] = True
-            # Clear any stored reroute reason so the agent can make a fresh decision
-            # based on the user's feedback
-            agent_entry.pop("reroute_reason", None)
-            feedback_prompt = agent_entry.get("feedback_prompt") or prior_content
-            base_query = state.context.get("user_query")
-            if not base_query:
-                messages = state.context.get("user_messages") or []
-                if isinstance(messages, list) and len(messages) >= 2:
-                    base_query = str(messages[-2])
-                elif messages:
-                    base_query = str(messages[-1])
-            combined_query = await self._summarize_user_query(
-                base_query=base_query,
-                feedback=feedback,
-                feedback_prompt=feedback_prompt,
-                request=request,
-                access_token=access_token,
-                span=span,
-            )
-            if combined_query:
-                state.context["user_query"] = combined_query
-            should_rerun = await self._should_rerun_feedback_agent(
-                base_query=base_query,
-                feedback=feedback,
-                feedback_prompt=feedback_prompt,
-                agent_name=state.current_agent,
-                agent_context=agent_entry,
-                request=request,
-                access_token=access_token,
-                span=span,
-            )
-            if should_rerun:
-                # Remember which agent should resume first after feedback
+            feedback_tag = self._extract_tag(feedback, "user_feedback")
+            feedback_content = feedback_tag or feedback
+            feedback_action = None
+            if feedback_tag:
+                feedback_action = self._resolve_feedback_action(
+                    feedback_tag, agent_entry
+                )
+            if feedback_action:
+                agent_entry["feedback_selection"] = feedback_tag
+                agent_entry["pending_user_reroute"] = feedback_action
+                agent_entry.pop("awaiting_feedback", None)
+                agent_entry["completed"] = False
+                agent_entry["had_feedback"] = True
+                # Ensure the feedback-processing path runs before other agents
                 state.context["_resume_agent"] = state.current_agent
                 logger.info(
-                    "[WorkflowEngine._merge_feedback] Agent '%s' set to rerun after feedback",
+                    "[WorkflowEngine._merge_feedback] Agent '%s' received structured feedback selection",
+                    state.current_agent,
+                )
+            elif feedback_tag:
+                logger.debug(
+                    "[WorkflowEngine._merge_feedback] Structured feedback tag received but no matching choice found for agent '%s'",
                     state.current_agent,
                 )
             else:
-                agent_entry["completed"] = True
-                agent_entry["skip_feedback_rerun"] = True
-                logger.info(
-                    "[WorkflowEngine._merge_feedback] Agent '%s' will reuse prior output after feedback",
-                    state.current_agent,
+                agent_entry["content"] = (
+                    agent_entry.get("content", "") + f" {feedback_content}"
+                ).strip()
+                agent_entry.pop("awaiting_feedback", None)
+                agent_entry["completed"] = False
+                agent_entry["had_feedback"] = True
+                # Clear any stored reroute reason so the agent can make a fresh decision
+                # based on the user's feedback
+                agent_entry.pop("reroute_reason", None)
+                feedback_prompt = agent_entry.get("feedback_prompt") or prior_content
+                base_query = state.context.get("user_query")
+                if not base_query:
+                    messages = state.context.get("user_messages") or []
+                    if isinstance(messages, list) and len(messages) >= 2:
+                        base_query = str(messages[-2])
+                    elif messages:
+                        base_query = str(messages[-1])
+                combined_query = await self._summarize_user_query(
+                    base_query=base_query,
+                    feedback=feedback_content,
+                    feedback_prompt=feedback_prompt,
+                    request=request,
+                    access_token=access_token,
+                    span=span,
                 )
+                if combined_query:
+                    state.context["user_query"] = combined_query
+                should_rerun = await self._should_rerun_feedback_agent(
+                    base_query=base_query,
+                    feedback=feedback_content,
+                    feedback_prompt=feedback_prompt,
+                    agent_name=state.current_agent,
+                    agent_context=agent_entry,
+                    request=request,
+                    access_token=access_token,
+                    span=span,
+                )
+                if should_rerun:
+                    # Remember which agent should resume first after feedback
+                    state.context["_resume_agent"] = state.current_agent
+                    logger.info(
+                        "[WorkflowEngine._merge_feedback] Agent '%s' set to rerun after feedback",
+                        state.current_agent,
+                    )
+                else:
+                    agent_entry["completed"] = True
+                    agent_entry["skip_feedback_rerun"] = True
+                    logger.info(
+                        "[WorkflowEngine._merge_feedback] Agent '%s' will reuse prior output after feedback",
+                        state.current_agent,
+                    )
         state.context.setdefault("feedback", []).append(feedback)
         self.state_store.save_state(state)
+
+    def _parse_feedback_action(self, raw: str) -> Optional[dict[str, Any]]:
+        if not raw:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        workflow_target = self._parse_workflow_reroute_target(text)
+        if workflow_target:
+            return {"workflow": workflow_target}
+        func_match = re.match(r"^(?P<name>[\w\-]+)\s*\((?P<args>.*)\)$", text)
+        if func_match:
+            name = func_match.group("name")
+            args_raw = func_match.group("args") or ""
+            args, kwargs = self._parse_feedback_args(args_raw)
+            return {"to": name, "args": args, "kwargs": kwargs}
+        return {"to": text}
+
+    def _parse_feedback_args(self, text: str) -> tuple[list[str], dict[str, str]]:
+        args: list[str] = []
+        kwargs: dict[str, str] = {}
+        if not text:
+            return args, kwargs
+        parts = []
+        current = []
+        in_quote: Optional[str] = None
+        escape = False
+        for ch in text:
+            if escape:
+                current.append(ch)
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                current.append(ch)
+                continue
+            if ch in ("'", '"'):
+                if in_quote is None:
+                    in_quote = ch
+                elif in_quote == ch:
+                    in_quote = None
+                current.append(ch)
+                continue
+            if ch == "," and in_quote is None:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                continue
+            current.append(ch)
+        if current:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+        for part in parts:
+            if "=" in part:
+                name, value = part.split("=", 1)
+                name = name.strip()
+                value = value.strip()
+                kwargs[name] = self._strip_feedback_arg_value(value)
+            else:
+                args.append(self._strip_feedback_arg_value(part))
+        return args, kwargs
+
+    def _strip_feedback_arg_value(self, value: str) -> str:
+        cleaned = value.strip()
+        if (
+            len(cleaned) >= 2
+            and cleaned[0] == cleaned[-1]
+            and cleaned[0]
+            in (
+                "'",
+                '"',
+            )
+        ):
+            return cleaned[1:-1]
+        return cleaned
+
+    def _resolve_feedback_action(
+        self, feedback_text: str, agent_entry: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        action = self._parse_feedback_action(feedback_text)
+        if not action:
+            return None
+        choices = agent_entry.get("feedback_choices") or []
+        if not choices:
+            return None
+        matched_choice: Optional[dict[str, Any]] = None
+        raw_to = action.get("to")
+        raw_workflow = action.get("workflow")
+        raw_id = action.get("id")
+        for choice in choices:
+            choice_to = choice.get("to")
+            choice_id = choice.get("id")
+            choice_workflow = self._parse_workflow_reroute_target(choice_to or "")
+            if raw_id and choice_id == raw_id:
+                matched_choice = choice
+                break
+            if raw_workflow and choice_workflow == raw_workflow:
+                matched_choice = choice
+                break
+            if raw_to and choice_to == raw_to:
+                matched_choice = choice
+                break
+        if not matched_choice and raw_to and choices:
+            for choice in choices:
+                if choice.get("id") == raw_to:
+                    matched_choice = choice
+                    break
+        with_fields = matched_choice.get("with") if matched_choice else []
+        if isinstance(with_fields, str):
+            with_fields = [with_fields]
+        with_fields = [w for w in with_fields if isinstance(w, str)]
+        assignments: dict[str, Any] = {}
+        kwargs = action.get("kwargs") or {}
+        if isinstance(kwargs, dict) and kwargs:
+            for key, value in kwargs.items():
+                assignments[key] = value
+        args = action.get("args") or []
+        if not assignments and args and with_fields:
+            for idx, field in enumerate(with_fields):
+                if idx >= len(args):
+                    break
+                assignments[field] = args[idx]
+        if matched_choice and matched_choice.get("options") and args:
+            option_key = args[0]
+            if with_fields and with_fields[0] not in assignments:
+                assignments[with_fields[0]] = option_key
+        if not matched_choice and raw_to:
+            return {
+                "target": raw_to,
+                "workflow_target": self._parse_workflow_reroute_target(raw_to),
+                "with_fields": with_fields,
+                "assignments": assignments,
+            }
+        if not matched_choice and raw_workflow:
+            return {
+                "workflow_target": raw_workflow,
+                "with_fields": with_fields,
+                "assignments": assignments,
+            }
+        if not matched_choice:
+            return None
+        choice_target = matched_choice.get("to")
+        workflow_target = self._parse_workflow_reroute_target(choice_target or "")
+        return {
+            "target": None if workflow_target else choice_target,
+            "workflow_target": workflow_target,
+            "with_fields": with_fields,
+            "assignments": assignments,
+        }
 
     async def _routing_intent_check(
         self,
