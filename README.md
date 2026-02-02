@@ -651,6 +651,7 @@ Set the following environment variables to expose OpenAI-compatible agent endpoi
 ### Endpoints
 - `POST /tgi/v1/chat/completions` – Streaming or non-streaming chat completions with automatic MCP tool invocation.
 - `POST /tgi/v1/a2a` – A2A JSON-RPC wrapper around the same capability for clients that speak the A2A protocol.
+- `DELETE /tgi/v1/workflows/<execution_id>` – Cancel a background workflow execution.
 - `GET /.well-known/agent.json` – Agent metadata describing available tools.
 
 ### System prompts
@@ -714,7 +715,7 @@ Field reference:
   - `when` (string, optional): Python-style expression evaluated against `context`; if falsy, the agent is skipped and marked with `reason: condition_not_met`.
   - `reroute` (object, optional): `{ "on": ["CODE1", ...], "to": "agent_name" }`. If the agent emits `<reroute>CODE1</reroute>`, the router jumps to the `to` agent next.
     - Tool-result reroutes are supported via `on` entries like `tool:tool_name:success` or `tool:tool_name:error`. These trigger reroutes immediately after tool results are processed, even if the LLM does not emit a `<reroute>` tag.
-    - You can also hand off to another workflow by emitting `<reroute start_with='{"args": {...}}'>workflows[target_flow]</reroute>`. The engine completes the current workflow, starts a new execution for `target_flow` (optionally applying the provided `start_with` payload), and continues streaming from the new workflow. Looping reroutes between workflows are detected and aborted.
+    - You can also hand off to another workflow by emitting `<reroute start_with='{"args": {...}}'>workflows[target_flow]</reroute>`. The engine completes the current workflow, resets state for `target_flow` within the same execution id (optionally applying the provided `start_with` payload), and continues streaming from the new workflow. Looping reroutes between workflows are detected and aborted.
     - If a reroute target is missing, has unmet dependencies, or was already completed earlier in the run, the engine stops and emits an error chunk explaining the reason (e.g., missing dependencies, already completed).
   - `tools` (array, optional): Limit available tools for this agent. Can be:
     - Array of strings: Simple tool names (e.g., `["get_weather", "search"]`)
@@ -897,6 +898,8 @@ Runtime behavior:
 - `use_workflow: "<flow_id>"` forces that workflow; `use_workflow: true` auto-selects by matching `root_intent` to the user request.
 - Optional `workflow_execution_id` resumes a prior execution (state is persisted in SQLite). Without it, a new execution id is generated.
 - Optional `return_full_state: true` replays the stored workflow event history when resuming; omit or set to `false` to stream only newly generated events.
+- Optional background execution: include the header `x-inxm-workflow-background: true` on streaming requests to keep the workflow running even if the client disconnects. Reconnect with the same `workflow_execution_id` to receive the full history and then continue streaming live updates. Use `DELETE /tgi/v1/workflows/<execution_id>` to cancel a background run.
+- Workflow executions are bound to the user token that started them; resuming with a different token returns an access error.
 - The routing agent streams status events; agents marked `pass_through: true` stream their content to the user.
 - `persist_inner_thinking` (boolean, optional) controls how much agent output is stored in workflow context for later turns. Defaults to `false`, which keeps only pass-through content and explicit returns, trimming internal reasoning to avoid oversized LLM payloads. Set to `true` if you need full agent transcripts preserved across resumes.
 - `start_with` (object, optional) lets you prefill workflow context and optionally jump directly to a specific agent. Shape: `{"args": {"plan_id": "abc"}, "agent": "get_plan"}`. `args` are copied into the workflow context (top-level keys), and `agent` forces the first runnable agent; its declared dependencies are marked completed with reason `start_with_prefill` so it can run immediately.

@@ -100,6 +100,7 @@ class WorkflowEngine:
         access_token: Optional[str],
         span,
         workflow_chain: Optional[list[str]] = None,
+        handoff: bool = False,
     ) -> Optional[AsyncGenerator[str, None]]:
         workflow_def = self._select_workflow(request)
         if not workflow_def:
@@ -109,6 +110,8 @@ class WorkflowEngine:
         state = self.state_store.load_execution(execution_id)
         if state:
             self._enforce_workflow_owner(state, user_token)
+            if handoff:
+                self._reset_state_for_handoff(state, workflow_def.flow_id)
         else:
             state = WorkflowExecutionState.new(execution_id, workflow_def.flow_id)
             self._enforce_workflow_owner(state, user_token)
@@ -602,7 +605,10 @@ class WorkflowEngine:
                         new_chain = list(workflow_chain)
                         new_chain.append(target_workflow)
                         new_request = self._build_workflow_reroute_request(
-                            request, target_workflow, start_with_payload
+                            request,
+                            target_workflow,
+                            start_with_payload,
+                            execution_id=state.execution_id,
                         )
                         new_stream = await self.start_or_resume_workflow(
                             session,
@@ -611,6 +617,7 @@ class WorkflowEngine:
                             access_token,
                             span,
                             workflow_chain=new_chain,
+                            handoff=True,
                         )
                         if not new_stream:
                             yield self._record_event(
@@ -2308,17 +2315,43 @@ class WorkflowEngine:
         base_request: ChatCompletionRequest,
         target_workflow: str,
         start_with: Optional[dict[str, Any]],
+        execution_id: Optional[str] = None,
     ) -> ChatCompletionRequest:
         copier = getattr(base_request, "model_copy", None)
         new_request = (
             copier(deep=True) if callable(copier) else base_request.copy(deep=True)
         )
         new_request.use_workflow = target_workflow
-        new_request.workflow_execution_id = None
+        new_request.workflow_execution_id = execution_id
         new_request.return_full_state = False
         new_request.start_with = start_with if isinstance(start_with, dict) else None
         new_request.stream = True
         return new_request
+
+    def _reset_state_for_handoff(
+        self, state: WorkflowExecutionState, new_flow_id: str
+    ) -> None:
+        """
+        Reset workflow state for an in-place handoff to a new workflow.
+        Preserves execution history and user ownership while clearing agent context.
+        """
+        preserved: dict[str, Any] = {}
+        for key in (
+            self.WORKFLOW_OWNER_KEY,
+            "user_query",
+            "user_messages",
+            "_persist_inner_thinking",
+        ):
+            if key in state.context:
+                preserved[key] = state.context.get(key)
+
+        state.flow_id = new_flow_id
+        state.context = {"agents": {}}
+        state.context.update(preserved)
+        state.current_agent = None
+        state.completed = False
+        state.awaiting_feedback = False
+        self.state_store.save_state(state)
 
     def _strip_tags(self, text: str) -> str:
         stripped = re.sub(
@@ -2850,6 +2883,18 @@ class WorkflowEngine:
         state.events.append(event)
         self.state_store.save_state(state)
         return event
+
+    def cancel_execution(self, execution_id: str, reason: Optional[str] = None) -> bool:
+        state = self.state_store.load_execution(execution_id)
+        if not state:
+            return False
+        if state.completed:
+            return True
+        state.completed = True
+        state.awaiting_feedback = False
+        message = reason or "Workflow cancelled."
+        self._record_event(state, message, status="cancelled", role="system")
+        return True
 
     async def _merge_feedback(
         self,

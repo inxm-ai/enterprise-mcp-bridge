@@ -22,7 +22,12 @@ from app.tgi.services.message_summarization_service import MessageSummarizationS
 from app.tgi.services.tool_chat_runner import ToolChatRunner
 from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.model_formats import BaseModelFormat, get_model_format_for
-from app.tgi.workflows import WorkflowEngine, WorkflowRepository, WorkflowStateStore
+from app.tgi.workflows import (
+    WorkflowEngine,
+    WorkflowRepository,
+    WorkflowStateStore,
+    WorkflowBackgroundManager,
+)
 from app.vars import TGI_MODEL_NAME
 from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
 
@@ -53,6 +58,7 @@ class ProxiedTGIService:
         )
         self.tool_resolution = self.model_format.create_tool_resolution_strategy()
         self.workflow_engine: Optional[WorkflowEngine] = None
+        self.workflow_background: Optional[WorkflowBackgroundManager] = None
         # pass a lambda that looks up the current _non_stream_chat_with_tools
         # attribute at call time so tests can monkeypatch it after
         # construction.
@@ -82,6 +88,7 @@ class ProxiedTGIService:
                 prompt_service=self.prompt_service,
                 tool_service=self.tool_service,
             )
+            self.workflow_background = WorkflowBackgroundManager(logger=self.logger)
         except Exception as exc:
             self.logger.debug(f"[ProxiedTGI] Workflow engine not initialized: {exc}")
 

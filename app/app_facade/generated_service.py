@@ -29,8 +29,8 @@ from app.app_facade.generated_schemas import (
 from app.app_facade.generated_storage import GeneratedUIStorage
 from app.app_facade.generated_types import (
     Actor,
-    Scope,
-)
+    Scope,  # re-exported for route/tests import compatibility
+    )
 from app.app_facade.test_fix_tools import run_tool_driven_test_fix
 
 

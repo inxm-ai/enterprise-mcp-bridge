@@ -875,6 +875,7 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
         model="test-model",
         stream=True,
         use_workflow="first_flow",
+        workflow_execution_id="exec-handoff",
     )
 
     stream = await engine.start_or_resume_workflow(
@@ -889,13 +890,62 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     assert "second_agent" in llm.calls
     assert llm.calls.index("first_agent") < llm.calls.index("second_agent")
 
+    state = engine.state_store.load_execution("exec-handoff")
+    assert state.flow_id == "second_flow"
+    assert state.context.get("prefill") == "set"
+    assert "first_agent" not in (state.context.get("agents") or {})
     with engine.state_store._connect() as conn:
-        rows = conn.execute(
-            "SELECT execution_id, flow_id, context_json FROM workflow_executions"
-        ).fetchall()
-    assert {row[1] for row in rows} == {"first_flow", "second_flow"}
-    second_ctx = next(json.loads(row[2]) for row in rows if row[1] == "second_flow")
-    assert second_ctx.get("prefill") == "set"
+        rows = conn.execute("SELECT execution_id FROM workflow_executions").fetchall()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_reroute_resets_agent_context_for_overlap(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "first_flow",
+        "root_intent": "FIRST",
+        "agents": [{"agent": "shared_agent", "description": "First"}],
+    }
+    second_flow = {
+        "flow_id": "second_flow",
+        "root_intent": "SECOND",
+        "agents": [{"agent": "shared_agent", "description": "Second"}],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "shared_agent": [
+                "<reroute>workflows[second_flow]</reroute>",
+                "Second workflow complete",
+            ]
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start handoff")],
+        model="test-model",
+        stream=True,
+        use_workflow="first_flow",
+        workflow_execution_id="exec-overlap",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    payload = "\n".join([chunk async for chunk in stream])
+
+    assert llm.calls.count("shared_agent") == 2
+    assert "Second workflow complete" in payload
+    state = engine.state_store.load_execution("exec-overlap")
+    assert state.flow_id == "second_flow"
 
 
 @pytest.mark.asyncio
@@ -1020,18 +1070,17 @@ async def test_workflow_reroute_with_fields_prefills_new_context(tmp_path, monke
         model="test-model",
         stream=True,
         use_workflow="select_run_mode_flow",
+        workflow_execution_id="exec-handoff-fields",
     )
 
     session = CaptureSession(tools=tools)
     stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT flow_id, context_json FROM workflow_executions"
-        ).fetchall()
-    plan_run_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_run")
-    assert plan_run_ctx.get("plan_id") == "plan-xyz"
+    state = store.load_execution("exec-handoff-fields")
+    assert state.flow_id == "plan_run"
+    assert state.context.get("plan_id") == "plan-xyz"
+    assert "select_run_mode" not in (state.context.get("agents") or {})
     assert session.tool_calls
     assert session.tool_calls[0]["args"].get("plan_id") == "plan-xyz"
 
@@ -1171,18 +1220,17 @@ async def test_workflow_reroute_with_shared_context_value(tmp_path, monkeypatch)
         model="test-model",
         stream=True,
         use_workflow="select_plan_flow",
+        workflow_execution_id="exec-handoff-shared",
     )
 
     session = CaptureSession(tools=tools)
     stream = await engine.start_or_resume_workflow(session, request, None, None, None)
     _ = [chunk async for chunk in stream]
 
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT flow_id, context_json FROM workflow_executions"
-        ).fetchall()
-    plan_run_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_run")
-    assert plan_run_ctx.get("plan_id") == "plan-xyz"
+    state = store.load_execution("exec-handoff-shared")
+    assert state.flow_id == "plan_run"
+    assert state.context.get("plan_id") == "plan-xyz"
+    assert "select_plan" not in (state.context.get("agents") or {})
     assert session.tool_calls
     assert session.tool_calls[0]["args"].get("plan_id") == "plan-xyz"
 
@@ -1220,6 +1268,7 @@ async def test_workflow_reroute_loop_detection(tmp_path, monkeypatch):
         model="test-model",
         stream=True,
         use_workflow="loop_a",
+        workflow_execution_id="exec-loop",
     )
 
     stream = await engine.start_or_resume_workflow(
@@ -1231,9 +1280,8 @@ async def test_workflow_reroute_loop_detection(tmp_path, monkeypatch):
     assert llm.calls.count("first") == 1
     assert llm.calls.count("second") == 1
 
-    with engine.state_store._connect() as conn:
-        rows = conn.execute("SELECT flow_id FROM workflow_executions").fetchall()
-    assert {row[0] for row in rows} == {"loop_a", "loop_b"}
+    state = engine.state_store.load_execution("exec-loop")
+    assert state.flow_id == "loop_b"
 
 
 @pytest.mark.asyncio
@@ -4351,16 +4399,13 @@ async def test_workflow_handoff_preserves_user_query_and_messages(
     )
     _ = [chunk async for chunk in resume_stream]
 
-    with engine.state_store._connect() as conn:
-        rows = conn.execute(
-            "SELECT flow_id, context_json FROM workflow_executions"
-        ).fetchall()
-    plan_ctx = next(json.loads(row[1]) for row in rows if row[0] == "plan_create")
+    state = store.load_execution(exec_id)
+    assert state.flow_id == "plan_create"
     assert (
-        plan_ctx.get("user_query")
+        state.context.get("user_query")
         == "Create a new plan to summarize the last 24 hours of news."
     )
-    assert plan_ctx.get("user_messages") == [
+    assert state.context.get("user_messages") == [
         "Generate a plan to create a news summary for the last 24 hours",
         "Create a new one please",
     ]

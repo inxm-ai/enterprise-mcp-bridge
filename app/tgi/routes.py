@@ -91,6 +91,12 @@ def _resolve_user_token(
     return incoming_headers.get(header_name) or access_token
 
 
+def _header_truthy(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _select_group_exception(
     exc_group: BaseExceptionGroup, expected_type: type[BaseException]
 ) -> BaseException:
@@ -229,6 +235,9 @@ async def _handle_chat_completion(
     accept_header = request.headers.get("accept", "")
     chat_request.stream = chat_request.stream or "text/event-stream" in accept_header
     is_streaming = chat_request.stream
+    background_requested = _header_truthy(
+        request.headers.get("x-inxm-workflow-background")
+    )
 
     with traced_request(
         tracer=tracer,
@@ -247,36 +256,130 @@ async def _handle_chat_completion(
     ):
         done_sent = False
         try:
-            async with mcp_session_context(
-                sessions,
-                x_inxm_mcp_session,
-                access_token,
-                group,
-                incoming_headers,
-            ) as session:
-                result = await tgi_service.chat_completion(
-                    session, chat_request, user_token, access_token, prompt
-                )
+            if (
+                background_requested
+                and is_streaming
+                and chat_request.use_workflow
+                and tgi_service.workflow_background
+            ):
+                if not chat_request.workflow_execution_id:
+                    chat_request.workflow_execution_id = str(uuid4())
+                execution_id = chat_request.workflow_execution_id
+                if execution_id:
+                    chat_request.return_full_state = True
 
-                # If the service returned an async-iterable (stream), forward chunks
-                # while the mcp_session_context is still active. This ensures
-                # any cancel scopes, ContextVars and session state created by the
-                # session context remain valid for the lifetime of the stream.
-                if hasattr(result, "__aiter__"):
-                    async for chunk in result:
-                        if isinstance(chunk, str):
+                copier = getattr(chat_request, "model_copy", None)
+                background_request = (
+                    copier(deep=True)
+                    if callable(copier)
+                    else chat_request.copy(deep=True)
+                )
+                background_request.return_full_state = False
+                background_request.stream = True
+
+                engine = tgi_service.workflow_engine
+                existing_state = (
+                    engine.state_store.load_execution(execution_id)
+                    if engine and execution_id
+                    else None
+                )
+                if existing_state and engine:
+                    engine._enforce_workflow_owner(existing_state, user_token or "")
+                if not (existing_state and existing_state.completed):
+                    initial_count = len(existing_state.events) if existing_state else 0
+
+                    async def _stream_factory():
+                        async def _stream():
+                            async with mcp_session_context(
+                                sessions,
+                                x_inxm_mcp_session,
+                                access_token,
+                                group,
+                                incoming_headers,
+                            ) as session:
+                                result = await tgi_service.chat_completion(
+                                    session,
+                                    background_request,
+                                    user_token,
+                                    access_token,
+                                    prompt,
+                                )
+                                if hasattr(result, "__aiter__"):
+                                    async for chunk in result:
+                                        yield chunk
+                                else:
+                                    if isinstance(result, str):
+                                        yield result
+                                    else:
+                                        yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+
+                        return _stream()
+
+                    await tgi_service.workflow_background.get_or_start(
+                        execution_id, _stream_factory, initial_count
+                    )
+
+                async with tgi_service.workflow_background.subscribe(
+                    execution_id
+                ) as queue:
+                    state = (
+                        engine.state_store.load_execution(execution_id)
+                        if engine and execution_id
+                        else existing_state
+                    )
+                    history_events = (
+                        list(state.events)
+                        if state and chat_request.return_full_state
+                        else []
+                    )
+                    skip_index = len(history_events) if history_events else 0
+
+                    for event in history_events:
+                        if isinstance(event, str) and "[DONE]" in event:
+                            done_sent = True
+                        yield event
+
+                    if queue is not None:
+                        while True:
+                            idx, chunk, recorded = await queue.get()
+                            if chunk is None:
+                                break
+                            if recorded and skip_index and idx <= skip_index:
+                                continue
                             if "[DONE]" in chunk:
                                 done_sent = True
                             yield chunk
-                        else:
-                            yield chunk
-                else:
-                    # Non-streaming dict result: yield once inside the context
-                    async def _single():
-                        yield result
+            else:
+                async with mcp_session_context(
+                    sessions,
+                    x_inxm_mcp_session,
+                    access_token,
+                    group,
+                    incoming_headers,
+                ) as session:
+                    result = await tgi_service.chat_completion(
+                        session, chat_request, user_token, access_token, prompt
+                    )
 
-                    async for chunk in _single():
-                        yield chunk
+                    # If the service returned an async-iterable (stream), forward chunks
+                    # while the mcp_session_context is still active. This ensures
+                    # any cancel scopes, ContextVars and session state created by the
+                    # session context remain valid for the lifetime of the stream.
+                    if hasattr(result, "__aiter__"):
+                        async for chunk in result:
+                            if isinstance(chunk, str):
+                                if "[DONE]" in chunk:
+                                    done_sent = True
+                                yield chunk
+                            else:
+                                yield chunk
+                    else:
+                        # Non-streaming dict result: yield once inside the context
+                        async def _single():
+                            yield result
+
+                        async for chunk in _single():
+                            yield chunk
         except* PermissionError as exc_group:
             permission_exc = _select_group_exception(exc_group, PermissionError)
             logger.warning(f"[TGI] Workflow access denied: {permission_exc}")
@@ -400,6 +503,42 @@ async def chat_completions(
         if child_http_exception:
             raise child_http_exception
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/workflows/{execution_id}")
+async def cancel_workflow(
+    execution_id: str,
+    request: Request,
+    access_token: Optional[str] = Depends(get_access_token),
+):
+    """
+    Cancel a background workflow execution by id.
+    """
+    engine = tgi_service.workflow_engine
+    manager = tgi_service.workflow_background
+    if not engine or not manager:
+        raise HTTPException(status_code=404, detail="Workflow engine not available")
+
+    incoming_headers = dict(request.headers)
+    user_token = _resolve_user_token(incoming_headers, access_token)
+    state = engine.state_store.load_execution(execution_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Workflow execution not found")
+
+    try:
+        engine._enforce_workflow_owner(state, user_token or "")
+    except PermissionError as exc:
+        status_code = _permission_status_code(exc)
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+    cancelled = await manager.cancel(execution_id)
+    if cancelled:
+        engine.cancel_execution(execution_id, reason="Cancelled by request")
+        return JSONResponse(
+            content={"status": "cancelled", "execution_id": execution_id}
+        )
+
+    return JSONResponse(content={"status": "not_running", "execution_id": execution_id})
 
 
 @router.post("/a2a")
