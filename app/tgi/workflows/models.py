@@ -1,6 +1,33 @@
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
+
+
+def _utc_now_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _normalize_timestamp(value: Optional[str]) -> str:
+    if value:
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (
+                dt.astimezone(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+        except ValueError:
+            pass
+    return _utc_now_iso()
 
 
 @dataclass
@@ -87,10 +114,14 @@ class WorkflowExecutionState:
     current_agent: Optional[str] = None
     completed: bool = False
     awaiting_feedback: bool = False
+    owner_id: Optional[str] = None
+    created_at: str = field(default_factory=_utc_now_iso)
+    last_change: str = field(default_factory=_utc_now_iso)
 
     @classmethod
     def new(cls, execution_id: str, flow_id: str) -> "WorkflowExecutionState":
         # Always include an agents map to attach outputs in a consistent shape
+        created_at = _utc_now_iso()
         return cls(
             execution_id=execution_id,
             flow_id=flow_id,
@@ -99,9 +130,12 @@ class WorkflowExecutionState:
             current_agent=None,
             completed=False,
             awaiting_feedback=False,
+            created_at=created_at,
+            last_change=created_at,
         )
 
     def to_record(self) -> Dict[str, Any]:
+        owner_id = self.owner_id or (self.context or {}).get("_workflow_owner_id")
         return {
             "execution_id": self.execution_id,
             "flow_id": self.flow_id,
@@ -110,6 +144,9 @@ class WorkflowExecutionState:
             "current_agent": self.current_agent,
             "completed": int(self.completed),
             "awaiting_feedback": int(self.awaiting_feedback),
+            "owner_id": owner_id,
+            "created_at": _normalize_timestamp(self.created_at),
+            "last_change": _normalize_timestamp(self.last_change),
         }
 
     @classmethod
@@ -124,10 +161,18 @@ class WorkflowExecutionState:
             current_agent,
             completed,
             awaiting_feedback,
+            owner_id,
+            created_at,
+            last_change,
         ) = row
         context = json.loads(context_json) if context_json else {"agents": {}}
         # Ensure agents map exists
         context.setdefault("agents", {})
+        owner_id = owner_id or context.get("_workflow_owner_id")
+        created_at = _normalize_timestamp(created_at or context.get("created_at"))
+        last_change = _normalize_timestamp(
+            last_change or context.get("last_change") or created_at
+        )
         return cls(
             execution_id=execution_id,
             flow_id=flow_id,
@@ -136,4 +181,14 @@ class WorkflowExecutionState:
             current_agent=current_agent,
             completed=bool(completed),
             awaiting_feedback=bool(awaiting_feedback),
+            owner_id=owner_id,
+            created_at=created_at,
+            last_change=last_change,
         )
+
+    def status(self) -> str:
+        if self.completed:
+            return "completed"
+        if self.awaiting_feedback:
+            return "awaiting_feedback"
+        return "in_progress"

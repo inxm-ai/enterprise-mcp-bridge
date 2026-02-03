@@ -652,7 +652,49 @@ Set the following environment variables to expose OpenAI-compatible agent endpoi
 - `POST /tgi/v1/chat/completions` – Streaming or non-streaming chat completions with automatic MCP tool invocation.
 - `POST /tgi/v1/a2a` – A2A JSON-RPC wrapper around the same capability for clients that speak the A2A protocol.
 - `DELETE /tgi/v1/workflows/<execution_id>` – Cancel a background workflow execution.
+- `GET /tgi/v1/workflows` – List workflows for the current user, ordered by `created_at` (desc). Supports paging via `limit` (1-100, default 20), `before` (ISO-8601 UTC timestamp), and `before_id` (execution id tiebreaker when multiple rows share the same timestamp). Response includes `created_at`, `last_change`, `status`, `awaiting_feedback`, and `current_agent`.
 - `GET /.well-known/agent.json` – Agent metadata describing available tools.
+
+#### Workflow listing
+
+list workflows with paging (newest first), then page using the last item’s `created_at` + `execution_id`.
+
+```bash
+# First page
+curl -X GET "http://localhost:8000/tgi/v1/workflows?limit=2" \
+  -H "X-Auth-Request-Access-Token: $TOKEN"
+
+# Next page (use last item's created_at + execution_id)
+curl -X GET "http://localhost:8000/tgi/v1/workflows?limit=2&before=2024-01-15T10:30:00.123000Z&before_id=exec-123" \
+  -H "X-Auth-Request-Access-Token: $TOKEN"
+```
+
+Example response:
+
+```json
+{
+  "workflows": [
+    {
+      "execution_id": "exec-456",
+      "workflow_id": "newsletter_flow",
+      "status": "awaiting_feedback",
+      "awaiting_feedback": true,
+      "current_agent": "review_copy",
+      "created_at": "2024-01-15T10:45:00.123000Z",
+      "last_change": "2024-01-15T10:50:12.456000Z"
+    },
+    {
+      "execution_id": "exec-123",
+      "workflow_id": "plan_run",
+      "status": "completed",
+      "awaiting_feedback": false,
+      "current_agent": "finalize",
+      "created_at": "2024-01-15T10:30:00.123000Z",
+      "last_change": "2024-01-15T10:35:10.789000Z"
+    }
+  ]
+}
+```
 
 ### System prompts
 `SYSTEM_DEFINED_PROMPTS` can include prompts with `role: "system"` content. When no system message is supplied in the request, the bridge automatically prepends the configured system prompt, ensuring consistent agent behavior.
@@ -904,6 +946,61 @@ Runtime behavior:
 - `persist_inner_thinking` (boolean, optional) controls how much agent output is stored in workflow context for later turns. Defaults to `false`, which keeps only pass-through content and explicit returns, trimming internal reasoning to avoid oversized LLM payloads. Set to `true` if you need full agent transcripts preserved across resumes.
 - `start_with` (object, optional) lets you prefill workflow context and optionally jump directly to a specific agent. Shape: `{"args": {"plan_id": "abc"}, "agent": "get_plan"}`. `args` are copied into the workflow context (top-level keys), and `agent` forces the first runnable agent; its declared dependencies are marked completed with reason `start_with_prefill` so it can run immediately.
 - Agent-level `context` controls how much prior workflow state each agent sees: set to `false` to omit context entirely, or provide a list of references (e.g., `["plan.steps", "detect.intent"]`) to send only selected values using the same notation as arg mappings.
+
+#### Example: 3-step workflow with feedback + client response
+Below is a short workflow that finds matching plans, asks the user to pick one (or create a new plan), then runs the selected plan.
+
+```json
+{
+  "flow_id": "plan_run",
+  "root_intent": "RUN_PLAN",
+  "agents": [
+    {
+      "agent": "find_plan",
+      "description": "Find matching plans. Emit plan list or reroute to create.",
+      "tools": ["search_plan"],
+      "reroute": [
+        {
+          "on": ["FOUND_MULTIPLE_MATCHES"],
+          "ask": {
+            "question": "Present matching plans and ask the user to select one or create a new plan.",
+            "expected_responses": [
+              {
+                "select_plan": { "to": "select_run_mode", "each": "plans", "with": ["plan_id"] },
+                "create_new": { "to": "workflows[plan_create]" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "agent": "select_run_mode",
+      "description": "Choose how to run the selected plan.",
+      "depends_on": ["find_plan"]
+    },
+    {
+      "agent": "run_plan",
+      "description": "Run the plan now.",
+      "depends_on": ["select_run_mode"]
+    }
+  ]
+}
+```
+
+**What the server streams when a selection is needed:**
+```xml
+<user_feedback_needed>{"question":"Which plan should I run?","expected_responses":[{"id":"select_plan","to":"select_run_mode","each":"plans","with":["plan_id"],"options":[{"key":"plan-1","value":"Plan One - ..."},{"key":"plan-2","value":"Plan Two - ..."}]},{"id":"create_new","to":"workflows[plan_create]"}]}</user_feedback_needed>
+```
+
+**Client response (user selects plan-2):**
+```xml
+<user_feedback>select_run_mode("plan-2")</user_feedback>
+```
+
+Notes:
+- The client should return the `to` target plus the selected `key`.
+- If a choice needs to propagate context, it must be explicitly declared in `with`. The engine does not infer it.
 
 #### Example: start or resume a workflow
 ```bash

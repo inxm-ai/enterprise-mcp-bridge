@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional, Any, AsyncGenerator
 from fastapi import (
     APIRouter,
@@ -25,9 +26,8 @@ from app.utils.exception_logging import (
     log_exception_with_details,
 )
 
-from app.tgi.models import (
-    ChatCompletionRequest,
-)
+from app.tgi.models import ChatCompletionRequest
+from app.tgi.workflows.models import WorkflowExecutionState
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.protocols.chunk_reader import (
     chunk_reader,
@@ -164,6 +164,40 @@ def _extract_completion_content(result: Any) -> str:
         return "".join(parts)
 
     return str(result)
+
+
+def _workflow_status(state: WorkflowExecutionState) -> str:
+    return state.status()
+
+
+def _serialize_workflow(state: WorkflowExecutionState) -> dict[str, Any]:
+    return {
+        "execution_id": state.execution_id,
+        "workflow_id": state.flow_id,
+        "status": _workflow_status(state),
+        "awaiting_feedback": bool(state.awaiting_feedback),
+        "current_agent": state.current_agent,
+        "created_at": state.created_at,
+        "last_change": state.last_change,
+    }
+
+
+def _parse_timestamp(value: str) -> str:
+    """
+    Parse an ISO-8601 timestamp string and normalize it to UTC with a Z suffix.
+    """
+    if not value:
+        raise ValueError("Timestamp is required")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _coerce_a2a_request(raw_body: Any) -> A2ARequest:
@@ -539,6 +573,57 @@ async def cancel_workflow(
         )
 
     return JSONResponse(content={"status": "not_running", "execution_id": execution_id})
+
+
+@router.get("/workflows")
+async def list_workflows(
+    request: Request,
+    access_token: Optional[str] = Depends(get_access_token),
+    limit: int = Query(20, ge=1, le=100),
+    before: Optional[str] = Query(None),
+    before_id: Optional[str] = Query(None),
+):
+    """
+    List workflow executions for the current user, ordered by created_at desc.
+    """
+    engine = tgi_service.workflow_engine
+    if not engine:
+        raise HTTPException(status_code=404, detail="Workflow engine not available")
+
+    incoming_headers = dict(request.headers)
+    user_token = _resolve_user_token(incoming_headers, access_token)
+    if not user_token:
+        raise HTTPException(
+            status_code=401, detail="Access token required to list workflows."
+        )
+
+    if before_id and not before:
+        raise HTTPException(
+            status_code=400,
+            detail="before_id requires a before timestamp.",
+        )
+
+    parsed_before = None
+    if before:
+        try:
+            parsed_before = _parse_timestamp(before)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        workflows = engine.list_workflows(
+            user_token,
+            limit=limit,
+            before=parsed_before,
+            before_id=before_id,
+        )
+    except PermissionError as exc:
+        status_code = _permission_status_code(exc)
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+    return JSONResponse(
+        content={"workflows": [_serialize_workflow(state) for state in workflows]}
+    )
 
 
 @router.post("/a2a")

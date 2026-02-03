@@ -4044,6 +4044,15 @@ async def test_reroute_ask_multiple_match_assigns_selection(tmp_path, monkeypatc
     _ = [chunk async for chunk in stream]
     state = store.load_execution(exec_id)
     assert state.awaiting_feedback is True
+    feedback_spec = state.context["agents"]["find_plan"].get("feedback_spec") or {}
+    expected = feedback_spec.get("expected_responses") or []
+    select_entry = next(
+        (entry for entry in expected if entry.get("id") == "select_plan"), None
+    )
+    assert select_entry is not None
+    assert select_entry.get("options")
+    assert select_entry.get("with") in (None, [])
+    assert select_entry.get("each") == "plans"
 
     resume_request = ChatCompletionRequest(
         messages=[
@@ -4063,8 +4072,163 @@ async def test_reroute_ask_multiple_match_assigns_selection(tmp_path, monkeypatc
     _ = [chunk async for chunk in resume_stream]
 
     final_state = store.load_execution(exec_id)
+    assert final_state.context.get("plan_id") is None
+    assert "select_run_mode" in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_reroute_ask_multiple_match_with_explicit_with_sets_plan_id(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "ask_flow_multi_with",
+        "root_intent": "ASK_MULTI_WITH",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate matching plans.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_MULTIPLE_MATCHES"],
+                        "ask": {
+                            "question": "Present matching plans and ask which to run.",
+                            "expected_responses": [
+                                {
+                                    "select_plan": {
+                                        "to": "select_run_mode",
+                                        "each": "plans",
+                                        "with": ["plan_id"],
+                                    },
+                                    "create_new": {"to": "workflows[plan_create]"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "select_run_mode",
+                "description": "Select a run mode.",
+                "depends_on": ["find_plan"],
+                "context": ["plan_id"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    plans = [
+        {"key": "plan-1", "value": "Plan one"},
+        {"key": "plan-2", "value": "Plan two"},
+    ]
+    llm = StubLLMClient(
+        {
+            "find_plan": (
+                f'<return name="plans">{json.dumps(plans)}</return>'
+                "<reroute>FOUND_MULTIPLE_MATCHES</reroute>"
+            ),
+            "select_run_mode": "<passthrough>ready</passthrough>",
+        },
+        ask_responses={"feedback_question": "Which plan should I run?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-ask-multi-with"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_multi_with",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content='<user_feedback>select_run_mode("plan-2")</user_feedback>',
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_multi_with",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
     assert final_state.context.get("plan_id") == "plan-2"
     assert "select_run_mode" in llm.calls
+    select_calls = [
+        idx for idx, call in enumerate(llm.calls) if call == "select_run_mode"
+    ]
+    assert select_calls
+    select_prompt = llm.user_messages[select_calls[-1]]
+    assert '"plan_id": "plan-2"' in select_prompt
+
+
+@pytest.mark.asyncio
+async def test_scoped_context_root_reference_resolves_top_level_key(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "root_context_flow",
+        "root_intent": "ROOT_CONTEXT",
+        "agents": [
+            {
+                "agent": "first",
+                "description": "Set a plan id and reroute.",
+                "reroute": [{"on": ["GO"], "to": "second", "with": ["plan_id"]}],
+            },
+            {
+                "agent": "second",
+                "description": "Consumes shared plan id.",
+                "depends_on": ["first"],
+                "context": ["plan_id"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first": '<return name="plan_id">plan-123</return><reroute>GO</reroute>',
+            "second": "<passthrough>ok</passthrough>",
+        }
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-root-context"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="root_context_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    second_calls = [idx for idx, call in enumerate(llm.calls) if call == "second"]
+    assert second_calls
+    second_prompt = llm.user_messages[second_calls[-1]]
+    assert '"plan_id": "plan-123"' in second_prompt
 
 
 @pytest.mark.asyncio

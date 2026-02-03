@@ -5,8 +5,13 @@ from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
 import os
-from app.tgi.routes import router as tgi_router, UserLoggedOutException
+from app.tgi.routes import (
+    router as tgi_router,
+    UserLoggedOutException,
+    list_workflows,
+)
 from fastapi import HTTPException
+from starlette.requests import Request
 
 
 # Ensure TGI_URL is set for all tests except the one that checks missing value
@@ -718,6 +723,112 @@ class TestTGIRoutes:
             )
 
             assert response.status_code == 200
+
+
+class TestWorkflowListingRoutes:
+    def _make_request(self, headers: dict[str, str], query: bytes | None = None) -> Request:
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/tgi/v1/workflows",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "query_string": query or b"",
+        }
+        return Request(scope)
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_requires_token(self, monkeypatch):
+        class _StubEngine:
+            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+                return []
+
+        class _StubService:
+            workflow_engine = _StubEngine()
+
+        monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+        request = self._make_request({})
+        with pytest.raises(HTTPException) as exc_info:
+            await list_workflows(request, access_token=None)
+        assert exc_info.value.status_code == 401
+        assert "Access token required" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_rejects_before_id_without_before(self, monkeypatch):
+        class _StubEngine:
+            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+                return []
+
+        class _StubService:
+            workflow_engine = _StubEngine()
+
+        monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+        request = self._make_request({"X-Auth-Request-Access-Token": "token-ok"})
+        with pytest.raises(HTTPException) as exc_info:
+            await list_workflows(
+                request, access_token="token-ok", before=None, before_id="exec-1"
+            )
+        assert exc_info.value.status_code == 400
+        assert "before_id requires a before timestamp" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_returns_status_and_timestamp(self, monkeypatch):
+        from app.tgi.workflows.models import WorkflowExecutionState
+
+        awaiting = WorkflowExecutionState.new("exec-1", "flow-a")
+        awaiting.current_agent = "reviewer"
+        awaiting.awaiting_feedback = True
+        awaiting.created_at = "2024-01-15T10:30:00.000000Z"
+        awaiting.last_change = "2024-01-15T10:45:00.000000Z"
+
+        completed = WorkflowExecutionState.new("exec-2", "flow-b")
+        completed.current_agent = "planner"
+        completed.completed = True
+        completed.created_at = "2024-01-15T09:00:00.000000Z"
+        completed.last_change = "2024-01-15T09:30:00.000000Z"
+
+        class _StubEngine:
+            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+                assert user_token == "token-ok"
+                assert limit == 20
+                return [awaiting, completed]
+
+        class _StubService:
+            workflow_engine = _StubEngine()
+
+        monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+        request = self._make_request({"X-Auth-Request-Access-Token": "token-ok"})
+        response = await list_workflows(
+            request,
+            access_token="token-ok",
+            limit=20,
+            before=None,
+            before_id=None,
+        )
+        assert response.status_code == 200
+        data = json.loads(response.body)
+        assert data["workflows"] == [
+            {
+                "execution_id": "exec-1",
+                "workflow_id": "flow-a",
+                "status": "awaiting_feedback",
+                "awaiting_feedback": True,
+                "current_agent": "reviewer",
+                "created_at": "2024-01-15T10:30:00.000000Z",
+                "last_change": "2024-01-15T10:45:00.000000Z",
+            },
+            {
+                "execution_id": "exec-2",
+                "workflow_id": "flow-b",
+                "status": "completed",
+                "awaiting_feedback": False,
+                "current_agent": "planner",
+                "created_at": "2024-01-15T09:00:00.000000Z",
+                "last_change": "2024-01-15T09:30:00.000000Z",
+            },
+        ]
 
 
 if __name__ == "__main__":

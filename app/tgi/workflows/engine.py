@@ -299,9 +299,31 @@ class WorkflowEngine:
                 raise PermissionError(
                     f"Workflow execution '{state.execution_id}' belongs to a different user."
                 )
+            state.owner_id = stored_owner
             return
         if current_user_id:
             state.context[self.WORKFLOW_OWNER_KEY] = current_user_id
+            state.owner_id = current_user_id
+
+    def list_workflows(
+        self,
+        user_token: str,
+        *,
+        limit: int,
+        before: Optional[str] = None,
+        before_id: Optional[str] = None,
+    ) -> list[WorkflowExecutionState]:
+        """
+        Return workflow executions for the user identified by the token.
+        """
+        if not user_token:
+            raise PermissionError("Access token required to list workflows.")
+        user_id = self._resolve_request_user_id(user_token)
+        if not user_id:
+            return []
+        return self.state_store.list_workflows(
+            owner_id=user_id, limit=limit, before=before, before_id=before_id
+        )
 
     def _apply_start_with(
         self,
@@ -802,6 +824,10 @@ class WorkflowEngine:
             if isinstance(with_fields, str):
                 with_fields = [with_fields]
             with_fields = [w for w in with_fields if isinstance(w, str)]
+            if with_fields and isinstance(assignments, dict):
+                for field in with_fields:
+                    if field in assignments:
+                        self._set_path_value(state.context, field, assignments[field])
             if with_fields:
                 self._apply_reroute_with(state.context, agent_context, with_fields)
             agent_context["completed"] = True
@@ -1619,7 +1645,13 @@ class WorkflowEngine:
         for ref in references:
             if not isinstance(ref, str):
                 continue
-            value = self.agent_executor.resolve_arg_reference(ref, full_context)
+            value = None
+            if "." not in ref:
+                value = full_context.get(ref)
+            else:
+                value = self.agent_executor.resolve_arg_reference(ref, full_context)
+                if value is None:
+                    value = self._get_path_value(full_context, ref)
             logger.info(
                 "[WorkflowEngine._select_context_references] Reference '%s' resolved to: %s",
                 ref,
@@ -1633,14 +1665,19 @@ class WorkflowEngine:
                 continue
             parts = ref.split(".")
             if len(parts) < 2:
+                selected[ref] = value
                 continue
             agent_name, path_parts = parts[0], parts[1:]
-            agent_ctx = selected["agents"].setdefault(agent_name, {})
-            self._set_nested_value(agent_ctx, path_parts, value)
+            if agent_name in (full_context.get("agents") or {}):
+                agent_ctx = selected["agents"].setdefault(agent_name, {})
+                self._set_nested_value(agent_ctx, path_parts, value)
+            else:
+                self._set_nested_value(selected, parts, value)
 
         if selected.get("agents"):
             return selected
-        return {}
+        selected.pop("agents", None)
+        return selected if selected else {}
 
     def _set_nested_value(
         self, target: dict, path_parts: list[str], value: Any
@@ -1843,21 +1880,6 @@ class WorkflowEngine:
             serialized = json.dumps({"question": payload.get("question") or ""})
         return f"<user_feedback_needed>{serialized}</user_feedback_needed>"
 
-    def _infer_selection_field(self, name: str) -> Optional[str]:
-        if not name:
-            return None
-        normalized = name.strip()
-        if not normalized:
-            return None
-        lower = normalized.lower()
-        if lower.endswith("ies") and len(normalized) > 3:
-            singular = normalized[:-3] + "y"
-        elif lower.endswith("s") and not lower.endswith("ss") and len(normalized) > 1:
-            singular = normalized[:-1]
-        else:
-            singular = normalized
-        return f"{singular}_id"
-
     def _resolve_feedback_each_value(
         self,
         each: Any,
@@ -1874,18 +1896,30 @@ class WorkflowEngine:
             return None
         value = self._get_path_value(agent_context, each)
         if value is not None:
-            return value
+            return self._parse_feedback_json_value(value)
         value = self._get_path_value(shared_context, each)
         if value is not None:
-            return value
+            return self._parse_feedback_json_value(value)
         agents_ctx = (
             shared_context.get("agents") if isinstance(shared_context, dict) else None
         )
         if isinstance(agents_ctx, dict):
             value = self._get_path_value(agents_ctx, each)
             if value is not None:
-                return value
+                return self._parse_feedback_json_value(value)
         return None
+
+    def _parse_feedback_json_value(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped or stripped[0] not in "[{":
+            return value
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            return value
+        return parsed
 
     def _normalize_feedback_option(self, item: Any) -> Optional[tuple[str, str]]:
         if item is None:
@@ -1953,11 +1987,11 @@ class WorkflowEngine:
                 )
                 options = self._normalize_feedback_options(options_raw)
                 if each and not with_fields:
-                    inferred = self._infer_selection_field(
-                        each if isinstance(each, str) else choice_id
+                    logger.warning(
+                        "[WorkflowEngine] Feedback option '%s' has 'each' without explicit 'with'; "
+                        "selection context will not be propagated.",
+                        choice_id,
                     )
-                    if inferred:
-                        with_fields = [inferred]
                 choice_entry = {
                     "id": str(choice_id),
                     "to": target,
@@ -1982,6 +2016,8 @@ class WorkflowEngine:
             }
             if choice.get("with"):
                 entry["with"] = choice["with"]
+            if choice.get("each") is not None:
+                entry["each"] = choice.get("each")
             if "options" in choice:
                 entry["options"] = choice.get("options") or []
             expected_responses.append(entry)
