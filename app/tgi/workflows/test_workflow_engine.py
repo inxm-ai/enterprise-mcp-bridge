@@ -3883,9 +3883,7 @@ async def test_reroute_with_shared_plan_id(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reroute_ask_single_match_routes_on_user_feedback(
-    tmp_path, monkeypatch
-):
+async def test_reroute_ask_single_match_routes_on_user_feedback(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
     flow = {
@@ -3906,9 +3904,7 @@ async def test_reroute_ask_single_match_routes_on_user_feedback(
                                         "to": "select_run_mode",
                                         "with": ["plan_id"],
                                     },
-                                    "create_new": {
-                                        "to": "workflows[plan_create]"
-                                    },
+                                    "create_new": {"to": "workflows[plan_create]"},
                                 }
                             ],
                         },
@@ -3930,7 +3926,9 @@ async def test_reroute_ask_single_match_routes_on_user_feedback(
             "find_plan": '<return name="plan_id">plan-1</return><reroute>FOUND_PERFECT_MATCH</reroute>',
             "select_run_mode": "<passthrough>ready</passthrough>",
         },
-        ask_responses={"feedback_question": "Use the matching plan or create a new one?"},
+        ask_responses={
+            "feedback_question": "Use the matching plan or create a new one?"
+        },
     )
     store = WorkflowStateStore(db_path=tmp_path / "state.db")
     engine = WorkflowEngine(WorkflowRepository(), store, llm)
@@ -3955,7 +3953,10 @@ async def test_reroute_ask_single_match_routes_on_user_feedback(
 
     resume_request = ChatCompletionRequest(
         messages=[
-            Message(role=MessageRole.USER, content="<user_feedback>select_run_mode</user_feedback>")
+            Message(
+                role=MessageRole.USER,
+                content="<user_feedback>select_run_mode</user_feedback>",
+            )
         ],
         model="test-model",
         stream=True,
@@ -3995,9 +3996,7 @@ async def test_reroute_ask_multiple_match_assigns_selection(tmp_path, monkeypatc
                                         "to": "select_run_mode",
                                         "each": "plans",
                                     },
-                                    "create_new": {
-                                        "to": "workflows[plan_create]"
-                                    },
+                                    "create_new": {"to": "workflows[plan_create]"},
                                 }
                             ],
                         },

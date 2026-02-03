@@ -43,3 +43,23 @@ def test_clear():
     m.clear()
     assert len(m.list_todos()) == 0
     assert m.history() == []
+
+
+def test_insert_and_close_todos():
+    m = TodoManager()
+    t1 = TodoItem(id="1", name="one", goal="g1")
+    t2 = TodoItem(id="2", name="two", goal="g2")
+    t3 = TodoItem(id="3", name="three", goal="g3")
+    m.add_todos([t1, t2, t3])
+
+    s1 = TodoItem(id="s1", name="sub1", goal="sg1", parent_id="1", root_id="1")
+    s2 = TodoItem(id="s2", name="sub2", goal="sg2", parent_id="1", root_id="1")
+    m.insert_todos_after("1", [s1, s2])
+
+    ids = [t.id for t in m.list_todos()]
+    assert ids == ["1", "s1", "s2", "2", "3"]
+
+    closed = m.close_todos_after("s2", reason="skip")
+    assert closed == 2
+    assert m.get_todo("2").state == TodoState.DONE
+    assert m.get_todo("3").state == TodoState.DONE

@@ -355,10 +355,19 @@ class LLMClient:
 
         response = await self.non_stream_completion(request, access_token, outer_span)
 
-        # Handle response which is now a dict
+        # Handle response from ChatCompletionResponse or raw dict
+        if isinstance(response, ChatCompletionResponse):
+            choices = response.choices or []
+            if choices:
+                message = choices[0].message
+                if message and message.content is not None:
+                    return message.content
+                delta = choices[0].delta
+                if delta and delta.content is not None:
+                    return delta.content
+            return ""
         if isinstance(response, dict):
             choices = response.get("choices", [])
             if choices:
                 return choices[0].get("message", {}).get("content", "")
-
         return ""

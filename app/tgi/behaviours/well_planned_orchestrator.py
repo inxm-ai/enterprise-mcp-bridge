@@ -7,7 +7,7 @@ from typing import Any, List, Optional, AsyncGenerator, Tuple
 from app.tgi.protocols.think_helper import ThinkExtractor
 from opentelemetry import trace
 
-from app.tgi.behaviours.todos.todo_manager import TodoItem, TodoManager
+from app.tgi.behaviours.todos.todo_manager import TodoItem, TodoManager, TodoState
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -24,40 +24,47 @@ from app.vars import TGI_MODEL_NAME
 
 tracer = trace.get_tracer(__name__)
 
+todo_item_schema = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "goal": {"type": "string"},
+        "needed_info": {
+            "oneOf": [
+                {"type": "string"},
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "required_from_user": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "context": {"type": ["string", "null"]},
+                    },
+                    "additionalProperties": False,
+                },
+            ]
+        },
+        "expected_result": {"type": ["string", "null"]},
+        "tools": {"type": "array", "items": {"type": "string"}},
+        "subtasks": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/todo"},
+        },
+    },
+    "required": ["id", "name", "goal", "tools"],
+    "additionalProperties": False,
+}
+
 todo_response_schema = {
     "type": "object",
+    "definitions": {"todo": todo_item_schema},
     "properties": {
         "todos": {
             "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "needed_info": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "null"},
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "required_from_user": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                    },
-                                    "context": {"type": ["string", "null"]},
-                                },
-                                "additionalProperties": False,
-                            },
-                        ]
-                    },
-                    "expected_result": {"type": ["string", "null"]},
-                    "tools": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["id", "name", "goal", "tools"],
-                "additionalProperties": False,
-            },
+            "items": {"$ref": "#/definitions/todo"},
         }
     },
     "required": ["todos"],
@@ -66,6 +73,7 @@ todo_response_schema = {
 
 intent_response_schema = {
     "type": "object",
+    "definitions": todo_response_schema.get("definitions"),
     "properties": {
         "intent": {"type": "string", "enum": ["plan", "answer", "reroute"]},
         "reason": {"type": ["string", "null"]},
@@ -75,6 +83,11 @@ intent_response_schema = {
     "required": ["intent"],
     "additionalProperties": False,
 }
+
+MAX_SUBTASK_DEPTH = 4
+MAX_TODOS = 60
+MAX_HISTORY_RESULT_CHARS = 4000
+MAX_HISTORY_EVENTS = 6
 
 
 async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
@@ -312,6 +325,9 @@ class WellPlannedOrchestrator:
             "needed_info": todo.needed_info,
             "expected_result": todo.expected_result,
             "tools": list(todo.tools),
+            "parent_id": todo.parent_id,
+            "root_id": todo.root_id,
+            "depth": todo.depth,
             "state": getattr(todo.state, "value", str(todo.state)),
         }
 
@@ -347,10 +363,19 @@ class WellPlannedOrchestrator:
         parsed["metadata"] = merged
         return f"data: {json.dumps(parsed, ensure_ascii=False)}\n\n"
 
-    def _create_todo_manager(self, todos_json: list) -> TodoManager:
-        todo_manager = TodoManager()
+    def _build_todo_items_from_entries(
+        self,
+        entries: list,
+        parent_id: Optional[str] = None,
+        root_id: Optional[str] = None,
+        depth: int = 0,
+        max_depth: int = MAX_SUBTASK_DEPTH,
+    ) -> List[TodoItem]:
         todo_items: List[TodoItem] = []
-        for entry in todos_json:
+        if not isinstance(entries, list) or depth > max_depth:
+            return todo_items
+
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
 
@@ -362,22 +387,158 @@ class WellPlannedOrchestrator:
                 "expectedResult"
             )
             tools = entry.get("tools") or []
+            if not isinstance(tools, list):
+                tools = []
 
-            todo_items.append(
-                TodoItem(
-                    id=tid,
-                    name=name,
-                    goal=goal,
-                    needed_info=needed_info,
-                    expected_result=expected_result,
-                    tools=tools,
-                )
+            todo = TodoItem(
+                id=tid,
+                name=name,
+                goal=goal,
+                needed_info=needed_info,
+                expected_result=expected_result,
+                tools=tools,
+                parent_id=parent_id,
+                root_id=root_id or tid,
+                depth=depth,
             )
+            todo_items.append(todo)
 
+            subtasks = entry.get("subtasks")
+            if isinstance(subtasks, list):
+                todo_items.extend(
+                    self._build_todo_items_from_entries(
+                        subtasks,
+                        parent_id=todo.id,
+                        root_id=todo.root_id,
+                        depth=depth + 1,
+                        max_depth=max_depth,
+                    )
+                )
+
+        return todo_items
+
+    def _create_todo_manager(self, todos_json: list) -> TodoManager:
+        todo_manager = TodoManager()
+        todo_items = self._build_todo_items_from_entries(todos_json)
         if todo_items:
             todo_manager.add_todos(todo_items)
-
         return todo_manager
+
+    def _format_todo_plan(self, todos: List[TodoItem]) -> str:
+        lines = []
+        for todo in todos:
+            indent = "  " * max(todo.depth, 0)
+            lines.append(f"{indent}- {todo.name}")
+        return "\n".join(lines)
+
+    def _last_pending_index(self, todos: List[TodoItem]) -> int:
+        for idx in range(len(todos) - 1, -1, -1):
+            if todos[idx].state != TodoState.DONE:
+                return idx
+        return -1
+
+    def _subtask_instructions(self) -> str:
+        return (
+            "\nIf this goal requires multiple distinct steps or many tool calls, "
+            "return ONLY a JSON object with:\n"
+            '{"intent":"subtasks","subtasks":[{"id":"...","name":"...","goal":"...","needed_info":null,'
+            '"expected_result":"...","tools":["..."],"subtasks":[]}],'
+            '"close_followups":false,"reason":"..."}\n'
+            "Use subtasks to keep context small. Subtasks may include subtasks. "
+            "If close_followups is true, include a final user-facing answer step among the subtasks. "
+            "Do not call tools when returning a subtask plan. "
+            "Prefer smaller subtasks whenever a clean split is possible, "
+            "but multiple tool calls are allowed within a todo when necessary."
+        )
+
+    def _looks_like_todo_entry(self, entry: Any) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        if entry.get("goal") or entry.get("name") or entry.get("title"):
+            return True
+        return False
+
+    def _extract_subtask_plan(self, result: Any) -> Optional[dict]:
+        payload = result
+        if isinstance(payload, ChatCompletionResponse):
+            choice = payload.choices[0] if payload.choices else None
+            message = choice.message if choice else None
+            payload = message.content if message else None
+
+        if isinstance(payload, str):
+            payload = self._try_parse_json(payload)
+
+        if not isinstance(payload, dict):
+            return None
+
+        intent = payload.get("intent") or payload.get("type")
+        if intent not in ("subtasks", "plan", "subtask_plan"):
+            return None
+
+        tasks = None
+        if isinstance(payload.get("subtasks"), list):
+            tasks = payload.get("subtasks")
+        elif isinstance(payload.get("todos"), list):
+            tasks = payload.get("todos")
+
+        if not isinstance(tasks, list) or not tasks:
+            return None
+
+        valid_tasks = [t for t in tasks if self._looks_like_todo_entry(t)]
+        if not valid_tasks:
+            return None
+
+        return {
+            "tasks": valid_tasks,
+            "close_followups": bool(
+                payload.get("close_followups")
+                or payload.get("close_remaining")
+                or payload.get("close_remaining_todos")
+            ),
+            "reason": payload.get("reason"),
+        }
+
+    def _relevant_history_events(
+        self, todo_manager: TodoManager, todo: TodoItem
+    ) -> List[dict]:
+        history = todo_manager.history()
+        if not history:
+            return []
+
+        todos = todo_manager.list_todos()
+        idx = todo_manager.index_of(todo.id)
+        if idx is None:
+            return []
+
+        if todo.parent_id is None:
+            relevant_ids = {
+                t.id for i, t in enumerate(todos[:idx]) if t.state == TodoState.DONE
+            }
+        else:
+            root_id = todo.root_id or todo.id
+            relevant_ids = {
+                t.id
+                for i, t in enumerate(todos[:idx])
+                if t.state == TodoState.DONE and t.root_id == root_id
+            }
+
+        events = [
+            h
+            for h in history
+            if h.get("event") == "finish" and h.get("id") in relevant_ids
+        ]
+        if len(events) > MAX_HISTORY_EVENTS:
+            events = events[-MAX_HISTORY_EVENTS:]
+        return events
+
+    def _compact_history_text(self, text: str) -> str:
+        if not isinstance(text, str):
+            text = str(text)
+        if len(text) <= MAX_HISTORY_RESULT_CHARS:
+            return text
+        truncated = text[:MAX_HISTORY_RESULT_CHARS]
+        remaining = len(text) - MAX_HISTORY_RESULT_CHARS
+        return f"{truncated}... [truncated {remaining} chars]"
 
     def _select_tools_for_todo(
         self,
@@ -421,6 +582,7 @@ class WellPlannedOrchestrator:
         original_messages: Optional[List[Message]] = None,
         is_final_multistep_todo: bool = False,
         is_final_step: bool = False,
+        root_goal: Optional[str] = None,
     ):
         # Preserve any original system prompt from the base request/prepared messages
         original_system_content = None
@@ -431,16 +593,16 @@ class WellPlannedOrchestrator:
                     break
 
         # Combine original system prompt with todo-specific goal
+        system_parts = []
         if original_system_content:
-            combined_system_content = (
-                f"{original_system_content}\n\nCurrent Goal: {todo.goal}\n"
-                "You have access to the results of previous steps. Use them to achieve the current goal."
-            )
-        else:
-            combined_system_content = (
-                f"Goal: {todo.goal}\n"
-                "You have access to the results of previous steps. Use them to achieve the current goal."
-            )
+            system_parts.append(original_system_content)
+        if root_goal:
+            system_parts.append(f"Root Goal: {root_goal}")
+        system_parts.append(f"Current Goal: {todo.goal}")
+        system_parts.append(
+            "You have access to the results of relevant previous steps. Use them to achieve the current goal."
+        )
+        combined_system_content = "\n\n".join(system_parts)
 
         tool_sentence = (
             f"\nAllowed tools for this step: {', '.join(todo.tools)}."
@@ -457,6 +619,8 @@ class WellPlannedOrchestrator:
                 "\nThis is the final step of the plan. Do not start additional tool calls "
                 "or new tasks—deliver the final user-facing answer directly."
             )
+        elif not is_final_step:
+            combined_system_content += self._subtask_instructions()
 
         if todo.expected_result:
             combined_system_content += f"\n\nExpected Result: {todo.expected_result}"
@@ -465,14 +629,13 @@ class WellPlannedOrchestrator:
             Message(role=MessageRole.SYSTEM, content=combined_system_content)
         ]
 
-        for hist in todo_manager.history():
-            if hist.get("event") == "finish":
-                focused_messages.append(
-                    Message(
-                        role=MessageRole.ASSISTANT,
-                        content=str(hist.get("result")),
-                    )
+        for hist in self._relevant_history_events(todo_manager, todo):
+            focused_messages.append(
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content=str(hist.get("result")),
                 )
+            )
 
         needed_info = self._normalize_needed_info(todo.needed_info)
         if needed_info:
@@ -798,15 +961,18 @@ class WellPlannedOrchestrator:
         user_goal = (user_message or "").strip() or "Answer the user's request."
 
         if not todos:
+            tid = str(uuid.uuid4())
             todo_manager.add_todos(
                 [
                     TodoItem(
-                        id=str(uuid.uuid4()),
+                        id=tid,
                         name="final-answer",
                         goal=user_goal,
                         needed_info=None,
                         expected_result="A clear final answer to the user.",
                         tools=[],
+                        root_id=tid,
+                        depth=0,
                     )
                 ]
             )
@@ -814,15 +980,18 @@ class WellPlannedOrchestrator:
 
         final_todo = todos[-1]
         if final_todo and final_todo.tools:
+            tid = str(uuid.uuid4())
             todo_manager.add_todos(
                 [
                     TodoItem(
-                        id=str(uuid.uuid4()),
+                        id=tid,
                         name="final-answer",
                         goal=f"Use only the existing information to answer the user's request: {user_goal}",
                         needed_info=None,
                         expected_result="A concise final answer with no tool calls.",
                         tools=[],
+                        root_id=tid,
+                        depth=0,
                     )
                 ]
             )
@@ -844,22 +1013,33 @@ class WellPlannedOrchestrator:
         access_token: Optional[str],
         span,
         original_messages: Optional[List[Message]] = None,
+        root_goal: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         async def _generator():
             todos = todo_manager.list_todos()
             all_tool_names = self._extract_tool_names(available_tools)
             id = f"mcp-{str(uuid.uuid4())}"
-            names = "\n - ".join([t.name for t in todos])
+            plan_lines = self._format_todo_plan(todos)
             message = (
-                f"<think>I have planned the following todos:\n - {names}\n</think>"
+                f"<think>I have planned the following todos:\n{plan_lines}\n</think>"
             )
 
             yield create_response_chunk(id, message)
 
             visible_accum = ""
+            idx = 0
+            while True:
+                todos = todo_manager.list_todos()
+                last_pending_idx = self._last_pending_index(todos)
+                if last_pending_idx < 0 or idx >= len(todos) or idx > last_pending_idx:
+                    break
 
-            for idx, todo in enumerate(todos):
-                is_last_todo = idx == len(todos) - 1
+                todo = todos[idx]
+                if todo.state == TodoState.DONE:
+                    idx += 1
+                    continue
+
+                is_last_todo = idx == last_pending_idx
                 todo_manager.start_todo(todo.id)
                 todo_metadata = None if is_last_todo else self._todo_metadata(todo)
                 todo_meta_wrapper = (
@@ -881,13 +1061,15 @@ class WellPlannedOrchestrator:
                     yield create_response_chunk(f"mcp-{str(uuid.uuid4())}", "[DONE]")
                     return
 
+                pending_count = sum(1 for t in todos if t.state != TodoState.DONE)
                 focused_messages, focused_request = self._build_focused_request(
                     todo_manager,
                     todo,
                     request,
                     original_messages,
-                    is_final_multistep_todo=is_last_todo and len(todos) > 1,
+                    is_final_multistep_todo=is_last_todo and pending_count > 1,
                     is_final_step=is_last_todo,
+                    root_goal=root_goal,
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
@@ -992,6 +1174,71 @@ class WellPlannedOrchestrator:
                     cleaned_result = stringified
 
                 if not is_last_todo:
+                    subtask_plan = self._extract_subtask_plan(result)
+                    if not subtask_plan and isinstance(cleaned_result, str):
+                        subtask_plan = self._extract_subtask_plan(cleaned_result)
+
+                    if subtask_plan:
+                        current_count = len(todo_manager.list_todos())
+                        remaining_capacity = max(0, MAX_TODOS - current_count)
+                        if remaining_capacity > 0:
+                            new_items = self._build_todo_items_from_entries(
+                                subtask_plan["tasks"],
+                                parent_id=todo.id,
+                                root_id=todo.root_id or todo.id,
+                                depth=todo.depth + 1,
+                            )
+                            if len(new_items) > remaining_capacity:
+                                new_items = new_items[:remaining_capacity]
+                        else:
+                            new_items = []
+
+                        if new_items:
+                            todo_manager.insert_todos_after(todo.id, new_items)
+
+                        reason = subtask_plan.get("reason")
+                        summary_text = (
+                            f"Created {len(new_items)} subtasks to achieve the goal."
+                        )
+                        if reason:
+                            summary_text += f" Reason: {reason}"
+
+                        todo_manager.finish_todo(todo.id, summary_text)
+
+                        if subtask_plan.get("close_followups"):
+                            last_inserted_id = (
+                                new_items[-1].id if new_items else todo.id
+                            )
+                            todo_manager.close_todos_after(
+                                last_inserted_id, reason=summary_text
+                            )
+
+                        summary = (
+                            f"<think>I have completed the todo '{todo.name}'. "
+                            f"Result summary: {self._stringify_result(summary_text)[:200]}...</think>"
+                        )
+                        summary_metadata = {
+                            "context": {
+                                "subtask_plan": {
+                                    "count": len(new_items),
+                                    "reason": reason,
+                                    "close_followups": bool(
+                                        subtask_plan.get("close_followups")
+                                    ),
+                                }
+                            },
+                            **todo_meta_wrapper,
+                        }
+                        yield self._create_metadata_chunk(
+                            summary,
+                            summary_metadata,
+                            model_name=request.model or self.model_name,
+                            chunk_id=f"mcp-{str(uuid.uuid4())}",
+                        )
+                        idx += 1
+                        continue
+
+                if not is_last_todo:
                     feedback = self._extract_feedback_from_result(
                         result, all_tool_names
                     )
@@ -1009,7 +1256,17 @@ class WellPlannedOrchestrator:
                         )
                         return
 
-                todo_manager.finish_todo(todo.id, cleaned_result)
+                if is_last_todo:
+                    todo_manager.finish_todo(todo.id, cleaned_result)
+                else:
+                    history_result = cleaned_result
+                    if isinstance(history_result, str):
+                        history_result = self._compact_history_text(history_result)
+                    else:
+                        history_result = self._compact_history_text(
+                            self._stringify_result(history_result)
+                        )
+                    todo_manager.finish_todo(todo.id, history_result)
                 visible_accum = visible_state.get("clean", visible_accum)
 
                 if is_last_todo and isinstance(cleaned_result, str):
@@ -1033,6 +1290,7 @@ class WellPlannedOrchestrator:
                     model_name=request.model or self.model_name,
                     chunk_id=f"mcp-{str(uuid.uuid4())}",
                 )
+                idx += 1
 
             # yield the result of the final todo as a last chunk
             final_result = todos[-1].result if todos else "No todos were processed."
@@ -1082,14 +1340,24 @@ class WellPlannedOrchestrator:
         access_token: Optional[str],
         span,
         original_messages: Optional[List[Message]] = None,
+        root_goal: Optional[str] = None,
     ) -> ChatCompletionResponse:
-        todos = todo_manager.list_todos()
-        names = [t.name for t in todos]
         results_payload: List[dict] = []
         all_tool_names = self._extract_tool_names(available_tools)
 
-        for idx, todo in enumerate(todos):
-            is_last_todo = idx == len(todos) - 1
+        idx = 0
+        while True:
+            todos = todo_manager.list_todos()
+            last_pending_idx = self._last_pending_index(todos)
+            if last_pending_idx < 0 or idx >= len(todos) or idx > last_pending_idx:
+                break
+
+            todo = todos[idx]
+            if todo.state == TodoState.DONE:
+                idx += 1
+                continue
+
+            is_last_todo = idx == last_pending_idx
             todo_manager.start_todo(todo.id)
 
             needed_info = self._normalize_needed_info(todo.needed_info)
@@ -1098,13 +1366,15 @@ class WellPlannedOrchestrator:
                 todo_manager.finish_todo(todo.id, question)
                 return self._single_message_response(question, request)
 
+            pending_count = sum(1 for t in todos if t.state != TodoState.DONE)
             focused_messages, focused_request = self._build_focused_request(
                 todo_manager,
                 todo,
                 request,
                 original_messages,
-                is_final_multistep_todo=is_last_todo and len(todos) > 1,
+                is_final_multistep_todo=is_last_todo and pending_count > 1,
                 is_final_step=is_last_todo,
+                root_goal=root_goal,
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
@@ -1137,6 +1407,55 @@ class WellPlannedOrchestrator:
                 stored_result = self._strip_tool_call_blocks(
                     self._strip_think_tags(stored_result), all_tool_names
                 )
+
+            subtask_plan = None
+            if not is_last_todo:
+                subtask_plan = self._extract_subtask_plan(result)
+                if not subtask_plan and isinstance(stored_result, str):
+                    subtask_plan = self._extract_subtask_plan(stored_result)
+
+            if subtask_plan:
+                current_count = len(todo_manager.list_todos())
+                remaining_capacity = max(0, MAX_TODOS - current_count)
+                if remaining_capacity > 0:
+                    new_items = self._build_todo_items_from_entries(
+                        subtask_plan["tasks"],
+                        parent_id=todo.id,
+                        root_id=todo.root_id or todo.id,
+                        depth=todo.depth + 1,
+                    )
+                    if len(new_items) > remaining_capacity:
+                        new_items = new_items[:remaining_capacity]
+                else:
+                    new_items = []
+
+                if new_items:
+                    todo_manager.insert_todos_after(todo.id, new_items)
+
+                reason = subtask_plan.get("reason")
+                summary_text = f"Created {len(new_items)} subtasks to achieve the goal."
+                if reason:
+                    summary_text += f" Reason: {reason}"
+
+                todo_manager.finish_todo(todo.id, summary_text)
+
+                if subtask_plan.get("close_followups"):
+                    last_inserted_id = new_items[-1].id if new_items else todo.id
+                    todo_manager.close_todos_after(
+                        last_inserted_id, reason=summary_text
+                    )
+
+                results_payload.append(
+                    {
+                        "id": todo.id,
+                        "name": todo.name,
+                        "goal": todo.goal,
+                        "result": summary_text,
+                    }
+                )
+                idx += 1
+                continue
+
             feedback = self._extract_feedback_from_result(result, all_tool_names)
             if not feedback and isinstance(stored_result, str):
                 feedback = self._extract_feedback_from_text(
@@ -1145,17 +1464,29 @@ class WellPlannedOrchestrator:
             if feedback:
                 todo_manager.finish_todo(todo.id, feedback)
                 return self._single_message_response(feedback, request)
-            todo_manager.finish_todo(todo.id, stored_result)
+            if is_last_todo:
+                todo_manager.finish_todo(todo.id, stored_result)
+            else:
+                history_result = stored_result
+                if isinstance(history_result, str):
+                    history_result = self._compact_history_text(history_result)
+                else:
+                    history_result = self._compact_history_text(
+                        self._stringify_result(history_result)
+                    )
+                todo_manager.finish_todo(todo.id, history_result)
 
             results_payload.append(
                 {
                     "id": todo.id,
                     "name": todo.name,
                     "goal": todo.goal,
-                    "result": stored_result,
+                    "result": stored_result if is_last_todo else history_result,
                 }
             )
+            idx += 1
 
+        names = [t.name for t in todo_manager.list_todos()]
         content = json.dumps(
             {"todos": names, "results": results_payload},
             ensure_ascii=False,
@@ -1227,6 +1558,10 @@ class WellPlannedOrchestrator:
             "previous steps/tools, put it in needed_info.context instead of required_from_user. "
             "If nothing is needed from the user and no context is required, set needed_info to null. "
             "If no tools are required, use an empty array. "
+            "When a todo is broad or likely to require multiple tool calls, break it into subtasks "
+            "using the 'subtasks' field; subtasks may include subtasks. Keep each todo focused to "
+            "minimize context. Prefer plans where each todo maps to a small cluster of tool calls or "
+            "a short reasoning step without tools; if a clean split is possible, use subtasks. "
             "If more then one todo is needed, ensure the final todo delivers a clear user-facing answer. "
             f"Available tools: {tool_list_text}.\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
@@ -1300,6 +1635,7 @@ class WellPlannedOrchestrator:
 
         todo_manager = self._create_todo_manager(todos_json)
         user_message = messages[-1].content if messages else ""
+        root_goal = user_message
         self._enforce_final_answer_step(todo_manager, user_message)
 
         if span:
@@ -1314,6 +1650,7 @@ class WellPlannedOrchestrator:
                 access_token,
                 span,
                 original_messages=messages,
+                root_goal=root_goal,
             )
 
         return await self._well_planned_non_streaming(
@@ -1324,4 +1661,5 @@ class WellPlannedOrchestrator:
             access_token,
             span,
             original_messages=messages,
+            root_goal=root_goal,
         )

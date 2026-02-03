@@ -1,0 +1,208 @@
+import json
+import re
+import time
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+from app.tgi.behaviours.well_planned_orchestrator import WellPlannedOrchestrator
+from app.tgi.behaviours.todos.todo_manager import TodoManager, TodoItem
+from app.tgi.models import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    Choice,
+    Message,
+    MessageRole,
+    Usage,
+)
+
+
+def configure_plan_stream(service, todos, intent_payload=None):
+    todos_payload = intent_payload or json.dumps(
+        {"intent": "plan", "todos": todos}, ensure_ascii=False
+    )
+    chunk_payload = json.dumps(
+        {"choices": [{"delta": {"content": todos_payload}, "index": 0}]}
+    )
+    plan_chunks = [
+        f"data: {chunk_payload}" + "\n\n",
+        "data: [DONE]" + "\n\n",
+    ]
+
+    async def plan_generator():
+        for chunk in plan_chunks:
+            yield chunk
+
+    def fake_stream_completion(llm_request, access_token, span):
+        return plan_generator()
+
+    service.llm_client.stream_completion = fake_stream_completion
+    service.llm_client.non_stream_completion = AsyncMock(
+        side_effect=AssertionError(
+            "non_stream_completion should not be used when streaming the todo plan"
+        )
+    )
+
+
+def test_subtask_instructions_allow_multiple_tool_calls():
+    class DummyLLM:
+        def create_completion_id(self):
+            return "dummy"
+
+        def create_usage_stats(self):
+            return {}
+
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=DummyLLM(),
+        prompt_service=None,
+        tool_service=None,
+        non_stream_chat_with_tools_callable=lambda *a, **k: None,
+        stream_chat_with_tools_callable=lambda *a, **k: None,
+        tool_resolution=None,
+        logger_obj=None,
+        model_name="test-model",
+    )
+
+    todo_manager = TodoManager()
+    todo_manager.add_todos(
+        [
+            TodoItem(
+                id="t1",
+                name="step",
+                goal="Do work",
+                needed_info=None,
+                tools=["tool-a", "tool-b"],
+            )
+        ]
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the task")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    focused_messages, _ = orchestrator._build_focused_request(
+        todo_manager=todo_manager,
+        todo=todo_manager.list_todos()[0],
+        base_request=request,
+        original_messages=request.messages,
+        is_final_multistep_todo=False,
+        is_final_step=False,
+        root_goal="Do the task",
+    )
+
+    system_content = focused_messages[0].content or ""
+    assert "Prefer smaller subtasks" in system_content
+    assert "multiple tool calls are allowed" in system_content
+    assert "At most one tool call" not in system_content
+
+
+@pytest.mark.asyncio
+async def test_well_planned_inserts_subtasks_from_step():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "parent",
+            "goal": "Parent step",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Final answer",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    call_goals = []
+    captured_messages = []
+
+    async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
+        captured_messages.append(messages)
+        system = messages[0].content or ""
+        match = re.search(r"Current Goal:\s*(.*)", system)
+        goal = match.group(1).strip() if match else system
+        call_goals.append(goal)
+
+        if goal == "Parent step":
+            return {
+                "intent": "subtasks",
+                "reason": "Need smaller steps",
+                "subtasks": [
+                    {
+                        "id": "s1",
+                        "name": "sub-1",
+                        "goal": "Subtask one",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                    {
+                        "id": "s2",
+                        "name": "sub-2",
+                        "goal": "Subtask two",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                ],
+                "close_followups": False,
+            }
+
+        return ChatCompletionResponse(
+            id="chatcmpl-test",
+            created=int(time.time()),
+            model=req.model or "test-model",
+            choices=[
+                Choice(
+                    index=0,
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content=f"Result for {goal}",
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    service._non_stream_chat_with_tools = fake_non_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the thing")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    assert call_goals[:3] == ["Parent step", "Subtask one", "Subtask two"]
+    assert call_goals[3].startswith(
+        "Use only the existing information to answer the user's request:"
+    )
+
+    # Subtask calls should include the parent summary in their context.
+    subtask_messages = captured_messages[1]
+    assert any(
+        "Created 2 subtasks" in (m.content or "")
+        for m in subtask_messages
+        if m.role == MessageRole.ASSISTANT
+    )
