@@ -312,6 +312,8 @@ class WorkflowEngine:
         limit: int,
         before: Optional[str] = None,
         before_id: Optional[str] = None,
+        after: Optional[str] = None,
+        after_id: Optional[str] = None,
     ) -> list[WorkflowExecutionState]:
         """
         Return workflow executions for the user identified by the token.
@@ -322,7 +324,12 @@ class WorkflowEngine:
         if not user_id:
             return []
         return self.state_store.list_workflows(
-            owner_id=user_id, limit=limit, before=before, before_id=before_id
+            owner_id=user_id,
+            limit=limit,
+            before=before,
+            before_id=before_id,
+            after=after,
+            after_id=after_id,
         )
 
     def _apply_start_with(

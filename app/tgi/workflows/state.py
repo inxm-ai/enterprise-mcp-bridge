@@ -77,9 +77,7 @@ class WorkflowStateStore:
                 columns.add(row[1])
 
             if "owner_id" not in columns:
-                conn.execute(
-                    "ALTER TABLE workflow_executions ADD COLUMN owner_id TEXT"
-                )
+                conn.execute("ALTER TABLE workflow_executions ADD COLUMN owner_id TEXT")
             if "created_at" not in columns:
                 conn.execute(
                     "ALTER TABLE workflow_executions ADD COLUMN created_at TEXT"
@@ -109,9 +107,7 @@ class WorkflowStateStore:
                 created_at,
                 last_change,
             ) in rows:
-                context = (
-                    json.loads(context_json) if context_json else {"agents": {}}
-                )
+                context = json.loads(context_json) if context_json else {"agents": {}}
                 resolved_owner = owner_id or context.get("_workflow_owner_id")
                 resolved_created_at = _normalize_timestamp(
                     created_at or context.get("created_at")
@@ -203,16 +199,22 @@ class WorkflowStateStore:
         limit: int,
         before: Optional[str] = None,
         before_id: Optional[str] = None,
+        after: Optional[str] = None,
+        after_id: Optional[str] = None,
     ) -> list[WorkflowExecutionState]:
         """
         List workflow executions for a specific owner, ordered by created_at desc.
         """
         clauses = ["owner_id = ?"]
         params: list[object] = [owner_id]
+        if after and after_id:
+            clauses.append("(created_at > ? OR (created_at = ? AND execution_id > ?))")
+            params.extend([after, after, after_id])
+        elif after:
+            clauses.append("created_at > ?")
+            params.append(after)
         if before and before_id:
-            clauses.append(
-                "(created_at < ? OR (created_at = ? AND execution_id < ?))"
-            )
+            clauses.append("(created_at < ? OR (created_at = ? AND execution_id < ?))")
             params.extend([before, before, before_id])
         elif before:
             clauses.append("created_at < ?")

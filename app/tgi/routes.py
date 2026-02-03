@@ -582,6 +582,8 @@ async def list_workflows(
     limit: int = Query(20, ge=1, le=100),
     before: Optional[str] = Query(None),
     before_id: Optional[str] = Query(None),
+    after: Optional[str] = Query(None),
+    after_id: Optional[str] = Query(None),
 ):
     """
     List workflow executions for the current user, ordered by created_at desc.
@@ -602,11 +604,23 @@ async def list_workflows(
             status_code=400,
             detail="before_id requires a before timestamp.",
         )
+    if after_id and not after:
+        raise HTTPException(
+            status_code=400,
+            detail="after_id requires an after timestamp.",
+        )
 
     parsed_before = None
     if before:
         try:
             parsed_before = _parse_timestamp(before)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    parsed_after = None
+    if after:
+        try:
+            parsed_after = _parse_timestamp(after)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -616,6 +630,8 @@ async def list_workflows(
             limit=limit,
             before=parsed_before,
             before_id=before_id,
+            after=parsed_after,
+            after_id=after_id,
         )
     except PermissionError as exc:
         status_code = _permission_status_code(exc)

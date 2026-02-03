@@ -726,7 +726,9 @@ class TestTGIRoutes:
 
 
 class TestWorkflowListingRoutes:
-    def _make_request(self, headers: dict[str, str], query: bytes | None = None) -> Request:
+    def _make_request(
+        self, headers: dict[str, str], query: bytes | None = None
+    ) -> Request:
         scope = {
             "type": "http",
             "method": "GET",
@@ -739,7 +741,16 @@ class TestWorkflowListingRoutes:
     @pytest.mark.asyncio
     async def test_list_workflows_requires_token(self, monkeypatch):
         class _StubEngine:
-            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+            def list_workflows(
+                self,
+                user_token,
+                *,
+                limit,
+                before=None,
+                before_id=None,
+                after=None,
+                after_id=None,
+            ):
                 return []
 
         class _StubService:
@@ -756,7 +767,16 @@ class TestWorkflowListingRoutes:
     @pytest.mark.asyncio
     async def test_list_workflows_rejects_before_id_without_before(self, monkeypatch):
         class _StubEngine:
-            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+            def list_workflows(
+                self,
+                user_token,
+                *,
+                limit,
+                before=None,
+                before_id=None,
+                after=None,
+                after_id=None,
+            ):
                 return []
 
         class _StubService:
@@ -771,6 +791,34 @@ class TestWorkflowListingRoutes:
             )
         assert exc_info.value.status_code == 400
         assert "before_id requires a before timestamp" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_rejects_after_id_without_after(self, monkeypatch):
+        class _StubEngine:
+            def list_workflows(
+                self,
+                user_token,
+                *,
+                limit,
+                before=None,
+                before_id=None,
+                after=None,
+                after_id=None,
+            ):
+                return []
+
+        class _StubService:
+            workflow_engine = _StubEngine()
+
+        monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+        request = self._make_request({"X-Auth-Request-Access-Token": "token-ok"})
+        with pytest.raises(HTTPException) as exc_info:
+            await list_workflows(
+                request, access_token="token-ok", after=None, after_id="exec-1"
+            )
+        assert exc_info.value.status_code == 400
+        assert "after_id requires an after timestamp" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
     async def test_list_workflows_returns_status_and_timestamp(self, monkeypatch):
@@ -789,7 +837,16 @@ class TestWorkflowListingRoutes:
         completed.last_change = "2024-01-15T09:30:00.000000Z"
 
         class _StubEngine:
-            def list_workflows(self, user_token, *, limit, before=None, before_id=None):
+            def list_workflows(
+                self,
+                user_token,
+                *,
+                limit,
+                before=None,
+                before_id=None,
+                after=None,
+                after_id=None,
+            ):
                 assert user_token == "token-ok"
                 assert limit == 20
                 return [awaiting, completed]
@@ -806,6 +863,8 @@ class TestWorkflowListingRoutes:
             limit=20,
             before=None,
             before_id=None,
+            after=None,
+            after_id=None,
         )
         assert response.status_code == 200
         data = json.loads(response.body)
