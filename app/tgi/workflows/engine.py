@@ -1988,6 +1988,11 @@ class WorkflowEngine:
                 if isinstance(with_fields, str):
                     with_fields = [with_fields]
                 with_fields = [w for w in with_fields if isinstance(w, str)]
+                extra_fields = {
+                    k: v
+                    for k, v in cfg.items()
+                    if k not in {"to", "with", "each"}
+                }
                 each = cfg.get("each")
                 options_raw = self._resolve_feedback_each_value(
                     each, agent_context, shared_context
@@ -2004,6 +2009,7 @@ class WorkflowEngine:
                     "to": target,
                     "with": with_fields,
                 }
+                choice_entry.update(extra_fields)
                 if each is not None:
                     choice_entry["each"] = each
                     choice_entry["options"] = options
@@ -2027,6 +2033,10 @@ class WorkflowEngine:
                 entry["each"] = choice.get("each")
             if "options" in choice:
                 entry["options"] = choice.get("options") or []
+            for key, value in choice.items():
+                if key in {"id", "to", "with", "each", "options"}:
+                    continue
+                entry[key] = value
             expected_responses.append(entry)
         return {"question": question, "expected_responses": expected_responses}
 

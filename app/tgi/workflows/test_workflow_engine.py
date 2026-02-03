@@ -4232,6 +4232,74 @@ async def test_scoped_context_root_reference_resolves_top_level_key(
 
 
 @pytest.mark.asyncio
+async def test_feedback_choice_passthrough_fields(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "choice_passthrough",
+        "root_intent": "CHOICE_PASSTHROUGH",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Pick a mode.",
+                            "expected_responses": [
+                                {
+                                    "run_now": {
+                                        "to": "workflows[plan_run]",
+                                        "with": ["plan_id"],
+                                        "value": "Run the plan now",
+                                    },
+                                    "abort": {"to": "end", "value": "Abort"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_run_mode": "<reroute>ASK_USER</reroute>",
+        },
+        ask_responses={"feedback_question": "Pick a mode."},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-choice-pass"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="choice_passthrough",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    feedback_spec = state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    abort = next((entry for entry in expected if entry.get("id") == "abort"), None)
+    assert run_now is not None
+    assert abort is not None
+    assert run_now.get("value") == "Run the plan now"
+    assert abort.get("value") == "Abort"
+
+
+@pytest.mark.asyncio
 async def test_feedback_resume_preserves_reroute_with_context(tmp_path, monkeypatch):
     """
     After resuming from user feedback, reroute `with` values should still be
