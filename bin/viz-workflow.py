@@ -7,7 +7,7 @@ Supports multi-workflow visualization by following references in reroutes.
 Usage:
     python bin/viz-workflow.py <workflow.json> [-o output.png]
     python bin/viz-workflow.py tmp/plan_create_or_run.json -o workflow.png
-    
+
 Workflow references in reroutes (e.g., workflows[plan_run]) will automatically
 load referenced workflow files from the same directory.
 """
@@ -40,20 +40,20 @@ def sanitize_label(text: str, max_len: int = 50) -> str:
 def extract_workflow_references(workflow: Dict[str, Any], base_dir: Path) -> Set[str]:
     """
     Extract workflow references from reroutes and other configurations.
-    
+
     Looks for patterns like workflows[workflow_name] in all nested structures,
     including in ask.expected_responses.
-    
+
     Args:
         workflow: The workflow definition.
         base_dir: The base directory for resolving relative paths.
-        
+
     Returns:
         Set of workflow names referenced.
     """
     references = set()
-    workflow_pattern = re.compile(r'workflows\s*\[\s*([^\]]+)\s*\]')
-    
+    workflow_pattern = re.compile(r"workflows\s*\[\s*([^\]]+)\s*\]")
+
     def search_value(obj):
         """Recursively search through data structures."""
         if isinstance(obj, str):
@@ -65,7 +65,7 @@ def extract_workflow_references(workflow: Dict[str, Any], base_dir: Path) -> Set
         elif isinstance(obj, list):
             for item in obj:
                 search_value(item)
-    
+
     search_value(workflow)
     return references
 
@@ -73,16 +73,16 @@ def extract_workflow_references(workflow: Dict[str, Any], base_dir: Path) -> Set
 def load_workflow(workflow_path: Path) -> Optional[Dict[str, Any]]:
     """
     Load a workflow JSON file.
-    
+
     Args:
         workflow_path: Path to the workflow JSON file.
-        
+
     Returns:
         Parsed workflow dict, or None if file doesn't exist or is invalid.
     """
     if not workflow_path.exists():
         return None
-    
+
     try:
         with open(workflow_path) as f:
             return json.load(f)
@@ -95,10 +95,10 @@ def load_all_workflows(
 ) -> Tuple[Dict[str, Dict[str, Any]], Path]:
     """
     Recursively load a workflow and all referenced workflows.
-    
+
     Args:
         initial_workflow_path: Path to the initial workflow JSON file.
-        
+
     Returns:
         Tuple of (workflows_dict, base_dir) where workflows_dict maps
         flow_id to workflow definition.
@@ -107,31 +107,30 @@ def load_all_workflows(
     workflows = {}
     to_process = {initial_workflow_path.stem}
     processed = set()
-    
+
     while to_process:
         workflow_name = to_process.pop()
         if workflow_name in processed:
             continue
         processed.add(workflow_name)
-        
+
         workflow_path = base_dir / f"{workflow_name}.json"
         workflow = load_workflow(workflow_path)
-        
+
         if workflow is None:
             # Silently skip missing files
             continue
-        
+
         flow_id = workflow.get("flow_id", workflow_name)
         workflows[flow_id] = workflow
-        
+
         # Find references to other workflows
         refs = extract_workflow_references(workflow, base_dir)
         for ref in refs:
             if ref not in processed:
                 to_process.add(ref)
-    
-    return workflows, base_dir
 
+    return workflows, base_dir
 
 
 def get_tools_label(tools: Any) -> str:
@@ -164,7 +163,7 @@ def build_subgraph_for_workflow(
 ) -> Tuple[List[str], List[str], Set[Tuple[str, str, str]]]:
     """
     Build graph nodes and edges for a single workflow.
-    
+
     Returns:
         Tuple of (node_lines, edge_lines, cross_workflow_edges)
         where cross_workflow_edges are (from_agent, to_workflow, to_node_label)
@@ -173,32 +172,32 @@ def build_subgraph_for_workflow(
     root_intent = workflow.get("root_intent", "")
     description = workflow.get("description", "")
     agents = workflow.get("agents", [])
-    
+
     node_lines = []
     edge_lines = []
     cross_workflow_edges = set()
-    
+
     # Create workflow prefix for node naming
     prefix = f"{flow_id}_"
-    
+
     # Add subgraph for this workflow
     root_label = f"[Orchestrator: {flow_id}]\\n{root_intent}"
     if description:
         root_label += f"\\n{sanitize_label(description, 40)}"
-    
-    node_lines.append(f'  subgraph cluster_{flow_id} {{')
+
+    node_lines.append(f"  subgraph cluster_{flow_id} {{")
     node_lines.append(f'    label="{sanitize_label(root_intent, 35)}";')
-    node_lines.append(f'    style=filled;')
-    node_lines.append(f'    fillcolor=lightblue;')
-    node_lines.append(f'    color=blue;')
-    node_lines.append(f'    penwidth=1.5;')
-    node_lines.append(f'    margin=0.1;')
-    node_lines.append(f'    fontsize=9;')
+    node_lines.append(f"    style=filled;")
+    node_lines.append(f"    fillcolor=lightblue;")
+    node_lines.append(f"    color=blue;")
+    node_lines.append(f"    penwidth=1.5;")
+    node_lines.append(f"    margin=0.1;")
+    node_lines.append(f"    fontsize=9;")
     node_lines.append("")
-    
+
     # Track all agent nodes in this workflow
     agent_names = {agent["agent"] for agent in agents}
-    
+
     # Add agent nodes
     for agent in agents:
         agent_name = agent["agent"]
@@ -212,7 +211,7 @@ def build_subgraph_for_workflow(
         label = f"{agent_name}"
         if desc and len(desc) > 0:
             # Only add first sentence or truncated description
-            first_sent = desc.split('.')[0]
+            first_sent = desc.split(".")[0]
             label += f"\\n{sanitize_label(first_sent, 30)}"
 
         tools_label = get_tools_label(tools)
@@ -236,13 +235,17 @@ def build_subgraph_for_workflow(
 
     # Add root to first agents (no dependencies)
     root_id = f"{prefix}root"
-    node_lines.append(f'    {root_id} [label="[Start]", shape=circle, style=filled, fillcolor=yellow];')
+    node_lines.append(
+        f'    {root_id} [label="[Start]", shape=circle, style=filled, fillcolor=yellow];'
+    )
     node_lines.append("")
-    
+
     first_agents = [agent["agent"] for agent in agents if not agent.get("depends_on")]
     for agent_name in first_agents:
         agent_id = f"{prefix}{agent_name}"
-        edge_lines.append(f'  {root_id} -> {agent_id} [label="start", color=blue, penwidth=2];')
+        edge_lines.append(
+            f'  {root_id} -> {agent_id} [label="start", color=blue, penwidth=2];'
+        )
 
     # Add dependency edges within workflow
     for agent in agents:
@@ -253,7 +256,9 @@ def build_subgraph_for_workflow(
         for dep in depends_on:
             if dep in agent_names:
                 dep_id = f"{prefix}{dep}"
-                edge_lines.append(f'  {dep_id} -> {agent_id} [label="depends", style=solid];')
+                edge_lines.append(
+                    f'  {dep_id} -> {agent_id} [label="depends", style=solid];'
+                )
             else:
                 # Broken dependency - show in red
                 edge_lines.append(
@@ -283,7 +288,7 @@ def build_subgraph_for_workflow(
                             "..." if len(on_codes) > 2 else ""
                         )
                         edge_lines.append(
-                            f'  {agent_id} -> {target_workflow}_root '
+                            f"  {agent_id} -> {target_workflow}_root "
                             f'[label="{codes_label} → {target_workflow}", color=purple, style=dashed, constraint=false, penwidth=2];'
                         )
                     else:
@@ -294,7 +299,7 @@ def build_subgraph_for_workflow(
                         if to_target in agent_names:
                             to_id = f"{prefix}{to_target}"
                             edge_lines.append(
-                                f'  {agent_id} -> {to_id} '
+                                f"  {agent_id} -> {to_id} "
                                 f'[label="{codes_label}", color=orange, style=dashed, constraint=false];'
                             )
 
@@ -306,7 +311,10 @@ def build_subgraph_for_workflow(
                         for response_group in expected_responses:
                             if isinstance(response_group, dict):
                                 # Each key in response_group is a response option
-                                for response_key, response_value in response_group.items():
+                                for (
+                                    response_key,
+                                    response_value,
+                                ) in response_group.items():
                                     if isinstance(response_value, dict):
                                         response_to = response_value.get("to", "")
                                         if response_to:
@@ -314,9 +322,15 @@ def build_subgraph_for_workflow(
                                             match = workflow_pattern.match(response_to)
                                             if match:
                                                 target_workflow = match.group(1)
-                                                cross_workflow_edges.add((agent_id, target_workflow, response_to))
+                                                cross_workflow_edges.add(
+                                                    (
+                                                        agent_id,
+                                                        target_workflow,
+                                                        response_to,
+                                                    )
+                                                )
                                                 edge_lines.append(
-                                                    f'  {agent_id} -> {target_workflow}_root '
+                                                    f"  {agent_id} -> {target_workflow}_root "
                                                     f'[label="{response_key} → {target_workflow}", color=purple, style=dashed, constraint=false, penwidth=2];'
                                                 )
                                             else:
@@ -324,7 +338,7 @@ def build_subgraph_for_workflow(
                                                 if response_to in agent_names:
                                                     to_id = f"{prefix}{response_to}"
                                                     edge_lines.append(
-                                                        f'  {agent_id} -> {to_id} '
+                                                        f"  {agent_id} -> {to_id} "
                                                         f'[label="{response_key}", color=orange, style=dashed, constraint=false];'
                                                     )
 
@@ -336,7 +350,7 @@ def build_subgraph_for_workflow(
                 target_workflow = match.group(1)
                 cross_workflow_edges.add((agent_id, target_workflow, on_tool_error))
                 edge_lines.append(
-                    f'  {agent_id} -> {target_workflow}_root '
+                    f"  {agent_id} -> {target_workflow}_root "
                     f'[label="on error → {target_workflow}", color=red, style=dashed, constraint=false, penwidth=2];'
                 )
             elif on_tool_error in agent_names:
@@ -348,7 +362,7 @@ def build_subgraph_for_workflow(
 
     node_lines.append("  }")
     node_lines.append("")
-    
+
     return node_lines, edge_lines, cross_workflow_edges
 
 
@@ -356,7 +370,7 @@ def build_graph(
     workflows: Dict[str, Dict[str, Any]],
 ) -> str:
     """Build Graphviz DOT representation of all workflows."""
-    
+
     # Start DOT graph with better layout settings for multiple workflows
     lines = [
         "digraph workflow {",
@@ -368,11 +382,11 @@ def build_graph(
         '  edge [fontname="DejaVu Sans", fontsize=8];',
         "",
     ]
-    
-    workflow_pattern = re.compile(r'^workflows\s*\[\s*([^\]]+)\s*\]$')
+
+    workflow_pattern = re.compile(r"^workflows\s*\[\s*([^\]]+)\s*\]$")
     all_node_lines = []
     all_edge_lines = []
-    
+
     # Build subgraphs for each workflow
     for flow_id, workflow in workflows.items():
         node_lines, edge_lines, _ = build_subgraph_for_workflow(
@@ -380,15 +394,15 @@ def build_graph(
         )
         all_node_lines.extend(node_lines)
         all_edge_lines.extend(edge_lines)
-    
+
     # Add all nodes
     lines.extend(all_node_lines)
     lines.append("")
-    
+
     # Add all edges
     lines.append("  // All edges")
     lines.extend(all_edge_lines)
-    
+
     lines.append("")
 
     # Add legend
@@ -416,7 +430,6 @@ def build_graph(
     return "\n".join(lines)
 
 
-
 def main():
     args = parse_args()
 
@@ -442,18 +455,21 @@ def main():
 
     try:
         workflows, base_dir = load_all_workflows(workflow_path)
-        
+
         if not workflows:
             print(
                 f"Error: Could not load any workflows from {workflow_path}",
                 file=sys.stderr,
             )
             sys.exit(1)
-        
+
         # Report which workflows were loaded
         if len(workflows) > 1:
-            print(f"📦 Loaded {len(workflows)} workflow(s): {', '.join(workflows.keys())}", file=sys.stderr)
-        
+            print(
+                f"📦 Loaded {len(workflows)} workflow(s): {', '.join(workflows.keys())}",
+                file=sys.stderr,
+            )
+
     except json.JSONDecodeError as e:
         print(f"Error: Invalid JSON in workflow file: {e}", file=sys.stderr)
         sys.exit(1)
@@ -489,4 +505,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

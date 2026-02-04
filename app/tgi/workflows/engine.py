@@ -1323,7 +1323,9 @@ class WorkflowEngine:
                 choices = self._build_feedback_choices(
                     ask_cfg, agent_context, state.context
                 )
-                feedback_payload = self._build_feedback_payload(question, choices)
+                feedback_payload = self._build_feedback_payload(
+                    question, choices, agent_context, state.context
+                )
                 feedback_block = self._format_feedback_block(feedback_payload)
                 agent_context["feedback_prompt"] = question
                 agent_context["feedback_spec"] = feedback_payload
@@ -1989,9 +1991,7 @@ class WorkflowEngine:
                     with_fields = [with_fields]
                 with_fields = [w for w in with_fields if isinstance(w, str)]
                 extra_fields = {
-                    k: v
-                    for k, v in cfg.items()
-                    if k not in {"to", "with", "each"}
+                    k: v for k, v in cfg.items() if k not in {"to", "with", "each"}
                 }
                 each = cfg.get("each")
                 options_raw = self._resolve_feedback_each_value(
@@ -2020,6 +2020,8 @@ class WorkflowEngine:
         self,
         question: str,
         choices: list[dict[str, Any]],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
     ) -> dict[str, Any]:
         expected_responses: list[dict[str, Any]] = []
         for choice in choices:
@@ -2028,7 +2030,13 @@ class WorkflowEngine:
                 "to": choice.get("to"),
             }
             if choice.get("with"):
-                entry["with"] = choice["with"]
+                with_fields = choice["with"]
+                if self._is_external_reroute_target(choice.get("to")):
+                    entry["with"] = self._resolve_external_with_values(
+                        with_fields, agent_context, shared_context
+                    )
+                else:
+                    entry["with"] = with_fields
             if choice.get("each") is not None:
                 entry["each"] = choice.get("each")
             if "options" in choice:
@@ -2039,6 +2047,41 @@ class WorkflowEngine:
                 entry[key] = value
             expected_responses.append(entry)
         return {"question": question, "expected_responses": expected_responses}
+
+    def _is_external_reroute_target(self, target: Optional[str]) -> bool:
+        if not target:
+            return False
+        normalized = str(target).strip()
+        return bool(
+            re.match(r"^external\[\s*(?P<name>[^\]]+)\s*\]$", normalized, re.IGNORECASE)
+        )
+
+    def _resolve_external_with_values(
+        self,
+        with_fields: list[str],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+    ) -> list[Any]:
+        resolved: list[Any] = []
+        for field in with_fields or []:
+            if not isinstance(field, str):
+                continue
+            value = self._get_path_value(agent_context, field)
+            if value is None:
+                value = self._get_path_value(shared_context, field)
+                if value is not None:
+                    logger.info(
+                        "[WorkflowEngine._resolve_external_with_values] Field '%s' missing from agent context; using shared context value: %s",
+                        field,
+                        str(value)[:200],
+                    )
+            if value is None:
+                logger.warning(
+                    "[WorkflowEngine._resolve_external_with_values] Field '%s' is None; external payload will include null",
+                    field,
+                )
+            resolved.append(value)
+        return resolved
 
     def _collect_feedback_context(
         self,

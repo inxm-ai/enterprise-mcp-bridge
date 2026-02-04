@@ -4289,7 +4289,9 @@ async def test_feedback_choice_passthrough_fields(tmp_path, monkeypatch):
     _ = [chunk async for chunk in stream]
 
     state = store.load_execution(exec_id)
-    feedback_spec = state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
     expected = feedback_spec.get("expected_responses") or []
     run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
     abort = next((entry for entry in expected if entry.get("id") == "abort"), None)
@@ -4297,6 +4299,223 @@ async def test_feedback_choice_passthrough_fields(tmp_path, monkeypatch):
     assert abort is not None
     assert run_now.get("value") == "Run the plan now"
     assert abort.get("value") == "Abort"
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_external_with_values_from_agent_context(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "external_choice",
+        "root_intent": "EXTERNAL_CHOICE",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Pick a mode.",
+                            "expected_responses": [
+                                {
+                                    "run_now": {
+                                        "to": "external[trigger]",
+                                        "with": ["plan_id"],
+                                        "value": "Run the plan now",
+                                    },
+                                    "schedule": {
+                                        "to": "workflows[plan_schedule]",
+                                        "with": ["plan_id"],
+                                        "value": "Schedule the plan for later",
+                                    },
+                                    "abort": {"to": "end", "value": "Abort"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_run_mode": '<return name="plan_id">plan-123</return><reroute>ASK_USER</reroute>',
+        },
+        ask_responses={"feedback_question": "Pick a mode."},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-external-choice"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="external_choice",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    schedule = next(
+        (entry for entry in expected if entry.get("id") == "schedule"), None
+    )
+    assert run_now is not None
+    assert schedule is not None
+    assert run_now.get("to") == "external[trigger]"
+    assert run_now.get("with") == ["plan-123"]
+    assert schedule.get("with") == ["plan_id"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_external_with_values_from_shared_context(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "external_choice_shared",
+        "root_intent": "EXTERNAL_CHOICE_SHARED",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Pick a mode.",
+                            "expected_responses": [
+                                {
+                                    "run_now": {
+                                        "to": "external[trigger]",
+                                        "with": ["plan_id"],
+                                        "value": "Run the plan now",
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_run_mode": "<reroute>ASK_USER</reroute>",
+        },
+        ask_responses={"feedback_question": "Pick a mode."},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-external-choice-shared"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="external_choice_shared",
+        workflow_execution_id=exec_id,
+        start_with={"args": {"plan_id": "plan-999"}},
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    assert run_now is not None
+    assert run_now.get("with") == ["plan-999"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_external_missing_context_uses_null(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "external_choice_missing",
+        "root_intent": "EXTERNAL_CHOICE_MISSING",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Pick a mode.",
+                            "expected_responses": [
+                                {
+                                    "run_now": {
+                                        "to": "external[trigger]",
+                                        "with": ["plan_id"],
+                                        "value": "Run the plan now",
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_run_mode": "<reroute>ASK_USER</reroute>",
+        },
+        ask_responses={"feedback_question": "Pick a mode."},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-external-choice-missing"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="external_choice_missing",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    assert run_now is not None
+    assert run_now.get("with") == [None]
 
 
 @pytest.mark.asyncio
