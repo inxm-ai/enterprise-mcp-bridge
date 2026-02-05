@@ -23,6 +23,7 @@ from app.session_manager.session_context import filter_tools, get_tool_name
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
+_WORKFLOW_DESCRIPTION_TOOL_NAMES = {"plan"}
 
 
 def _compact_text(text: str) -> str:
@@ -138,6 +139,8 @@ class ToolService:
                     span.set_attribute("tools.count", 0)
                     return []
 
+                self._augment_workflow_description_arg(tools_result)
+
                 tools_result.append(
                     {
                         "type": "function",
@@ -169,6 +172,58 @@ class ToolService:
                 span.set_attribute("error.message", str(e))
                 self.logger.error(f"[ToolService] Error getting MCP tools: {str(e)}")
                 raise
+
+    def _augment_workflow_description_arg(self, tools_result: List[Tool]) -> None:
+        """
+        Ensure workflow-creation tools request a short description argument.
+
+        This adds or updates the "description" input schema for workflow creation
+        so the LLM provides a 3-5 word identifier derived from the user's prompt.
+        """
+        if not tools_result:
+            return
+        for tool in tools_result:
+            if not isinstance(tool, dict):
+                continue
+            func = tool.get("function") or {}
+            name = func.get("name")
+            if name not in _WORKFLOW_DESCRIPTION_TOOL_NAMES:
+                continue
+
+            params = func.get("parameters")
+            if not isinstance(params, dict):
+                params = {"type": "object", "properties": {}}
+                func["parameters"] = params
+            if params.get("type") is None:
+                params["type"] = "object"
+
+            properties = params.get("properties")
+            if not isinstance(properties, dict):
+                properties = {}
+                params["properties"] = properties
+
+            desc_schema = properties.get("description")
+            if not isinstance(desc_schema, dict):
+                desc_schema = {"type": "string"}
+                properties["description"] = desc_schema
+            if desc_schema.get("type") is None:
+                desc_schema["type"] = "string"
+
+            desc_text = desc_schema.get("description") or ""
+            desc_lower = desc_text.lower()
+            if not desc_text:
+                desc_schema["description"] = (
+                    "Short identifier derived from the user's request (3-5 words max)."
+                )
+            elif "3-5" not in desc_lower and "three to five" not in desc_lower:
+                desc_schema["description"] = f"{desc_text} (3-5 words max)"
+
+            required = params.get("required")
+            if not isinstance(required, list):
+                required = []
+                params["required"] = required
+            if "description" not in required:
+                required.append("description")
 
     async def execute_tool_call(
         self,

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import re
@@ -55,6 +56,10 @@ class WorkflowEngine:
 
     MAX_RETURN_RETRIES = 3
     WORKFLOW_OWNER_KEY = "_workflow_owner_id"
+    CONTINUE_PLACEHOLDER = "[continue]"
+    END_PLACEHOLDER = "[end]"
+    WORKFLOW_DESCRIPTION_TOOL_NAMES = {"plan"}
+    WORKFLOW_DESCRIPTION_CONTEXT_KEY = "_workflow_description"
 
     def __init__(
         self,
@@ -108,7 +113,8 @@ class WorkflowEngine:
 
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
         state = self.state_store.load_execution(execution_id)
-        if state:
+        state_loaded = state is not None
+        if state_loaded:
             self._enforce_workflow_owner(state, user_token)
             if handoff:
                 self._reset_state_for_handoff(state, workflow_def.flow_id)
@@ -125,7 +131,18 @@ class WorkflowEngine:
             self._prune_inner_thinking(state, workflow_def)
         # Ensure we have a task id available for envelope formatting
         self.chunk_formatter.ensure_task_id(state)
-        user_message = self._extract_user_message(request)
+        if state_loaded and self._strip_continue_placeholder(request):
+            user_message = None
+        else:
+            user_message = self._extract_user_message(request)
+
+        if self._is_end_placeholder(user_message):
+            self._mark_workflow_success(state, reason="user_end")
+
+            async def _done_only():
+                yield "data: [DONE]\n\n"
+
+            return _done_only()
         self._append_user_message(state, user_message)
 
         # Apply optional start_with prefill once at the beginning of an execution
@@ -918,6 +935,14 @@ class WorkflowEngine:
 
         # Resolve tools - get both modified (for LLM) and original (for validation)
         modified_tools, original_tools = await self._resolve_tools(session, agent_def)
+        tools_available = self._normalize_tools(modified_tools or [])
+        tools_for_validation = self._normalize_tools(original_tools or [])
+        needs_workflow_description = self._needs_workflow_description(tools_available)
+        if needs_workflow_description:
+            system_prompt = (
+                f"{system_prompt}\n\n{self._workflow_description_instruction()}"
+            )
+
         tool_configs = self.agent_executor.get_tool_configs_for_agent(agent_def)
         streaming_tools = {
             tc.name for tc in tool_configs if getattr(tc, "streaming", False)
@@ -930,26 +955,43 @@ class WorkflowEngine:
             ],
             model=request.model or TGI_MODEL_NAME,
             stream=True,
-            tools=modified_tools,
+            tools=tools_available,
             stop=request.stop,
         )
 
         content_text = ""
-        tools_available = self._normalize_tools(agent_request.tools or [])
-        tools_for_validation = self._normalize_tools(original_tools or [])
-        agent_request.tools = tools_available
 
-        # Create arg injector for pre-mapped arguments
+        # Create arg injector for pre-mapped arguments and workflow description
         arg_injector_obj = ArgInjector.from_agent_def(agent_def)
-        arg_injector_fn = (
-            (
-                lambda name, args: arg_injector_obj.inject(
-                    name, args, state.context, fail_on_missing=True
-                )
-            )
-            if arg_injector_obj
-            else None
-        )
+        original_prompt = self._get_original_user_prompt(state) or user_prompt
+
+        if arg_injector_obj or needs_workflow_description:
+
+            def _inject_args(name, args):
+                merged = args or {}
+                if arg_injector_obj:
+                    merged = arg_injector_obj.inject(
+                        name, merged, state.context, fail_on_missing=True
+                    )
+                if needs_workflow_description:
+                    merged = self._ensure_workflow_description_arg(
+                        name, merged, original_prompt
+                    )
+                    if name in self.WORKFLOW_DESCRIPTION_TOOL_NAMES:
+                        description = (
+                            merged.get("description")
+                            if isinstance(merged, dict)
+                            else None
+                        )
+                        if description:
+                            state.context[self.WORKFLOW_DESCRIPTION_CONTEXT_KEY] = str(
+                                description
+                            )
+                return merged
+
+            arg_injector_fn = _inject_args
+        else:
+            arg_injector_fn = None
 
         # Create tool result capture for returns
         result_capture = (
@@ -1257,7 +1299,10 @@ class WorkflowEngine:
                 reroute_reason = tool_reroute_reason
                 reroute_source = "tool"
         reroute_start_with = self._parse_start_with(reroute_tag.attrs.get("start_with"))
-        feedback_needed = bool(self._extract_tag(content_text, "user_feedback_needed"))
+        feedback_tag = self._extract_tag_with_attrs(
+            content_text, "user_feedback_needed"
+        )
+        feedback_needed = bool(feedback_tag.content)
         inline_returns = self._extract_return_values(content_text)
         cleaned_content = self._strip_tags(content_text)
         content_for_context = cleaned_content.strip()
@@ -1283,8 +1328,6 @@ class WorkflowEngine:
         if tool_errors:
             agent_context["tool_errors"] = tool_errors
 
-        if reroute_reason:
-            agent_context["reroute_reason"] = reroute_reason
         if reroute_start_with is not None:
             agent_context["reroute_start_with"] = reroute_start_with
 
@@ -1292,7 +1335,51 @@ class WorkflowEngine:
         for name, value in inline_returns:
             self._set_path_value(agent_context, name, value)
 
+        if feedback_needed and self._is_routing_only_agent(agent_def):
+            if not reroute_reason and self._match_reroute_entry(
+                agent_def.reroute, "ASK_USER"
+            ):
+                reroute_reason = "ASK_USER"
+                reroute_source = "engine"
+            if reroute_reason:
+                logger.warning(
+                    "[WorkflowEngine] Routing-only agent '%s' emitted user_feedback_needed; "
+                    "ignoring feedback and forcing reroute '%s'.",
+                    agent_def.agent,
+                    reroute_reason,
+                )
+                feedback_needed = False
+
+        if reroute_reason:
+            agent_context["reroute_reason"] = reroute_reason
+
         if feedback_needed:
+            feedback_payload = self._parse_feedback_payload(feedback_tag.content)
+            if feedback_payload:
+                raw_payload = feedback_payload
+                feedback_choices = self._build_feedback_choices_from_payload(
+                    raw_payload
+                )
+                resolved_payload = self._resolve_external_with_in_feedback_payload(
+                    copy.deepcopy(raw_payload), agent_context, state.context
+                )
+                feedback_block = self._format_feedback_block(resolved_payload)
+                agent_context["feedback_prompt"] = (
+                    resolved_payload.get("question") or cleaned_content
+                )
+                agent_context["feedback_spec"] = resolved_payload
+                agent_context["feedback_choices"] = feedback_choices
+                agent_context["awaiting_feedback"] = True
+                agent_context["completed"] = False
+                state.awaiting_feedback = True
+                self.state_store.save_state(state)
+                yield self._record_event(
+                    state,
+                    feedback_block,
+                    status="waiting_for_feedback",
+                )
+                yield {"status": "feedback", "content": feedback_block}
+                return
             if cleaned_content:
                 agent_context["feedback_prompt"] = cleaned_content
             agent_context["awaiting_feedback"] = True
@@ -1493,6 +1580,17 @@ class WorkflowEngine:
 
         return result
 
+    def _is_routing_only_agent(self, agent_def: WorkflowAgentDef) -> bool:
+        """
+        Heuristic to detect routing-only agents that should not ask for feedback.
+        """
+        desc = (agent_def.description or "").lower()
+        if "routing-only" in desc or "routing only" in desc:
+            return True
+        if "respond only with" in desc and "<reroute>" in desc:
+            return True
+        return False
+
     def _get_tool_names_from_config(self, agent_def: WorkflowAgentDef) -> Optional[set]:
         """
         Extract tool names from agent definition, handling both string and dict formats.
@@ -1595,6 +1693,86 @@ class WorkflowEngine:
             if message.role == MessageRole.USER:
                 return message.content
         return None
+
+    def _needs_workflow_description(self, tools: Optional[list]) -> bool:
+        if not tools:
+            return False
+        for tool in tools:
+            if isinstance(tool, dict):
+                name = tool.get("function", {}).get("name")
+            else:
+                func = getattr(tool, "function", None)
+                name = (
+                    getattr(func, "name", None) if func else getattr(tool, "name", None)
+                )
+            if name in self.WORKFLOW_DESCRIPTION_TOOL_NAMES:
+                return True
+        return False
+
+    def _workflow_description_instruction(self) -> str:
+        return (
+            "If you call the 'plan' tool to create a new workflow, generate a short "
+            "(3-5 words max) identification derived from the user's original request "
+            "and include it as the 'description' argument."
+        )
+
+    def _short_request_identifier(self, text: str, max_words: int = 5) -> Optional[str]:
+        if not text:
+            return None
+        cleaned = re.sub(r"<[^>]+>", " ", str(text))
+        words = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?", cleaned)
+        if not words:
+            return None
+        selected = words[:max_words]
+        return " ".join(selected)
+
+    def _ensure_workflow_description_arg(
+        self, tool_name: str, args: dict, user_prompt: Optional[str]
+    ) -> dict:
+        if tool_name not in self.WORKFLOW_DESCRIPTION_TOOL_NAMES:
+            return args
+        if isinstance(args, dict) and args.get("description"):
+            return args
+        if not user_prompt:
+            return args
+        description = self._short_request_identifier(user_prompt)
+        if not description:
+            return args
+        updated = dict(args or {})
+        updated["description"] = description
+        return updated
+
+    def _is_continue_placeholder(self, content: Optional[str]) -> bool:
+        if not content:
+            return False
+        return content.strip().lower() == self.CONTINUE_PLACEHOLDER
+
+    def _is_end_placeholder(self, content: Optional[str]) -> bool:
+        if not content:
+            return False
+        return content.strip().lower() == self.END_PLACEHOLDER
+
+    def _mark_workflow_success(
+        self, state: WorkflowExecutionState, reason: Optional[str] = None
+    ) -> None:
+        state.completed = True
+        state.awaiting_feedback = False
+        state.context["_workflow_outcome"] = "success"
+        if reason:
+            state.context["_workflow_end_reason"] = reason
+        self.state_store.save_state(state)
+
+    def _strip_continue_placeholder(self, request: ChatCompletionRequest) -> bool:
+        """Drop user messages when last user message is the resume placeholder."""
+        for idx in range(len(request.messages) - 1, -1, -1):
+            message = request.messages[idx]
+            if message.role != MessageRole.USER:
+                continue
+            if not self._is_continue_placeholder(message.content):
+                return False
+            del request.messages[idx]
+            return True
+        return False
 
     def _append_user_message(
         self, state: WorkflowExecutionState, message: Optional[str]
@@ -1929,6 +2107,79 @@ class WorkflowEngine:
         except Exception:
             return value
         return parsed
+
+    def _parse_feedback_payload(self, raw: Optional[str]) -> Optional[dict[str, Any]]:
+        if not raw or not isinstance(raw, str):
+            return None
+        stripped = raw.strip()
+        if not stripped or stripped[0] not in "{[":
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+
+    def _build_feedback_choices_from_payload(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        choices: list[dict[str, Any]] = []
+        expected = payload.get("expected_responses") or []
+        if not isinstance(expected, list):
+            return choices
+        for entry in expected:
+            if not isinstance(entry, dict):
+                continue
+            choice: dict[str, Any] = {
+                "id": entry.get("id"),
+                "to": entry.get("to"),
+            }
+            if "with" in entry:
+                with_fields = entry.get("with") or []
+                if isinstance(with_fields, str):
+                    with_fields = [with_fields]
+                with_fields = [w for w in with_fields if isinstance(w, str)]
+                choice["with"] = with_fields
+            if "each" in entry:
+                choice["each"] = entry.get("each")
+            if "options" in entry:
+                choice["options"] = entry.get("options") or []
+            for key, value in entry.items():
+                if key in {"id", "to", "with", "each", "options"}:
+                    continue
+                choice[key] = value
+            choices.append(choice)
+        return choices
+
+    def _resolve_external_with_in_feedback_payload(
+        self,
+        payload: dict[str, Any],
+        agent_context: dict[str, Any],
+        shared_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        expected = payload.get("expected_responses")
+        if not isinstance(expected, list):
+            return payload
+        for entry in expected:
+            if not isinstance(entry, dict):
+                continue
+            target = entry.get("to")
+            if not self._is_external_reroute_target(target):
+                continue
+            with_fields = entry.get("with")
+            if isinstance(with_fields, str):
+                with_fields = [with_fields]
+            if not isinstance(with_fields, list):
+                continue
+            fields = [w for w in with_fields if isinstance(w, str)]
+            if not fields:
+                continue
+            entry["with"] = self._resolve_external_with_values(
+                fields, agent_context, shared_context
+            )
+        return payload
 
     def _normalize_feedback_option(self, item: Any) -> Optional[tuple[str, str]]:
         if item is None:
@@ -3345,7 +3596,7 @@ class WorkflowEngine:
             feedback_action = None
             if feedback_tag:
                 feedback_action = self._resolve_feedback_action(
-                    feedback_tag, agent_entry
+                    feedback_tag, agent_entry, state.context
                 )
             if feedback_action:
                 agent_entry["feedback_selection"] = feedback_tag
@@ -3503,8 +3754,35 @@ class WorkflowEngine:
             return cleaned[1:-1]
         return cleaned
 
+    def _is_placeholder_feedback_arg(
+        self,
+        value: Any,
+        field: str,
+        agent_entry: Optional[dict[str, Any]] = None,
+        shared_context: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Treat args that repeat the field name (e.g., "plan_id") as placeholders
+        so we don't overwrite real values already stored in context.
+        """
+        if not isinstance(value, str) or not isinstance(field, str):
+            return False
+        if value != field:
+            return False
+        # If there's a real value in agent or shared context, keep it.
+        if agent_entry and self._get_path_value(agent_entry, field) is not None:
+            return True
+        if shared_context and self._get_path_value(shared_context, field) is not None:
+            return True
+        # Even if missing, treat "field-name literal" as a placeholder to avoid
+        # clobbering future context resolution.
+        return True
+
     def _resolve_feedback_action(
-        self, feedback_text: str, agent_entry: dict[str, Any]
+        self,
+        feedback_text: str,
+        agent_entry: dict[str, Any],
+        shared_context: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         action = self._parse_feedback_action(feedback_text)
         if not action:
@@ -3542,12 +3820,20 @@ class WorkflowEngine:
         kwargs = action.get("kwargs") or {}
         if isinstance(kwargs, dict) and kwargs:
             for key, value in kwargs.items():
+                if self._is_placeholder_feedback_arg(
+                    value, key, agent_entry, shared_context
+                ):
+                    continue
                 assignments[key] = value
         args = action.get("args") or []
         if not assignments and args and with_fields:
             for idx, field in enumerate(with_fields):
                 if idx >= len(args):
                     break
+                if self._is_placeholder_feedback_arg(
+                    args[idx], field, agent_entry, shared_context
+                ):
+                    continue
                 assignments[field] = args[idx]
         if matched_choice and matched_choice.get("options") and args:
             option_key = args[0]

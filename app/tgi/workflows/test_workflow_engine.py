@@ -10,6 +10,7 @@ import pytest
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.services.tool_service import ToolService
 from app.tgi.workflows.engine import WorkflowEngine
+from app.tgi.workflows.models import WorkflowExecutionState
 from app.tgi.workflows.repository import WorkflowRepository
 from app.tgi.workflows.state import WorkflowStateStore
 
@@ -244,6 +245,49 @@ async def test_workflow_resume_requires_same_user(tmp_path, monkeypatch):
 
     with pytest.raises(PermissionError, match="Access token required"):
         await engine.start_or_resume_workflow(StubSession(), request, None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_end_message_completes_workflow_and_streams_done_only(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "simple_flow",
+        "root_intent": "SIMPLE_TASK",
+        "agents": [{"agent": "only_agent", "description": "Do the work"}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient({"only_agent": "ok"})
+    engine = WorkflowEngine(repo, store, llm)
+
+    exec_id = "exec-end"
+    store.save_state(WorkflowExecutionState.new(exec_id, flow["flow_id"]))
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="[end]")],
+        use_workflow="simple_flow",
+        workflow_execution_id=exec_id,
+        stream=True,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    assert stream is not None
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == ["data: [DONE]\n\n"]
+    state = store.load_execution(exec_id)
+    assert state.completed is True
+    assert state.awaiting_feedback is False
+    assert state.context.get("_workflow_outcome") == "success"
+    assert llm.calls == []
 
 
 @pytest.mark.asyncio
@@ -1890,6 +1934,58 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
     assert final_state.context.get("task_id") != first_task_id
     agent_calls = [call for call in llm.calls if call in {"ask_preference", "finalize"}]
     assert agent_calls == ["ask_preference", "ask_preference", "finalize"]
+
+
+@pytest.mark.asyncio
+async def test_resume_continue_placeholder_does_not_append_user_message(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "simple_flow",
+        "root_intent": "SIMPLE",
+        "agents": [{"agent": "finalize", "description": "Finalize."}],
+    }
+    _write_workflow(workflows_dir, "simple", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient({"finalize": "All set."})
+    engine = WorkflowEngine(repo, store, llm)
+
+    initial_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Start the flow")],
+        model="test-model",
+        stream=True,
+        use_workflow="simple_flow",
+        workflow_execution_id="exec-continue",
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), initial_request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution("exec-continue")
+    assert state.context.get("user_messages") == ["Start the flow"]
+    assert state.context.get("user_query") == "Start the flow"
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="[continue]")],
+        model="test-model",
+        stream=True,
+        use_workflow="simple_flow",
+        workflow_execution_id="exec-continue",
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    resumed_state = store.load_execution("exec-continue")
+    assert resumed_state.context.get("user_messages") == ["Start the flow"]
+    assert resumed_state.context.get("user_query") == "Start the flow"
 
 
 @pytest.mark.asyncio
@@ -4516,6 +4612,85 @@ async def test_feedback_payload_external_missing_context_uses_null(
     run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
     assert run_now is not None
     assert run_now.get("with") == [None]
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_external_from_llm_tag_resolves_context(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "llm_feedback_external",
+        "root_intent": "LLM_FEEDBACK_EXTERNAL",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    payload = {
+        "question": "Pick a mode.",
+        "expected_responses": [
+            {
+                "id": "run_now",
+                "to": "external[trigger]",
+                "with": ["plan_id"],
+                "value": "Run the plan now",
+            },
+            {
+                "id": "schedule",
+                "to": "workflows[plan_schedule]",
+                "with": ["plan_id"],
+                "value": "Schedule the plan",
+            },
+        ],
+    }
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    llm = StubLLMClient(
+        {
+            "select_run_mode": (
+                '<return name="plan_id">plan-123</return>'
+                f"<user_feedback_needed>{payload_json}</user_feedback_needed>"
+            ),
+        }
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-llm-feedback-external"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="llm_feedback_external",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    output = "".join(chunks)
+
+    assert "<user_feedback_needed>" in output
+    assert "plan-123" in output
+    state = store.load_execution(exec_id)
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    schedule = next(
+        (entry for entry in expected if entry.get("id") == "schedule"), None
+    )
+    assert run_now is not None
+    assert schedule is not None
+    assert run_now.get("with") == ["plan-123"]
+    assert schedule.get("with") == ["plan_id"]
 
 
 @pytest.mark.asyncio

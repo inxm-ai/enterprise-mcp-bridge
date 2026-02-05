@@ -2158,5 +2158,11 @@ async def test_engine_injects_args_from_context_into_tool_calls(tmp_path, monkey
         "selected_tools" in plan_call["args"]
     ), f"selected_tools not injected: {plan_call['args']}"
     assert plan_call["args"]["selected_tools"] == ["tool1", "tool2"]
+    # Verify workflow description was injected
+    assert (
+        "description" in plan_call["args"]
+    ), f"description not injected: {plan_call['args']}"
+    description_words = str(plan_call["args"]["description"]).split()
+    assert 3 <= len(description_words) <= 5
     # Verify the LLM-provided arg is also present
     assert plan_call["args"]["title"] == "My Plan"

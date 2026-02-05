@@ -294,6 +294,45 @@ class WellPlannedOrchestrator:
 
         return _generator()
 
+    def _build_answer_request(
+        self, messages: List[Message], base_request: ChatCompletionRequest, stream: bool
+    ) -> ChatCompletionRequest:
+        """Build a direct LLM request for intent=answer without tools."""
+        return ChatCompletionRequest(
+            messages=messages,
+            model=base_request.model or self.model_name,
+            stream=stream,
+            temperature=base_request.temperature,
+            max_tokens=base_request.max_tokens,
+            top_p=base_request.top_p,
+            stop=base_request.stop,
+            response_format=base_request.response_format,
+            tools=None,
+            tool_choice=None,
+        )
+
+    def _stream_answer_with_llm(
+        self,
+        messages: List[Message],
+        base_request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> AsyncGenerator[str, None]:
+        llm_request = self._build_answer_request(messages, base_request, stream=True)
+        return self.llm_client.stream_completion(llm_request, access_token or "", span)
+
+    async def _non_stream_answer_with_llm(
+        self,
+        messages: List[Message],
+        base_request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+    ) -> ChatCompletionResponse:
+        llm_request = self._build_answer_request(messages, base_request, stream=False)
+        return await self.llm_client.non_stream_completion(
+            llm_request, access_token or "", span
+        )
+
     def _create_metadata_chunk(
         self,
         content: str,
@@ -613,6 +652,12 @@ class WellPlannedOrchestrator:
             "\nUse only the tools listed for this todo; do not add new ones."
             + tool_sentence
         )
+        if todo.tools and "plan" in todo.tools:
+            combined_system_content += (
+                "\nIf you call the 'plan' tool to create a new workflow, generate a short "
+                "(3-5 words max) identification derived from the user's request and include "
+                "it as the 'description' argument."
+            )
 
         if is_final_multistep_todo:
             combined_system_content += (
@@ -1611,18 +1656,13 @@ class WellPlannedOrchestrator:
             return self._single_message_response(message, request)
 
         if intent == "answer":
-            answer_payload = (intent_result or {}).get("answer")
-            if isinstance(answer_payload, str):
-                answer_payload = self._strip_think_tags(answer_payload)
-                if request.response_format:
-                    try:
-                        answer_payload = json.loads(answer_payload)
-                    except Exception:
-                        pass
-            answer_text = self._stringify_payload(answer_payload)
             if request.stream:
-                return self._stream_single_message(answer_text)
-            return self._single_message_response(answer_text, request)
+                return self._stream_answer_with_llm(
+                    messages, request, access_token, span
+                )
+            return await self._non_stream_answer_with_llm(
+                messages, request, access_token, span
+            )
 
         todos_json = intent_result.get("todos") if intent_result else []
 

@@ -829,6 +829,7 @@ class TestWorkflowListingRoutes:
         awaiting.awaiting_feedback = True
         awaiting.created_at = "2024-01-15T10:30:00.000000Z"
         awaiting.last_change = "2024-01-15T10:45:00.000000Z"
+        awaiting.context["_workflow_description"] = "Create weekly report"
 
         completed = WorkflowExecutionState.new("exec-2", "flow-b")
         completed.current_agent = "planner"
@@ -877,6 +878,7 @@ class TestWorkflowListingRoutes:
                 "current_agent": "reviewer",
                 "created_at": "2024-01-15T10:30:00.000000Z",
                 "last_change": "2024-01-15T10:45:00.000000Z",
+                "description": "Create weekly report",
             },
             {
                 "execution_id": "exec-2",
@@ -886,6 +888,7 @@ class TestWorkflowListingRoutes:
                 "current_agent": "planner",
                 "created_at": "2024-01-15T09:00:00.000000Z",
                 "last_change": "2024-01-15T09:30:00.000000Z",
+                "description": None,
             },
         ]
 

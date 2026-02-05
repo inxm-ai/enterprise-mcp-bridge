@@ -26,7 +26,7 @@ from app.utils.exception_logging import (
     log_exception_with_details,
 )
 
-from app.tgi.models import ChatCompletionRequest
+from app.tgi.models import ChatCompletionRequest, MessageRole
 from app.tgi.workflows.models import WorkflowExecutionState
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.protocols.chunk_reader import (
@@ -127,6 +127,27 @@ def _permission_error_payload(exc: PermissionError) -> dict[str, Any]:
     }
 
 
+def _workflow_conflict_payload(detail: str, status: int = 409) -> dict[str, Any]:
+    return {"error": "workflow_conflict", "detail": detail, "status": status}
+
+
+def _extract_last_user_message(
+    messages: Optional[list],
+) -> Optional[str]:
+    if not messages:
+        return None
+    for message in reversed(messages):
+        if getattr(message, "role", None) == MessageRole.USER:
+            return getattr(message, "content", None)
+    return None
+
+
+def _is_continue_placeholder(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return text.strip().lower() == "[continue]"
+
+
 def _extract_completion_content(result: Any) -> str:
     if result is None:
         return ""
@@ -171,6 +192,11 @@ def _workflow_status(state: WorkflowExecutionState) -> str:
 
 
 def _serialize_workflow(state: WorkflowExecutionState) -> dict[str, Any]:
+    description = None
+    if isinstance(state.context, dict):
+        description = state.context.get("_workflow_description") or state.context.get(
+            "workflow_description"
+        )
     return {
         "execution_id": state.execution_id,
         "workflow_id": state.flow_id,
@@ -179,6 +205,7 @@ def _serialize_workflow(state: WorkflowExecutionState) -> dict[str, Any]:
         "current_agent": state.current_agent,
         "created_at": state.created_at,
         "last_change": state.last_change,
+        "description": description,
     }
 
 
@@ -299,8 +326,6 @@ async def _handle_chat_completion(
                 if not chat_request.workflow_execution_id:
                     chat_request.workflow_execution_id = str(uuid4())
                 execution_id = chat_request.workflow_execution_id
-                if execution_id:
-                    chat_request.return_full_state = True
 
                 copier = getattr(chat_request, "model_copy", None)
                 background_request = (
@@ -319,6 +344,44 @@ async def _handle_chat_completion(
                 )
                 if existing_state and engine:
                     engine._enforce_workflow_owner(existing_state, user_token or "")
+                user_message = _extract_last_user_message(chat_request.messages)
+                has_new_message = bool(
+                    user_message and not _is_continue_placeholder(user_message)
+                )
+                if execution_id and has_new_message:
+                    if existing_state and existing_state.completed:
+                        detail = (
+                            f"Workflow execution '{execution_id}' has completed; "
+                            "start a new workflow execution to continue."
+                        )
+                        error_payload = _workflow_conflict_payload(detail)
+                        yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+                        return
+                    if existing_state and existing_state.awaiting_feedback:
+                        # Allow feedback even if a background task is still winding down.
+                        pass
+                    else:
+                        is_running = (
+                            tgi_service.workflow_background.is_running(execution_id)
+                            if tgi_service.workflow_background
+                            else False
+                        )
+                        if is_running:
+                            detail = (
+                                f"Workflow execution '{execution_id}' is still active; "
+                                "wait for it to request feedback before sending a new message."
+                            )
+                            error_payload = _workflow_conflict_payload(detail)
+                            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+                            return
+                    if existing_state and not existing_state.awaiting_feedback:
+                        detail = (
+                            f"Workflow execution '{execution_id}' is not awaiting feedback; "
+                            "wait for it to request feedback before sending a new message."
+                        )
+                        error_payload = _workflow_conflict_payload(detail)
+                        yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+                        return
                 if not (existing_state and existing_state.completed):
                     initial_count = len(existing_state.events) if existing_state else 0
 

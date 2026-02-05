@@ -828,10 +828,49 @@ async def test_well_planned_answer_intent_short_circuit_streaming():
     answer_payload = json.dumps(
         {"intent": "answer", "answer": "Hello there!"}, ensure_ascii=False
     )
-    configure_plan_stream(service, [], intent_payload=answer_payload)
+    chunk_payload = json.dumps(
+        {"choices": [{"delta": {"content": answer_payload}, "index": 0}]}
+    )
+    plan_chunks = [
+        f"data: {chunk_payload}" + "\n\n",
+        "data: [DONE]" + "\n\n",
+    ]
 
     service._stream_chat_with_tools = AsyncMock(
         side_effect=AssertionError("Tool flow should not run for answer intent")
+    )
+
+    answer_chunks = [
+        "data: "
+        + json.dumps({"choices": [{"delta": {"content": "Hello "}, "index": 0}]})
+        + "\n\n",
+        "data: "
+        + json.dumps({"choices": [{"delta": {"content": "there!"}, "index": 0}]})
+        + "\n\n",
+        "data: [DONE]\n\n",
+    ]
+
+    async def plan_generator():
+        for chunk in plan_chunks:
+            yield chunk
+
+    async def answer_generator():
+        for chunk in answer_chunks:
+            yield chunk
+
+    call_count = {"count": 0}
+
+    def fake_stream_completion(llm_request, access_token, span):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return plan_generator()
+        return answer_generator()
+
+    service.llm_client.stream_completion = fake_stream_completion
+    service.llm_client.non_stream_completion = AsyncMock(
+        side_effect=AssertionError(
+            "non_stream_completion should not be used for streaming answers"
+        )
     )
 
     class DummySession:
@@ -858,10 +897,16 @@ async def test_well_planned_answer_intent_short_circuit_streaming():
         if chunk.strip():
             chunks.append(chunk)
 
-    assert len(chunks) == 2, f"Expected answer + DONE, got {chunks}"
-    first_obj = _parse_stream_json(chunks[0])
-    content = first_obj["choices"][0]["delta"]["content"]
-    assert content == "Hello there!"
+    content_parts = []
+    for chunk in chunks:
+        parsed = _parse_stream_json(chunk)
+        if parsed and parsed.get("choices"):
+            delta = parsed["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                content_parts.append(content)
+
+    assert "".join(content_parts) == "Hello there!"
     assert chunks[-1].strip() == "data: [DONE]"
 
 

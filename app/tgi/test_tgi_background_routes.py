@@ -52,8 +52,9 @@ class _StubEngine:
 
 
 class _StubBackground:
-    def __init__(self, queue_items: list[tuple[int, str, bool]]):
+    def __init__(self, queue_items: list[tuple[int, str, bool]], running: bool = False):
         self.queue_items = queue_items
+        self.running = running
         self.started = False
 
     async def get_or_start(self, execution_id, stream_factory, initial_event_count=0):
@@ -75,6 +76,9 @@ class _StubBackground:
 
     def subscribe(self, execution_id):
         return self
+
+    def is_running(self, execution_id: str) -> bool:
+        return self.running
 
 
 class _StubCancelManager:
@@ -116,10 +120,11 @@ async def test_background_replays_history_and_dedupes(monkeypatch):
         }
     )
     chat_request = ChatCompletionRequest(
-        messages=[Message(role=MessageRole.USER, content="Hi")],
+        messages=[Message(role=MessageRole.USER, content="[continue]")],
         stream=True,
         use_workflow="flow",
         workflow_execution_id="exec-1",
+        return_full_state=True,
     )
 
     chunks = [
@@ -138,6 +143,136 @@ async def test_background_replays_history_and_dedupes(monkeypatch):
     assert "[DONE]" in chunks[-1]
     assert all("event-1" not in chunk for chunk in chunks[2:])
     assert all("event-2" not in chunk for chunk in chunks[2:])
+
+
+@pytest.mark.asyncio
+async def test_background_does_not_replay_history_without_request(monkeypatch):
+    state = WorkflowExecutionState.new("exec-1", "flow")
+    state.events = ["data: event-1\n\n", "data: event-2\n\n"]
+
+    engine = _StubEngine(state)
+    background = _StubBackground(
+        [
+            (0, "data: submitted\n\n", False),
+            (3, "data: event-3\n\n", True),
+        ]
+    )
+
+    class _StubService:
+        workflow_engine = engine
+        workflow_background = background
+
+    monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+    request = _make_request(
+        {
+            "Accept": "text/event-stream",
+            "x-inxm-workflow-background": "true",
+            "X-Auth-Request-Access-Token": "token-ok",
+        }
+    )
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="[continue]")],
+        stream=True,
+        use_workflow="flow",
+        workflow_execution_id="exec-1",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _handle_chat_completion(
+            request, chat_request, None, None, None, None
+        )
+    ]
+
+    assert background.started is True
+    assert "event-1" not in "".join(chunks)
+    assert "event-2" not in "".join(chunks)
+    assert "data: submitted" in chunks[0]
+    assert "data: event-3" in chunks[1]
+    assert "[DONE]" in chunks[-1]
+
+
+@pytest.mark.asyncio
+async def test_background_rejects_message_while_active(monkeypatch):
+    state = WorkflowExecutionState.new("exec-1", "flow")
+    state.awaiting_feedback = False
+    state.completed = False
+
+    engine = _StubEngine(state)
+    background = _StubBackground([], running=True)
+
+    class _StubService:
+        workflow_engine = engine
+        workflow_background = background
+
+    monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+    request = _make_request(
+        {
+            "Accept": "text/event-stream",
+            "x-inxm-workflow-background": "true",
+            "X-Auth-Request-Access-Token": "token-ok",
+        }
+    )
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="New message")],
+        stream=True,
+        use_workflow="flow",
+        workflow_execution_id="exec-1",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _handle_chat_completion(
+            request, chat_request, None, None, None, None
+        )
+    ]
+
+    assert background.started is False
+    assert "workflow_conflict" in chunks[0]
+    assert "[DONE]" in chunks[-1]
+
+
+@pytest.mark.asyncio
+async def test_background_allows_feedback_while_active(monkeypatch):
+    state = WorkflowExecutionState.new("exec-1", "flow")
+    state.awaiting_feedback = True
+    state.completed = False
+
+    engine = _StubEngine(state)
+    background = _StubBackground([(0, "data: submitted\n\n", False)], running=True)
+
+    class _StubService:
+        workflow_engine = engine
+        workflow_background = background
+
+    monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+    request = _make_request(
+        {
+            "Accept": "text/event-stream",
+            "x-inxm-workflow-background": "true",
+            "X-Auth-Request-Access-Token": "token-ok",
+        }
+    )
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Proceed")],
+        stream=True,
+        use_workflow="flow",
+        workflow_execution_id="exec-1",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _handle_chat_completion(
+            request, chat_request, None, None, None, None
+        )
+    ]
+
+    assert background.started is True
+    assert "workflow_conflict" not in "".join(chunks)
+    assert "[DONE]" in chunks[-1]
 
 
 @pytest.mark.asyncio
