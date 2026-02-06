@@ -83,7 +83,7 @@ async def test_well_planned_context_forwarding():
                     index=0,
                     message=Message(
                         role=MessageRole.ASSISTANT,
-                        content=f"Result for {req.messages[0].content}",  # Just some content
+                        content=f"Result for {req.messages[-1].content}",  # Just some content
                     ),
                     finish_reason="stop",
                 )

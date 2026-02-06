@@ -88,6 +88,21 @@ MAX_SUBTASK_DEPTH = 4
 MAX_TODOS = 60
 MAX_HISTORY_RESULT_CHARS = 4000
 MAX_HISTORY_EVENTS = 6
+PLACEHOLDER_TOOL_NAMES = {
+    "*",
+    "all",
+    "any",
+    "call tool",
+    "call-tool",
+    "call_tool",
+    "call_tools",
+    "calltool",
+    "calltools",
+    "call-tools",
+    "tool",
+    "tool_call",
+    "tools",
+}
 
 
 async def read_todo_stream(stream_gen) -> AsyncGenerator[ParsedChunk, None]:
@@ -476,7 +491,16 @@ class WellPlannedOrchestrator:
                 return idx
         return -1
 
-    def _subtask_instructions(self) -> str:
+    def _subtask_instructions(
+        self, available_tool_names: Optional[List[str]] = None
+    ) -> str:
+        tool_hint = ""
+        if available_tool_names:
+            tool_hint = (
+                "\nWhen listing tools for subtasks, use the exact tool names from this list: "
+                + ", ".join(available_tool_names)
+                + ". Use [] if no tools are needed. Do not use placeholders like call_tool."
+            )
         return (
             "\nIf this goal requires multiple distinct steps or many tool calls, "
             "return ONLY a JSON object with:\n"
@@ -488,6 +512,7 @@ class WellPlannedOrchestrator:
             "Do not call tools when returning a subtask plan. "
             "Prefer smaller subtasks whenever a clean split is possible, "
             "but multiple tool calls are allowed within a todo when necessary."
+            + tool_hint
         )
 
     def _looks_like_todo_entry(self, entry: Any) -> bool:
@@ -512,6 +537,24 @@ class WellPlannedOrchestrator:
 
         intent = payload.get("intent") or payload.get("type")
         if intent not in ("subtasks", "plan", "subtask_plan"):
+            for key in ("response", "answer", "content", "message"):
+                nested = payload.get(key)
+                if isinstance(nested, str):
+                    parsed = self._try_parse_json(nested)
+                    if parsed is not None:
+                        nested_plan = self._extract_subtask_plan(parsed)
+                        if nested_plan:
+                            return nested_plan
+                elif isinstance(nested, dict):
+                    nested_plan = self._extract_subtask_plan(nested)
+                    if nested_plan:
+                        return nested_plan
+            tool_results = payload.get("tool_results")
+            if isinstance(tool_results, list):
+                for entry in tool_results:
+                    nested_plan = self._extract_subtask_plan(entry)
+                    if nested_plan:
+                        return nested_plan
             return None
 
         tasks = None
@@ -601,6 +644,54 @@ class WellPlannedOrchestrator:
 
         return selected
 
+    def _is_placeholder_tool_name(self, name: str) -> bool:
+        if not isinstance(name, str):
+            return False
+        return name.strip().lower() in PLACEHOLDER_TOOL_NAMES
+
+    def _dedupe_preserve_order(self, items: List[str]) -> List[str]:
+        seen = set()
+        deduped = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
+
+    def _normalize_todo_tool_lists(
+        self, todos: List[TodoItem], available_tools: Optional[List[Any]]
+    ) -> None:
+        if not todos:
+            return
+        available_tool_names = self._extract_tool_names(available_tools)
+        if available_tool_names:
+            available_tool_names = self._dedupe_preserve_order(available_tool_names)
+
+        for todo in todos:
+            if not todo.tools:
+                continue
+
+            cleaned: List[str] = []
+            saw_placeholder = False
+            for tool in todo.tools:
+                if not isinstance(tool, str):
+                    continue
+                tool_name = tool.strip()
+                if self._is_placeholder_tool_name(tool_name):
+                    saw_placeholder = True
+                    continue
+                cleaned.append(tool_name)
+
+            if cleaned:
+                todo.tools = self._dedupe_preserve_order(cleaned)
+                continue
+
+            if saw_placeholder and available_tool_names:
+                todo.tools = list(available_tool_names)
+            elif saw_placeholder:
+                todo.tools = []
+
     def _extract_tool_names(self, tools: Optional[List[Any]]) -> List[str]:
         names: List[str] = []
         for tool in tools or []:
@@ -622,6 +713,7 @@ class WellPlannedOrchestrator:
         is_final_multistep_todo: bool = False,
         is_final_step: bool = False,
         root_goal: Optional[str] = None,
+        available_tools: Optional[List[Any]] = None,
     ):
         # Preserve any original system prompt from the base request/prepared messages
         original_system_content = None
@@ -649,8 +741,8 @@ class WellPlannedOrchestrator:
             else "\nNo tools are available for this step; do not invent new tool calls."
         )
         combined_system_content += (
-            "\nUse only the tools listed for this todo; do not add new ones."
-            + tool_sentence
+            "\nUse only the tools listed for this todo when making tool calls; "
+            "do not add new ones." + tool_sentence
         )
         if todo.tools and "plan" in todo.tools:
             combined_system_content += (
@@ -665,7 +757,9 @@ class WellPlannedOrchestrator:
                 "or new tasks—deliver the final user-facing answer directly."
             )
         elif not is_final_step:
-            combined_system_content += self._subtask_instructions()
+            combined_system_content += self._subtask_instructions(
+                self._extract_tool_names(available_tools)
+            )
 
         if todo.expected_result:
             combined_system_content += f"\n\nExpected Result: {todo.expected_result}"
@@ -872,11 +966,82 @@ class WellPlannedOrchestrator:
             return None
         stripped = text.strip()
         if not stripped or stripped[0] not in "{[":
+            # Try extracting JSON from fenced blocks or embedded content.
+            for candidate in self._extract_json_candidates(text):
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    continue
             return None
         try:
             return json.loads(stripped)
         except Exception:
+            for candidate in self._extract_json_candidates(text):
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    continue
             return None
+
+    def _extract_json_candidates(self, text: str) -> List[str]:
+        if not isinstance(text, str) or not text:
+            return []
+        candidates: List[str] = []
+
+        # 1) Look for fenced code blocks, preferring ```json.
+        for match in re.finditer(
+            r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE
+        ):
+            block = (match.group(1) or "").strip()
+            if block and block[0] in "{[":
+                candidates.append(block)
+
+        # 2) Scan for the first balanced JSON object/array in the text.
+        embedded = self._find_balanced_json(text)
+        if embedded:
+            candidates.append(embedded)
+
+        return candidates
+
+    def _find_balanced_json(self, text: str) -> Optional[str]:
+        if not isinstance(text, str):
+            return None
+
+        start_chars = {"{": "}", "[": "]"}
+        for start_idx, ch in enumerate(text):
+            if ch not in start_chars:
+                continue
+
+            stack = [start_chars[ch]]
+            in_string = False
+            escape = False
+            for idx in range(start_idx + 1, len(text)):
+                c = text[idx]
+                if in_string:
+                    if escape:
+                        escape = False
+                        continue
+                    if c == "\\":
+                        escape = True
+                        continue
+                    if c == '"':
+                        in_string = False
+                    continue
+
+                if c == '"':
+                    in_string = True
+                    continue
+                if c in start_chars:
+                    stack.append(start_chars[c])
+                    continue
+                if c in ("}", "]"):
+                    if not stack or c != stack[-1]:
+                        break
+                    stack.pop()
+                    if not stack:
+                        return text[start_idx : idx + 1].strip()
+
+        return None
 
     def _extract_feedback_from_result(
         self, result: Any, tool_names: List[str]
@@ -1115,6 +1280,7 @@ class WellPlannedOrchestrator:
                     is_final_multistep_todo=is_last_todo and pending_count > 1,
                     is_final_step=is_last_todo,
                     root_goal=root_goal,
+                    available_tools=available_tools,
                 )
                 filtered_tools = self._select_tools_for_todo(todo, available_tools)
                 if len(filtered_tools) == 0 and len(todo.tools) > 0:
@@ -1235,6 +1401,7 @@ class WellPlannedOrchestrator:
                             )
                             if len(new_items) > remaining_capacity:
                                 new_items = new_items[:remaining_capacity]
+                            self._normalize_todo_tool_lists(new_items, available_tools)
                         else:
                             new_items = []
 
@@ -1420,6 +1587,7 @@ class WellPlannedOrchestrator:
                 is_final_multistep_todo=is_last_todo and pending_count > 1,
                 is_final_step=is_last_todo,
                 root_goal=root_goal,
+                available_tools=available_tools,
             )
             filtered_tools = self._select_tools_for_todo(todo, available_tools)
 
@@ -1471,6 +1639,7 @@ class WellPlannedOrchestrator:
                     )
                     if len(new_items) > remaining_capacity:
                         new_items = new_items[:remaining_capacity]
+                    self._normalize_todo_tool_lists(new_items, available_tools)
                 else:
                     new_items = []
 
@@ -1676,6 +1845,7 @@ class WellPlannedOrchestrator:
         todo_manager = self._create_todo_manager(todos_json)
         user_message = messages[-1].content if messages else ""
         root_goal = user_message
+        self._normalize_todo_tool_lists(todo_manager.list_todos(), available_tools)
         self._enforce_final_answer_step(todo_manager, user_message)
 
         if span:

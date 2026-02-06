@@ -748,6 +748,7 @@ Each workflow file must include `flow_id`, `root_intent`, and an ordered `agents
 Field reference:
 - `flow_id` (string): Unique id used by `use_workflow`.
 - `root_intent` (string): Intent label; used for auto-selection when `use_workflow: true`.
+- `loop` (bool, optional, default false): If true, the workflow stays open and reruns its agents for each new user message, preserving history so you can continue a normal chat across turns.
 - `agents` (array, ordered): Steps executed in order when their dependencies are met.
   - `agent` (string): Name of the agent/prompt to run (also used to look up a custom prompt by name).
   - `description` (string): Default prompt text if no custom prompt exists for this agent.

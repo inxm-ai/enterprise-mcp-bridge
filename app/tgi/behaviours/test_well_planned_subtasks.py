@@ -206,3 +206,349 @@ async def test_well_planned_inserts_subtasks_from_step():
         for m in subtask_messages
         if m.role == MessageRole.ASSISTANT
     )
+
+
+@pytest.mark.asyncio
+async def test_well_planned_expands_placeholder_tools_for_subtasks():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "parent",
+            "goal": "Parent step",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Final answer",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    available_tools = [
+        {
+            "type": "function",
+            "function": {"name": "list-joined-teams", "description": "..."},
+        },
+        {
+            "type": "function",
+            "function": {"name": "list-team-channels", "description": "..."},
+        },
+    ]
+
+    captured_tools = {}
+
+    async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
+        system = messages[0].content or ""
+        match = re.search(r"Current Goal:\s*(.*)", system)
+        goal = match.group(1).strip() if match else system
+
+        if goal == "Parent step":
+            return {
+                "intent": "subtasks",
+                "reason": "Need tool calls",
+                "subtasks": [
+                    {
+                        "id": "s1",
+                        "name": "sub-1",
+                        "goal": "Subtask one",
+                        "needed_info": None,
+                        "tools": ["call_tool"],
+                    },
+                    {
+                        "id": "s2",
+                        "name": "sub-2",
+                        "goal": "Subtask two",
+                        "needed_info": None,
+                        "tools": ["call_tool"],
+                    },
+                ],
+                "close_followups": False,
+            }
+
+        if goal == "Subtask one":
+            captured_tools["sub-1"] = tools
+        if goal == "Subtask two":
+            captured_tools["sub-2"] = tools
+
+        return ChatCompletionResponse(
+            id="chatcmpl-test",
+            created=int(time.time()),
+            model=req.model or "test-model",
+            choices=[
+                Choice(
+                    index=0,
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content=f"Result for {goal}",
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    service._non_stream_chat_with_tools = fake_non_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return available_tools
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the thing")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    expected_names = [t["function"]["name"] for t in available_tools]
+    if "describe_tool" not in expected_names:
+        expected_names.append("describe_tool")
+    for key in ("sub-1", "sub-2"):
+        tool_names = [
+            (t.get("function") or {}).get("name") for t in (captured_tools[key] or [])
+        ]
+        assert tool_names == expected_names
+
+
+@pytest.mark.asyncio
+async def test_well_planned_parses_subtasks_from_code_block():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "parent",
+            "goal": "Parent step",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Final answer",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    call_goals = []
+
+    async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
+        system = messages[0].content or ""
+        match = re.search(r"Current Goal:\s*(.*)", system)
+        goal = match.group(1).strip() if match else system
+        call_goals.append(goal)
+
+        if goal == "Parent step":
+            subtask_payload = {
+                "intent": "subtasks",
+                "reason": "Need smaller steps",
+                "subtasks": [
+                    {
+                        "id": "s1",
+                        "name": "sub-1",
+                        "goal": "Subtask one",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                    {
+                        "id": "s2",
+                        "name": "sub-2",
+                        "goal": "Subtask two",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                ],
+                "close_followups": False,
+            }
+            content = (
+                "Here are the subtasks:\n```json\n"
+                + json.dumps(subtask_payload, ensure_ascii=False)
+                + "\n```\n"
+            )
+            return ChatCompletionResponse(
+                id="chatcmpl-test",
+                created=int(time.time()),
+                model=req.model or "test-model",
+                choices=[
+                    Choice(
+                        index=0,
+                        message=Message(
+                            role=MessageRole.ASSISTANT,
+                            content=content,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            )
+
+        return ChatCompletionResponse(
+            id="chatcmpl-test",
+            created=int(time.time()),
+            model=req.model or "test-model",
+            choices=[
+                Choice(
+                    index=0,
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content=f"Result for {goal}",
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    service._non_stream_chat_with_tools = fake_non_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the thing")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    assert call_goals[:3] == ["Parent step", "Subtask one", "Subtask two"]
+
+
+@pytest.mark.asyncio
+async def test_well_planned_streaming_inserts_subtasks_with_tool_results():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "parent",
+            "goal": "Parent step",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Final answer",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    call_goals = []
+
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        system = messages[0].content or ""
+        match = re.search(r"Current Goal:\s*(.*)", system)
+        goal = match.group(1).strip() if match else system
+        call_goals.append(goal)
+
+        if goal == "Parent step":
+            subtask_payload = {
+                "intent": "subtasks",
+                "reason": "Need smaller steps",
+                "subtasks": [
+                    {
+                        "id": "s1",
+                        "name": "sub-1",
+                        "goal": "Subtask one",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                    {
+                        "id": "s2",
+                        "name": "sub-2",
+                        "goal": "Subtask two",
+                        "needed_info": None,
+                        "tools": [],
+                    },
+                ],
+                "close_followups": False,
+            }
+            content = (
+                "Perfect! I found the integration.\n```json\n"
+                + json.dumps(subtask_payload, ensure_ascii=False)
+                + "\n```\n"
+            )
+            tool_result_event = {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_result": {
+                                "name": "list-chats",
+                                "content": "[]",
+                            }
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+            yield "data: " + json.dumps(tool_result_event) + "\n\n"
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": content}, "index": 0}]}
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": f"Result for {goal}"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the thing")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    async for _chunk in gen:
+        pass
+
+    assert call_goals[:3] == ["Parent step", "Subtask one", "Subtask two"]
+    assert call_goals[3].startswith(
+        "Use only the existing information to answer the user's request:"
+    )
