@@ -1,4 +1,5 @@
 import os
+import json
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
@@ -10,6 +11,23 @@ INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 # Tools that are modifying or notifying or similar
 EFFECT_TOOLS = [t for t in os.environ.get("EFFECT_TOOLS", "").split(",") if t]
+
+
+def _load_tool_output_schemas():
+    schemas = json.loads(os.environ.get("TOOL_OUTPUT_SCHEMAS", "{}"))
+    for tool_name, schema_or_path in schemas.items():
+        if isinstance(schema_or_path, str):
+            try:
+                with open(schema_or_path, "r") as f:
+                    schemas[tool_name] = json.load(f)
+            except Exception as e:
+                print(
+                    f"Error loading schema for {tool_name} from {schema_or_path}: {e}"
+                )
+    return schemas
+
+
+TOOL_OUTPUT_SCHEMAS = _load_tool_output_schemas()
 
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", os.environ.get("TGI_MODEL_NAME", ""))
 OAUTH_ENV = os.environ.get("OAUTH_ENV", "")

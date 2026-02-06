@@ -100,6 +100,60 @@ def test_subtask_instructions_allow_multiple_tool_calls():
     assert "At most one tool call" not in system_content
 
 
+def test_focused_request_discourages_user_questions_when_tools_available():
+    class DummyLLM:
+        def create_completion_id(self):
+            return "dummy"
+
+        def create_usage_stats(self):
+            return {}
+
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=DummyLLM(),
+        prompt_service=None,
+        tool_service=None,
+        non_stream_chat_with_tools_callable=lambda *a, **k: None,
+        stream_chat_with_tools_callable=lambda *a, **k: None,
+        tool_resolution=None,
+        logger_obj=None,
+        model_name="test-model",
+    )
+
+    todo_manager = TodoManager()
+    todo_manager.add_todos(
+        [
+            TodoItem(
+                id="t1",
+                name="pick-team",
+                goal="Identify the team",
+                needed_info=None,
+                tools=["select-from-tool-response"],
+            )
+        ]
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the task")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    focused_messages, _ = orchestrator._build_focused_request(
+        todo_manager=todo_manager,
+        todo=todo_manager.list_todos()[0],
+        base_request=request,
+        original_messages=request.messages,
+        is_final_multistep_todo=False,
+        is_final_step=False,
+        root_goal="Do the task",
+    )
+
+    system_content = focused_messages[0].content or ""
+    assert "Do not ask the user" in system_content
+    assert "select-from-tool-response" in system_content
+
+
 @pytest.mark.asyncio
 async def test_well_planned_inserts_subtasks_from_step():
     service = ProxiedTGIService()
@@ -316,6 +370,8 @@ async def test_well_planned_expands_placeholder_tools_for_subtasks():
     )
 
     expected_names = [t["function"]["name"] for t in available_tools]
+    if "select-from-tool-response" not in expected_names:
+        expected_names.append("select-from-tool-response")
     if "describe_tool" not in expected_names:
         expected_names.append("describe_tool")
     for key in ("sub-1", "sub-2"):
@@ -552,3 +608,112 @@ async def test_well_planned_streaming_inserts_subtasks_with_tool_results():
     assert call_goals[3].startswith(
         "Use only the existing information to answer the user's request:"
     )
+
+
+@pytest.mark.asyncio
+async def test_well_planned_relaxes_subtask_tools_from_select_only():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "parent",
+            "goal": "Parent step",
+            "needed_info": None,
+            "tools": ["select-from-tool-response"],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Final answer",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    available_tools = [
+        {
+            "type": "function",
+            "function": {"name": "call_tool", "description": "..."},
+        },
+        {
+            "type": "function",
+            "function": {"name": "select-from-tool-response", "description": "..."},
+        },
+        {
+            "type": "function",
+            "function": {"name": "list-team-channels", "description": "..."},
+        },
+    ]
+
+    captured_tools = {}
+
+    async def fake_non_stream_chat(session, messages, tools, req, access_token, span):
+        system = messages[0].content or ""
+        match = re.search(r"Current Goal:\s*(.*)", system)
+        goal = match.group(1).strip() if match else system
+
+        if goal == "Parent step":
+            return {
+                "intent": "subtasks",
+                "reason": "Need a tool call",
+                "subtasks": [
+                    {
+                        "id": "s1",
+                        "name": "list-channels",
+                        "goal": "List channels for the team",
+                        "needed_info": None,
+                        "tools": ["select-from-tool-response"],
+                    }
+                ],
+                "close_followups": False,
+            }
+
+        if goal == "List channels for the team":
+            captured_tools["list-channels"] = tools
+
+        return ChatCompletionResponse(
+            id="chatcmpl-test",
+            created=int(time.time()),
+            model=req.model or "test-model",
+            choices=[
+                Choice(
+                    index=0,
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content=f"Result for {goal}",
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    service._non_stream_chat_with_tools = fake_non_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return available_tools
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do the thing")],
+        model="test-model",
+        stream=False,
+        tool_choice="auto",
+    )
+
+    await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    tool_names = [
+        (t.get("function") or {}).get("name")
+        for t in (captured_tools.get("list-channels") or [])
+    ]
+    assert "call_tool" in tool_names

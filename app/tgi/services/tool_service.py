@@ -6,6 +6,7 @@ import json
 import copy
 import logging
 import inspect
+import time
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE
 from opentelemetry import trace
@@ -24,6 +25,8 @@ from app.session_manager.session_context import filter_tools, get_tool_name
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
 _WORKFLOW_DESCRIPTION_TOOL_NAMES = {"plan"}
+_TOOL_RESULT_CACHE_LIMIT = 50
+_SELECT_TOOL_NAME = "select-from-tool-response"
 
 
 def _compact_text(text: str) -> str:
@@ -140,26 +143,33 @@ class ToolService:
                     return []
 
                 self._augment_workflow_description_arg(tools_result)
+                self._ensure_select_from_tool_response(tools_result)
 
-                tools_result.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "describe_tool",
-                            "description": "Return the full schema for one of your available tools. Use this when you need parameter details.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Tool name exactly as provided in the tool list",
-                                    }
+                existing_names = {
+                    tool.get("function", {}).get("name")
+                    for tool in tools_result
+                    if isinstance(tool, dict)
+                }
+                if "describe_tool" not in existing_names:
+                    tools_result.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "describe_tool",
+                                "description": "Return the full schema for one of your available tools. Use this when you need parameter details.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                            "description": "Tool name exactly as provided in the tool list",
+                                        }
+                                    },
+                                    "required": ["name"],
                                 },
-                                "required": ["name"],
                             },
-                        },
-                    }
-                )
+                        }
+                    )
 
                 span.set_attribute("tools.count", len(tools_result))
                 self.logger.debug(
@@ -224,6 +234,52 @@ class ToolService:
                 params["required"] = required
             if "description" not in required:
                 required.append("description")
+
+    def _ensure_select_from_tool_response(self, tools_result: List[Tool]) -> None:
+        if not tools_result:
+            return
+        existing = {
+            tool.get("function", {}).get("name")
+            for tool in tools_result
+            if isinstance(tool, dict)
+        }
+        if _SELECT_TOOL_NAME in existing:
+            return
+        tools_result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": _SELECT_TOOL_NAME,
+                    "description": (
+                        "Select a subset of a previous tool response using a JSON Pointer "
+                        "(RFC 6901). Use tool_call_id to target a specific tool call, or "
+                        "tool_name to select the most recent result for that tool."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tool_call_id": {
+                                "type": "string",
+                                "description": "Tool call ID to select from (preferred).",
+                            },
+                            "tool_name": {
+                                "type": "string",
+                                "description": "Tool name to select the most recent result from.",
+                            },
+                            "pointer": {
+                                "type": "string",
+                                "description": "JSON Pointer path. Use '' to return the full result.",
+                            },
+                            "default": {
+                                "description": "Optional fallback value if the pointer cannot be resolved.",
+                            },
+                        },
+                        "required": ["pointer"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
 
     async def execute_tool_call(
         self,
@@ -735,6 +791,22 @@ class ToolService:
             try:
                 if tool_call.function.name == "describe_tool":
                     result = await self._handle_describe_tool(tool_call)
+                    self._cache_tool_result(session, result)
+                    if return_raw_results:
+                        raw_results.append(result)
+                    if build_messages:
+                        tool_message = await self.create_result_message(
+                            tool_call_format,
+                            result,
+                            summarize=summarize_tool_results,
+                        )
+                        tool_results.append(tool_message)
+                    continue
+                if tool_call.function.name == _SELECT_TOOL_NAME:
+                    result = await self._handle_select_from_tool_response(
+                        session, tool_call
+                    )
+                    self._cache_tool_result(session, result)
                     if return_raw_results:
                         raw_results.append(result)
                     if build_messages:
@@ -746,6 +818,48 @@ class ToolService:
                         tool_results.append(tool_message)
                     continue
                 tool_call = fix_tool_arguments(tool_call, mapped_tools)
+                missing_required = self._missing_required_tool_args(
+                    tool_call, available_tools or []
+                )
+                if missing_required:
+                    self.logger.info(
+                        "[ToolService] Skipping tool '%s' due to missing required args: %s",
+                        tool_call.function.name,
+                        ", ".join(missing_required),
+                    )
+                    error_result = {
+                        "name": tool_call.function.name,
+                        "tool_call_id": tool_call.id,
+                        "content": {
+                            "error": "Missing required tool arguments",
+                            "missing": missing_required,
+                        },
+                    }
+                    if return_raw_results:
+                        raw_results.append(error_result)
+                    if build_messages:
+                        error_message = await self.create_result_message(
+                            tool_call_format,
+                            error_result,
+                            summarize=summarize_tool_results,
+                        )
+                        tool_results.append(error_message)
+                        user_asks_for_correction = Message(
+                            role=MessageRole.USER,
+                            name="mcp_tool_retry_hint",
+                            content=(
+                                "Missing required tool inputs: "
+                                f"{', '.join(missing_required)}. "
+                                "Ask the user for these values before calling the tool again."
+                            ),
+                        )
+                        tool_results.append(user_asks_for_correction)
+                    success = False
+                    break
+                self.logger.info(
+                    "[ToolService] Required args present for tool '%s'; executing.",
+                    tool_call.function.name,
+                )
                 result = await self.execute_tool_call(
                     session,
                     tool_call,
@@ -753,6 +867,8 @@ class ToolService:
                     progress_callback=progress_callback,
                     log_callback=log_callback,
                 )
+
+                self._cache_tool_result(session, result)
 
                 if return_raw_results:
                     raw_results.append(result)
@@ -814,6 +930,235 @@ class ToolService:
         if return_raw_results:
             return tool_results, success, raw_results
         return tool_results, success
+
+    def _missing_required_tool_args(
+        self, tool_call: ToolCall, available_tools: List[dict]
+    ) -> List[str]:
+        tool_name = getattr(tool_call.function, "name", None)
+        if not tool_name:
+            return []
+        tool_def = next(
+            (
+                tool
+                for tool in available_tools
+                if isinstance(tool, dict)
+                and (tool.get("function") or {}).get("name") == tool_name
+            ),
+            None,
+        )
+        if not tool_def:
+            return []
+        params = (tool_def.get("function") or {}).get("parameters") or {}
+        if not isinstance(params, dict):
+            return []
+        required = params.get("required")
+        if not isinstance(required, list) or not required:
+            return []
+        try:
+            raw_args = tool_call.function.arguments
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except Exception:
+            args = {}
+        if not isinstance(args, dict):
+            return list(required)
+        missing = []
+        for key in required:
+            if key not in args or args.get(key) is None:
+                missing.append(key)
+        return missing
+
+    def _get_tool_result_cache(self, session: MCPSessionBase) -> dict:
+        cache = getattr(session, "_tool_result_cache", None)
+        if not isinstance(cache, dict):
+            cache = {"order": [], "items": {}}
+            setattr(session, "_tool_result_cache", cache)
+        cache.setdefault("order", [])
+        cache.setdefault("items", {})
+        return cache
+
+    def _cache_tool_result(
+        self, session: MCPSessionBase, result: Dict[str, Any]
+    ) -> None:
+        if not session or not isinstance(result, dict):
+            return
+        tool_call_id = result.get("tool_call_id")
+        if not tool_call_id:
+            return
+        content = result.get("content")
+        parsed = None
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                parsed = None
+        else:
+            parsed = content
+        cache = self._get_tool_result_cache(session)
+        items = cache["items"]
+        order = cache["order"]
+        if tool_call_id in order:
+            order.remove(tool_call_id)
+        items[tool_call_id] = {
+            "tool_call_id": tool_call_id,
+            "name": result.get("name"),
+            "content": content,
+            "parsed": parsed,
+            "ts": time.time(),
+        }
+        order.append(tool_call_id)
+        while len(order) > _TOOL_RESULT_CACHE_LIMIT:
+            oldest = order.pop(0)
+            items.pop(oldest, None)
+
+    def _resolve_cached_tool_result(
+        self,
+        session: MCPSessionBase,
+        tool_call_id: Optional[str],
+        tool_name: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not session:
+            return None
+        cache = self._get_tool_result_cache(session)
+        items = cache.get("items", {})
+        order = cache.get("order", [])
+        if tool_call_id:
+            return items.get(tool_call_id)
+        if tool_name:
+            for call_id in reversed(order):
+                entry = items.get(call_id)
+                if entry and entry.get("name") == tool_name:
+                    return entry
+        return None
+
+    @staticmethod
+    def _apply_json_pointer(data: Any, pointer: str) -> Any:
+        if pointer == "":
+            return data
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ValueError("pointer must be a JSON Pointer string starting with '/'")
+        current = data
+        for raw_part in pointer.split("/")[1:]:
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, list):
+                try:
+                    index = int(part)
+                except Exception as exc:
+                    raise KeyError(f"Invalid array index '{part}'") from exc
+                if index < 0 or index >= len(current):
+                    raise KeyError(f"Index '{part}' out of range")
+                current = current[index]
+            elif isinstance(current, dict):
+                if part not in current:
+                    raise KeyError(f"Key '{part}' not found")
+                current = current[part]
+            else:
+                raise KeyError("Pointer cannot be applied to non-container value")
+        return current
+
+    async def _handle_select_from_tool_response(
+        self, session: MCPSessionBase, tool_call: ToolCall
+    ) -> Dict[str, Any]:
+        try:
+            args = (
+                json.loads(tool_call.function.arguments)
+                if tool_call.function.arguments
+                else {}
+            )
+        except json.JSONDecodeError as exc:
+            error_content = json.dumps(
+                {"error": f"Invalid JSON: {exc}"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": error_content,
+            }
+
+        tool_call_id = args.get("tool_call_id") or args.get("toolCallId")
+        tool_name = args.get("tool_name") or args.get("toolName")
+        pointer = args.get("pointer")
+        default_value = args.get("default", None)
+
+        if pointer is None:
+            content = json.dumps(
+                {"error": "Missing required 'pointer' argument"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": content,
+            }
+
+        entry = self._resolve_cached_tool_result(session, tool_call_id, tool_name)
+        if not entry:
+            content = json.dumps(
+                {
+                    "error": "No cached tool result found for selection",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": content,
+            }
+
+        data = entry.get("parsed")
+        if data is None:
+            data = entry.get("content")
+
+        try:
+            if isinstance(data, str):
+                if pointer != "":
+                    raise ValueError("Pointer selection requires JSON content")
+                selected = data
+            else:
+                selected = self._apply_json_pointer(data, pointer)
+        except Exception as exc:
+            if "default" in args:
+                selected = default_value
+            else:
+                content = json.dumps(
+                    {
+                        "error": f"Pointer selection failed: {exc}",
+                        "pointer": pointer,
+                        "tool_call_id": entry.get("tool_call_id"),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": content,
+                }
+
+        content = json.dumps(
+            {
+                "tool_call_id": entry.get("tool_call_id"),
+                "pointer": pointer,
+                "value": selected,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "content": content,
+        }
 
     async def _handle_describe_tool(self, tool_call: ToolCall) -> Dict[str, Any]:
         try:

@@ -246,6 +246,131 @@ async def test_well_planned_streaming_includes_tool_results_in_next_step():
 
 
 @pytest.mark.asyncio
+async def test_well_planned_streaming_attaches_tool_call_context_to_results():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "list-channels",
+            "goal": "List channels",
+            "needed_info": None,
+            "tools": ["list-team-channels"],
+        },
+        {
+            "id": "t2",
+            "name": "final-answer",
+            "goal": "Summarize channels",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(session, messages, tools, req, access_token, span):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            tool_calls_chunk = {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_a",
+                                    "function": {
+                                        "name": "list-team-channels",
+                                        "arguments": '{"team_id":"teamA"}',
+                                    },
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call_b",
+                                    "function": {
+                                        "name": "list-team-channels",
+                                        "arguments": '{"team_id":"teamB"}',
+                                    },
+                                },
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+            yield "data: " + json.dumps(tool_calls_chunk) + "\n\n"
+            for content in [
+                '{"channels":["A"]}',
+                '{"channels":["B"]}',
+            ]:
+                tool_result_event = {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_result": {
+                                    "name": "list-team-channels",
+                                    "content": content,
+                                }
+                            },
+                            "index": 0,
+                        }
+                    ]
+                }
+                yield "data: " + json.dumps(tool_result_event) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        history = "\n".join(
+            [m.content or "" for m in messages if m.role == MessageRole.ASSISTANT]
+        )
+        assert '"team_id":"teamA"' in history
+        assert '"team_id":"teamB"' in history
+        assert (
+            '"tool_call_id":"call_a"' in history or '"tool_call_id":"call_b"' in history
+        )
+
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "Final answer"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return [
+                {
+                    "name": "list-team-channels",
+                    "description": "List channels for a team",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"team_id": {"type": "string"}},
+                    },
+                }
+            ]
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="List channels")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    async for _chunk in gen:
+        pass
+
+
+@pytest.mark.asyncio
 async def test_well_planned_streaming_flow():
     service = ProxiedTGIService()
 

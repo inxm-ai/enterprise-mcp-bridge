@@ -186,7 +186,6 @@ class TestToolService:
             mock_map_tools.return_value = [
                 {"type": "function", "function": {"name": "list-files"}},
                 {"type": "function", "function": {"name": "read-file"}},
-                {"type": "function", "function": {"name": "describe_tool"}},
             ]
 
             openai_tools = await tool_service.get_all_mcp_tools(session)
@@ -195,6 +194,7 @@ class TestToolService:
             names = [tool["function"]["name"] for tool in openai_tools]
             assert "list-files" in names
             assert "read-file" in names
+            assert "select-from-tool-response" in names
             assert names[-1] == "describe_tool"
             assert all(tool["type"] == "function" for tool in openai_tools)
 
@@ -713,6 +713,58 @@ async def test_describe_tool_unknown_name(tool_service):
 
 
 @pytest.mark.asyncio
+async def test_select_from_tool_response_uses_cached_result(tool_service):
+    class SelectSession:
+        async def call_tool(self, name, args, access_token):
+            return {
+                "isError": False,
+                "structuredContent": {"channels": [{"id": "alpha"}, {"id": "beta"}]},
+                "content": [],
+            }
+
+        async def list_tools(self):
+            return [
+                {
+                    "name": "list-team-channels",
+                    "description": "List channels",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+
+    session = SelectSession()
+    available_tools = await tool_service.get_all_mcp_tools(session)
+
+    tool_call = make_tool_call(
+        name="list-team-channels", args=json.dumps({}), id="call_list"
+    )
+    result, success = await tool_service.execute_tool_calls(
+        session,
+        [(tool_call, ToolCallFormat.OPENAI_JSON)],
+        None,
+        None,
+        available_tools=available_tools,
+    )
+    assert success
+    assert result
+
+    select_call = make_tool_call(
+        name="select-from-tool-response",
+        args=json.dumps({"tool_call_id": "call_list", "pointer": "/channels/1/id"}),
+        id="call_select",
+    )
+    select_result, select_success = await tool_service.execute_tool_calls(
+        session,
+        [(select_call, ToolCallFormat.OPENAI_JSON)],
+        None,
+        None,
+        available_tools=available_tools,
+    )
+    assert select_success
+    payload = json.loads(select_result[0].content)
+    assert payload["value"] == "beta"
+
+
+@pytest.mark.asyncio
 async def test_create_result_message_basic():
     service = ToolService(model_format=ChatGPTModelFormat())
     tool_result = {
@@ -771,6 +823,48 @@ async def test_create_result_message_summarizes_long_content(monkeypatch):
 
     msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
     assert msg.content == "SHORT_SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_missing_required_tool_args_prompts_user(tool_service):
+    class RequiredArgsSession:
+        async def call_tool(self, name, args, access_token):
+            raise AssertionError(
+                "Tool should not be executed when required args are missing"
+            )
+
+        async def list_tools(self):
+            return [
+                {
+                    "name": "list-team-channels",
+                    "description": "List channels",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"teamId": {"type": "string"}},
+                        "required": ["teamId"],
+                    },
+                }
+            ]
+
+    session = RequiredArgsSession()
+    available_tools = await tool_service.get_all_mcp_tools(session)
+    tool_call = make_tool_call(
+        name="list-team-channels", args=json.dumps({}), id="call_missing"
+    )
+    result, success = await tool_service.execute_tool_calls(
+        session,
+        [(tool_call, ToolCallFormat.OPENAI_JSON)],
+        None,
+        None,
+        available_tools=available_tools,
+    )
+    assert success is False
+    assert result
+    assert result[0].role == MessageRole.TOOL
+    payload = json.loads(result[0].content)
+    assert payload.get("missing") == ["teamId"]
+    assert result[1].role == MessageRole.USER
+    assert "Ask the user" in (result[1].content or "")
 
 
 if __name__ == "__main__":

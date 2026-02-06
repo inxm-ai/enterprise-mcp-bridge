@@ -1,6 +1,12 @@
 import logging
 import io
-from app.vars import EFFECT_TOOLS, MCP_BASE_PATH, SESSION_FIELD_NAME
+import json
+from app.vars import (
+    EFFECT_TOOLS,
+    MCP_BASE_PATH,
+    SESSION_FIELD_NAME,
+    TOOL_OUTPUT_SCHEMAS,
+)
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
     JSONResponse,
@@ -386,6 +392,24 @@ async def run_tool(
                         result = maybe_result
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
+
+        if not result.isError and tool_name in TOOL_OUTPUT_SCHEMAS:
+            if result.structuredContent:
+                logger.info(
+                    f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
+                )
+            else:
+                for content in result.content:
+                    if hasattr(content, "text") and content.text:
+                        try:
+                            parsed = json.loads(content.text)
+                            result.structuredContent = parsed
+                            break
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                f"[Tool-Call] Failed to parse structured content for tool {tool_name}"
+                            )
+                            pass
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
         if result.isError:

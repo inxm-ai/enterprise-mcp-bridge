@@ -1645,7 +1645,11 @@ async def test_agent_tools_fallback_to_all_when_none_match(tmp_path, monkeypatch
 
     # Even though the agent requested a missing tool, engine should pass all tools
     # (plus the lazy context tool added by routing)
-    assert set(llm.request_tools[0]) == {"available_tool", "get_workflow_context"}
+    assert set(llm.request_tools[0]) == {
+        "available_tool",
+        "get_workflow_context",
+        "select-from-tool-response",
+    }
 
 
 @pytest.mark.asyncio
@@ -4817,6 +4821,83 @@ async def test_feedback_payload_external_from_llm_tag_resolves_context(
     assert run_now is not None
     assert schedule is not None
     assert run_now.get("with") == ["plan-123"]
+    assert schedule.get("with") == ["plan_id"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_external_from_llm_tag_prefers_shared_context(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "llm_feedback_external_shared",
+        "root_intent": "LLM_FEEDBACK_EXTERNAL_SHARED",
+        "agents": [
+            {
+                "agent": "select_run_mode",
+                "description": "Ask how to run the plan.",
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    payload = {
+        "question": "Pick a mode.",
+        "expected_responses": [
+            {
+                "id": "run_now",
+                "to": "external[trigger]",
+                "with": ["plan_id"],
+                "value": "Run the plan now",
+            },
+            {
+                "id": "schedule",
+                "to": "workflows[plan_schedule]",
+                "with": ["plan_id"],
+                "value": "Schedule the plan",
+            },
+        ],
+    }
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    llm = StubLLMClient(
+        {
+            "select_run_mode": (
+                '<return name="plan_id">plan_id</return>'
+                f"<user_feedback_needed>{payload_json}</user_feedback_needed>"
+            ),
+        }
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-llm-feedback-external-shared"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="llm_feedback_external_shared",
+        workflow_execution_id=exec_id,
+        start_with={"args": {"plan_id": "plan-999"}},
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    feedback_spec = (
+        state.context["agents"]["select_run_mode"].get("feedback_spec") or {}
+    )
+    expected = feedback_spec.get("expected_responses") or []
+    run_now = next((entry for entry in expected if entry.get("id") == "run_now"), None)
+    schedule = next(
+        (entry for entry in expected if entry.get("id") == "schedule"), None
+    )
+    assert run_now is not None
+    assert schedule is not None
+    assert run_now.get("with") == ["plan-999"]
     assert schedule.get("with") == ["plan_id"]
 
 

@@ -715,6 +715,11 @@ class WellPlannedOrchestrator:
         root_goal: Optional[str] = None,
         available_tools: Optional[List[Any]] = None,
     ):
+        needed_info = self._normalize_needed_info(todo.needed_info)
+        context_info = None
+        if not needed_info:
+            context_info = self._normalize_needed_info_context(todo.needed_info)
+
         # Preserve any original system prompt from the base request/prepared messages
         original_system_content = None
         if original_messages:
@@ -744,6 +749,18 @@ class WellPlannedOrchestrator:
             "\nUse only the tools listed for this todo when making tool calls; "
             "do not add new ones." + tool_sentence
         )
+        if not needed_info and todo.tools:
+            combined_system_content += (
+                "\nDo not ask the user to choose or provide information. "
+                "Use the available tools and prior tool results (including "
+                "select-from-tool-response when appropriate) to decide and proceed. "
+                "Only ask the user if needed_info explicitly requires it."
+            )
+        if not is_final_step:
+            combined_system_content += (
+                "\nIf you return a subtask plan, you may assign tools from the full "
+                "available tools list, even if this step's tool calls are restricted."
+            )
         if todo.tools and "plan" in todo.tools:
             combined_system_content += (
                 "\nIf you call the 'plan' tool to create a new workflow, generate a short "
@@ -776,7 +793,6 @@ class WellPlannedOrchestrator:
                 )
             )
 
-        needed_info = self._normalize_needed_info(todo.needed_info)
         if needed_info:
             focused_messages.append(
                 Message(
@@ -785,7 +801,6 @@ class WellPlannedOrchestrator:
                 )
             )
         else:
-            context_info = self._normalize_needed_info_context(todo.needed_info)
             if context_info:
                 focused_messages.append(
                     Message(
@@ -812,6 +827,29 @@ class WellPlannedOrchestrator:
             focused_request.response_format = base_request.response_format
 
         return focused_messages, focused_request
+
+    def _should_relax_subtask_tools(
+        self, parent: TodoItem, new_items: List[TodoItem]
+    ) -> bool:
+        if not parent.tools or not new_items:
+            return False
+        parent_tools = [
+            t.strip() for t in parent.tools if isinstance(t, str) and t.strip()
+        ]
+        if not parent_tools:
+            return False
+        parent_set = set(parent_tools)
+        if not parent_set.issubset({"select-from-tool-response"}):
+            return False
+        for item in new_items:
+            if not item.tools:
+                continue
+            child_tools = {
+                t.strip() for t in item.tools if isinstance(t, str) and t.strip()
+            }
+            if not child_tools.issubset(parent_set):
+                return False
+        return True
 
     def _strip_think_tags(self, text: str) -> str:
         # Remove <think>...</think> blocks, including newlines that might follow them
@@ -1164,6 +1202,89 @@ class WellPlannedOrchestrator:
 
         return str(result)
 
+    @staticmethod
+    def _normalize_tool_call_arguments(arguments: Any) -> Any:
+        if isinstance(arguments, str):
+            try:
+                return json.loads(arguments)
+            except Exception:
+                return arguments
+        return arguments
+
+    def _attach_tool_call_context(
+        self,
+        tool_result: dict,
+        tool_calls_by_index: dict,
+        tool_call_order: List[int],
+        assigned_tool_calls: set,
+        allowed_tool_names: Optional[set] = None,
+    ) -> None:
+        if not tool_calls_by_index or not tool_call_order or not tool_result:
+            return
+
+        matched_call = None
+        tool_call_id = tool_result.get("tool_call_id")
+        if tool_call_id:
+            for idx in tool_call_order:
+                call = tool_calls_by_index.get(idx)
+                if (
+                    allowed_tool_names
+                    and call
+                    and call.get("name")
+                    and call.get("name") not in allowed_tool_names
+                ):
+                    continue
+                if not call or idx in assigned_tool_calls:
+                    continue
+                if call.get("id") == tool_call_id:
+                    matched_call = call
+                    assigned_tool_calls.add(idx)
+                    break
+
+        if matched_call is None:
+            tool_name = tool_result.get("name")
+            for idx in tool_call_order:
+                call = tool_calls_by_index.get(idx)
+                if (
+                    allowed_tool_names
+                    and call
+                    and call.get("name")
+                    and call.get("name") not in allowed_tool_names
+                ):
+                    continue
+                if not call or idx in assigned_tool_calls:
+                    continue
+                if tool_name and call.get("name") != tool_name:
+                    continue
+                matched_call = call
+                assigned_tool_calls.add(idx)
+                break
+
+        if matched_call is None:
+            for idx in tool_call_order:
+                call = tool_calls_by_index.get(idx)
+                if (
+                    allowed_tool_names
+                    and call
+                    and call.get("name")
+                    and call.get("name") not in allowed_tool_names
+                ):
+                    continue
+                if call and idx not in assigned_tool_calls:
+                    matched_call = call
+                    assigned_tool_calls.add(idx)
+                    break
+
+        if not matched_call:
+            return
+
+        tool_result.setdefault("tool_call_id", matched_call.get("id"))
+        tool_result.setdefault("tool_call_index", matched_call.get("index"))
+        if "arguments" not in tool_result and matched_call.get("arguments") is not None:
+            tool_result["arguments"] = self._normalize_tool_call_arguments(
+                matched_call.get("arguments")
+            )
+
     def _enforce_final_answer_step(
         self, todo_manager: TodoManager, user_message: Optional[str]
     ) -> None:
@@ -1315,9 +1436,24 @@ class WellPlannedOrchestrator:
 
                     aggregated = ""
                     tool_results = []
+                    tool_call_meta: dict = {}
+                    tool_call_order: List[int] = []
+                    assigned_tool_calls: set = set()
+                    allowed_tool_names: Optional[set] = None
+                    if filtered_tools:
+                        allowed_tool_names = set(
+                            self._extract_tool_names(filtered_tools)
+                        )
                     think_extractor = ThinkExtractor()
 
                     async for parsed in read_todo_stream(stream_gen):
+                        if parsed.accumulated_tool_calls:
+                            for idx, call in parsed.accumulated_tool_calls.items():
+                                if idx not in tool_call_meta:
+                                    tool_call_meta[idx] = dict(call)
+                                    tool_call_order.append(idx)
+                                else:
+                                    tool_call_meta[idx].update(call)
                         think_chunk = think_extractor.feed(parsed.content or "")
                         if think_chunk and think_chunk.strip():
                             yield self._attach_metadata_to_chunk(
@@ -1328,6 +1464,13 @@ class WellPlannedOrchestrator:
                             aggregated += parsed.content
                         if parsed.tool_result:
                             tool_result = dict(parsed.tool_result)
+                            self._attach_tool_call_context(
+                                tool_result,
+                                tool_call_meta,
+                                tool_call_order,
+                                assigned_tool_calls,
+                                allowed_tool_names,
+                            )
                             content = tool_result.get("content")
                             if not isinstance(content, str):
                                 try:
@@ -1407,6 +1550,15 @@ class WellPlannedOrchestrator:
 
                         if new_items:
                             todo_manager.insert_todos_after(todo.id, new_items)
+
+                        if new_items and self._should_relax_subtask_tools(
+                            todo, new_items
+                        ):
+                            expanded = self._extract_tool_names(available_tools)
+                            expanded = self._dedupe_preserve_order(expanded)
+                            if expanded:
+                                for item in new_items:
+                                    item.tools = list(expanded)
 
                         reason = subtask_plan.get("reason")
                         summary_text = (
@@ -1645,6 +1797,13 @@ class WellPlannedOrchestrator:
 
                 if new_items:
                     todo_manager.insert_todos_after(todo.id, new_items)
+
+                if new_items and self._should_relax_subtask_tools(todo, new_items):
+                    expanded = self._extract_tool_names(available_tools)
+                    expanded = self._dedupe_preserve_order(expanded)
+                    if expanded:
+                        for item in new_items:
+                            item.tools = list(expanded)
 
                 reason = subtask_plan.get("reason")
                 summary_text = f"Created {len(new_items)} subtasks to achieve the goal."

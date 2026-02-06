@@ -226,6 +226,7 @@ volumes:
 | `MCP_REMOTE_SERVER_FORWARD_HEADERS` | Comma-separated list of incoming request header names to forward to remote MCP server | "" |
 | `MCP_MAP_HEADER_TO_INPUT` | Comma-separated list of mappings from tool input property to incoming HTTP header name, in the form `input=Header-Name` (e.g. `userId=x-auth-user-id,email=x-auth-user-email`). Mapped input properties are removed from tool input schemas and will be automatically filled from headers at call time. | "" |
 | `SYSTEM_DEFINED_PROMPTS`  | JSON array of built-in prompts available to all users     | "[]"                   |
+| `TOOL_OUTPUT_SCHEMAS`     | JSON object mapping tool names to JSON Schemas for their output. Ensures tools advertise structured output capability and parsed JSON strings into `structuredContent`. If a value is a string, it is treated as a file path to load the schema from. | "{}" |
 | `GENERATED_WEB_PATH`      | Base directory for storing AI-generated web applications  | ""                     |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
@@ -266,6 +267,28 @@ Templates may provide content directly via `template.content` or point to a file
 - If `template.file` is an absolute path (for example `/tmp/prompt.md`) it will be opened directly as provided. This is intentional: system-defined prompts are controlled by the environment owner via `SYSTEM_DEFINED_PROMPTS` and may reference external files.
 
 Be aware that allowing absolute paths means the runtime will attempt to read any file the process user can access.
+
+### Tool Output Schemas
+
+You can define output schemas for tools that do not natively provide them (or provide them as unstructured text) via the `TOOL_OUTPUT_SCHEMAS` environment variable. This variable accepts a JSON object where keys are tool names and values are JSON Schema objects.
+
+If the value is a string, it is interpreted as a file path (absolute or relative to the working directory) to read the schema from.
+
+```json
+{
+  "my-complex-tool": {
+    "type": "object",
+    "properties": {
+      "result": { "type": "string" }
+    }
+  },
+  "my-other-tool": "/path/to/schema.json"
+}
+```
+
+When a schema is defined for a tool:
+1. The schema is advertised in the tool definition under `outputSchema`.
+2. When the tool is executed, if the output is a JSON-encoded string, the bridge will attempt to parse it and populate the `structuredContent` field in the result.
 
 ## API Docs
 - Interactive Swagger UI: `http://localhost:8000/docs`

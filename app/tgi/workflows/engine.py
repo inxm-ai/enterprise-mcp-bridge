@@ -2370,8 +2370,12 @@ class WorkflowEngine:
             if not isinstance(field, str):
                 continue
             value = self._get_path_value(agent_context, field)
+            if isinstance(value, str) and value == field:
+                value = None
             if value is None:
                 value = self._get_path_value(shared_context, field)
+                if isinstance(value, str) and value == field:
+                    value = None
                 if value is not None:
                     logger.info(
                         "[WorkflowEngine._resolve_external_with_values] Field '%s' missing from agent context; using shared context value: %s",

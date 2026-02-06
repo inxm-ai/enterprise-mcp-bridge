@@ -16,14 +16,13 @@ from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import get_data_access_manager
 from app.utils import mask_token
-from app.vars import MCP_MAP_HEADER_TO_INPUT
+from app.vars import MCP_MAP_HEADER_TO_INPUT, TOOL_OUTPUT_SCHEMAS, MCP_BASE_PATH
 
 
 logger = logging.getLogger("uvicorn.error")
 
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
-MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 TOOLS_CACHE_ENABLED = (
     os.environ.get("MCP_TOOLS_CACHE_ENABLED", "true").lower() == "true"
 )
@@ -132,6 +131,8 @@ def map_tools(tools):
             output_schema = tool.get("outputSchema")
             if output_schema is None:
                 output_schema = (tool.get("function") or {}).get("outputSchema")
+            if output_schema is None and name in TOOL_OUTPUT_SCHEMAS:
+                output_schema = TOOL_OUTPUT_SCHEMAS[name]
             annotations = tool.get("annotations")
             meta = tool.get("meta")
         else:
@@ -145,6 +146,8 @@ def map_tools(tools):
             output_schema = getattr(tool, "outputSchema", None)
             if output_schema is None and hasattr(tool, "function"):
                 output_schema = getattr(getattr(tool, "function"), "outputSchema", None)
+            if output_schema is None and name in TOOL_OUTPUT_SCHEMAS:
+                output_schema = TOOL_OUTPUT_SCHEMAS[name]
             annotations = getattr(tool, "annotations", None)
             meta = getattr(tool, "meta", None)
 
