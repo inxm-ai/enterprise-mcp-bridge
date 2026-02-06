@@ -235,6 +235,48 @@ async def test_background_rejects_message_while_active(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_background_allows_looping_workflow_message(monkeypatch):
+    state = WorkflowExecutionState.new("exec-1", "flow")
+    state.awaiting_feedback = False
+    state.completed = False
+    state.context["_workflow_loop"] = True
+
+    engine = _StubEngine(state)
+    background = _StubBackground([(0, "data: submitted\n\n", False)], running=False)
+
+    class _StubService:
+        workflow_engine = engine
+        workflow_background = background
+
+    monkeypatch.setattr("app.tgi.routes.tgi_service", _StubService())
+
+    request = _make_request(
+        {
+            "Accept": "text/event-stream",
+            "x-inxm-workflow-background": "true",
+            "X-Auth-Request-Access-Token": "token-ok",
+        }
+    )
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="New message")],
+        stream=True,
+        use_workflow="flow",
+        workflow_execution_id="exec-1",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _handle_chat_completion(
+            request, chat_request, None, None, None, None
+        )
+    ]
+
+    assert background.started is True
+    assert "workflow_conflict" not in "".join(chunks)
+    assert "[DONE]" in chunks[-1]
+
+
+@pytest.mark.asyncio
 async def test_background_allows_feedback_while_active(monkeypatch):
     state = WorkflowExecutionState.new("exec-1", "flow")
     state.awaiting_feedback = True

@@ -60,6 +60,7 @@ class WorkflowEngine:
     END_PLACEHOLDER = "[end]"
     WORKFLOW_DESCRIPTION_TOOL_NAMES = {"plan"}
     WORKFLOW_DESCRIPTION_CONTEXT_KEY = "_workflow_description"
+    FEEDBACK_PAUSE_NOTICE_KEY = "_feedback_pause_notice_sent"
 
     def __init__(
         self,
@@ -122,6 +123,7 @@ class WorkflowEngine:
             state = WorkflowExecutionState.new(execution_id, workflow_def.flow_id)
             self._enforce_workflow_owner(state, user_token)
         state.context.setdefault("agents", {})
+        state.context["_workflow_loop"] = bool(workflow_def.loop)
         chain = list(workflow_chain or state.context.get("_workflow_chain") or [])
         if workflow_def.flow_id not in chain:
             chain.append(workflow_def.flow_id)
@@ -143,6 +145,8 @@ class WorkflowEngine:
                 yield "data: [DONE]\n\n"
 
             return _done_only()
+        if workflow_def.loop and user_message and not state.awaiting_feedback:
+            self._reset_state_for_loop_turn(state)
         self._append_user_message(state, user_message)
 
         # Apply optional start_with prefill once at the beginning of an execution
@@ -155,13 +159,15 @@ class WorkflowEngine:
         handoff_state: dict[str, bool] = {"workflow_handoff": False}
 
         async def _runner():
-            # Always emit execution id first
-            yield self.chunk_formatter.format_chunk(
-                state=state,
-                content=f'<workflow_execution_id for="{workflow_def.flow_id}">{execution_id}</workflow_execution_id>\n',
-                status="submitted",
-                role="system",
-            )
+            user_message_local = user_message
+            emit_execution_id = not state_loaded or user_message_local is not None
+            if emit_execution_id:
+                yield self.chunk_formatter.format_chunk(
+                    state=state,
+                    content=f'<workflow_execution_id for="{workflow_def.flow_id}">{execution_id}</workflow_execution_id>\n',
+                    status="submitted",
+                    role="system",
+                )
             # Replay stored events for resume only when requested
             if return_full_state:
                 for event in state.events:
@@ -171,7 +177,6 @@ class WorkflowEngine:
                 yield "data: [DONE]\n\n"
                 return
 
-            user_message_local = user_message
             # Pre-resolve tools for single-agent workflows so routing sees available tools
             preresolved_tools = None
             if len(workflow_def.agents) == 1:
@@ -233,11 +238,16 @@ class WorkflowEngine:
                         status="feedback_received",
                     )
                 else:
-                    yield self._record_event(
-                        state,
-                        "Workflow paused awaiting user feedback.",
-                        status="waiting_for_feedback",
-                    )
+                    if not state.context.get(self.FEEDBACK_PAUSE_NOTICE_KEY):
+                        state.context[self.FEEDBACK_PAUSE_NOTICE_KEY] = True
+                        self.state_store.save_state(state)
+                        if not return_full_state:
+                            yield self.chunk_formatter.format_chunk(
+                                state=state,
+                                content="Workflow paused awaiting user feedback.",
+                                status="waiting_for_feedback",
+                                role="assistant",
+                            )
                     yield "data: [DONE]\n\n"
                     return
 
@@ -264,8 +274,11 @@ class WorkflowEngine:
             ):
                 yield event
 
-            if state.completed and not handoff_state.get("workflow_handoff"):
-                yield "data: [DONE]\n\n"
+            if not handoff_state.get("workflow_handoff"):
+                if state.completed or (
+                    workflow_def.loop and not state.awaiting_feedback
+                ):
+                    yield "data: [DONE]\n\n"
 
         return _runner()
 
@@ -582,6 +595,11 @@ class WorkflowEngine:
                         and not result.get("pass_through")
                     ):
                         last_visible_output = result.get("content")
+                    if status == "done" and workflow_def.loop:
+                        assistant_text = (result.get("content") or "").strip()
+                        if result.get("pass_through") and assistant_text:
+                            self._append_assistant_message(state, assistant_text)
+                            self.state_store.save_state(state)
                     if status == "feedback":
                         logger.info(
                             "[WorkflowEngine._run_agents] Agent '%s' requested feedback, pausing workflow",
@@ -792,6 +810,9 @@ class WorkflowEngine:
                 yield self._record_event(
                     state, f"Result: {last_visible_output.strip()}"
                 )
+            if workflow_def.loop:
+                self.state_store.save_state(state)
+                return
             state.completed = True
             yield self._record_event(
                 state, "\nWorkflow complete\n", status="completed", finish_reason="stop"
@@ -925,13 +946,27 @@ class WorkflowEngine:
         history_text = (
             "\n".join(history_messages[-10:]) if history_messages else "<none>"
         )
-        user_content = (
-            f"<agent:{agent_def.agent}> Goal: {workflow_def.root_intent}\n"
-            f"Latest user input: {user_prompt}\n"
-            f"User message history:\n{history_text}\n"
-            f"Context summary: {context_summary}\n"
-            f"Note: Full context available via tools if you have them configured."
-        )
+        if workflow_def.loop:
+            assistant_messages = state.context.get("assistant_messages", [])
+            assistant_text = (
+                "\n".join(assistant_messages[-10:]) if assistant_messages else "<none>"
+            )
+            user_content = (
+                f"<agent:{agent_def.agent}> Goal: {workflow_def.root_intent}\n"
+                f"Latest user input: {user_prompt}\n"
+                f"User message history:\n{history_text}\n"
+                f"Assistant message history:\n{assistant_text}\n"
+                f"Context summary: {context_summary}\n"
+                f"Note: Full context available via tools if you have them configured."
+            )
+        else:
+            user_content = (
+                f"<agent:{agent_def.agent}> Goal: {workflow_def.root_intent}\n"
+                f"Latest user input: {user_prompt}\n"
+                f"User message history:\n{history_text}\n"
+                f"Context summary: {context_summary}\n"
+                f"Note: Full context available via tools if you have them configured."
+            )
 
         # Resolve tools - get both modified (for LLM) and original (for validation)
         modified_tools, original_tools = await self._resolve_tools(session, agent_def)
@@ -1371,7 +1406,7 @@ class WorkflowEngine:
                 agent_context["feedback_choices"] = feedback_choices
                 agent_context["awaiting_feedback"] = True
                 agent_context["completed"] = False
-                state.awaiting_feedback = True
+                self._set_awaiting_feedback(state)
                 self.state_store.save_state(state)
                 yield self._record_event(
                     state,
@@ -1384,7 +1419,7 @@ class WorkflowEngine:
                 agent_context["feedback_prompt"] = cleaned_content
             agent_context["awaiting_feedback"] = True
             agent_context["completed"] = False
-            state.awaiting_feedback = True
+            self._set_awaiting_feedback(state)
             self.state_store.save_state(state)
             yield self._record_event(
                 state,
@@ -1419,7 +1454,7 @@ class WorkflowEngine:
                 agent_context["feedback_choices"] = choices
                 agent_context["awaiting_feedback"] = True
                 agent_context["completed"] = False
-                state.awaiting_feedback = True
+                self._set_awaiting_feedback(state)
                 self.state_store.save_state(state)
                 yield self._record_event(
                     state,
@@ -1762,6 +1797,13 @@ class WorkflowEngine:
             state.context["_workflow_end_reason"] = reason
         self.state_store.save_state(state)
 
+    def _reset_feedback_pause_notice(self, state: WorkflowExecutionState) -> None:
+        state.context.pop(self.FEEDBACK_PAUSE_NOTICE_KEY, None)
+
+    def _set_awaiting_feedback(self, state: WorkflowExecutionState) -> None:
+        state.awaiting_feedback = True
+        self._reset_feedback_pause_notice(state)
+
     def _strip_continue_placeholder(self, request: ChatCompletionRequest) -> bool:
         """Drop user messages when last user message is the resume placeholder."""
         for idx in range(len(request.messages) - 1, -1, -1):
@@ -1785,6 +1827,16 @@ class WorkflowEngine:
             history.append(message)
         if not state.awaiting_feedback:
             state.context["user_query"] = message
+
+    def _append_assistant_message(
+        self, state: WorkflowExecutionState, message: Optional[str]
+    ) -> None:
+        """Persist assistant messages for looping workflows."""
+        if not message:
+            return
+        history = state.context.setdefault("assistant_messages", [])
+        if not history or history[-1] != message:
+            history.append(message)
 
     def _get_original_user_prompt(self, state: WorkflowExecutionState) -> Optional[str]:
         """
@@ -3025,6 +3077,33 @@ class WorkflowEngine:
         state.awaiting_feedback = False
         self.state_store.save_state(state)
 
+    def _reset_state_for_loop_turn(self, state: WorkflowExecutionState) -> None:
+        """
+        Reset per-turn workflow state for looping workflows while preserving history.
+        """
+        state.completed = False
+        state.awaiting_feedback = False
+        state.current_agent = None
+        state.context.pop("_resume_agent", None)
+        agents_ctx = state.context.get("agents", {}) or {}
+        for ctx in agents_ctx.values():
+            if not isinstance(ctx, dict):
+                continue
+            ctx["completed"] = False
+            ctx.pop("awaiting_feedback", None)
+            ctx.pop("had_feedback", None)
+            ctx.pop("pending_user_reroute", None)
+            ctx.pop("reroute_reason", None)
+            ctx.pop("reroute_start_with", None)
+            ctx.pop("feedback_prompt", None)
+            ctx.pop("feedback_spec", None)
+            ctx.pop("feedback_choices", None)
+            ctx.pop("tool_errors", None)
+            ctx.pop("return_attempts", None)
+            ctx.pop("skipped", None)
+            ctx.pop("reason", None)
+        self.chunk_formatter.ensure_task_id(state, reset=True)
+
     def _strip_tags(self, text: str) -> str:
         stripped = re.sub(
             r"<(/?)(reroute|user_feedback_needed|user_feedback|passthrough)([^>]*)>",
@@ -3577,6 +3656,7 @@ class WorkflowEngine:
         span,
     ) -> None:
         state.awaiting_feedback = False
+        self._reset_feedback_pause_notice(state)
         if state.current_agent:
             agent_entry = state.context["agents"].setdefault(
                 state.current_agent, {"content": "", "pass_through": False}

@@ -148,6 +148,23 @@ def _is_continue_placeholder(text: Optional[str]) -> bool:
     return text.strip().lower() == "[continue]"
 
 
+def _is_looping_workflow_state(
+    state: Optional[WorkflowExecutionState], engine: Optional[Any]
+) -> bool:
+    if not state:
+        return False
+    if isinstance(state.context, dict) and state.context.get("_workflow_loop"):
+        return True
+    if engine:
+        repo = getattr(engine, "repository", None)
+        if repo:
+            try:
+                return bool(repo.get(state.flow_id).loop)
+            except Exception:
+                return False
+    return False
+
+
 def _extract_completion_content(result: Any) -> str:
     if result is None:
         return ""
@@ -344,12 +361,13 @@ async def _handle_chat_completion(
                 )
                 if existing_state and engine:
                     engine._enforce_workflow_owner(existing_state, user_token or "")
+                is_looping = _is_looping_workflow_state(existing_state, engine)
                 user_message = _extract_last_user_message(chat_request.messages)
                 has_new_message = bool(
                     user_message and not _is_continue_placeholder(user_message)
                 )
                 if execution_id and has_new_message:
-                    if existing_state and existing_state.completed:
+                    if existing_state and existing_state.completed and not is_looping:
                         detail = (
                             f"Workflow execution '{execution_id}' has completed; "
                             "start a new workflow execution to continue."
@@ -374,7 +392,11 @@ async def _handle_chat_completion(
                             error_payload = _workflow_conflict_payload(detail)
                             yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
                             return
-                    if existing_state and not existing_state.awaiting_feedback:
+                    if (
+                        existing_state
+                        and not existing_state.awaiting_feedback
+                        and not is_looping
+                    ):
                         detail = (
                             f"Workflow execution '{execution_id}' is not awaiting feedback; "
                             "wait for it to request feedback before sending a new message."

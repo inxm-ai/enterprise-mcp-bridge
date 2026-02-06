@@ -1981,11 +1981,138 @@ async def test_resume_continue_placeholder_does_not_append_user_message(
     resume_stream = await engine.start_or_resume_workflow(
         StubSession(), resume_request, None, None, None
     )
-    _ = [chunk async for chunk in resume_stream]
+    resume_chunks = [chunk async for chunk in resume_stream]
+    resume_payload = "\n".join(resume_chunks)
+    assert "<workflow_execution_id" not in resume_payload
 
     resumed_state = store.load_execution("exec-continue")
     assert resumed_state.context.get("user_messages") == ["Start the flow"]
     assert resumed_state.context.get("user_query") == "Start the flow"
+
+
+@pytest.mark.asyncio
+async def test_feedback_pause_notice_emits_once(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "pause_flow",
+        "root_intent": "ASK_PREFERENCE",
+        "agents": [{"agent": "ask_preference", "description": "Ask for preference."}],
+    }
+    _write_workflow(workflows_dir, "pause", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient(
+        {
+            "ask_preference": [
+                "<user_feedback_needed>Please tell me if you prefer indoors</user_feedback_needed>"
+            ]
+        }
+    )
+    engine = WorkflowEngine(repo, store, llm)
+
+    initial_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Plan my day")],
+        model="test-model",
+        stream=True,
+        use_workflow="pause_flow",
+        workflow_execution_id="exec-pause",
+    )
+    first_stream = await engine.start_or_resume_workflow(
+        StubSession(), initial_request, None, None, None
+    )
+    _ = [chunk async for chunk in first_stream]
+
+    paused_state = store.load_execution("exec-pause")
+    assert paused_state.awaiting_feedback is True
+    initial_event_count = len(paused_state.events)
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="[continue]")],
+        model="test-model",
+        stream=True,
+        use_workflow="pause_flow",
+        workflow_execution_id="exec-pause",
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    resume_payload = "\n".join([chunk async for chunk in resume_stream])
+    assert "Workflow paused awaiting user feedback." in resume_payload
+
+    mid_state = store.load_execution("exec-pause")
+    assert len(mid_state.events) == initial_event_count
+
+    second_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    second_payload = "\n".join([chunk async for chunk in second_stream])
+    assert "Workflow paused awaiting user feedback." not in second_payload
+
+
+@pytest.mark.asyncio
+async def test_looping_workflow_allows_multiple_turns(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "loop_flow",
+        "root_intent": "CHAT",
+        "loop": True,
+        "agents": [
+            {
+                "agent": "chat",
+                "description": "General conversation agent.",
+                "pass_through": True,
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "loop", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient({"chat": ["Hello!", "Sure."]})
+    engine = WorkflowEngine(repo, store, llm)
+
+    exec_id = "exec-loop-chat"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        model="test-model",
+        stream=True,
+        use_workflow="loop_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    assert chunks and "[DONE]" in chunks[-1]
+
+    state = store.load_execution(exec_id)
+    assert state.completed is False
+    assert state.awaiting_feedback is False
+    assert state.context.get("user_messages") == ["Hi"]
+    assert state.context.get("assistant_messages") == ["Hello!"]
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Tell me more")],
+        model="test-model",
+        stream=True,
+        use_workflow="loop_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
+    assert final_state.context.get("user_messages") == ["Hi", "Tell me more"]
+    assert final_state.context.get("assistant_messages") == ["Hello!", "Sure."]
+    assert llm.calls.count("chat") == 2
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ class WorkflowRepository:
                 payload = json.loads(file.read_text(encoding="utf-8"))
                 flow_id = payload.get("flow_id")
                 root_intent = payload.get("root_intent") or ""
+                loop = bool(payload.get("loop", False))
                 agents_payload = payload.get("agents") or []
                 if not flow_id or not root_intent or not agents_payload:
                     logger.debug(
@@ -70,7 +71,10 @@ class WorkflowRepository:
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(
-                    flow_id=flow_id, root_intent=root_intent, agents=agents
+                    flow_id=flow_id,
+                    root_intent=root_intent,
+                    agents=agents,
+                    loop=loop,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning(

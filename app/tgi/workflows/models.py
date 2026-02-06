@@ -103,6 +103,7 @@ class WorkflowDefinition:
     flow_id: str
     root_intent: str
     agents: List[WorkflowAgentDef]
+    loop: bool = False
 
 
 @dataclass
