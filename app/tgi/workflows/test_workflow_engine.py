@@ -4202,6 +4202,102 @@ async def test_reroute_ask_single_match_routes_on_user_feedback(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_reroute_ask_single_match_routes_to_workflow_with_paren_feedback(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "ask_flow_single",
+        "root_intent": "ASK_SINGLE",
+        "agents": [
+            {
+                "agent": "find_plan",
+                "description": "Locate a matching plan.",
+                "reroute": [
+                    {
+                        "on": ["FOUND_PERFECT_MATCH"],
+                        "ask": {
+                            "question": "Present the plan and ask whether to proceed or create a new plan.",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "select_run_mode",
+                                        "with": ["plan_id"],
+                                    },
+                                    "create_new": {"to": "workflows[plan_create]"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "select_run_mode",
+                "description": "Select a run mode.",
+                "depends_on": ["find_plan"],
+            },
+        ],
+    }
+    plan_create_flow = {
+        "flow_id": "plan_create",
+        "root_intent": "CREATE_PLAN",
+        "agents": [{"agent": "select_tools", "description": "Select tools."}],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    _write_workflow(workflows_dir, "plan_create", plan_create_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "find_plan": '<return name="plan_id">plan-1</return><reroute>FOUND_PERFECT_MATCH</reroute>',
+            "select_run_mode": "<passthrough>ready</passthrough>",
+            "select_tools": "<passthrough>ok</passthrough>",
+        },
+        ask_responses={
+            "feedback_question": "Use the matching plan or create a new one?"
+        },
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-ask-single-workflow"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run a plan")],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_single",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content="<user_feedback>workflows[plan_create]()</user_feedback>",
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="ask_flow_single",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    final_state = store.load_execution(exec_id)
+    assert final_state.flow_id == "plan_create"
+
+
+@pytest.mark.asyncio
 async def test_reroute_ask_multiple_match_assigns_selection(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()

@@ -2512,7 +2512,7 @@ class WorkflowEngine:
             return None
         normalized = reroute_reason.strip()
         match = re.match(
-            r"^workflows\[\s*(?P<name>[^\]]+)\s*\]$",
+            r"^workflows\[\s*(?P<name>[^\]]+)\s*\]\s*(?:\(\s*\))?$",
             normalized,
             re.IGNORECASE,
         )
