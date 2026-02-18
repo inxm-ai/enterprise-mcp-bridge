@@ -108,13 +108,33 @@ class WorkflowEngine:
         workflow_chain: Optional[list[str]] = None,
         handoff: bool = False,
     ) -> Optional[AsyncGenerator[str, None]]:
-        workflow_def = self._select_workflow(request)
-        if not workflow_def:
-            return None
-
         execution_id = request.workflow_execution_id or str(uuid.uuid4())
         state = self.state_store.load_execution(execution_id)
         state_loaded = state is not None
+        workflow_def = None
+        if state_loaded and not handoff:
+            try:
+                workflow_def = self.repository.get(state.flow_id)
+            except Exception:
+                workflow_def = None
+            if not workflow_def:
+                return None
+            requested_workflow = getattr(request, "use_workflow", None)
+            if (
+                requested_workflow not in (None, True)
+                and str(requested_workflow) != state.flow_id
+            ):
+                logger.warning(
+                    "[WorkflowEngine] Ignoring requested workflow '%s' for resumed execution '%s'; "
+                    "using stored flow '%s'.",
+                    requested_workflow,
+                    execution_id,
+                    state.flow_id,
+                )
+        else:
+            workflow_def = self._select_workflow(request)
+            if not workflow_def:
+                return None
         if state_loaded:
             self._enforce_workflow_owner(state, user_token)
             if handoff:

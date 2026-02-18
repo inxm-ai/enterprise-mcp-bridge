@@ -192,13 +192,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 access_token,
                 options={"verify_signature": False, "verify_exp": False},
             )
-        except (InvalidTokenError, DecodeError) as exc:
-            if refresh_token:
-                self.logger.info(
-                    "Access token could not be decoded (%s); attempting refresh using refresh token.",
-                    str(exc),
-                )
-                return True
+        except (InvalidTokenError, DecodeError):
             self.logger.debug(
                 "Access token appears opaque and no refresh token is available; assuming still valid."
             )

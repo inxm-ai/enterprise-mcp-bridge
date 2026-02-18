@@ -158,7 +158,9 @@ class ProxiedTGIService:
                 f"[ProxiedTGI] Received chat completion request: model={request.model}, use workflow={request.use_workflow}, tool_choice={request.tool_choice}, tools_provided={bool(request.tools)}"
             )
 
-            if self.workflow_engine and request.use_workflow:
+            if self.workflow_engine and (
+                request.use_workflow or request.workflow_execution_id
+            ):
                 if user_token is None:
                     raise ValueError(
                         "User token is required for workflow-based chat completions"

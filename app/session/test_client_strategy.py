@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -415,3 +416,52 @@ async def test_mcp_log_notifications_forwarded(monkeypatch):
     assert fake_logger.messages[-1][0] == "error"
     assert "[MCP][MCP][ERROR]" in fake_logger.messages[-1][1]
     assert '"detail": "boom"' in fake_logger.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_closes_on_cancellation(monkeypatch):
+    closed = {"stream": False, "session": False}
+
+    class SlowExitSession(DummyClientSession):
+        async def __aexit__(self, exc_type, exc, tb):
+            await asyncio.sleep(0)
+            closed["session"] = True
+            return False
+
+    class FakeStreamableContext:
+        async def __aenter__(self):
+            return object(), object(), lambda: None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            await asyncio.sleep(0)
+            closed["stream"] = True
+            return False
+
+    def fake_streamable_client(url, headers=None, auth=None):
+        return FakeStreamableContext()
+
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", SlowExitSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token=None, requested_group=None
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async with strategy.session():
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
+
+    assert closed["session"] is True
+    assert closed["stream"] is True

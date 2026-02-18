@@ -966,25 +966,50 @@ class WellPlannedOrchestrator:
             return False
         if stripped.startswith("{") or stripped.startswith("["):
             return False
-        if len(stripped) <= 500:
-            return True
-        lowered = stripped.lower()
-        triggers = (
-            "please",
-            "clarif",
-            "confirm",
-            "specify",
-            "which",
-            "what",
-            "how",
-            "when",
-            "where",
-            "do you",
-            "can you",
-            "could you",
-            "would you",
+        # Strip code/quoted content to avoid treating referenced questions as user prompts.
+        cleaned = re.sub(r"```[\s\S]*?```", "", stripped)
+        cleaned = re.sub(r"`[^`]*`", "", cleaned)
+        cleaned = re.sub(r"\"(?:\\.|[^\"\\\\])*\"", "", cleaned)
+        if "?" not in cleaned:
+            return False
+
+        starter_re = re.compile(
+            r"^(who|what|when|where|why|how|which|can|could|would|do|does|did|is|are|"
+            r"should|may|might|will|have|has|need|provide|share|choose|select|confirm)\b"
         )
-        return any(trigger in lowered for trigger in triggers)
+        user_re = re.compile(r"\b(you|your|please)\b")
+
+        for line in re.split(r"[\n\r]+", cleaned):
+            if "?" not in line:
+                continue
+            prefix = line.split("?", 1)[0].strip()
+            if not prefix:
+                continue
+            lowered = prefix.lower()
+
+            if re.search(r"\b(your|root|original|user)\s+question\b", lowered):
+                continue
+
+            if re.match(r"^question\b", lowered):
+                after = lowered.split(":", 1)[-1].strip()
+                if starter_re.match(after) or user_re.search(after):
+                    return True
+                continue
+
+            if "question" in lowered and not user_re.search(
+                lowered
+            ) and not starter_re.search(lowered):
+                continue
+
+            if starter_re.search(lowered):
+                return True
+            if user_re.search(lowered):
+                return True
+
+            if len(prefix) <= 80 and cleaned.strip().endswith("?"):
+                return True
+
+        return False
 
     def _extract_feedback_from_text(
         self, text: Optional[str], tool_names: List[str]

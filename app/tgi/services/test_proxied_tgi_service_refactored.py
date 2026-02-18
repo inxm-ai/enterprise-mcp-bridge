@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
@@ -113,6 +113,47 @@ class TestProxiedTGIServiceRefactored:
                     assert len(chunks) == 2
                     assert "data: test" in chunks[0]
                     assert "data: [DONE]" in chunks[1]
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_resume_without_use_workflow(
+        self, proxied_tgi_service
+    ):
+        """Resuming with workflow_execution_id should invoke workflow engine even without use_workflow."""
+        session = MockMCPSession()
+
+        request = ChatCompletionRequest(
+            messages=[Message(role=MessageRole.USER, content="[continue]")],
+            model="test-model",
+            stream=True,
+            workflow_execution_id="exec-1",
+        )
+
+        async def mock_stream_generator():
+            yield "data: resumed\n\n"
+            yield "data: [DONE]\n\n"
+
+        mock_engine = Mock()
+        mock_engine.start_or_resume_workflow = AsyncMock(
+            return_value=mock_stream_generator()
+        )
+        proxied_tgi_service.workflow_engine = mock_engine
+
+        result = await proxied_tgi_service.chat_completion(
+            session, request, user_token="user-token"
+        )
+
+        chunks = []
+        async for chunk in result:
+            chunks.append(chunk)
+
+        assert "data: resumed" in chunks[0]
+        assert "data: [DONE]" in chunks[-1]
+
+        mock_engine.start_or_resume_workflow.assert_awaited_once()
+        call_args = mock_engine.start_or_resume_workflow.call_args
+        assert call_args.args[0] is session
+        assert call_args.args[1] is request
+        assert call_args.args[2] == "user-token"
 
     @pytest.mark.asyncio
     async def test_stream_chat_with_tools_no_tool_calls(self, proxied_tgi_service):

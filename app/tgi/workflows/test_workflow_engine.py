@@ -1941,6 +1941,72 @@ async def test_engine_resumes_after_user_feedback(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resume_without_use_workflow_uses_state_flow(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "preference_flow",
+        "root_intent": "ASK_PREFERENCE",
+        "agents": [
+            {"agent": "ask_preference", "description": "Ask for preference."},
+            {
+                "agent": "finalize",
+                "description": "Summarize the plan.",
+                "depends_on": ["ask_preference"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "pref", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    llm = StubLLMClient(
+        {
+            "ask_preference": [
+                "<user_feedback_needed>Please tell me if you prefer indoors</user_feedback_needed>",
+                "Thanks, I will plan for indoors now.",
+            ],
+            "finalize": "Great, here is your indoor plan.",
+        }
+    )
+    engine = WorkflowEngine(repo, store, llm)
+
+    initial_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Plan my day")],
+        model="test-model",
+        stream=True,
+        use_workflow="preference_flow",
+        workflow_execution_id="exec-feedback-no-use",
+    )
+    first_stream = await engine.start_or_resume_workflow(
+        StubSession(), initial_request, None, None, None
+    )
+    assert first_stream is not None
+    _ = [chunk async for chunk in first_stream]
+    state = store.load_execution("exec-feedback-no-use")
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="I prefer indoors")],
+        model="test-model",
+        stream=True,
+        workflow_execution_id="exec-feedback-no-use",
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    assert resume_stream is not None
+    resume_chunks = [chunk async for chunk in resume_stream]
+    resume_payload = "\n".join(resume_chunks)
+    expected_tag = (
+        '<workflow_execution_id for="preference_flow">exec-feedback-no-use</workflow_execution_id>'
+    )
+    assert expected_tag in resume_payload or "exec-feedback-no-use" in resume_payload
+    assert "indoor plan" in resume_payload.lower()
+
+
+@pytest.mark.asyncio
 async def test_resume_continue_placeholder_does_not_append_user_message(
     tmp_path, monkeypatch
 ):

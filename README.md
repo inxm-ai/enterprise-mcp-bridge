@@ -930,19 +930,35 @@ Notes:
   "depends_on": ["select_tools"]
 },
 {
+  "agent": "confirm_plan",
+  "description": "Present the plan and ask for approval. On the first run, always emit <user_feedback_needed> with two choices: approve (save) or retry (workflows[plan_create]). On resume, interpret free-text feedback: emit <reroute>APPROVE</reroute> to proceed or <reroute>RETRY</reroute> to regenerate.",
+  "context": ["create_plan.plan", "feedback", "user_query"],
+  "pass_through": "Summarize the plan in 3-6 bullets and ask if it looks good or should be reworked.",
+  "reroute": [
+    { "on": ["APPROVE"], "to": "save_plan" },
+    { "on": ["RETRY"], "to": "workflows[plan_create]" }
+  ],
+  "depends_on": ["create_plan"]
+},
+{
   "agent": "save_plan",
   "description": "Save the created plan",
   "tools": [
     {"save_plan": {"args": {"plan": "create_plan.plan"}}}
   ],
-  "depends_on": ["create_plan"]
+  "depends_on": ["confirm_plan"]
 }
 ```
 
 In this example:
 1. `select_tools` agent runs and captures `selected_tools` from its tool result
 2. `create_plan` agent receives `selected_tools` via arg mapping, runs the `plan` tool, and captures `payload.result` specifically from the `plan` tool, storing it as `plan`
-3. `save_plan` agent receives the plan via `create_plan.plan` arg mapping
+3. `confirm_plan` presents the plan, asks for approval, and either reroutes to `save_plan` or restarts with `workflows[plan_create]`
+4. `save_plan` agent receives the plan via `create_plan.plan` arg mapping
+
+Note:
+- Workflow reroutes must use the plural form `workflows[plan_create]`. This is required by the engine’s reroute parser.
+- If the user replies in free text instead of clicking a button, the `confirm_plan` prompt handles it by emitting `<reroute>APPROVE</reroute>` or `<reroute>RETRY</reroute>` based on the response.
 
 Prompt usage:
 - For each agent the router looks for a prompt named exactly like the `agent` value via the MCP prompt service. If found, that prompt content is used; otherwise it falls back to the agent’s `description`.

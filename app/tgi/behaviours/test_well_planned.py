@@ -808,6 +808,85 @@ async def test_well_planned_streaming_stops_on_user_feedback_tag():
 
 
 @pytest.mark.asyncio
+async def test_well_planned_streaming_ignores_quoted_question():
+    service = ProxiedTGIService()
+
+    todos = [
+        {
+            "id": "t1",
+            "name": "step1",
+            "goal": "Do step one",
+            "needed_info": None,
+            "tools": [],
+        },
+        {
+            "id": "t2",
+            "name": "step2",
+            "goal": "Do step two",
+            "needed_info": None,
+            "tools": [],
+        },
+    ]
+
+    configure_plan_stream(service, todos)
+
+    calls = {"count": 0}
+
+    async def fake_stream_chat(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            yield "data: " + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": (
+                                    "Verified identity. Root question: "
+                                    "\"What issues are assigned to me?\""
+                                )
+                            },
+                            "index": 0,
+                        }
+                    ]
+                }
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "final answer"}, "index": 0}]}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    service._stream_chat_with_tools = fake_stream_chat
+
+    class DummySession:
+        async def list_tools(self):
+            return []
+
+        async def list_prompts(self):
+            return []
+
+    session = DummySession()
+    chat_request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Please do X")],
+        model="test-model",
+        stream=True,
+        tool_choice="auto",
+    )
+
+    gen = await service.well_planned_chat_completion(
+        session, chat_request, access_token=None, prompt=None, span=None
+    )
+
+    chunks = []
+    async for chunk in gen:
+        chunks.append(chunk)
+
+    assert calls["count"] == 2
+    assert any("final answer" in c for c in chunks)
+
+
+@pytest.mark.asyncio
 async def test_well_planned_no_premature_done():
     """Test that verifies [DONE] is not sent immediately - the full sequence should be yielded."""
     service = ProxiedTGIService()

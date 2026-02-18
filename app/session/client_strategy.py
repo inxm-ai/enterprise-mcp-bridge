@@ -1,9 +1,10 @@
+import asyncio
 import json
 import logging
 import os
 import threading
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
@@ -343,52 +344,56 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         # Detect if this is an SSE-only endpoint (like Atlassian)
         # SSE endpoints typically end with /sse or only support GET+SSE
         use_sse_only = self.url.endswith("/sse")
+        stack = AsyncExitStack()
+        cancelled = False
+        try:
+            if use_sse_only:
+                logger.info("[RemoteMCP] Using SSE-only client (detected /sse endpoint)")
+                read, write = await stack.enter_async_context(
+                    sse_client(
+                        self.url,
+                        headers=headers,
+                    )
+                )
+                get_session_id = None
+            else:
+                logger.info("[RemoteMCP] Using StreamableHTTP client (full protocol)")
+                read, write, get_session_id = await stack.enter_async_context(
+                    streamablehttp_client(
+                        self.url,
+                        headers=headers,
+                        auth=self._auth_provider,
+                    )
+                )
 
-        if use_sse_only:
-            logger.info("[RemoteMCP] Using SSE-only client (detected /sse endpoint)")
-            async with sse_client(
-                self.url,
-                headers=headers,
-            ) as (read, write):
-                async with ClientSession(
-                    read, write, logging_callback=_log_mcp_notification
-                ) as session:
-                    try:
-                        await session.initialize()
-                    except Exception as e:
-                        logger.error(
-                            f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
-                        )
-                        logger.error(f"[RemoteMCP] URL: {self.url}")
-                        logger.error(
-                            f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
-                        )
-                        raise
-                    yield session
-        else:
-            logger.info("[RemoteMCP] Using StreamableHTTP client (full protocol)")
-            async with streamablehttp_client(
-                self.url,
-                headers=headers,
-                auth=self._auth_provider,
-            ) as (read, write, get_session_id):
-                async with ClientSession(
-                    read, write, logging_callback=_log_mcp_notification
-                ) as session:
-                    try:
-                        await session.initialize()
-                    except Exception as e:
-                        logger.error(
-                            f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
-                        )
-                        logger.error(f"[RemoteMCP] URL: {self.url}")
-                        logger.error(
-                            f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
-                        )
-                        raise
-                    if get_session_id:
-                        setattr(session, "get_remote_session_id", get_session_id)
-                    yield session
+            session = await stack.enter_async_context(
+                ClientSession(read, write, logging_callback=_log_mcp_notification)
+            )
+            try:
+                await session.initialize()
+            except Exception as e:
+                logger.error(
+                    f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
+                )
+                logger.error(f"[RemoteMCP] URL: {self.url}")
+                logger.error(
+                    f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
+                )
+                raise
+            if get_session_id:
+                setattr(session, "get_remote_session_id", get_session_id)
+            yield session
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            try:
+                if cancelled:
+                    await asyncio.shield(stack.aclose())
+                else:
+                    await stack.aclose()
+            except Exception as exc:
+                logger.debug(f"[RemoteMCP] Error while closing transport: {exc}")
 
 
 def build_mcp_client_strategy(
