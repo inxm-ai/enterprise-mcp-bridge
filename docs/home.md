@@ -2,7 +2,7 @@
 
 > FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over plain HTTP/JSON
 
-![Architecture](architecture.png)
+![Enterprise MCP Bridge Example](example-application.png)
 
 ## What is Enterprise MCP Bridge?
 
