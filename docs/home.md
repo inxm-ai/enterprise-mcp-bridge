@@ -10,7 +10,7 @@ Enterprise MCP Bridge is a production-ready wrapper that transforms any Model Co
 
 ## Why This Project?
 
-Most existing MCP examples fall short for real-world applications. They are typically:
+Many open source MCPs fall short for real-world applications. They are typically:
 
 * **Single-user** CLI processes driven by a local client
 * **Ephemeral**, with state lost when the process ends
@@ -22,6 +22,8 @@ Most existing MCP examples fall short for real-world applications. They are typi
 This project directly addresses these gaps with enterprise-grade features for security, scalability, and integration.
 
 ## Key Features
+
+**The Enterprise MCP Bridge automatically extends any MCP server with enterprise-grade capabilities:**
 
 ### 🚀 Production-Ready Architecture
 - **Multi-user & multi-session support** with isolated user contexts
@@ -40,8 +42,11 @@ This project directly addresses these gaps with enterprise-grade features for se
 - **Auto-generated OpenAPI documentation**
 - **Automatic tool endpoint mapping**
 - **Structured error handling** with standard HTTP codes
-- **AI-powered UI generation** for rapid dashboard creation
-- **Workflow orchestration** for complex multi-step automations
+
+### ✨ Usability Add-Ons
+- **AI-powered UI generation** - Generate web applications from natural language prompts
+- **Workflow orchestration with agents** - Build complex multi-step automations with human-in-the-loop feedback
+- **SSE streaming** - Real-time updates for long-running operations
 
 ### 🌐 Flexible Deployment
 - **Protocol agnostic** - works with any stdio-based MCP server
