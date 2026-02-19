@@ -111,7 +111,7 @@ Contributions are welcome! Please see our **[contributing guidelines](https://in
 
 ## License
 
-Apache 2.0 - See **[LICENSE](https://inxm-ai.github.io/enterprise-mcp-bridge/#/license)** for details.
+GPL-3.0 - See **[LICENSE](https://inxm-ai.github.io/enterprise-mcp-bridge/#/license)** for details.
 
 ## Support
 
