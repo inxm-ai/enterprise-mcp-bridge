@@ -7,6 +7,8 @@ from typing import Sequence
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Info
 
+from app.sse.mcp_proxy import get_sse_proxy_routes
+
 app = FastAPI()
 instrumentator = Instrumentator()
 
@@ -91,3 +93,6 @@ app_info = Info("fastapi_app_info", "Application Info")
 app_info.info({"app_name": SERVICE_NAME})
 
 app.include_router(router)
+
+for route in get_sse_proxy_routes():
+    app.router.routes.insert(0, route)

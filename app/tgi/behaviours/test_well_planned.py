@@ -842,7 +842,7 @@ async def test_well_planned_streaming_ignores_quoted_question():
                             "delta": {
                                 "content": (
                                     "Verified identity. Root question: "
-                                    "\"What issues are assigned to me?\""
+                                    '"What issues are assigned to me?"'
                                 )
                             },
                             "index": 0,

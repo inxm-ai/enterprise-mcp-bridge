@@ -996,9 +996,11 @@ class WellPlannedOrchestrator:
                     return True
                 continue
 
-            if "question" in lowered and not user_re.search(
-                lowered
-            ) and not starter_re.search(lowered):
+            if (
+                "question" in lowered
+                and not user_re.search(lowered)
+                and not starter_re.search(lowered)
+            ):
                 continue
 
             if starter_re.search(lowered):

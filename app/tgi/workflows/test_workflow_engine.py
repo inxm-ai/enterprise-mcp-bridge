@@ -1999,9 +1999,7 @@ async def test_resume_without_use_workflow_uses_state_flow(tmp_path, monkeypatch
     assert resume_stream is not None
     resume_chunks = [chunk async for chunk in resume_stream]
     resume_payload = "\n".join(resume_chunks)
-    expected_tag = (
-        '<workflow_execution_id for="preference_flow">exec-feedback-no-use</workflow_execution_id>'
-    )
+    expected_tag = '<workflow_execution_id for="preference_flow">exec-feedback-no-use</workflow_execution_id>'
     assert expected_tag in resume_payload or "exec-feedback-no-use" in resume_payload
     assert "indoor plan" in resume_payload.lower()
 

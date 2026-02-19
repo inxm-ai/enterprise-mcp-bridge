@@ -348,7 +348,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         cancelled = False
         try:
             if use_sse_only:
-                logger.info("[RemoteMCP] Using SSE-only client (detected /sse endpoint)")
+                logger.info(
+                    "[RemoteMCP] Using SSE-only client (detected /sse endpoint)"
+                )
                 read, write = await stack.enter_async_context(
                     sse_client(
                         self.url,

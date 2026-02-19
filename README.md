@@ -230,6 +230,11 @@ volumes:
 | `GENERATED_WEB_PATH`      | Base directory for storing AI-generated web applications  | ""                     |
 | `MCP_ENV_*`               | Forwarded to the MCP server process                       |                        |
 | `MCP_*_DATA_ACCESS_TEMPLATE` | Template for specific data resources. See [User and Group Management](#user-and-group-management) for details. | `{*}/{placeholder}` |
+| `MCP_OAUTH_RESOURCE_URL`  | Public URL of this bridge (for RFC 9728 protected resource metadata). Auto-derived from request if unset. | (auto) |
+| `MCP_OAUTH_ISSUER`        | OAuth issuer / authorization server URL. Auto-derived from `AUTH_BASE_URL`+`KEYCLOAK_REALM` when unset. | (auto) |
+| `MCP_OAUTH_CLIENT_ID`     | OAuth client ID that MCP clients should use               | (unset)                |
+| `MCP_OAUTH_SCOPES`        | Space-separated scopes the bridge accepts                 | `openid profile email` |
+| `MCP_OAUTH_REGISTRATION_ENDPOINT` | Dynamic client registration URL (defaults to Keycloak's) | (auto)          |
 
 ### Data access templates
 | Template                           | Default value          | Description                                     |
@@ -306,6 +311,363 @@ When a schema is defined for a tool:
   - `GET /app/_generated/{scope}/{ui_id}/{name}` – retrieve a generated application (as metadata, page, or snippet).
   - `POST /app/_generated/{scope}/{ui_id}/{name}` – update an existing generated application.
   - `GET /.well-known/agent.json` – discover agent metadata when agent mode is enabled.
+  - `GET /sse` – MCP-native SSE endpoint (full MCP protocol over SSE transport). See [Native MCP SSE Endpoint](#native-mcp-sse-endpoint).
+  - `GET /.well-known/oauth-protected-resource` – RFC 9728 resource metadata for MCP client auth discovery.
+  - `GET /.well-known/oauth-authorization-server` – RFC 8414 authorization server metadata.
+
+## Native MCP SSE Endpoint
+
+The bridge exposes a **fully MCP-compliant SSE transport** at `/sse`. Any standard MCP client (Claude Code, VS Code Copilot, Cursor, `mcp-client-cli`, etc.) can connect directly using the MCP SSE protocol — no custom HTTP/JSON wrapper needed.
+
+All requests flow through the same auth pipeline as the REST API: OAuth2 token exchange, tool filtering (`INCLUDE_TOOLS`/`EXCLUDE_TOOLS`), header-to-input mapping, and group-based data access.
+
+### How it works
+
+```
+┌──────────────┐       SSE           ┌──────────────────────┐       stdio / HTTP       ┌─────────────┐
+│  MCP Client  │ ◄──── GET /sse ──► │  Enterprise Bridge   │ ◄─────────────────────► │  MCP Server  │
+│ (Claude Code)│  POST /sse/messages │  (SSE proxy server)  │   (token exchanged)      │  (downstream)│
+└──────────────┘                     └──────────────────────┘                          └─────────────┘
+```
+
+1. Client opens `GET /sse` → receives an SSE stream with a `session_id`-bearing message endpoint.
+2. Client sends JSON-RPC messages to `POST /sse/messages?session_id=...`.
+3. The bridge opens a fresh downstream MCP session per SSE connection (with full OAuth token exchange).
+4. All MCP operations (`tools/list`, `tools/call`, `prompts/list`, `resources/read`, etc.) are proxied transparently.
+
+### Connecting Claude Code
+
+1. **Set the OAuth discovery variables** so Claude Code can authenticate automatically:
+
+```bash
+# Keycloak-based setup (most common)
+export AUTH_BASE_URL="https://keycloak.example.com"
+export KEYCLOAK_REALM="myrealm"
+
+# Optional: explicit overrides
+# export MCP_OAUTH_ISSUER="https://keycloak.example.com/realms/myrealm"
+# export MCP_OAUTH_CLIENT_ID="enterprise-mcp-bridge"
+# export MCP_OAUTH_SCOPES="openid profile email offline_access"
+
+uvicorn app.server:app --host 0.0.0.0 --port 8000
+```
+
+2. **Add the server to Claude Code's config** (`~/.claude/settings.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "enterprise-bridge": {
+      "url": "https://bridge.example.com/sse"
+    }
+  }
+}
+```
+
+Claude Code will:
+- Connect to `GET /sse` and get a 401 (if auth is configured)
+- Discover `/.well-known/oauth-protected-resource` → finds the authorization server
+- Discover `/.well-known/oauth-authorization-server` → gets token/auth endpoints
+- Perform the OAuth authorization code flow with PKCE
+- Reconnect to `/sse` with a valid bearer token
+- Use all MCP tools/prompts/resources through the standard protocol
+
+3. **Without OAuth** (e.g., local development behind a VPN):
+
+If you don't need auth, just point the client at the bare URL. No OAuth variables needed:
+
+```json
+{
+  "mcpServers": {
+    "enterprise-bridge": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+### Connecting VS Code (GitHub Copilot)
+
+Add to `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "enterprise-bridge": {
+      "type": "sse",
+      "url": "https://bridge.example.com/sse"
+    }
+  }
+}
+```
+
+### Connecting Cursor
+
+Add to Cursor's MCP settings (Settings → MCP Servers → Add):
+
+```json
+{
+  "mcpServers": {
+    "enterprise-bridge": {
+      "url": "https://bridge.example.com/sse"
+    }
+  }
+}
+```
+
+### Group scoping
+
+Pass a `group` query parameter to scope the session to a specific data group:
+
+```json
+{
+  "mcpServers": {
+    "enterprise-bridge": {
+      "url": "https://bridge.example.com/sse?group=my-team"
+    }
+  }
+}
+```
+
+### Using with `MCP_BASE_PATH`
+
+When the bridge is deployed behind a reverse proxy with a path prefix, both the SSE endpoint and the message channel respect `MCP_BASE_PATH`:
+
+```bash
+export MCP_BASE_PATH="/api/mcp"
+```
+
+Clients should then connect to:
+```
+https://bridge.example.com/api/mcp/sse
+```
+
+### Keycloak Integration
+
+The bridge integrates with Keycloak in two distinct ways depending on how it is
+deployed. Choose the section that matches your setup.
+
+---
+
+#### Scenario A: Embedded in a Kubernetes application (recommended)
+
+This is the standard production setup. The bridge runs as an in-cluster service
+behind an application that already handles user authentication via Keycloak. A
+proxy layer (e.g. [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/),
+an OIDC-aware ingress) sits in front of the bridge and injects the authenticated
+user's token into every request as a header. The bridge reads that header — no
+OAuth client or PKCE flow needed inside the bridge itself.
+
+```
+User's browser / app frontend
+        │  already authenticated via Keycloak
+        ▼
+ Ingress / oauth2-proxy
+        │  validates session, injects X-Auth-Request-Access-Token header
+        ▼
+ enterprise-mcp-bridge  (reads header, optionally exchanges for downstream token)
+        ▼
+ Downstream MCP server
+```
+
+**Keycloak setup:** none required beyond what your application already has.
+The bridge does not initiate any OAuth flows.
+
+**Bridge environment variables:**
+
+```bash
+# ── How the user token arrives at the bridge ─────────────────────────
+export TOKEN_SOURCE="header"                        # or "cookie"
+export TOKEN_NAME="X-Auth-Request-Access-Token"     # injected by oauth2-proxy
+# export TOKEN_COOKIE_NAME="_oauth2_proxy"          # if using cookie mode
+
+# ── (Optional) Exchange user token for a downstream service token ─────
+# If MCP tools need to call third-party APIs on behalf of the user,
+# configure Keycloak broker token exchange:
+export AUTH_BASE_URL="https://keycloak.example.com"
+export KEYCLOAK_REALM="myrealm"
+export KEYCLOAK_PROVIDER_ALIAS="github"             # IDP alias in Keycloak
+export KEYCLOAK_PROVIDER_REFRESH_MODE="broker"      # or "oidc"
+
+# ── MCP server to proxy ──────────────────────────────────────────────
+export MCP_SERVER_COMMAND="python mcp/server.py"
+# or: export MCP_REMOTE_SERVER="https://remote-mcp.example.com/"
+```
+
+When `KEYCLOAK_PROVIDER_ALIAS` is set, the bridge calls Keycloak's broker
+endpoint (`/realms/{realm}/broker/{alias}/token`) on each tool call that
+requires an `oauth_token`, exchanging the user's Keycloak JWT for a stored
+downstream provider token (GitHub, Microsoft 365, etc.).
+
+To enable token storage in Keycloak for a given Identity Provider:
+
+```
+Keycloak Admin → Identity Providers → <your provider>
+  → Enable "Store tokens"
+
+  Mappers → Add mapper:
+    Name:  Store Token
+    Type:  Hardcoded Attribute
+```
+
+---
+
+#### Scenario B: Direct external MCP client access
+
+Use this when MCP clients (Claude Code, Cursor, VS Code Copilot) connect
+**directly** to the bridge from outside the cluster — i.e. the bridge is the
+public-facing endpoint and there is no proxy handling auth upstream of it.
+
+In this case the MCP client must obtain a Keycloak token itself using the
+OAuth 2.0 Authorization Code + PKCE flow. The bridge's `/.well-known/` endpoints
+advertise where to do that.
+
+```
+MCP Client (Claude Code, Cursor, …)
+   │ 1. GET /.well-known/oauth-protected-resource  → discovers Keycloak
+   │ 2. PKCE Authorization Code flow with Keycloak → gets access token
+   │ 3. GET /sse  (Authorization: Bearer <token>)
+   ▼
+ Ingress / oauth2-proxy          ← must accept bearer tokens directly
+   │ validates JWT, injects X-Auth-Request-Access-Token
+   ▼
+ enterprise-mcp-bridge
+```
+
+> **Important:** The ingress / oauth2-proxy in front of the bridge must be
+> configured to accept Bearer tokens (not just session cookies), otherwise it
+> will redirect the MCP client to the Keycloak login page, breaking the SSE
+> connection. With oauth2-proxy, set `--skip-jwt-bearer-tokens=true` and
+> `--oidc-issuer-url=https://keycloak.example.com/realms/myrealm`.
+
+##### 1. Create (or reuse) a Keycloak realm
+
+```
+Keycloak Admin → Realm Settings → Create Realm
+  Name: myrealm
+```
+
+##### 2. Create a public OAuth client
+
+MCP clients run on the user's machine and cannot keep a client secret, so the
+client must be **public** (no `client_secret`). PKCE provides the security instead.
+
+```
+Keycloak Admin → Clients → Create Client
+
+  Client ID:      enterprise-mcp-bridge
+  Client type:    OpenID Connect
+  Authentication: OFF            ← makes it a "public" client
+
+  Valid Redirect URIs:
+    http://localhost/*            ← for local development / CLI clients
+    http://127.0.0.1/*           ← alternative localhost
+    https://bridge.example.com/* ← production callback (if used)
+
+  Web Origins:
+    +                            ← or list your allowed origins
+
+  Advanced → Proof Key for Code Exchange:
+    S256                         ← required by MCP clients
+```
+
+> **Tip:** Enable the *clients-registrations* endpoint on the realm if you want
+> MCP clients to register themselves dynamically. Otherwise all clients share the
+> same pre-configured `client_id`.
+
+##### 3. Configure scopes
+
+| Scope | Purpose |
+|---|---|
+| `openid` | Standard OIDC identity |
+| `profile` | User's display name |
+| `email` | User's email (used for group access resolution) |
+| `offline_access` | *(optional)* Enables refresh tokens for long-lived sessions |
+
+In Keycloak: **Clients → enterprise-mcp-bridge → Client Scopes → Add client scope**.
+
+##### 4. Bridge environment variables
+
+```bash
+# ── Keycloak connection (drives /.well-known/* discovery) ────────────
+export AUTH_BASE_URL="https://keycloak.example.com"
+export KEYCLOAK_REALM="myrealm"
+
+# ── OAuth discovery metadata ─────────────────────────────────────────
+# AUTH_BASE_URL + KEYCLOAK_REALM are usually enough; override if needed:
+# export MCP_OAUTH_ISSUER="https://keycloak.example.com/realms/myrealm"
+export MCP_OAUTH_CLIENT_ID="enterprise-mcp-bridge"
+export MCP_OAUTH_SCOPES="openid profile email"
+
+# ── How the injected token arrives at the bridge ─────────────────────
+export TOKEN_SOURCE="header"
+export TOKEN_NAME="X-Auth-Request-Access-Token"
+
+# ── (Optional) Downstream token exchange — same as Scenario A ────────
+# export KEYCLOAK_PROVIDER_ALIAS="github"
+# export KEYCLOAK_PROVIDER_REFRESH_MODE="broker"
+
+# ── MCP server to proxy ──────────────────────────────────────────────
+export MCP_SERVER_COMMAND="python mcp/server.py"
+
+uvicorn app.server:app --host 0.0.0.0 --port 8000
+```
+
+##### 5. Verify the discovery endpoints
+
+```bash
+# Protected resource metadata — points clients at your Keycloak realm
+curl -s http://localhost:8000/.well-known/oauth-protected-resource | jq .
+# {
+#   "resource": "http://localhost:8000",
+#   "authorization_servers": ["https://keycloak.example.com/realms/myrealm"],
+#   "scopes_supported": ["openid", "profile", "email"],
+#   "bearer_methods_supported": ["header"]
+# }
+
+# Authorization server metadata — tells clients where to get tokens
+curl -s http://localhost:8000/.well-known/oauth-authorization-server | jq .
+# {
+#   "issuer": "https://keycloak.example.com/realms/myrealm",
+#   "authorization_endpoint": "…/protocol/openid-connect/auth",
+#   "token_endpoint": "…/protocol/openid-connect/token",
+#   "code_challenge_methods_supported": ["S256"],
+#   …
+# }
+```
+
+##### 6. Connect your MCP client
+
+```json
+{
+  "mcpServers": {
+    "enterprise-bridge": {
+      "url": "https://bridge.example.com/sse"
+    }
+  }
+}
+```
+
+On first connection the client will:
+
+1. `GET /sse` → 401 Unauthorized
+2. `GET /.well-known/oauth-protected-resource` → discovers Keycloak as the auth server
+3. `GET /.well-known/oauth-authorization-server` → gets the `/auth` and `/token` URLs
+4. Opens a browser for the user to log in to Keycloak
+5. Exchanges the authorization code (with PKCE) for tokens
+6. Reconnects to `GET /sse` with `Authorization: Bearer <token>`
+7. Full MCP session is active — tools, prompts, resources all work
+
+##### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Client gets 404 on `/.well-known/*` | `AUTH_BASE_URL` or `KEYCLOAK_REALM` not set | Set both or set `MCP_OAUTH_ISSUER` explicitly |
+| Ingress redirects client to login page | oauth2-proxy not accepting bearer tokens | Add `--skip-jwt-bearer-tokens=true` to oauth2-proxy |
+| Client gets "invalid redirect URI" | Keycloak client missing the redirect URI the MCP client uses | Add `http://localhost/*` and `http://127.0.0.1/*` to Valid Redirect URIs |
+| `PKCE challenge method not supported` | Keycloak client not configured for S256 | Enable PKCE S256 in client Advanced settings |
+| Token exchange returns empty | Provider alias mismatch or "Store tokens" not enabled | Verify `KEYCLOAK_PROVIDER_ALIAS` matches and token storage is on |
+| "User is logged out" errors | Keycloak token expired and refresh failed | Check `offline_access` scope; verify `KEYCLOAK_PROVIDER_REFRESH_MODE` |
 
 ## Progress Streaming (SSE)
 
