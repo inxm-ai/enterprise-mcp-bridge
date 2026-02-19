@@ -4,9 +4,74 @@ Understanding the design and architecture of the Enterprise MCP Bridge.
 
 ## System Architecture
 
-![Architecture Diagram](../architecture.png)
-
 The Enterprise MCP Bridge sits between REST API clients and Model Context Protocol (MCP) servers, providing enterprise-grade features for production deployments.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            REST API Clients                              │
+│                    (Browser, CLI, Apps, Services)                        │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             │ HTTP/JSON
+                             ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     ENTERPRISE MCP BRIDGE                                │
+│                                                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │              FastAPI Application Layer                          │    │
+│  │  • REST Endpoints  • OpenAPI Docs  • CORS  • Middleware        │    │
+│  └────────────────────────┬────────────────────────────────────────┘    │
+│                           │                                              │
+│  ┌────────────────────────┴────────────────────────────────────────┐    │
+│  │         OAuth & Authentication Layer (Optional)                 │    │
+│  │  • Token Validation  • Token Exchange  • Group Extraction       │    │
+│  │  • Token Refresh     • Token Injection into MCP calls          │    │
+│  └────────────────────────┬────────────────────────────────────────┘    │
+│                           │                                              │
+│  ┌────────────────────────┴────────────────────────────────────────┐    │
+│  │              Session Management Layer                           │    │
+│  │  • Session Creation/Lifecycle  • Multi-tenancy Isolation        │    │
+│  │  • Pluggable Backend (Memory/Redis)  • Auto-cleanup            │    │
+│  └────────────────┬────────────────────────────────────────────────┘    │
+│                   │                                                      │
+│  ┌────────────────┴─────────────────────────────────────────────────┐   │
+│  │              Tool Routing & Discovery Layer                      │   │
+│  │  • Auto-discovery  • Endpoint Generation  • Schema Mapping      │   │
+│  │  • Parameter Validation  • Response Transformation             │   │
+│  └────────────────┬─────────────────────────────────────────────────┘   │
+│                   │                                                      │
+│  ┌────────────────┴─────────────────────────────────────────────────┐   │
+│  │              MCP Server Manager                                  │   │
+│  │  • Process Spawning  • stdio Communication  • Error Recovery    │   │
+│  │  • Resource Limits   • Protocol Handling                        │   │
+│  └────────────────┬─────────────────────────────────────────────────┘   │
+│                   │ MCP Protocol (stdio)                                 │
+└───────────────────┼──────────────────────────────────────────────────────┘
+                    │
+        ┌───────────┴───────────┐
+        ↓                       ↓
+┌───────────────────┐   ┌───────────────────┐
+│   MCP Server      │   │   MCP Server      │
+│   (Process 1)     │   │   (Process 2)     │
+│                   │   │                   │
+│  • User A Session │   │  • User B Session │
+│  • Isolated Data  │   │  • Isolated Data  │
+└───────────────────┘   └───────────────────┘
+
+Additional Features:
+┌─────────────────────────────────────────────────────────────────────────┐
+│  UI Generation (AI-Powered)          Workflow Engine                    │
+│  • LLM-based HTML/JS generation      • Multi-agent orchestration        │
+│  • pfusch components                 • Conditional routing              │
+│  • User/group scoped apps            • State management                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+External Integrations:
+┌─────────────────┐   ┌──────────────────┐   ┌─────────────────────┐
+│  OAuth Provider │   │  Session Store   │   │  External APIs      │
+│  (Keycloak/     │   │  (Redis/         │   │  (GitHub/M365/      │
+│   Entra ID)     │   │   Memory)        │   │   Atlassian)        │
+└─────────────────┘   └──────────────────┘   └─────────────────────┘
+```
 
 ## Core Components
 
