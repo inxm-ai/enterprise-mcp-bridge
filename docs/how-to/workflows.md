@@ -599,12 +599,12 @@ When an agent's reroute configuration includes both `on` and `ask`:
 ```json
 {
   "agent": "find_plan",
-  "description": "Search for existing deployment plans. When you find a match, emit <reroute>PLAN_FOUND</reroute>",
+  "description": "Search for existing deployment plans matching the user's requirements",
   "reroute": [
     {
       "on": ["PLAN_FOUND"],
       "ask": {
-        "question": "Present the deployment plan and ask whether to proceed or search for alternatives.",
+        "question": "I found a deployment plan that matches your requirements. Would you like to proceed with this plan, continue searching for alternatives, or abort the workflow?",
         "expected_responses": [
           {
             "choose_plan": {
@@ -630,6 +630,8 @@ When an agent's reroute configuration includes both `on` and `ask`:
   ]
 }
 ```
+
+> **Note**: The agent should emit `<reroute>PLAN_FOUND</reroute>` when it successfully finds a matching plan. This triggers the conditional routing behavior defined above.
 
 #### Agent Response
 
