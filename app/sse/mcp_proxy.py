@@ -13,6 +13,7 @@ POST {base}/sse/messages     — JSON-RPC message channel
 """
 
 import logging
+import time
 from typing import Optional
 
 from starlette.requests import Request
@@ -22,7 +23,9 @@ from starlette.routing import Route
 from mcp import types
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
+from mcp.server.lowlevel.server import request_ctx as lowlevel_request_ctx
 
+from app.elicitation import ElicitationRequiredError, get_elicitation_coordinator
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.session import mcp_session
 from app.session_manager.session_context import (
@@ -78,9 +81,11 @@ def _build_proxy_server(
     downstream,
     access_token: Optional[str],
     incoming_headers: Optional[dict[str, str]],
+    session_key: Optional[str],
 ) -> Server:
     """Create an MCP Server whose handlers proxy to *downstream*."""
     proxy = Server(SERVICE_NAME)
+    coordinator = get_elicitation_coordinator()
 
     @proxy.list_tools()
     async def _list_tools() -> list[types.Tool]:
@@ -94,7 +99,27 @@ def _build_proxy_server(
             tools, name, arguments, access_token
         )
         args = inject_headers_into_args(tools, name, args, incoming_headers)
-        return await downstream.call_tool(name, args)
+        for _ in range(3):
+            try:
+                return await downstream.call_tool(name, args)
+            except ElicitationRequiredError as exc:
+                if not session_key:
+                    raise
+                ctx = lowlevel_request_ctx.get(None)
+                if not ctx or not getattr(ctx, "session", None):
+                    raise
+                client_result = await ctx.session.elicit(
+                    message=str(exc.payload.get("message") or ""),
+                    requestedSchema=exc.payload.get("requestedSchema") or {},
+                )
+                coordinator.submit_response(
+                    session_key,
+                    {
+                        "action": client_result.action,
+                        "content": client_result.content,
+                    },
+                )
+        raise RuntimeError("Elicitation retry limit exceeded for proxied tool call")
 
     @proxy.list_prompts()
     async def _list_prompts() -> list[types.Prompt]:
@@ -162,6 +187,7 @@ class _SSEConnectionApp:
         logger.info(f"[MCP-SSE] New SSE connection. Group: {group}")
 
         try:
+            session_key = f"sse-proxy:{time.time_ns()}"
             async with sse_transport.connect_sse(scope, receive, send) as (
                 read_stream,
                 write_stream,
@@ -170,9 +196,10 @@ class _SSEConnectionApp:
                     access_token=access_token,
                     requested_group=group,
                     incoming_headers=incoming_headers,
+                    session_key=session_key,
                 ) as downstream:
                     proxy = _build_proxy_server(
-                        downstream, access_token, incoming_headers
+                        downstream, access_token, incoming_headers, session_key
                     )
                     await proxy.run(
                         read_stream,

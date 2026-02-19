@@ -10,6 +10,7 @@ import json
 import pytest
 from typing import Any, Dict, List, Optional
 
+from app.elicitation import ElicitationRequiredError
 from app.sse.streaming import (
     SSEEvent,
     SSEEventType,
@@ -258,9 +259,43 @@ class TestStreamToolCall:
             json_str = event_str[6:-2]
             events_received.append(json.loads(json_str))
 
-        # Should only have the result event
+    @pytest.mark.asyncio
+    async def test_tool_call_feedback_required_event(self):
+        events_received: List[Dict[str, Any]] = []
+
+        async def mock_call_tool_feedback(
+            tool_name: str,
+            args: Dict,
+            access_token: Optional[str],
+            progress_callback,
+            log_callback,
+        ):
+            raise ElicitationRequiredError(
+                {
+                    "message": "Pick one",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"choice": {"type": "string"}},
+                        "required": ["choice"],
+                        "additionalProperties": False,
+                    },
+                    "meta": {},
+                },
+                session_key="sess-1",
+                requires_session=False,
+            )
+
+        async for event_str in stream_tool_call(
+            mock_call_tool_feedback, "needs_feedback_tool", {}, None
+        ):
+            json_str = event_str[6:-2]
+            events_received.append(json.loads(json_str))
+
         assert len(events_received) == 1
-        assert events_received[0]["type"] == "result"
+        assert events_received[0]["type"] == "feedback_required"
+        assert events_received[0]["data"]["awaiting_feedback"] is True
+        assert events_received[0]["data"]["elicitation"]["message"] == "Pick one"
+        assert events_received[0]["data"]["resume_token"] == "sess-1"
 
     @pytest.mark.asyncio
     async def test_arguments_passed_correctly(self):

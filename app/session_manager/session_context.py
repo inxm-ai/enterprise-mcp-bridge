@@ -8,6 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from app.session import mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
 from app.session_manager.session_manager import SessionManagerBase
@@ -534,6 +535,19 @@ async def mcp_session_context(
             result = await mcp_task.request(
                 {"action": "run_tool", "tool_name": tool_name, "args": decorated_args}
             )
+            if isinstance(result, dict):
+                if result.get("error") == "feedback_required":
+                    raise ElicitationRequiredError(
+                        result.get("elicitation") or {},
+                        session_key=result.get("resume_token"),
+                        requires_session=bool(result.get("requires_session")),
+                    )
+                if result.get("error") == "invalid_feedback":
+                    raise InvalidUserFeedbackError(
+                        str(result.get("detail") or "Invalid user feedback."),
+                        session_key=x_inxm_mcp_session,
+                        payload=result.get("elicitation") or {},
+                    )
             return RunToolsResult(result)
 
         async def call_tool_with_progress(
@@ -564,18 +578,29 @@ async def mcp_session_context(
             decorated_args = inject_headers_into_args(
                 tools, tool_name, decorated_args, incoming_headers
             )
-
-            return RunToolsResult(
-                await mcp_task.request(
-                    {
-                        "action": "run_tool_with_progress",
-                        "tool_name": tool_name,
-                        "args": decorated_args,
-                        "progress_callback": progress_callback,
-                        "log_callback": log_callback,
-                    }
-                )
+            result = await mcp_task.request(
+                {
+                    "action": "run_tool_with_progress",
+                    "tool_name": tool_name,
+                    "args": decorated_args,
+                    "progress_callback": progress_callback,
+                    "log_callback": log_callback,
+                }
             )
+            if isinstance(result, dict):
+                if result.get("error") == "feedback_required":
+                    raise ElicitationRequiredError(
+                        result.get("elicitation") or {},
+                        session_key=result.get("resume_token"),
+                        requires_session=bool(result.get("requires_session")),
+                    )
+                if result.get("error") == "invalid_feedback":
+                    raise InvalidUserFeedbackError(
+                        str(result.get("detail") or "Invalid user feedback."),
+                        session_key=x_inxm_mcp_session,
+                        payload=result.get("elicitation") or {},
+                    )
+            return RunToolsResult(result)
 
         async def list_prompts(self):
             async def request():

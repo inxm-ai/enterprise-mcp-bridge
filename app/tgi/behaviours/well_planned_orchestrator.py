@@ -1021,6 +1021,11 @@ class WellPlannedOrchestrator:
         cleaned = self._strip_tool_call_blocks(self._strip_think_tags(text), tool_names)
         tag_content = self._extract_tag_content(cleaned, "user_feedback_needed")
         if tag_content:
+            parsed = self._try_parse_json(tag_content)
+            if isinstance(parsed, dict):
+                message = parsed.get("message") or parsed.get("question")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
             return tag_content
         if self._looks_like_question(cleaned):
             return cleaned.strip()
@@ -1132,7 +1137,7 @@ class WellPlannedOrchestrator:
             return None
 
         if isinstance(result, dict):
-            for key in ("user_feedback_needed", "question", "needed_info"):
+            for key in ("user_feedback_needed", "message", "question", "needed_info"):
                 val = result.get(key)
                 if isinstance(val, str) and val.strip():
                     return val.strip()

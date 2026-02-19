@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 from mcp import StdioServerParameters
 
+from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from ..utils.exception_logging import log_exception_with_details
 from .client_strategy import (
     MCPClientStrategy,
@@ -46,6 +47,7 @@ async def mcp_session(
     requested_group: Optional[str] = None,
     anon: bool = False,
     incoming_headers: Optional[dict[str, str]] = None,
+    session_key: Optional[str] = None,
 ):
     if isinstance(strategy_or_params, MCPClientStrategy):
         strategy = strategy_or_params
@@ -57,6 +59,7 @@ async def mcp_session(
             requested_group=requested_group,
             anon=anon,
             incoming_headers=incoming_headers,
+            session_key=session_key,
         )
     else:  # pragma: no cover - defensive branch
         raise TypeError("Unsupported strategy configuration for mcp_session")
@@ -246,6 +249,16 @@ class MCPLocalSessionTask(MCPSessionBase):
 
                             result = await call_fn(tool_name, args, **call_kwargs)
                             await self.response_queue.put(result)
+                        except ElicitationRequiredError as exc:
+                            await self.response_queue.put(exc.to_client_payload())
+                        except InvalidUserFeedbackError as exc:
+                            await self.response_queue.put(
+                                {
+                                    "error": "invalid_feedback",
+                                    "detail": str(exc),
+                                    "elicitation": exc.payload,
+                                }
+                            )
                         except Exception as e:
                             log_exception_with_details(
                                 logger, "[MCPLocalSessionTask]", e
@@ -260,6 +273,16 @@ class MCPLocalSessionTask(MCPSessionBase):
                         try:
                             result = await session.call_tool(tool_name, args)
                             await self.response_queue.put(result)
+                        except ElicitationRequiredError as exc:
+                            await self.response_queue.put(exc.to_client_payload())
+                        except InvalidUserFeedbackError as exc:
+                            await self.response_queue.put(
+                                {
+                                    "error": "invalid_feedback",
+                                    "detail": str(exc),
+                                    "elicitation": exc.payload,
+                                }
+                            )
                         except Exception as e:
                             # Handle TaskGroup exceptions with multiple sub-exceptions
                             log_exception_with_details(

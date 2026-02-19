@@ -15,6 +15,12 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.sse import sse_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+    get_elicitation_coordinator,
+)
 from app.mcp_server.server_params import get_server_params
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
 from app.utils import mask_token
@@ -62,6 +68,33 @@ async def _log_mcp_notification(
     log_fn(f"[MCP][{logger_name}][{params.level.upper()}] {message}")
 
 
+def _make_elicitation_callback(session_key: Optional[str]):
+    coordinator = get_elicitation_coordinator()
+
+    async def _elicitation_callback(_context, params: types.ElicitRequestParams):
+        raw_payload = {
+            "message": params.message,
+            "requestedSchema": dict(params.requestedSchema or {}),
+            "meta": dict(params.meta or {}),
+        }
+        try:
+            response = coordinator.resolve_or_raise(
+                session_key=session_key, payload=raw_payload
+            )
+        except (
+            ElicitationRequiredError,
+            InvalidUserFeedbackError,
+            UnsupportedElicitationSchemaError,
+        ):
+            raise
+        return types.ElicitResult(
+            action=response.get("action") or "accept",
+            content=response.get("content"),
+        )
+
+    return _elicitation_callback
+
+
 class MCPClientStrategy(ABC):
     """Strategy interface for establishing MCP client sessions."""
 
@@ -75,8 +108,11 @@ class MCPClientStrategy(ABC):
 class LocalMCPClientStrategy(MCPClientStrategy):
     """Run MCP server as a local process via stdio."""
 
-    def __init__(self, server_params: StdioServerParameters):
+    def __init__(
+        self, server_params: StdioServerParameters, *, session_key: Optional[str] = None
+    ):
         self.server_params = server_params
+        self.session_key = session_key
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
@@ -98,7 +134,10 @@ class LocalMCPClientStrategy(MCPClientStrategy):
                 write,
             ):
                 async with ClientSession(
-                    read, write, logging_callback=_log_mcp_notification
+                    read,
+                    write,
+                    logging_callback=_log_mcp_notification,
+                    elicitation_callback=_make_elicitation_callback(self.session_key),
                 ) as session:
                     await session.initialize()
                     yield session
@@ -144,11 +183,13 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         requested_group: Optional[str],
         anon: bool,
         incoming_headers: Optional[dict[str, str]] = None,
+        session_key: Optional[str] = None,
     ) -> None:
         self.url = url
         self.access_token = access_token
         self.requested_group = requested_group
         self.anon = anon
+        self.session_key = session_key
         self.incoming_headers = incoming_headers or {}
         self.headers: dict[str, str] = {}
         self._auth_provider: Optional[OAuthClientProvider] = None
@@ -369,7 +410,12 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 )
 
             session = await stack.enter_async_context(
-                ClientSession(read, write, logging_callback=_log_mcp_notification)
+                ClientSession(
+                    read,
+                    write,
+                    logging_callback=_log_mcp_notification,
+                    elicitation_callback=_make_elicitation_callback(self.session_key),
+                )
             )
             try:
                 await session.initialize()
@@ -404,6 +450,7 @@ def build_mcp_client_strategy(
     requested_group: Optional[str],
     anon: bool = False,
     incoming_headers: Optional[dict[str, str]] = None,
+    session_key: Optional[str] = None,
 ) -> MCPClientStrategy:
     remote_server = (MCP_REMOTE_SERVER or "").strip()
     if remote_server:
@@ -422,6 +469,7 @@ def build_mcp_client_strategy(
             requested_group=requested_group,
             anon=anon,
             incoming_headers=incoming_headers,
+            session_key=session_key,
         )
 
     server_params = get_server_params(
@@ -429,4 +477,4 @@ def build_mcp_client_strategy(
         requested_group=requested_group,
         anon=anon,
     )
-    return LocalMCPClientStrategy(server_params)
+    return LocalMCPClientStrategy(server_params, session_key=session_key)

@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional
 
+from app.elicitation import canonicalize_elicitation_payload, parse_user_feedback_tag
 from app.oauth.user_info import UserInfoExtractor
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
@@ -1420,9 +1421,13 @@ class WorkflowEngine:
                 )
                 feedback_block = self._format_feedback_block(resolved_payload)
                 agent_context["feedback_prompt"] = (
-                    resolved_payload.get("question") or cleaned_content
+                    resolved_payload.get("message") or cleaned_content
                 )
-                agent_context["feedback_spec"] = resolved_payload
+                agent_context["elicitation_spec"] = resolved_payload
+                agent_context["elicitation_choices"] = feedback_choices
+                agent_context["feedback_spec"] = self._legacy_feedback_spec_view(
+                    resolved_payload
+                )
                 agent_context["feedback_choices"] = feedback_choices
                 agent_context["awaiting_feedback"] = True
                 agent_context["completed"] = False
@@ -1437,16 +1442,33 @@ class WorkflowEngine:
                 return
             if cleaned_content:
                 agent_context["feedback_prompt"] = cleaned_content
+            fallback_payload = canonicalize_elicitation_payload(
+                {
+                    "message": cleaned_content or "Please provide feedback.",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"response": {"type": "string"}},
+                        "required": ["response"],
+                        "additionalProperties": False,
+                    },
+                    "meta": {},
+                }
+            )
+            feedback_block = self._format_feedback_block(fallback_payload)
+            agent_context["elicitation_spec"] = fallback_payload
+            agent_context["feedback_spec"] = self._legacy_feedback_spec_view(
+                fallback_payload
+            )
             agent_context["awaiting_feedback"] = True
             agent_context["completed"] = False
             self._set_awaiting_feedback(state)
             self.state_store.save_state(state)
             yield self._record_event(
                 state,
-                "User feedback needed before continuing.",
+                feedback_block,
                 status="waiting_for_feedback",
             )
-            yield {"status": "feedback", "content": cleaned_content}
+            yield {"status": "feedback", "content": feedback_block}
             return
         agent_context.pop("awaiting_feedback", None)
 
@@ -1469,8 +1491,14 @@ class WorkflowEngine:
                     question, choices, agent_context, state.context
                 )
                 feedback_block = self._format_feedback_block(feedback_payload)
-                agent_context["feedback_prompt"] = question
-                agent_context["feedback_spec"] = feedback_payload
+                agent_context["feedback_prompt"] = (
+                    feedback_payload.get("message") or question
+                )
+                agent_context["elicitation_spec"] = feedback_payload
+                agent_context["elicitation_choices"] = choices
+                agent_context["feedback_spec"] = self._legacy_feedback_spec_view(
+                    feedback_payload
+                )
                 agent_context["feedback_choices"] = choices
                 agent_context["awaiting_feedback"] = True
                 agent_context["completed"] = False
@@ -2134,10 +2162,45 @@ class WorkflowEngine:
 
     def _format_feedback_block(self, payload: dict[str, Any]) -> str:
         try:
-            serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            canonical = canonicalize_elicitation_payload(payload)
+            serialized = json.dumps(
+                canonical, ensure_ascii=False, separators=(",", ":")
+            )
         except Exception:
-            serialized = json.dumps({"question": payload.get("question") or ""})
+            serialized = json.dumps({"message": payload.get("message") or ""})
         return f"<user_feedback_needed>{serialized}</user_feedback_needed>"
+
+    def _feedback_expected_entries(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        expected = payload.get("expected_responses")
+        if isinstance(expected, list):
+            return expected
+        meta = payload.get("meta") or {}
+        if not isinstance(meta, dict):
+            return []
+        expected = meta.get("expected_responses")
+        if isinstance(expected, list):
+            return expected
+        return []
+
+    def _legacy_feedback_spec_view(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Keep legacy state readers working while canonical payload is the source of truth.
+        legacy = dict(payload or {})
+        if "question" not in legacy:
+            legacy["question"] = payload.get("message") or ""
+        if "expected_responses" not in legacy:
+            legacy["expected_responses"] = self._feedback_expected_entries(payload)
+        return legacy
+
+    def _set_feedback_expected_entries(
+        self, payload: dict[str, Any], expected: list[dict[str, Any]]
+    ) -> None:
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["expected_responses"] = expected
+        payload["meta"] = meta
 
     def _resolve_feedback_each_value(
         self,
@@ -2191,14 +2254,14 @@ class WorkflowEngine:
         except Exception:
             return None
         if isinstance(parsed, dict):
-            return parsed
+            return canonicalize_elicitation_payload(parsed)
         return None
 
     def _build_feedback_choices_from_payload(
         self, payload: dict[str, Any]
     ) -> list[dict[str, Any]]:
         choices: list[dict[str, Any]] = []
-        expected = payload.get("expected_responses") or []
+        expected = self._feedback_expected_entries(payload)
         if not isinstance(expected, list):
             return choices
         for entry in expected:
@@ -2231,7 +2294,7 @@ class WorkflowEngine:
         agent_context: dict[str, Any],
         shared_context: dict[str, Any],
     ) -> dict[str, Any]:
-        expected = payload.get("expected_responses")
+        expected = self._feedback_expected_entries(payload)
         if not isinstance(expected, list):
             return payload
         for entry in expected:
@@ -2251,6 +2314,7 @@ class WorkflowEngine:
             entry["with"] = self._resolve_external_with_values(
                 fields, agent_context, shared_context
             )
+        self._set_feedback_expected_entries(payload, expected)
         return payload
 
     def _normalize_feedback_option(self, item: Any) -> Optional[tuple[str, str]]:
@@ -2369,7 +2433,43 @@ class WorkflowEngine:
                     continue
                 entry[key] = value
             expected_responses.append(entry)
-        return {"question": question, "expected_responses": expected_responses}
+        selection_ids = [
+            str(entry.get("id"))
+            for entry in expected_responses
+            if isinstance(entry.get("id"), str)
+        ]
+        requested_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        if selection_ids:
+            requested_schema["properties"] = {
+                "selection": {
+                    "type": "string",
+                    "enum": selection_ids,
+                    "description": "Selected response id.",
+                },
+                "value": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "null"},
+                    ]
+                },
+            }
+            requested_schema["required"] = ["selection"]
+        else:
+            requested_schema["properties"] = {
+                "response": {"type": "string"},
+            }
+            requested_schema["required"] = ["response"]
+        return {
+            "message": question,
+            "requestedSchema": requested_schema,
+            "meta": {"expected_responses": expected_responses},
+        }
 
     def _is_external_reroute_target(self, target: Optional[str]) -> bool:
         if not target:
@@ -3120,6 +3220,8 @@ class WorkflowEngine:
             ctx.pop("reroute_reason", None)
             ctx.pop("reroute_start_with", None)
             ctx.pop("feedback_prompt", None)
+            ctx.pop("elicitation_spec", None)
+            ctx.pop("elicitation_choices", None)
             ctx.pop("feedback_spec", None)
             ctx.pop("feedback_choices", None)
             ctx.pop("tool_errors", None)
@@ -3703,17 +3805,33 @@ class WorkflowEngine:
                     feedback_tag, agent_entry, state.context
                 )
             if feedback_action:
-                agent_entry["feedback_selection"] = feedback_tag
-                agent_entry["pending_user_reroute"] = feedback_action
-                agent_entry.pop("awaiting_feedback", None)
-                agent_entry["completed"] = False
-                agent_entry["had_feedback"] = True
-                # Ensure the feedback-processing path runs before other agents
-                state.context["_resume_agent"] = state.current_agent
-                logger.info(
-                    "[WorkflowEngine._merge_feedback] Agent '%s' received structured feedback selection",
-                    state.current_agent,
-                )
+                if feedback_action.get("action") in {"decline", "cancel"}:
+                    agent_entry["feedback_selection"] = feedback_tag
+                    agent_entry["feedback_response"] = {
+                        "action": feedback_action.get("action"),
+                        "content": None,
+                    }
+                    agent_entry.pop("awaiting_feedback", None)
+                    agent_entry["had_feedback"] = True
+                    agent_entry["completed"] = True
+                    agent_entry["skip_feedback_rerun"] = True
+                    logger.info(
+                        "[WorkflowEngine._merge_feedback] Agent '%s' received '%s' feedback",
+                        state.current_agent,
+                        feedback_action.get("action"),
+                    )
+                else:
+                    agent_entry["feedback_selection"] = feedback_tag
+                    agent_entry["pending_user_reroute"] = feedback_action
+                    agent_entry.pop("awaiting_feedback", None)
+                    agent_entry["completed"] = False
+                    agent_entry["had_feedback"] = True
+                    # Ensure the feedback-processing path runs before other agents
+                    state.context["_resume_agent"] = state.current_agent
+                    logger.info(
+                        "[WorkflowEngine._merge_feedback] Agent '%s' received structured feedback selection",
+                        state.current_agent,
+                    )
             elif feedback_tag:
                 logger.debug(
                     "[WorkflowEngine._merge_feedback] Structured feedback tag received but no matching choice found for agent '%s'",
@@ -3777,13 +3895,24 @@ class WorkflowEngine:
     def _parse_feedback_action(self, raw: str) -> Optional[dict[str, Any]]:
         if not raw:
             return None
-        text = raw.strip()
+        text = (parse_user_feedback_tag(raw) or raw).strip()
         if not text:
             return None
+        lowered = text.lower()
+        if lowered in {"decline", "reject", "no"}:
+            return {"action": "decline"}
+        if lowered in {"cancel", "dismiss"}:
+            return {"action": "cancel"}
         if text.startswith("{") and text.endswith("}"):
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
+                    action = str(parsed.get("action") or "accept").lower()
+                    if action in {"decline", "cancel"}:
+                        return {"action": action}
+                    content = parsed.get("content")
+                    if isinstance(content, dict):
+                        return {"action": "accept", "content": content}
                     return parsed
             except Exception:
                 pass
@@ -3891,9 +4020,30 @@ class WorkflowEngine:
         action = self._parse_feedback_action(feedback_text)
         if not action:
             return None
-        choices = agent_entry.get("feedback_choices") or []
+        action_type = action.get("action")
+        if action_type in {"decline", "cancel"}:
+            return {"action": action_type}
+
+        if action_type == "accept" and isinstance(action.get("content"), dict):
+            content = action.get("content") or {}
+            if "selection" in content and "to" not in action and "id" not in action:
+                action["to"] = content.get("selection")
+            if "value" in content and "args" not in action:
+                action["args"] = [content.get("value")]
+            if "kwargs" not in action:
+                action["kwargs"] = {
+                    key: value
+                    for key, value in content.items()
+                    if key not in {"selection", "value"}
+                }
+
+        choices = (
+            agent_entry.get("elicitation_choices")
+            or agent_entry.get("feedback_choices")
+            or []
+        )
         if not choices:
-            return None
+            return {"action": "accept", "target": action.get("to")}
         matched_choice: Optional[dict[str, Any]] = None
         raw_to = action.get("to")
         raw_workflow = action.get("workflow")

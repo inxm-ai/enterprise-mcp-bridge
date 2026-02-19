@@ -25,6 +25,13 @@ from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
 )
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+    get_elicitation_coordinator,
+    parse_user_feedback_tag,
+)
 
 from app.tgi.models import ChatCompletionRequest, MessageRole
 from app.tgi.workflows.models import WorkflowExecutionState
@@ -140,6 +147,18 @@ def _extract_last_user_message(
         if getattr(message, "role", None) == MessageRole.USER:
             return getattr(message, "content", None)
     return None
+
+
+def _maybe_submit_pending_user_feedback(
+    session_key: Optional[str], user_message: Optional[str]
+) -> None:
+    if not session_key or not user_message:
+        return
+    parsed = parse_user_feedback_tag(user_message)
+    if not parsed:
+        return
+    coordinator = get_elicitation_coordinator()
+    coordinator.submit_feedback(session_key, parsed)
 
 
 def _is_continue_placeholder(text: Optional[str]) -> bool:
@@ -315,6 +334,9 @@ async def _handle_chat_completion(
     is_streaming = chat_request.stream
     background_requested = _header_truthy(
         request.headers.get("x-inxm-workflow-background")
+    )
+    _maybe_submit_pending_user_feedback(
+        x_inxm_mcp_session, _extract_last_user_message(chat_request.messages)
     )
 
     with traced_request(
@@ -507,6 +529,44 @@ async def _handle_chat_completion(
                 yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
             else:
                 raise permission_exc
+        except* ElicitationRequiredError as exc_group:
+            elicitation_exc = _select_group_exception(
+                exc_group, ElicitationRequiredError
+            )
+            if is_streaming:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        elicitation_exc.to_client_payload(), ensure_ascii=False
+                    )
+                    + "\n\n"
+                )
+            else:
+                raise elicitation_exc
+        except* InvalidUserFeedbackError as exc_group:
+            feedback_exc = _select_group_exception(exc_group, InvalidUserFeedbackError)
+            if is_streaming:
+                payload = {
+                    "error": "invalid_feedback",
+                    "detail": str(feedback_exc),
+                    "elicitation": feedback_exc.payload,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                raise feedback_exc
+        except* UnsupportedElicitationSchemaError as exc_group:
+            schema_exc = _select_group_exception(
+                exc_group, UnsupportedElicitationSchemaError
+            )
+            if is_streaming:
+                payload = {
+                    "error": "unsupported_elicitation_schema",
+                    "detail": str(schema_exc),
+                    "elicitation": schema_exc.payload,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                raise schema_exc
         except* Exception as exc_group:
             first_exc = _select_group_exception(exc_group, Exception)
             logger.error(f"[TGI] Streaming chat error: {first_exc}", exc_info=True)
@@ -608,6 +668,26 @@ async def chat_completions(
 
     except HTTPException as e:
         raise e
+    except ElicitationRequiredError as e:
+        raise HTTPException(status_code=409, detail=e.to_client_payload())
+    except InvalidUserFeedbackError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_feedback",
+                "detail": str(e),
+                "elicitation": e.payload,
+            },
+        )
+    except UnsupportedElicitationSchemaError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_elicitation_schema",
+                "detail": str(e),
+                "elicitation": e.payload,
+            },
+        )
     except PermissionError as e:
         status_code = _permission_status_code(e)
         detail = str(e)

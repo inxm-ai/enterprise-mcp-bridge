@@ -1,6 +1,7 @@
 import logging
 import io
 import json
+import re
 from app.vars import (
     EFFECT_TOOLS,
     MCP_BASE_PATH,
@@ -28,6 +29,12 @@ from app.session import (
 )
 from app.session_manager import mcp_session_context, session_manager
 from app.session_manager.session_context import map_tools
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+    get_elicitation_coordinator,
+)
 from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
@@ -48,6 +55,7 @@ router = APIRouter()
 sessions = session_manager()
 
 logger = logging.getLogger("uvicorn.error")
+_USER_FEEDBACK_KEY_RE = re.compile(r"^_?user_feedback$", re.IGNORECASE)
 
 tracer = trace.get_tracer(__name__)
 
@@ -61,6 +69,22 @@ else:
 def _extract_request_headers(request: Request) -> dict[str, str]:
     """Extract headers from the incoming request as a dictionary."""
     return dict(request.headers)
+
+
+def _pop_user_feedback(args: Optional[dict]) -> tuple[Optional[dict], Optional[str]]:
+    if not isinstance(args, dict):
+        return args, None
+    out = dict(args)
+    feedback = None
+    for key in list(out.keys()):
+        if _USER_FEEDBACK_KEY_RE.match(str(key)):
+            feedback = out.pop(key)
+            break
+    if isinstance(feedback, str):
+        feedback = feedback.strip()
+    if not feedback:
+        feedback = None
+    return out, feedback
 
 
 @router.get("/resources")
@@ -362,6 +386,25 @@ async def run_tool(
         if args and "inxm-session" in args:
             args = dict(args)
             args.pop("inxm-session")
+        args, user_feedback = _pop_user_feedback(args)
+        if user_feedback:
+            if not x_inxm_mcp_session:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "feedback_requires_session",
+                        "detail": "User feedback resume requires a persistent MCP session id.",
+                    },
+                )
+            coordinator = get_elicitation_coordinator()
+            if not coordinator.submit_feedback(x_inxm_mcp_session, user_feedback):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "feedback_not_expected",
+                        "detail": "No pending elicitation found for this session.",
+                    },
+                )
         incoming_headers = _extract_request_headers(request)
         with traced_request(
             tracer=tracer,
@@ -426,6 +469,26 @@ async def run_tool(
             logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
             raise HTTPException(status_code=500, detail=str(result))
         return result
+    except ElicitationRequiredError as e:
+        raise HTTPException(status_code=409, detail=e.to_client_payload())
+    except InvalidUserFeedbackError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_feedback",
+                "detail": str(e),
+                "elicitation": e.payload,
+            },
+        )
+    except UnsupportedElicitationSchemaError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_elicitation_schema",
+                "detail": str(e),
+                "elicitation": e.payload,
+            },
+        )
     except HTTPException as e:
         raise e
     except UserLoggedOutException as e:
@@ -542,7 +605,9 @@ async def start_session(
 
             try:
                 strategy = build_mcp_client_strategy(
-                    access_token=access_token, requested_group=group
+                    access_token=access_token,
+                    requested_group=group,
+                    session_key=x_inxm_mcp_session,
                 )
             except ValueError as exc:
                 logger.error(f"[Session] Invalid MCP configuration: {exc}")

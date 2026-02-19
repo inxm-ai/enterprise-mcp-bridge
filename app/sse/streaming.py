@@ -28,6 +28,12 @@ from typing import Any, AsyncGenerator, Callable, Dict, Optional
 
 from fastapi.responses import StreamingResponse
 
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+)
+
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -38,6 +44,7 @@ class SSEEventType(str, Enum):
     LOG = "log"
     RESULT = "result"
     ERROR = "error"
+    FEEDBACK_REQUIRED = "feedback_required"
 
 
 @dataclass
@@ -125,6 +132,11 @@ class SSEEvent:
         if details is not None:
             error_data["details"] = details
         return cls(type=SSEEventType.ERROR, data=error_data)
+
+    @classmethod
+    def feedback_required_event(cls, payload: dict[str, Any]) -> "SSEEvent":
+        """Create a feedback-required event."""
+        return cls(type=SSEEventType.FEEDBACK_REQUIRED, data=payload)
 
 
 class ProgressNotificationHandler:
@@ -230,6 +242,24 @@ async def stream_tool_call(
                 handler.on_log,  # May not be used by all implementations
             )
             await event_queue.put(SSEEvent.result_event(_serialize_result(result)))
+        except ElicitationRequiredError as e:
+            await event_queue.put(
+                SSEEvent.feedback_required_event(e.to_client_payload())
+            )
+        except InvalidUserFeedbackError as e:
+            await event_queue.put(
+                SSEEvent.error_event(
+                    "Invalid user feedback",
+                    {"detail": str(e), "elicitation": e.payload},
+                )
+            )
+        except UnsupportedElicitationSchemaError as e:
+            await event_queue.put(
+                SSEEvent.error_event(
+                    "Unsupported elicitation schema",
+                    {"detail": str(e), "elicitation": e.payload},
+                )
+            )
         except Exception as e:
             logger.exception(f"[SSE] Error executing tool {tool_name}: {e}")
             await event_queue.put(SSEEvent.error_event(str(e)))

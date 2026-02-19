@@ -11,12 +11,15 @@ Verifies that the SSE proxy correctly:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
+from contextlib import asynccontextmanager
 
 from mcp import types
 
+from app.elicitation import ElicitationRequiredError
 from app.sse.mcp_proxy import (
     _build_proxy_server,
     _extract_access_token,
+    lowlevel_request_ctx,
     get_sse_proxy_routes,
     sse_transport,
     _SSEConnectionApp,
@@ -164,7 +167,10 @@ class TestProxyServerBuilder:
     def test_proxy_has_handlers(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
         # Should have handlers for standard MCP request types
         assert types.ListToolsRequest in proxy.request_handlers
@@ -177,7 +183,10 @@ class TestProxyServerBuilder:
     def test_proxy_server_name(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
         assert proxy.name == "enterprise-mcp-bridge"
 
@@ -185,7 +194,10 @@ class TestProxyServerBuilder:
     async def test_list_tools_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
 
         handler = proxy.request_handlers[types.ListToolsRequest]
@@ -198,7 +210,12 @@ class TestProxyServerBuilder:
     @pytest.mark.asyncio
     async def test_call_tool_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(downstream, access_token="tok", incoming_headers={})
+        proxy = _build_proxy_server(
+            downstream,
+            access_token="tok",
+            incoming_headers={},
+            session_key="sess-1",
+        )
 
         handler = proxy.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
@@ -211,10 +228,72 @@ class TestProxyServerBuilder:
         assert not result.root.isError
 
     @pytest.mark.asyncio
+    async def test_call_tool_round_trips_elicitation(self):
+        downstream = _make_mock_downstream()
+        downstream.call_tool.side_effect = [
+            ElicitationRequiredError(
+                {
+                    "message": "Pick a mode",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"mode": {"type": "string"}},
+                        "required": ["mode"],
+                        "additionalProperties": False,
+                    },
+                    "meta": {},
+                },
+                session_key="sess-1",
+                requires_session=False,
+            ),
+            types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")],
+                isError=False,
+            ),
+        ]
+        proxy = _build_proxy_server(
+            downstream,
+            access_token="tok",
+            incoming_headers={},
+            session_key="sess-1",
+        )
+        handler = proxy.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="my_tool", arguments={"x": "val"}),
+        )
+        fake_ctx = SimpleNamespace(
+            session=SimpleNamespace(
+                elicit=AsyncMock(
+                    return_value=types.ElicitResult(
+                        action="accept", content={"mode": "run_now"}
+                    )
+                )
+            )
+        )
+        token = lowlevel_request_ctx.set(fake_ctx)
+        try:
+            result = await handler(req)
+        finally:
+            lowlevel_request_ctx.reset(token)
+
+        assert not result.root.isError
+        assert downstream.call_tool.await_count == 2
+        fake_ctx.session.elicit.assert_awaited_once()
+        elicit_kwargs = fake_ctx.session.elicit.await_args.kwargs
+        assert elicit_kwargs["message"] == "Pick a mode"
+        assert elicit_kwargs["requestedSchema"]["type"] == "object"
+        assert (
+            elicit_kwargs["requestedSchema"]["properties"]["mode"]["type"] == "string"
+        )
+
+    @pytest.mark.asyncio
     async def test_list_prompts_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
 
         handler = proxy.request_handlers[types.ListPromptsRequest]
@@ -228,7 +307,10 @@ class TestProxyServerBuilder:
     async def test_get_prompt_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
 
         handler = proxy.request_handlers[types.GetPromptRequest]
@@ -244,7 +326,10 @@ class TestProxyServerBuilder:
     async def test_read_resource_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
         proxy = _build_proxy_server(
-            downstream, access_token=None, incoming_headers=None
+            downstream,
+            access_token=None,
+            incoming_headers=None,
+            session_key="sess-1",
         )
 
         handler = proxy.request_handlers[types.ReadResourceRequest]
@@ -264,6 +349,77 @@ class TestProxyServerBuilder:
 
 class TestSSEConnectionAppGroupValidation:
     """Verify group access checks run before SSE stream opens."""
+
+    @pytest.mark.asyncio
+    async def test_sse_get_handshake_runs_proxy_server(self):
+        app = _SSEConnectionApp()
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/sse",
+            "query_string": b"",
+            "headers": [],
+            "root_path": "",
+        }
+        receive = AsyncMock()
+
+        async def send(_msg):
+            return None
+
+        read_stream = object()
+        write_stream = object()
+        downstream = object()
+        mock_proxy = MagicMock()
+        mock_proxy.run = AsyncMock()
+        mock_proxy.create_initialization_options.return_value = {"capabilities": {}}
+
+        @asynccontextmanager
+        async def fake_connect_sse(_scope, _receive, _send):
+            yield read_stream, write_stream
+
+        @asynccontextmanager
+        async def fake_mcp_session(**_kwargs):
+            yield downstream
+
+        with patch(
+            "app.sse.mcp_proxy._build_proxy_server", return_value=mock_proxy
+        ), patch(
+            "app.sse.mcp_proxy.sse_transport.connect_sse", side_effect=fake_connect_sse
+        ) as mock_connect, patch(
+            "app.sse.mcp_proxy.mcp_session", side_effect=fake_mcp_session
+        ) as mock_mcp_session:
+            await app(scope, receive, send)
+
+        mock_connect.assert_called_once()
+        mock_mcp_session.assert_called_once()
+        mock_proxy.run.assert_awaited_once_with(
+            read_stream,
+            write_stream,
+            mock_proxy.create_initialization_options.return_value,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sse_messages_post_forwards_to_transport(self):
+        app = _SSEMessagesApp()
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/sse/messages",
+            "query_string": b"session_id=abc",
+            "headers": [],
+            "root_path": "",
+        }
+        receive = AsyncMock()
+        send = AsyncMock()
+
+        with patch(
+            "app.sse.mcp_proxy.sse_transport.handle_post_message",
+            new=AsyncMock(),
+        ) as mock_handle:
+            await app(scope, receive, send)
+
+        mock_handle.assert_awaited_once_with(scope, receive, send)
 
     @pytest.mark.asyncio
     async def test_group_permission_denied_returns_403(self):

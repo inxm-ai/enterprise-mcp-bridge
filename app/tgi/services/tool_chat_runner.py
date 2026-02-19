@@ -6,6 +6,12 @@ from typing import Any, AsyncGenerator, Callable, List, Optional
 
 from opentelemetry import trace
 
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+    canonicalize_elicitation_payload,
+)
 from app.json.schema_validation import validate_schema
 from app.tgi.models import (
     ChatCompletionRequest,
@@ -307,80 +313,119 @@ class ToolChatRunner:
                                 logger.debug("[ToolChatRunner] Dropped log update")
 
                     async def _run_tools():
-                        stream_set = streaming_tools or set()
-                        normal_calls = []
-                        streaming_calls = []
+                        try:
+                            stream_set = streaming_tools or set()
+                            normal_calls = []
+                            streaming_calls = []
 
-                        for tc, fmt in tool_calls_to_execute:
-                            if tc.function.name in stream_set:
-                                streaming_calls.append((tc, fmt))
-                            else:
-                                normal_calls.append((tc, fmt))
+                            for tc, fmt in tool_calls_to_execute:
+                                if tc.function.name in stream_set:
+                                    streaming_calls.append((tc, fmt))
+                                else:
+                                    normal_calls.append((tc, fmt))
 
-                        tool_results: list = []
-                        raw_results: list = []
-                        success = True
+                            tool_results: list = []
+                            raw_results: list = []
+                            success = True
 
-                        if normal_calls:
-                            execute_fn = getattr(
-                                self.tool_service, "execute_tool_calls"
-                            )
-                            sig = inspect.signature(execute_fn)
-                            kwargs = {
-                                "available_tools": validation_tools,
-                                "return_raw_results": True,
-                            }
-                            if "progress_callback" in sig.parameters:
-                                kwargs["progress_callback"] = _handle_progress
-                            if "log_callback" in sig.parameters:
-                                kwargs["log_callback"] = _handle_log
-                            if (
-                                stop_after_tool_results
-                                and "summarize_tool_results" in sig.parameters
-                            ):
-                                kwargs["summarize_tool_results"] = False
-                            if (
-                                stop_after_tool_results
-                                and "build_messages" in sig.parameters
-                            ):
-                                kwargs["build_messages"] = False
-                            normal_results, normal_success, normal_raw = (
-                                await execute_fn(
-                                    session,
-                                    normal_calls,
-                                    access_token,
-                                    parent_span,
-                                    **kwargs,
+                            if normal_calls:
+                                execute_fn = getattr(
+                                    self.tool_service, "execute_tool_calls"
                                 )
-                            )
-                            tool_results.extend(normal_results)
-                            raw_results.extend(normal_raw)
-                            success = success and normal_success
+                                sig = inspect.signature(execute_fn)
+                                kwargs = {
+                                    "available_tools": validation_tools,
+                                    "return_raw_results": True,
+                                }
+                                if "progress_callback" in sig.parameters:
+                                    kwargs["progress_callback"] = _handle_progress
+                                if "log_callback" in sig.parameters:
+                                    kwargs["log_callback"] = _handle_log
+                                if (
+                                    stop_after_tool_results
+                                    and "summarize_tool_results" in sig.parameters
+                                ):
+                                    kwargs["summarize_tool_results"] = False
+                                if (
+                                    stop_after_tool_results
+                                    and "build_messages" in sig.parameters
+                                ):
+                                    kwargs["build_messages"] = False
+                                normal_results, normal_success, normal_raw = (
+                                    await execute_fn(
+                                        session,
+                                        normal_calls,
+                                        access_token,
+                                        parent_span,
+                                        **kwargs,
+                                    )
+                                )
+                                tool_results.extend(normal_results)
+                                raw_results.extend(normal_raw)
+                                success = success and normal_success
 
-                        for streaming_call, fmt in streaming_calls:
-                            (
-                                streaming_results,
-                                streaming_success,
-                                streaming_raw,
-                            ) = await self._run_streaming_tool(
-                                session=session,
-                                tool_call=streaming_call,
-                                tool_call_format=fmt,
-                                access_token=access_token,
-                                progress_callback=_handle_progress,
-                                log_callback=_handle_log,
-                                summarize_tool_results=(
-                                    False if stop_after_tool_results else True
-                                ),
-                                build_messages=(
-                                    False if stop_after_tool_results else True
-                                ),
-                            )
-                            tool_results.extend(streaming_results)
-                            raw_results.extend(streaming_raw)
-                            success = success and streaming_success
+                            for streaming_call, fmt in streaming_calls:
+                                (
+                                    streaming_results,
+                                    streaming_success,
+                                    streaming_raw,
+                                ) = await self._run_streaming_tool(
+                                    session=session,
+                                    tool_call=streaming_call,
+                                    tool_call_format=fmt,
+                                    access_token=access_token,
+                                    progress_callback=_handle_progress,
+                                    log_callback=_handle_log,
+                                    summarize_tool_results=(
+                                        False if stop_after_tool_results else True
+                                    ),
+                                    build_messages=(
+                                        False if stop_after_tool_results else True
+                                    ),
+                                )
+                                tool_results.extend(streaming_results)
+                                raw_results.extend(streaming_raw)
+                                success = success and streaming_success
 
-                        return tool_results, success, raw_results
+                            return tool_results, success, raw_results
+                        except ElicitationRequiredError as exc:
+                            return (
+                                [],
+                                False,
+                                [
+                                    {
+                                        "__feedback_required__": exc.to_client_payload(),
+                                    }
+                                ],
+                            )
+                        except InvalidUserFeedbackError as exc:
+                            return (
+                                [],
+                                False,
+                                [
+                                    {
+                                        "__feedback_error__": {
+                                            "error": "invalid_feedback",
+                                            "detail": str(exc),
+                                            "elicitation": exc.payload,
+                                        }
+                                    }
+                                ],
+                            )
+                        except UnsupportedElicitationSchemaError as exc:
+                            return (
+                                [],
+                                False,
+                                [
+                                    {
+                                        "__feedback_error__": {
+                                            "error": "unsupported_elicitation_schema",
+                                            "detail": str(exc),
+                                            "elicitation": exc.payload,
+                                        }
+                                    }
+                                ],
+                            )
 
                     tool_task = asyncio.create_task(_run_tools())
                     queue_get = asyncio.create_task(progress_queue.get())
@@ -467,6 +512,43 @@ class ToolChatRunner:
                     tool_span.set_attribute(
                         "tool_calls.executed_count", len(tool_results)
                     )
+
+                    feedback_required = next(
+                        (
+                            item.get("__feedback_required__")
+                            for item in raw_results
+                            if isinstance(item, dict)
+                            and item.get("__feedback_required__")
+                        ),
+                        None,
+                    )
+                    if isinstance(feedback_required, dict):
+                        elicitation_payload = canonicalize_elicitation_payload(
+                            feedback_required.get("elicitation") or {}
+                        )
+                        serialized_payload = json.dumps(
+                            elicitation_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        feedback_block = f"<user_feedback_needed>{serialized_payload}</user_feedback_needed>"
+                        yield self._build_content_chunk(feedback_block)
+                        if emit_tool_events:
+                            yield f"data: {json.dumps(feedback_required)}\n\n"
+                        break
+
+                    feedback_error = next(
+                        (
+                            item.get("__feedback_error__")
+                            for item in raw_results
+                            if isinstance(item, dict) and item.get("__feedback_error__")
+                        ),
+                        None,
+                    )
+                    if isinstance(feedback_error, dict):
+                        if emit_tool_events:
+                            yield f"data: {json.dumps(feedback_error)}\n\n"
+                        break
 
                     stop_after_tools = False
                     if stop_after_tool_results:

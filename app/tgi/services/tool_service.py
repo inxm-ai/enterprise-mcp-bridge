@@ -11,6 +11,11 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE
 from opentelemetry import trace
 
+from app.elicitation import (
+    ElicitationRequiredError,
+    InvalidUserFeedbackError,
+    UnsupportedElicitationSchemaError,
+)
 from app.models import RunToolResultContent
 from app.tgi.models import Message, MessageRole, Tool, ToolCall
 from app.tgi.clients.llm_client import LLMClient
@@ -884,6 +889,15 @@ class ToolService:
                     )
                     tool_results.append(tool_message)
             except Exception as e:
+                if isinstance(
+                    e,
+                    (
+                        ElicitationRequiredError,
+                        InvalidUserFeedbackError,
+                        UnsupportedElicitationSchemaError,
+                    ),
+                ):
+                    raise
                 # If tool execution fails completely, create an error message
                 error_msg = f"Failed to execute tool {getattr(tool_call.function, 'name', 'unknown')}: {str(e)}"
                 err_lower = str(e).lower()

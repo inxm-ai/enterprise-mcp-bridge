@@ -6,10 +6,12 @@ executions using Server-Sent Events (SSE).
 """
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, Cookie, Query, Request, HTTPException
 
+from app.elicitation import get_elicitation_coordinator
 from app.oauth.token_dependency import get_access_token
 from app.oauth.token_exchange import UserLoggedOutException
 from app.session import try_get_session_id, session_id
@@ -27,11 +29,28 @@ sessions = session_manager()
 
 logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
+_USER_FEEDBACK_KEY_RE = re.compile(r"^_?user_feedback$", re.IGNORECASE)
 
 
 def _extract_request_headers(request: Request) -> dict[str, str]:
     """Extract headers from the incoming request as a dictionary."""
     return dict(request.headers)
+
+
+def _pop_user_feedback(args: Optional[dict]) -> tuple[Optional[dict], Optional[str]]:
+    if not isinstance(args, dict):
+        return args, None
+    out = dict(args)
+    feedback = None
+    for key in list(out.keys()):
+        if _USER_FEEDBACK_KEY_RE.match(str(key)):
+            feedback = out.pop(key)
+            break
+    if isinstance(feedback, str):
+        feedback = feedback.strip()
+    if not feedback:
+        feedback = None
+    return out, feedback
 
 
 @router.post("/tools/{tool_name}/stream")
@@ -100,6 +119,25 @@ async def run_tool_with_progress(
         if args and "inxm-session" in args:
             args = dict(args)
             args.pop("inxm-session")
+        args, user_feedback = _pop_user_feedback(args)
+        if user_feedback:
+            if not x_inxm_mcp_session:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "feedback_requires_session",
+                        "detail": "User feedback resume requires a persistent MCP session id.",
+                    },
+                )
+            coordinator = get_elicitation_coordinator()
+            if not coordinator.submit_feedback(x_inxm_mcp_session, user_feedback):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "feedback_not_expected",
+                        "detail": "No pending elicitation found for this session.",
+                    },
+                )
 
         incoming_headers = _extract_request_headers(request)
 
