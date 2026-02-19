@@ -437,9 +437,6 @@ OAUTH_CLIENT_SECRET="secret"
 ### Security Variables
 
 ```bash
-# Rate limiting
-RATE_LIMIT="100/minute"
-
 # CORS settings
 CORS_ORIGINS="https://app.example.com,https://admin.example.com"
 

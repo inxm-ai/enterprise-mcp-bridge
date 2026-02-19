@@ -91,7 +91,7 @@ All dependencies are compatible with GPL-3.0.
 
 For licensing questions or commercial licensing inquiries, contact:
 
-📧 Email: matthias@inxm.ai  
+📧 Email: security@inxm.ai  
 🌐 Website: https://inxm.ai
 
 ---

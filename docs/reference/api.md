@@ -378,41 +378,6 @@ All error responses follow this format:
 | `500` | Internal Server Error - Server error |
 | `503` | Service Unavailable - Service is down |
 
-## Rate Limiting
-
-When rate limiting is enabled:
-
-**Headers:**
-```
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 95
-X-RateLimit-Reset: 1642252800
-```
-
-**Error Response (429):**
-```json
-{
-  "error": "Rate limit exceeded",
-  "retry_after": 60
-}
-```
-
-## Pagination
-
-For endpoints that support pagination:
-
-**Query Parameters:**
-- `page` - Page number (default: 1)
-- `per_page` - Items per page (default: 30, max: 100)
-
-**Response Headers:**
-```
-X-Total-Count: 250
-X-Page: 1
-X-Per-Page: 30
-Link: <...>; rel="next", <...>; rel="last"
-```
-
 ## OpenAPI Specification
 
 The complete OpenAPI specification is available at:

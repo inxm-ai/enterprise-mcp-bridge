@@ -121,22 +121,6 @@ if '{group_id}' in path:
     path = path.replace('{group_id}', user_groups[0])
 ```
 
-#### Role-Based Access Control (Future)
-
-Planned feature for fine-grained permissions:
-
-```yaml
-Roles:
-  admin:
-    - create_sessions
-    - delete_sessions
-    - view_all_sessions
-  
-  user:
-    - create_sessions (own)
-    - view_sessions (own)
-```
-
 ### 4. Token Management
 
 #### Token Exchange
@@ -368,7 +352,7 @@ logger.info(f"Request headers: {redact_sensitive(headers)}")
 ⚠️ **Weak Authentication** - Configure OAuth2  
 ⚠️ **Unencrypted Transport** - Enable HTTPS  
 ⚠️ **Token Leakage** - Use secret management  
-⚠️ **DoS Attacks** - Configure rate limiting  
+⚠️ **DoS Attacks** - Implement infrastructure-level protection  
 
 ### Ongoing Monitoring
 
@@ -421,8 +405,6 @@ Security-relevant events logged:
 ### GDPR Considerations
 
 - User data minimization
-- Right to deletion (session cleanup)
-- Data export capability
 - Privacy by design
 - Audit logging
 
@@ -442,7 +424,7 @@ Security-relevant events logged:
 - [ ] OAuth2 enabled
 - [ ] Secrets in secret manager
 - [ ] CORS restricted
-- [ ] Rate limiting enabled
+- [ ] Security headers set
 - [ ] Security headers set
 - [ ] Audit logging enabled
 - [ ] Dependency scanning
@@ -462,7 +444,7 @@ Security-relevant events logged:
 **Do NOT** open public issues for security vulnerabilities.
 
 Instead:
-1. Email: matthias@inxm.ai
+1. Email: security@inxm.ai
 2. Include detailed description
 3. Steps to reproduce
 4. Potential impact

@@ -439,20 +439,6 @@ Allow credentials in CORS requests.
 CORS_ALLOW_CREDENTIALS=true
 ```
 
-#### RATE_LIMIT
-
-Rate limiting configuration.
-
-- **Type:** String
-- **Default:** None (disabled)
-- **Required:** No
-- **Format:** `{count}/{period}`
-
-```bash
-RATE_LIMIT="100/minute"
-RATE_LIMIT="1000/hour"
-```
-
 #### ALLOWED_HOSTS
 
 Allowed host headers.
@@ -527,23 +513,6 @@ LOG_LEVEL=info
 
 The bridge automatically loads `.env` files.
 
-### Loading from YAML (Future)
-
-```yaml
-# config.yaml
-mcp:
-  server_command: "npx -y @modelcontextprotocol/server-memory"
-  base_path: "/api/mcp"
-
-session:
-  manager_type: "redis"
-  timeout_seconds: 3600
-  
-oauth:
-  issuer_url: "https://keycloak.example.com/realms/mcp"
-  client_id: "mcp-bridge"
-```
-
 ## Configuration by Deployment Type
 
 ### Development
@@ -562,7 +531,6 @@ ENV=dev
 MCP_SERVER_COMMAND="python mcp/server.py"
 LOG_LEVEL=info
 SESSION_MANAGER_TYPE=memory
-RATE_LIMIT="1000/minute"
 ```
 
 ### Staging
@@ -595,7 +563,6 @@ OAUTH_CLIENT_ID="mcp-bridge"
 OAUTH_CLIENT_SECRET="${OAUTH_CLIENT_SECRET}"
 OAUTH_ENABLE_TOKEN_EXCHANGE=true
 CORS_ORIGINS="https://app.example.com"
-RATE_LIMIT="100/minute"
 WORKERS=8
 PROMETHEUS_ENABLED=true
 OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"

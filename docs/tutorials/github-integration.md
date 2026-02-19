@@ -261,13 +261,7 @@ GITHUB_OAUTH_SCOPES="read:user user:email copilot:chat repo admin:org"
    GITHUB_CLIENT_SECRET_FILE=/run/secrets/github-secret
    ```
 
-3. **Rate Limiting**
-   ```bash
-   # Configure rate limits
-   RATE_LIMIT="100/minute"
-   ```
-
-4. **Audit Logging**
+2. **Audit Logging**
    ```bash
    # Enable comprehensive logging
    LOG_LEVEL=info
