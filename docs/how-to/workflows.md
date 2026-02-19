@@ -351,6 +351,208 @@ curl -X POST http://localhost:8000/workflows/execute \
   }'
 ```
 
+## Execution Modes
+
+### Foreground vs Background
+
+Workflows can execute in two different modes, each with distinct characteristics and use cases.
+
+#### Foreground Execution (Default)
+
+**Overview:**
+- Workflow runs inline with the HTTP request
+- Client waits for completion or timeout
+- Simpler for short-running workflows
+- Direct error handling
+
+**Characteristics:**
+```bash
+# Standard foreground execution
+curl -X POST http://localhost:8000/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "messages": [{"role": "user", "content": "Analyze this data"}],
+    "use_workflow": true,
+    "workflow_id": "data-analysis",
+    "stream": true
+  }'
+```
+
+**Advantages:**
+- ✅ Immediate results streamed to client
+- ✅ Simple error handling
+- ✅ No need to poll for completion
+- ✅ Client maintains direct connection
+
+**Disadvantages:**
+- ❌ Connection must stay open entire time
+- ❌ Request timeout limitations apply
+- ❌ Client must handle reconnection if dropped
+- ❌ Not suitable for long-running workflows
+
+**Best For:**
+- Quick analyses (< 1 minute)
+- Interactive sessions
+- Development and testing
+- Single-user scenarios
+
+#### Background Execution
+
+**Overview:**
+- Workflow runs in a separate background task
+- Client can disconnect and reconnect
+- Ideal for long-running workflows
+- Multiple clients can subscribe to same execution
+
+**Characteristics:**
+```bash
+# Start background execution with special header
+curl -X POST http://localhost:8000/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "X-INXM-Workflow-Background: true" \
+  -d '{
+    "messages": [{"role": "user", "content": "Generate comprehensive report"}],
+    "use_workflow": true,
+    "workflow_id": "report-generation",
+    "workflow_execution_id": "exec-12345",
+    "stream": true
+  }'
+```
+
+**Requirements:**
+- Must include `X-INXM-Workflow-Background: true` header
+- Must be a streaming request (`stream: true`)
+- Must use workflows (`use_workflow: true`)
+- Recommended to provide `workflow_execution_id` for resumption
+
+**Advantages:**
+- ✅ Workflow continues even if client disconnects
+- ✅ Multiple clients can subscribe to same execution
+- ✅ Can reconnect with same execution ID
+- ✅ No timeout limitations
+- ✅ Better for long-running tasks
+- ✅ Client can monitor progress at intervals
+
+**Disadvantages:**
+- ❌ Slightly more complex setup
+- ❌ Need to manage execution IDs
+- ❌ Requires SSE streaming support
+
+**Best For:**
+- Long-running workflows (> 1 minute)
+- Report generation
+- Batch processing
+- Multi-step automations
+- Workflows requiring human feedback at intervals
+- Production deployments with reliability requirements
+
+#### Reconnecting to Background Workflows
+
+If you disconnect from a background workflow, reconnect using the same execution ID:
+
+```bash
+# Reconnect to existing background execution
+curl -X POST http://localhost:8000/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "X-INXM-Workflow-Background: true" \
+  -d '{
+    "messages": [{"role": "user", "content": "Continue"}],
+    "use_workflow": true,
+    "workflow_id": "report-generation",
+    "workflow_execution_id": "exec-12345",
+    "stream": true
+  }'
+```
+
+**What happens:**
+1. Bridge checks if workflow with this execution ID is already running
+2. If running, subscribes you to existing execution stream
+3. You receive all events from the current point forward
+4. If paused for feedback, you can provide it
+
+#### Canceling Background Workflows
+
+Stop a running background workflow:
+
+```bash
+curl -X POST http://localhost:8000/workflows/exec-12345/cancel \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "cancelled": true,
+  "execution_id": "exec-12345"
+}
+```
+
+#### Monitoring Background Workflows
+
+Check workflow state without streaming:
+
+```bash
+# Get current workflow state
+curl http://localhost:8000/workflows/exec-12345/state \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "execution_id": "exec-12345",
+  "flow_id": "report-generation",
+  "current_agent": "summarizer",
+  "completed_agents": ["data_collector", "analyzer"],
+  "awaiting_feedback": false,
+  "completed": false,
+  "error": null,
+  "last_updated": "2024-01-15T10:30:00Z"
+}
+```
+
+#### Comparison Table
+
+| Feature | Foreground | Background |
+|---------|-----------|------------|
+| **Connection** | Must stay open | Can disconnect/reconnect |
+| **Timeout** | HTTP timeout applies | No timeout |
+| **Multiple subscribers** | No | Yes |
+| **Complexity** | Simple | Moderate |
+| **Best for** | Quick tasks | Long tasks |
+| **Cancellation** | Close connection | API endpoint |
+| **State persistence** | No | Yes |
+| **Resume after failure** | No | Yes |
+
+#### Best Practices
+
+**Use Foreground When:**
+- Workflow completes in under 30 seconds
+- You need immediate synchronous results
+- Developing or debugging
+- Single user/client scenario
+
+**Use Background When:**
+- Workflow takes > 1 minute
+- You need reliability and fault tolerance
+- Multiple users might monitor progress
+- Human feedback required at intervals
+- Production environment with load balancing
+
+**Execution ID Management:**
+```python
+import uuid
+
+# Generate unique execution ID
+execution_id = f"exec-{uuid.uuid4()}"
+
+# Use consistent ID for reconnection
+# Store in database or client session
+```
+
 ## Human-in-the-Loop
 
 ### Feedback Requests
