@@ -80,10 +80,13 @@ External Integrations:
 The outermost layer provides:
 
 - **HTTP/REST Interface:** Standard REST endpoints for all operations
+- **SSE Streaming Support:** Server-Sent Events for real-time streaming at `/sse`
 - **OpenAPI Documentation:** Auto-generated API docs at `/docs` and `/redoc`
 - **Request/Response Handling:** JSON serialization, validation, error handling
 - **CORS Support:** Cross-origin request handling
 - **Middleware:** Logging, metrics, authentication
+- **LLM Integration:** Chat completions with simple workflows
+- **UI Generation:** AI-powered web application generation from prompts
 
 **Key Files:**
 - `app/server.py` - Main FastAPI application
