@@ -30,4 +30,4 @@ jobs:
           remote-organization-name: inxm-ai
           remote-repository-name: cla-signatures
           path-to-document: https://github.com/inxm-ai/enterprise-mcp-bridge/blob/main/CONTRIBUTING.md#-contributor-license-agreement-cla          
-          allowlist: bot*
+          allowlist: bot*,dependabot[bot],Copilot,copilot-swe-agent[bot]
