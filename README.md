@@ -2,7 +2,7 @@
 
 FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over plain HTTP/JSON.
 
-📖 **[Full Documentation](https://inxm-ai.github.io/enterprise-mcp-bridge)** | [Quick Start](#quick-start) | [API Docs](http://localhost:8000/docs)
+📖 **[Full Documentation](https://inxm-ai.github.io/enterprise-mcp-bridge)** | [Quick Start](#quick-start)
 
 ## Why this project?
 
