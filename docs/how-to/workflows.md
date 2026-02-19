@@ -376,6 +376,97 @@ curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   }'
 ```
 
+### Conditional Routing Based on Feedback
+
+Use `reroute` with `on` and `ask` to route to different agents based on human feedback:
+
+```json
+{
+  "agent": "find_plan",
+  "description": "Locate a matching plan",
+  "reroute": [
+    {
+      "on": ["FOUND_PERFECT_MATCH"],
+      "ask": {
+        "question": "Present the plan and ask whether to proceed or create a new plan.",
+        "expected_responses": [
+          {
+            "proceed": {
+              "to": "select_run_mode",
+              "with": ["plan_id"]
+            }
+          },
+          {
+            "create_new": {
+              "to": "create_plan",
+              "with": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+**How it works:**
+
+1. **Trigger**: When the agent emits `<reroute>FOUND_PERFECT_MATCH</reroute>`
+2. **Ask**: Workflow pauses and presents the question to the user
+3. **Response Matching**: User's feedback is matched against `expected_responses`
+4. **Routing**: Based on the match, workflow routes to the specified agent
+5. **Context Passing**: Fields specified in `with` are passed to the next agent
+
+**Example User Feedback:**
+
+```bash
+# User chooses to proceed
+curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
+  -d '{
+    "feedback": "proceed",
+    "continue": true
+  }'
+
+# User chooses to create new
+curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
+  -d '{
+    "feedback": "create_new",
+    "continue": true
+  }'
+```
+
+**Multiple Routing Options:**
+
+You can define multiple routing paths:
+
+```json
+{
+  "reroute": [
+    {
+      "on": ["FOUND_MULTIPLE_MATCHES"],
+      "ask": {
+        "question": "Multiple plans found. Which would you like?",
+        "expected_responses": [
+          {"select_plan_1": {"to": "use_plan_1"}},
+          {"select_plan_2": {"to": "use_plan_2"}},
+          {"create_new": {"to": "create_plan"}}
+        ]
+      }
+    },
+    {
+      "on": ["NO_MATCHES_FOUND"],
+      "ask": {
+        "question": "No plans found. Create a new one?",
+        "expected_responses": [
+          {"yes": {"to": "create_plan"}},
+          {"no": {"to": "cancel_workflow"}}
+        ]
+      }
+    }
+  ]
+}
+```
+
 ## Monitoring and Debugging
 
 ### List Executions
