@@ -16,6 +16,8 @@
   * [Use Remote MCP Servers](how-to/remote-mcp-servers.md)
   * [Run in Docker](how-to/docker.md)
   * [Deploy to Kubernetes](how-to/kubernetes.md)
+  * [UI Generation](how-to/ui-generation.md)
+  * [Workflows and Agents](how-to/workflows.md)
 
 * **Reference**
   * [API Reference](reference/api.md)

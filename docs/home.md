@@ -40,6 +40,8 @@ This project directly addresses these gaps with enterprise-grade features for se
 - **Auto-generated OpenAPI documentation**
 - **Automatic tool endpoint mapping**
 - **Structured error handling** with standard HTTP codes
+- **AI-powered UI generation** for rapid dashboard creation
+- **Workflow orchestration** for complex multi-step automations
 
 ### 🌐 Flexible Deployment
 - **Protocol agnostic** - works with any stdio-based MCP server
@@ -57,6 +59,8 @@ This project directly addresses these gaps with enterprise-grade features for se
 - [Deploy to Production](how-to/deploy-production.md)
 - [Configure OAuth](how-to/configure-oauth.md)
 - [Use Remote MCP Servers](how-to/remote-mcp-servers.md)
+- [UI Generation](how-to/ui-generation.md)
+- [Workflows and Agents](how-to/workflows.md)
 
 ### 📖 Reference
 - [API Reference](reference/api.md)
