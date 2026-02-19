@@ -585,22 +585,28 @@ Use `reroute` with `on` and `ask` to route to different agents based on human fe
 ```json
 {
   "agent": "find_plan",
-  "description": "Locate a matching plan",
+  "description": "Search for existing deployment plans",
   "reroute": [
     {
-      "on": ["FOUND_PERFECT_MATCH"],
+      "on": ["PLAN_FOUND"],
       "ask": {
-        "question": "Present the plan and ask whether to proceed or create a new plan.",
+        "question": "I found a deployment plan. Would you like to choose this plan, continue searching for other options, or abort?",
         "expected_responses": [
           {
-            "proceed": {
+            "choose_plan": {
               "to": "select_run_mode",
               "with": ["plan_id"]
             }
           },
           {
-            "create_new": {
-              "to": "create_plan",
+            "continue_searching": {
+              "to": "find_alternative_plans",
+              "with": ["current_plan_id"]
+            }
+          },
+          {
+            "abort": {
+              "to": "cancel_workflow",
               "with": []
             }
           }
@@ -613,7 +619,7 @@ Use `reroute` with `on` and `ask` to route to different agents based on human fe
 
 **How it works:**
 
-1. **Trigger**: When the agent emits `<reroute>FOUND_PERFECT_MATCH</reroute>`
+1. **Trigger**: When the agent emits `<reroute>PLAN_FOUND</reroute>` in its response
 2. **Ask**: Workflow pauses and presents the question to the user
 3. **Response Matching**: User's feedback is matched against `expected_responses`
 4. **Routing**: Based on the match, workflow routes to the specified agent
@@ -622,43 +628,62 @@ Use `reroute` with `on` and `ask` to route to different agents based on human fe
 **Example User Feedback:**
 
 ```bash
-# User chooses to proceed
+# User chooses to use the plan
 curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   -d '{
-    "feedback": "proceed",
+    "feedback": "choose_plan",
     "continue": true
   }'
 
-# User chooses to create new
+# User wants to continue searching
 curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   -d '{
-    "feedback": "create_new",
+    "feedback": "continue_searching",
+    "continue": true
+  }'
+
+# User wants to abort
+curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
+  -d '{
+    "feedback": "abort",
     "continue": true
   }'
 ```
 
 **Multiple Routing Options:**
 
-You can define multiple routing paths:
+You can define multiple routing paths for different scenarios:
 
 ```json
 {
   "reroute": [
     {
-      "on": ["FOUND_MULTIPLE_MATCHES"],
+      "on": ["PLAN_FOUND"],
       "ask": {
-        "question": "Multiple plans found. Which would you like?",
+        "question": "I found a deployment plan. Choose this plan, continue searching, or abort?",
         "expected_responses": [
-          {"select_plan_1": {"to": "use_plan_1"}},
-          {"select_plan_2": {"to": "use_plan_2"}},
+          {"choose_plan": {"to": "select_run_mode", "with": ["plan_id"]}},
+          {"continue_searching": {"to": "find_alternative_plans", "with": ["current_plan_id"]}},
+          {"abort": {"to": "cancel_workflow"}}
+        ]
+      }
+    },
+    {
+      "on": ["MULTIPLE_PLANS_FOUND"],
+      "ask": {
+        "question": "I found 3 deployment plans. Which one should I use, or should I create a new one?",
+        "expected_responses": [
+          {"plan_1": {"to": "use_plan", "with": ["plan_id_1"]}},
+          {"plan_2": {"to": "use_plan", "with": ["plan_id_2"]}},
+          {"plan_3": {"to": "use_plan", "with": ["plan_id_3"]}},
           {"create_new": {"to": "create_plan"}}
         ]
       }
     },
     {
-      "on": ["NO_MATCHES_FOUND"],
+      "on": ["NO_PLANS_FOUND"],
       "ask": {
-        "question": "No plans found. Create a new one?",
+        "question": "No existing plans found. Should I create a new deployment plan?",
         "expected_responses": [
           {"yes": {"to": "create_plan"}},
           {"no": {"to": "cancel_workflow"}}
