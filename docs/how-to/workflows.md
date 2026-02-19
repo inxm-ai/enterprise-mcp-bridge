@@ -580,21 +580,35 @@ curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
 
 ### Conditional Routing Based on Feedback
 
-Use `reroute` with `on` and `ask` to route to different agents based on human feedback:
+The Enterprise MCP Bridge supports conditional routing where workflows pause to ask the user a question, then route to different agents based on their choice. This uses the `reroute` configuration with `on` (trigger) and `ask` (user prompt) fields.
+
+#### How It Works
+
+When an agent's reroute configuration includes both `on` and `ask`:
+
+1. **Agent emits trigger**: The agent completes its work and emits `<reroute>TRIGGER_NAME</reroute>`
+2. **Trigger matches**: The workflow checks if any `on` entry matches the trigger
+3. **Workflow pauses**: If the entry has an `ask` field, the workflow pauses (`awaiting_feedback: true`)
+4. **User sees question**: The question from `ask.question` is presented to the user
+5. **User responds**: The user selects one of the keys from `expected_responses` (e.g., "choose_plan")
+6. **Workflow routes**: The workflow routes to the agent specified in that response's `to` field
+7. **Context copied**: Any fields listed in `with` are copied from the agent context to the workflow context
+
+#### Example Configuration
 
 ```json
 {
   "agent": "find_plan",
-  "description": "Search for existing deployment plans",
+  "description": "Search for existing deployment plans. When you find a match, emit <reroute>PLAN_FOUND</reroute>",
   "reroute": [
     {
       "on": ["PLAN_FOUND"],
       "ask": {
-        "question": "I found a deployment plan. Would you like to choose this plan, continue searching for other options, or abort?",
+        "question": "Present the deployment plan and ask whether to proceed or search for alternatives.",
         "expected_responses": [
           {
             "choose_plan": {
-              "to": "select_run_mode",
+              "to": "execute_deployment",
               "with": ["plan_id"]
             }
           },
@@ -617,36 +631,39 @@ Use `reroute` with `on` and `ask` to route to different agents based on human fe
 }
 ```
 
-**How it works:**
+#### Agent Response
 
-1. **Trigger**: When the agent emits `<reroute>PLAN_FOUND</reroute>` in its response
-2. **Ask**: Workflow pauses and presents the question to the user
-3. **Response Matching**: User's feedback is matched against `expected_responses`
-4. **Routing**: Based on the match, workflow routes to the specified agent
-5. **Context Passing**: Fields specified in `with` are passed to the next agent
+When the agent finds a plan, it emits the trigger defined in the `on` field:
 
-**Example User Feedback:**
+```xml
+<return name="plan_id">deploy-123</return>
+<return name="plan_details">Blue-green deployment with health checks</return>
+<reroute>PLAN_FOUND</reroute>
+```
+
+The `<reroute>PLAN_FOUND</reroute>` tag is what triggers the conditional routing.
+
+#### User Feedback
+
+The workflow pauses and the user submits feedback with the action they want:
 
 ```bash
 # User chooses to use the plan
 curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   -d '{
-    "feedback": "choose_plan",
-    "continue": true
+    "action": "choose_plan"
   }'
 
 # User wants to continue searching
 curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   -d '{
-    "feedback": "continue_searching",
-    "continue": true
+    "action": "continue_searching"
   }'
 
 # User wants to abort
 curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   -d '{
-    "feedback": "abort",
-    "continue": true
+    "action": "abort"
   }'
 ```
 
