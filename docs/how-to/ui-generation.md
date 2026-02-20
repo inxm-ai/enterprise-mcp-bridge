@@ -82,6 +82,56 @@ User Prompt → LLM (GPT-4/etc) → Generated HTML/JS → pfusch Components → 
 6. **Testing** - Generated tests validate functionality
 7. **Deployment** - App stored and made available
 
+### Conversational Container Editing (Bridge-Hosted)
+
+The bridge can now host a conversational editing container for generated apps (feature-flagged).
+
+Feature flags:
+- `APP_CONVERSATIONAL_UI_ENABLED=true`
+- `APP_UI_SESSION_TTL_MINUTES=120` (default)
+- `APP_UI_PATCH_ENABLED=true` (default)
+
+Flow:
+1. Create a draft session:
+```bash
+curl -X POST http://localhost:8000/app/_generated/user=user123/my-ui/main/chat/sessions \
+  -H "Authorization: ******" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+2. Send conversational update message (SSE):
+```bash
+curl -N -X POST http://localhost:8000/app/_generated/user=user123/my-ui/main/chat/sessions/{session_id}/messages \
+  -H "Authorization: ******" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message":"Add a KPI card section and move filters to the top."}'
+```
+3. Load draft HTML in editor session:
+```bash
+curl "http://localhost:8000/app/_generated/user=user123/my-ui/main/draft?session_id={session_id}&as=page"
+```
+4. Publish draft to shared canonical version:
+```bash
+curl -X POST http://localhost:8000/app/_generated/user=user123/my-ui/main/chat/sessions/{session_id}/publish \
+  -H "Authorization: ******"
+```
+5. Discard draft session:
+```bash
+curl -X DELETE http://localhost:8000/app/_generated/user=user123/my-ui/main/chat/sessions/{session_id} \
+  -H "Authorization: ******"
+```
+
+Container endpoint:
+```bash
+open http://localhost:8000/app/_generated/user=user123/my-ui/main/container
+```
+
+Behavior:
+- Live updates apply to draft only (editor-session scoped).
+- Publish uses optimistic version checks to prevent stale overwrites.
+- Update strategy is patch-first with automatic regenerate fallback.
+
 ### Progressive Enhancement with pfusch
 
 Generated applications use [pfusch](https://matthiaskainer.github.io/pfusch/), a minimal framework for progressive enhancement:

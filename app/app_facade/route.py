@@ -11,7 +11,12 @@ from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from opentelemetry import trace
 
-from app.vars import MCP_BASE_PATH, SESSION_FIELD_NAME, TOKEN_NAME
+from app.vars import (
+    MCP_BASE_PATH,
+    SESSION_FIELD_NAME,
+    TOKEN_NAME,
+    APP_CONVERSATIONAL_UI_ENABLED,
+)
 from app.session import session_id, try_get_session_id
 from app.session_manager import mcp_session_context, session_manager
 from app.oauth.user_info import get_data_access_manager
@@ -23,7 +28,13 @@ from .generated_service import (
     Scope,
     validate_identifier,
 )
-from .schemas import UiCreateRequest, UiUpdateRequest
+from .schemas import (
+    UiChatMessageRequest,
+    UiChatSessionCreateRequest,
+    UiCreateRequest,
+    UiPublishResponse,
+    UiUpdateRequest,
+)
 
 # Initialize components
 router = APIRouter(prefix="/app")
@@ -72,6 +83,21 @@ def _ensure_tgi_enabled() -> None:
         raise HTTPException(
             status_code=503,
             detail="Text generation is not available because TGI_URL is not configured.",
+        )
+
+
+def _ensure_conversational_ui_enabled() -> None:
+    enabled = (
+        os.environ.get(
+            "APP_CONVERSATIONAL_UI_ENABLED",
+            "true" if APP_CONVERSATIONAL_UI_ENABLED else "false",
+        ).lower()
+        == "true"
+    )
+    if not enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversational UI endpoints are disabled.",
         )
 
 
@@ -480,6 +506,509 @@ async def reset_generated_ui(
         )
 
     return JSONResponse(status_code=200, content=_format_ui_response(record))
+
+
+@router.post("/_generated/{target}/{ui_id}/{name}/chat/sessions")
+async def create_generated_ui_chat_session(
+    target: str,
+    ui_id: str,
+    name: str,
+    body: UiChatSessionCreateRequest,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    _ensure_conversational_ui_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    session_info = service.create_draft_session(
+        scope=scope,
+        actor=actor,
+        ui_id=ui_id,
+        name=name,
+        tools=list(body.tools or []),
+    )
+    return JSONResponse(status_code=200, content=session_info)
+
+
+@router.post(
+    "/_generated/{target}/{ui_id}/{name}/chat/sessions/{chat_session_id}/messages"
+)
+async def chat_generated_ui(
+    target: str,
+    ui_id: str,
+    name: str,
+    chat_session_id: str,
+    body: UiChatMessageRequest,
+    request: Request,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
+    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+):
+    _ensure_conversational_ui_enabled()
+    _ensure_tgi_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    chat_session_id = validate_identifier(chat_session_id, "session id")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    incoming_headers = dict(request.headers)
+    session_key = session_id(
+        try_get_session_id(
+            x_inxm_mcp_session_header,
+            x_inxm_mcp_session_cookie,
+        ),
+        access_token,
+    )
+    requested_group = scope.identifier if scope.kind == "group" else None
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        try:
+            async with mcp_session_context(
+                sessions,
+                session_key,
+                access_token,
+                requested_group,
+                incoming_headers,
+            ) as session_obj:
+                async for chunk in service.stream_chat_update(
+                    session=session_obj,
+                    scope=scope,
+                    actor=actor,
+                    ui_id=ui_id,
+                    name=name,
+                    session_id=chat_session_id,
+                    message=body.message,
+                    tools=list(body.tools) if body.tools is not None else None,
+                    tool_choice=body.tool_choice,
+                    access_token=access_token,
+                ):
+                    yield chunk
+        except HTTPException as exc:
+            payload = {"error": exc.detail}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+        except Exception as exc:
+            logger.error(
+                "[chat_generated_ui] Unexpected exception: %s", str(exc), exc_info=exc
+            )
+            payload = {"error": "Internal Server Error"}
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+        },
+        status_code=200,
+    )
+
+
+@router.get("/_generated/{target}/{ui_id}/{name}/draft")
+async def get_generated_ui_draft(
+    target: str,
+    ui_id: str,
+    name: str,
+    session_id_query: str = Query(..., alias="session_id"),
+    render_mode: str = Query("page", alias="as"),
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    _ensure_conversational_ui_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    session_id_query = validate_identifier(session_id_query, "session id")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+
+    mode = (render_mode or "card").lower()
+    if mode not in {"card", "page", "snippet"}:
+        raise HTTPException(status_code=400, detail="Invalid render mode requested")
+    expand_payload = mode in {"page", "snippet"}
+    record = service.get_draft_ui(
+        scope=scope,
+        actor=actor,
+        ui_id=ui_id,
+        name=name,
+        session_id=session_id_query,
+        expand=expand_payload,
+    )
+
+    if mode == "card":
+        return JSONResponse(content=record)
+
+    html_section = (record.get("current") or {}).get("html") or {}
+    content = html_section.get(mode)
+    if not content:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Draft payload does not contain HTML for mode '{mode}'",
+        )
+    return HTMLResponse(content=content, media_type="text/html")
+
+
+@router.post(
+    "/_generated/{target}/{ui_id}/{name}/chat/sessions/{chat_session_id}/publish"
+)
+async def publish_generated_ui_draft(
+    target: str,
+    ui_id: str,
+    name: str,
+    chat_session_id: str,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    _ensure_conversational_ui_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    chat_session_id = validate_identifier(chat_session_id, "session id")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    record = service.publish_draft_session(
+        scope=scope,
+        actor=actor,
+        ui_id=ui_id,
+        name=name,
+        session_id=chat_session_id,
+    )
+    metadata = record.get("metadata", {})
+    response = UiPublishResponse(
+        status="published",
+        version=int(metadata.get("version") or 1),
+        published_at=str(metadata.get("published_at") or ""),
+        record=record,
+    )
+    return JSONResponse(status_code=200, content=response.model_dump())
+
+
+@router.delete("/_generated/{target}/{ui_id}/{name}/chat/sessions/{chat_session_id}")
+async def discard_generated_ui_draft_session(
+    target: str,
+    ui_id: str,
+    name: str,
+    chat_session_id: str,
+    access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
+):
+    _ensure_conversational_ui_enabled()
+    scope = _parse_scope(target)
+    ui_id = validate_identifier(ui_id, "ui id")
+    name = validate_identifier(name, "ui name")
+    chat_session_id = validate_identifier(chat_session_id, "session id")
+    actor = _extract_actor(access_token)
+    service = _get_generated_service()
+    deleted = service.discard_draft_session(
+        scope=scope,
+        actor=actor,
+        ui_id=ui_id,
+        name=name,
+        session_id=chat_session_id,
+    )
+    return JSONResponse(
+        status_code=200, content={"status": "discarded", "session_deleted": deleted}
+    )
+
+
+@router.get("/_generated/{target}/{ui_id}/{name}/container")
+async def get_generated_ui_container(
+    target: str,
+    ui_id: str,
+    name: str,
+):
+    _ensure_conversational_ui_enabled()
+    _parse_scope(target)
+    validate_identifier(ui_id, "ui id")
+    validate_identifier(name, "ui name")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Generated UI Container</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #eef4f4 0%, #f8fbfb 100%);
+    }}
+    .layout {{
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 12px;
+      min-height: 100vh;
+      padding: 12px;
+    }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }}
+    .chat {{
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+    }}
+    .header {{
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 600;
+    }}
+    .history {{
+      padding: 12px;
+      overflow-y: auto;
+      min-height: 0;
+      background: #fafbfc;
+    }}
+    .bubble {{
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }}
+    .bubble.user {{ background: #e5f4f2; border: 1px solid #c7e5e1; }}
+    .bubble.assistant {{ background: #ffffff; border: 1px solid #dfe4ea; }}
+    .toolbar {{
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+    }}
+    .input {{
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      resize: vertical;
+      min-height: 72px;
+      font: inherit;
+    }}
+    .controls {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+    }}
+    .btn {{
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 11px;
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    .btn.primary {{
+      background: var(--accent);
+      border-color: var(--accent-strong);
+      color: #fff;
+    }}
+    .btn:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+    iframe {{
+      width: 100%;
+      height: calc(100vh - 26px);
+      border: 0;
+      background: #fff;
+    }}
+    .status {{ color: var(--muted); font-size: 12px; }}
+    @media (max-width: 960px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+      iframe {{ height: 70vh; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <section class="panel chat">
+      <div class="header">Conversational UI Editor</div>
+      <div id="history" class="history"></div>
+      <div class="toolbar">
+        <div style="width:100%">
+          <textarea id="message" class="input" placeholder="Describe the UI change..."></textarea>
+          <div class="controls">
+            <span id="status" class="status">Session initializing...</span>
+            <div style="display:flex; gap:8px">
+              <button id="discard" class="btn" type="button">Discard</button>
+              <button id="publish" class="btn" type="button">Publish</button>
+              <button id="send" class="btn primary" type="button">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <iframe id="preview" title="Generated UI Preview"></iframe>
+    </section>
+  </div>
+  <script>
+    const basePath = window.location.pathname.replace(/\\/container$/, '');
+    const historyEl = document.getElementById('history');
+    const messageEl = document.getElementById('message');
+    const statusEl = document.getElementById('status');
+    const previewEl = document.getElementById('preview');
+    const sendBtn = document.getElementById('send');
+    const publishBtn = document.getElementById('publish');
+    const discardBtn = document.getElementById('discard');
+    let sessionId = null;
+
+    function addBubble(role, text) {{
+      const div = document.createElement('div');
+      div.className = `bubble ${{role}}`;
+      div.textContent = text || '';
+      historyEl.appendChild(div);
+      historyEl.scrollTop = historyEl.scrollHeight;
+      return div;
+    }}
+
+    function setStatus(text) {{ statusEl.textContent = text; }}
+
+    function draftUrl() {{
+      return `${{basePath}}/draft?session_id=${{encodeURIComponent(sessionId)}}&as=page&_ts=${{Date.now()}}`;
+    }}
+
+    async function initSession() {{
+      const res = await fetch(`${{basePath}}/chat/sessions`, {{
+        method: 'POST',
+        credentials: 'include',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{}})
+      }});
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      sessionId = data.session_id;
+      previewEl.src = draftUrl();
+      setStatus(`Draft v${{data.draft_version}}`);
+    }}
+
+    async function sendMessage() {{
+      const message = messageEl.value.trim();
+      if (!message || !sessionId) return;
+      messageEl.value = '';
+      sendBtn.disabled = true;
+      publishBtn.disabled = true;
+      discardBtn.disabled = true;
+
+      addBubble('user', message);
+      const assistantBubble = addBubble('assistant', '');
+      setStatus('Updating draft...');
+
+      const res = await fetch(`${{basePath}}/chat/sessions/${{encodeURIComponent(sessionId)}}/messages`, {{
+        method: 'POST',
+        credentials: 'include',
+        headers: {{
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        }},
+        body: JSON.stringify({{ message }})
+      }});
+
+      if (!res.ok || !res.body) {{
+        assistantBubble.textContent = `Error: ${{await res.text()}}`;
+        sendBtn.disabled = false;
+        publishBtn.disabled = false;
+        discardBtn.disabled = false;
+        return;
+      }}
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = null;
+
+      while (true) {{
+        const {{ done, value }} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {{ stream: true }});
+        const lines = buffer.split('\\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {{
+          if (line.startsWith('event: ')) {{
+            currentEvent = line.slice(7).trim();
+            continue;
+          }}
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') continue;
+          let data = null;
+          try {{ data = JSON.parse(raw); }} catch (_err) {{ continue; }}
+          if (currentEvent === 'assistant' && data.delta) {{
+            assistantBubble.textContent += data.delta;
+          }} else if (currentEvent === 'ui_updated') {{
+            previewEl.src = draftUrl();
+            setStatus(`Draft v${{data.draft_version}} (${{data.update_mode}})`);
+          }} else if (currentEvent === 'error') {{
+            assistantBubble.textContent += `\\nError: ${{typeof data.error === 'string' ? data.error : JSON.stringify(data.error)}}`;
+            setStatus('Error');
+          }}
+        }}
+      }}
+
+      sendBtn.disabled = false;
+      publishBtn.disabled = false;
+      discardBtn.disabled = false;
+    }}
+
+    async function publishDraft() {{
+      if (!sessionId) return;
+      setStatus('Publishing...');
+      const res = await fetch(`${{basePath}}/chat/sessions/${{encodeURIComponent(sessionId)}}/publish`, {{
+        method: 'POST',
+        credentials: 'include'
+      }});
+      const payload = await res.json().catch(() => ({{}}));
+      if (!res.ok) {{
+        setStatus('Publish failed');
+        addBubble('assistant', `Publish failed: ${{JSON.stringify(payload)}}`);
+        return;
+      }}
+      setStatus(`Published v${{payload.version}}`);
+      addBubble('assistant', `Published successfully as version ${{payload.version}}.`);
+    }}
+
+    async function discardDraft() {{
+      if (!sessionId) return;
+      await fetch(`${{basePath}}/chat/sessions/${{encodeURIComponent(sessionId)}}`, {{
+        method: 'DELETE',
+        credentials: 'include'
+      }});
+      setStatus('Draft discarded, creating new session...');
+      await initSession();
+      historyEl.innerHTML = '';
+    }}
+
+    sendBtn.addEventListener('click', () => {{ void sendMessage(); }});
+    publishBtn.addEventListener('click', () => {{ void publishDraft(); }});
+    discardBtn.addEventListener('click', () => {{ void discardDraft(); }});
+    void initSession().catch((err) => {{
+      setStatus('Failed to initialize session');
+      addBubble('assistant', `Initialization failed: ${{err.message}}`);
+    }});
+  </script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html, media_type="text/html")
 
 
 def get_target_url(request: Request) -> str:

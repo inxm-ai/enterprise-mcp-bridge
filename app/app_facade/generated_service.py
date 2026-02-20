@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import shutil
 import copy
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -15,7 +16,12 @@ from typing import AsyncIterator
 from fastapi import HTTPException
 
 from app.session import MCPSessionBase
-from app.vars import MCP_BASE_PATH, GENERATED_UI_PROMPT_DUMP
+from app.vars import (
+    MCP_BASE_PATH,
+    GENERATED_UI_PROMPT_DUMP,
+    APP_UI_SESSION_TTL_MINUTES,
+    APP_UI_PATCH_ENABLED,
+)
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
@@ -45,6 +51,14 @@ DEFAULT_DESIGN_PROMPT = (
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
 SCRIPT_KEYS = ("service_script", "components_script", "test_script", "dummy_data")
+
+
+def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:
+    return (
+        f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
+            "utf-8"
+        )
+    )
 
 
 def _load_pfusch_prompt() -> str:
@@ -89,6 +103,26 @@ class GeneratedUIService:
         self.tgi_service = tgi_service or ProxiedTGIService()
         self.output_factory = GeneratedUIOutputFactory()
         self.dummy_data_generator = DummyDataGenerator(self.tgi_service)
+
+    def _current_version(self, metadata: Dict[str, Any]) -> int:
+        raw = metadata.get("version")
+        try:
+            parsed = int(raw)
+            return parsed if parsed > 0 else 1
+        except (TypeError, ValueError):
+            return 1
+
+    def _ensure_version_metadata(self, metadata: Dict[str, Any]) -> None:
+        version = self._current_version(metadata)
+        metadata["version"] = version
+        if not metadata.get("published_at"):
+            metadata["published_at"] = (
+                metadata.get("updated_at") or metadata.get("created_at") or self._now()
+            )
+        if not metadata.get("published_by"):
+            metadata["published_by"] = metadata.get("updated_by") or metadata.get(
+                "created_by"
+            )
 
     def _run_tests(
         self,
@@ -293,6 +327,9 @@ class GeneratedUIService:
                 "created_by": actor.user_id,
                 "created_at": timestamp,
                 "updated_at": timestamp,
+                "version": 1,
+                "published_at": timestamp,
+                "published_by": actor.user_id,
                 "history": [
                     self._history_entry(
                         action="create",
@@ -582,6 +619,9 @@ class GeneratedUIService:
                 "created_by": actor.user_id,
                 "created_at": timestamp,
                 "updated_at": timestamp,
+                "version": 1,
+                "published_at": timestamp,
+                "published_by": actor.user_id,
                 "history": [
                     self._history_entry(
                         action="create",
@@ -833,8 +873,12 @@ class GeneratedUIService:
         timestamp = self._now()
         existing.setdefault("metadata", {})
         metadata = existing["metadata"]
+        self._ensure_version_metadata(metadata)
         metadata["updated_at"] = timestamp
         metadata["updated_by"] = actor.user_id
+        metadata["version"] = self._current_version(metadata) + 1
+        metadata["published_at"] = timestamp
+        metadata["published_by"] = actor.user_id
         history = metadata.setdefault("history", [])
         payload_scripts = self._changed_scripts(
             payload_obj, existing.get("current", {})
@@ -919,8 +963,12 @@ class GeneratedUIService:
         timestamp = self._now()
         existing.setdefault("metadata", {})
         metadata = existing["metadata"]
+        self._ensure_version_metadata(metadata)
         metadata["updated_at"] = timestamp
         metadata["updated_by"] = actor.user_id
+        metadata["version"] = self._current_version(metadata) + 1
+        metadata["published_at"] = timestamp
+        metadata["published_by"] = actor.user_id
         history = metadata.setdefault("history", [])
         payload_scripts = self._changed_scripts(generated, existing.get("current", {}))
         history.append(
@@ -959,6 +1007,8 @@ class GeneratedUIService:
             raise HTTPException(status_code=404, detail="Ui not found") from exc
 
         self._assert_scope_consistency(existing, scope, name)
+        existing.setdefault("metadata", {})
+        self._ensure_version_metadata(existing["metadata"])
 
         # Only expand payload when explicitly requested (for HTML rendering)
         if expand and "current" in existing:
@@ -1029,6 +1079,571 @@ class GeneratedUIService:
         )
 
         return existing
+
+    def create_draft_session(
+        self,
+        *,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        tools: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        try:
+            existing = self.storage.read(scope, ui_id, name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Ui not found") from exc
+
+        self._assert_scope_consistency(existing, scope, name)
+        self._ensure_update_permissions(existing, scope, actor)
+        existing.setdefault("metadata", {})
+        self._ensure_version_metadata(existing["metadata"])
+        self.storage.cleanup_expired_sessions(scope, ui_id, name)
+
+        ttl_minutes = int(
+            os.environ.get(
+                "APP_UI_SESSION_TTL_MINUTES", str(APP_UI_SESSION_TTL_MINUTES)
+            )
+        )
+        created_at = self._now()
+        expires_at = datetime.now(timezone.utc).timestamp() + (ttl_minutes * 60)
+        expires_iso = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat()
+        session_id = validate_identifier(uuid.uuid4().hex, "session id")
+        base_version = self._current_version(existing["metadata"])
+
+        payload = {
+            "session_id": session_id,
+            "editor_user_id": actor.user_id,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "expires_at": expires_iso,
+            "base_version": base_version,
+            "draft_version": 1,
+            "draft_payload": copy.deepcopy(existing.get("current", {})),
+            "messages": [],
+            "last_tools": list(tools or []),
+            "metadata_snapshot": copy.deepcopy(existing.get("metadata", {})),
+        }
+
+        self.storage.write_session(scope, ui_id, name, session_id, payload)
+        return {
+            "session_id": session_id,
+            "base_version": base_version,
+            "draft_version": 1,
+            "expires_at": expires_iso,
+        }
+
+    def _session_is_expired(self, session_payload: Dict[str, Any]) -> bool:
+        raw = session_payload.get("expires_at")
+        if not raw:
+            return False
+        value = str(raw)
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        try:
+            expires_dt = datetime.fromisoformat(value)
+        except ValueError:
+            return True
+        if expires_dt.tzinfo is None:
+            expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+        return expires_dt <= datetime.now(timezone.utc)
+
+    def _load_session(
+        self,
+        *,
+        scope: Scope,
+        ui_id: str,
+        name: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        self.storage.cleanup_expired_sessions(scope, ui_id, name)
+        try:
+            session_payload = self.storage.read_session(scope, ui_id, name, session_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail="Draft session not found"
+            ) from exc
+        if self._session_is_expired(session_payload):
+            self.storage.delete_session(scope, ui_id, name, session_id)
+            raise HTTPException(status_code=404, detail="Draft session expired")
+        return session_payload
+
+    def _assert_session_owner(
+        self, session_payload: Dict[str, Any], actor: Actor
+    ) -> None:
+        if session_payload.get("editor_user_id") != actor.user_id:
+            raise HTTPException(status_code=403, detail="Draft session access denied")
+
+    def get_draft_ui(
+        self,
+        *,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        session_id: str,
+        expand: bool = False,
+    ) -> Dict[str, Any]:
+        session_payload = self._load_session(
+            scope=scope, ui_id=ui_id, name=name, session_id=session_id
+        )
+        self._assert_session_owner(session_payload, actor)
+
+        metadata = copy.deepcopy(session_payload.get("metadata_snapshot", {}))
+        metadata["draft_version"] = session_payload.get("draft_version", 1)
+        metadata["session_id"] = session_payload.get("session_id")
+        self._ensure_version_metadata(metadata)
+
+        current = copy.deepcopy(session_payload.get("draft_payload", {}))
+        if expand:
+            current = self._expand_payload(current)
+
+        return {"metadata": metadata, "current": current}
+
+    def discard_draft_session(
+        self,
+        *,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        session_id: str,
+    ) -> bool:
+        session_payload = self._load_session(
+            scope=scope, ui_id=ui_id, name=name, session_id=session_id
+        )
+        self._assert_session_owner(session_payload, actor)
+        return self.storage.delete_session(scope, ui_id, name, session_id)
+
+    def publish_draft_session(
+        self,
+        *,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        try:
+            existing = self.storage.read(scope, ui_id, name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Ui not found") from exc
+
+        session_payload = self._load_session(
+            scope=scope, ui_id=ui_id, name=name, session_id=session_id
+        )
+        self._assert_session_owner(session_payload, actor)
+
+        self._assert_scope_consistency(existing, scope, name)
+        self._ensure_update_permissions(existing, scope, actor)
+
+        existing.setdefault("metadata", {})
+        metadata = existing["metadata"]
+        self._ensure_version_metadata(metadata)
+        current_version = self._current_version(metadata)
+        base_version = int(session_payload.get("base_version") or 0)
+
+        if base_version != current_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "publish_conflict",
+                    "detail": "Draft base version is stale. Refresh draft session.",
+                    "current_version": current_version,
+                    "base_version": base_version,
+                },
+            )
+
+        timestamp = self._now()
+        draft_payload = copy.deepcopy(session_payload.get("draft_payload", {}))
+        self._normalise_payload(
+            draft_payload,
+            scope,
+            ui_id,
+            name,
+            "Publish conversational draft",
+            existing,
+        )
+        payload_scripts = self._changed_scripts(
+            draft_payload, existing.get("current", {})
+        )
+
+        metadata["updated_at"] = timestamp
+        metadata["updated_by"] = actor.user_id
+        metadata["version"] = current_version + 1
+        metadata["published_at"] = timestamp
+        metadata["published_by"] = actor.user_id
+        history = metadata.setdefault("history", [])
+        history.append(
+            self._history_entry(
+                action="publish",
+                prompt="Publish conversational draft",
+                tools=list(session_payload.get("last_tools") or []),
+                user_id=actor.user_id,
+                generated_at=timestamp,
+                payload_metadata=draft_payload.get("metadata", {}),
+                payload_html=draft_payload.get("html", {}),
+                payload_scripts=payload_scripts or None,
+            )
+        )
+
+        existing["current"] = draft_payload
+        self.storage.write(scope, ui_id, name, existing)
+        self.storage.delete_session(scope, ui_id, name, session_id)
+        return existing
+
+    async def stream_chat_update(
+        self,
+        *,
+        session: MCPSessionBase,
+        scope: Scope,
+        actor: Actor,
+        ui_id: str,
+        name: str,
+        session_id: str,
+        message: str,
+        tools: Optional[Sequence[str]],
+        tool_choice: Optional[Any],
+        access_token: Optional[str],
+    ) -> AsyncIterator[bytes]:
+        if not message.strip():
+            yield _sse_event("error", {"error": "message must not be empty"})
+            return
+
+        try:
+            session_payload = self._load_session(
+                scope=scope, ui_id=ui_id, name=name, session_id=session_id
+            )
+            self._assert_session_owner(session_payload, actor)
+
+            requested_tools = (
+                list(tools)
+                if tools is not None
+                else list(session_payload.get("last_tools") or [])
+            )
+            selected_tools = await self._select_tools(session, requested_tools, message)
+            selected_tool_names = [
+                t.get("function", {}).get("name")
+                for t in (selected_tools or [])
+                if isinstance(t, dict)
+            ]
+            selected_tool_names = [name for name in selected_tool_names if name]
+
+            draft_payload = copy.deepcopy(session_payload.get("draft_payload", {}))
+            assistant_text = await self._run_assistant_message(
+                session=session,
+                draft_payload=draft_payload,
+                history=session_payload.get("messages", []),
+                user_message=message,
+                selected_tools=selected_tools,
+                tool_choice=tool_choice,
+                access_token=access_token,
+            )
+            if assistant_text:
+                yield _sse_event("assistant", {"delta": assistant_text})
+
+            updated_payload: Optional[Dict[str, Any]] = None
+            update_mode = "regenerated_fallback"
+            patch_error: Optional[str] = None
+
+            patch_enabled = (
+                os.environ.get(
+                    "APP_UI_PATCH_ENABLED", "true" if APP_UI_PATCH_ENABLED else "false"
+                ).lower()
+                == "true"
+            )
+            if patch_enabled:
+                patch_attempt = await self._attempt_patch_update(
+                    scope=scope,
+                    ui_id=ui_id,
+                    name=name,
+                    draft_payload=draft_payload,
+                    user_message=message,
+                    assistant_message=assistant_text,
+                    access_token=access_token,
+                    previous_metadata=session_payload.get("metadata_snapshot", {}),
+                )
+                if patch_attempt:
+                    updated_payload = patch_attempt.get("payload")
+                    update_mode = "patch_applied"
+                else:
+                    patch_error = "Patch validation failed, using full regenerate"
+
+            if updated_payload is None:
+                previous = {
+                    "metadata": copy.deepcopy(
+                        session_payload.get("metadata_snapshot", {}) or {}
+                    ),
+                    "current": draft_payload,
+                }
+                regenerate_prompt = self._compose_regeneration_prompt(
+                    user_message=message,
+                    assistant_message=assistant_text,
+                    history=session_payload.get("messages", []),
+                )
+                updated_payload = await self._generate_ui_payload(
+                    session=session,
+                    scope=scope,
+                    ui_id=ui_id,
+                    name=name,
+                    prompt=regenerate_prompt,
+                    tools=selected_tool_names,
+                    access_token=access_token,
+                    previous=previous,
+                )
+
+            messages_history = list(session_payload.get("messages") or [])
+            messages_history.append({"role": "user", "content": message})
+            messages_history.append({"role": "assistant", "content": assistant_text})
+
+            session_payload["messages"] = messages_history
+            session_payload["draft_payload"] = updated_payload
+            session_payload["last_tools"] = selected_tool_names
+            session_payload["updated_at"] = self._now()
+            session_payload["draft_version"] = (
+                int(session_payload.get("draft_version") or 1) + 1
+            )
+            self.storage.write_session(scope, ui_id, name, session_id, session_payload)
+
+            ui_event_payload = {
+                "session_id": session_id,
+                "draft_version": session_payload["draft_version"],
+                "update_mode": update_mode,
+                "tools": selected_tool_names,
+            }
+            if patch_error:
+                ui_event_payload["warning"] = patch_error
+            yield _sse_event("ui_updated", ui_event_payload)
+            yield _sse_event(
+                "done",
+                {
+                    "session_id": session_id,
+                    "draft_version": session_payload["draft_version"],
+                    "update_mode": update_mode,
+                },
+            )
+            yield b"data: [DONE]\n\n"
+        except HTTPException as exc:
+            yield _sse_event("error", {"error": exc.detail})
+        except Exception as exc:
+            logger.error(
+                "[GeneratedUI] Conversational update failed: %s", exc, exc_info=exc
+            )
+            yield _sse_event(
+                "error", {"error": "Failed to process conversational update"}
+            )
+
+    def _compose_regeneration_prompt(
+        self,
+        *,
+        user_message: str,
+        assistant_message: str,
+        history: Sequence[Dict[str, Any]],
+    ) -> str:
+        tail = list(history or [])[-6:]
+        return (
+            "Update the existing UI using the conversational request.\n\n"
+            f"User request:\n{user_message}\n\n"
+            f"Assistant analysis:\n{assistant_message}\n\n"
+            "Recent conversation history (JSON):\n"
+            f"{json.dumps(tail, ensure_ascii=False)}"
+        )
+
+    async def _run_assistant_message(
+        self,
+        *,
+        session: MCPSessionBase,
+        draft_payload: Dict[str, Any],
+        history: Sequence[Dict[str, Any]],
+        user_message: str,
+        selected_tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[Any],
+        access_token: Optional[str],
+    ) -> str:
+        system_prompt = (
+            "You are an assistant helping a user iteratively edit a generated web UI. "
+            "Keep answers concise and implementation-focused. If tools are available, "
+            "use them to gather facts before proposing UI changes."
+        )
+        messages: List[Message] = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt)
+        ]
+        messages.append(
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    "Current draft context:\n"
+                    + json.dumps(
+                        {
+                            "html": (draft_payload.get("html") or {}),
+                            "metadata": (draft_payload.get("metadata") or {}),
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            )
+        )
+        for item in history or []:
+            role = str(item.get("role") or "").lower()
+            content = str(item.get("content") or "")
+            if role == MessageRole.USER.value:
+                messages.append(Message(role=MessageRole.USER, content=content))
+            elif role == MessageRole.ASSISTANT.value:
+                messages.append(Message(role=MessageRole.ASSISTANT, content=content))
+        messages.append(Message(role=MessageRole.USER, content=user_message))
+
+        request = ChatCompletionRequest(
+            messages=messages,
+            stream=False,
+            tools=selected_tools if selected_tools else None,
+            tool_choice=tool_choice if tool_choice is not None else "auto",
+            extra_headers=UI_MODEL_HEADERS,
+        )
+
+        response = await self.tgi_service._non_stream_chat_with_tools(
+            session,
+            messages,
+            selected_tools or [],
+            request,
+            access_token,
+            None,
+        )
+        return self._assistant_text_from_response(response)
+
+    def _assistant_text_from_response(self, response: Any) -> str:
+        choices = getattr(response, "choices", None)
+        if choices:
+            first = choices[0]
+            message = getattr(first, "message", None)
+            if message and getattr(message, "content", None):
+                return str(message.content)
+
+        if isinstance(response, dict):
+            choices = response.get("choices") or []
+            if choices:
+                first = choices[0] or {}
+                message = first.get("message") or {}
+                content = message.get("content")
+                if content is not None:
+                    return str(content)
+        return ""
+
+    async def _attempt_patch_update(
+        self,
+        *,
+        scope: Scope,
+        ui_id: str,
+        name: str,
+        draft_payload: Dict[str, Any],
+        user_message: str,
+        assistant_message: str,
+        access_token: Optional[str],
+        previous_metadata: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            system_prompt = (
+                "You are a UI patch planner. Return valid JSON only in this shape: "
+                '{"patch":{"html":{"page":"...","snippet":"..."},"service_script":"...","components_script":"...","metadata":{...}}}. '
+                "Only include fields that need changes. Do not include markdown fences."
+            )
+            payload = {
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+                "current": {
+                    "html": draft_payload.get("html"),
+                    "service_script": draft_payload.get("service_script"),
+                    "components_script": draft_payload.get("components_script"),
+                    "metadata": draft_payload.get("metadata"),
+                },
+            }
+            request = ChatCompletionRequest(
+                messages=[
+                    Message(role=MessageRole.SYSTEM, content=system_prompt),
+                    Message(
+                        role=MessageRole.USER,
+                        content=json.dumps(payload, ensure_ascii=False),
+                    ),
+                ],
+                stream=False,
+                extra_headers=UI_MODEL_HEADERS,
+            )
+
+            response = await self.tgi_service.llm_client.non_stream_completion(
+                request, access_token or "", None
+            )
+            content = self._assistant_text_from_response(response)
+            if not content:
+                return None
+
+            parsed = self._parse_json(content)
+            patch = parsed.get("patch")
+            if not isinstance(patch, dict):
+                return None
+
+            candidate = copy.deepcopy(draft_payload)
+            html_patch = patch.get("html")
+            if isinstance(html_patch, dict):
+                html_target = candidate.setdefault("html", {})
+                for key in ("page", "snippet"):
+                    value = html_patch.get(key)
+                    if isinstance(value, str) and value.strip():
+                        html_target[key] = value
+
+            for key in (
+                "service_script",
+                "components_script",
+                "test_script",
+                "dummy_data",
+            ):
+                value = patch.get(key)
+                if isinstance(value, str):
+                    candidate[key] = value
+
+            metadata_patch = patch.get("metadata")
+            if isinstance(metadata_patch, dict):
+                current_metadata = candidate.get("metadata")
+                if not isinstance(current_metadata, dict):
+                    current_metadata = {}
+                merged_metadata = {**current_metadata, **metadata_patch}
+                candidate["metadata"] = merged_metadata
+
+            previous = {"metadata": previous_metadata, "current": draft_payload}
+            self._normalise_payload(
+                candidate,
+                scope,
+                ui_id,
+                name,
+                user_message,
+                previous,
+            )
+
+            test_script = candidate.get("test_script") or draft_payload.get(
+                "test_script"
+            )
+            service_script = candidate.get("service_script") or draft_payload.get(
+                "service_script"
+            )
+            components_script = candidate.get("components_script") or draft_payload.get(
+                "components_script"
+            )
+            if (
+                isinstance(service_script, str)
+                and isinstance(components_script, str)
+                and isinstance(test_script, str)
+                and test_script.strip()
+            ):
+                success, _ = self._run_tests(
+                    service_script,
+                    components_script,
+                    test_script,
+                    candidate.get("dummy_data"),
+                )
+                if not success:
+                    return None
+
+            return {"payload": candidate}
+        except Exception:
+            return None
 
     async def _generate_ui_payload(
         self,

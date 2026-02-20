@@ -104,3 +104,9 @@ MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
 )
 
 GENERATED_UI_PROMPT_DUMP = os.getenv("GENERATED_UI_PROMPT_DUMP", "")
+
+APP_CONVERSATIONAL_UI_ENABLED = (
+    os.getenv("APP_CONVERSATIONAL_UI_ENABLED", "false").lower() == "true"
+)
+APP_UI_SESSION_TTL_MINUTES = int(os.getenv("APP_UI_SESSION_TTL_MINUTES", "120"))
+APP_UI_PATCH_ENABLED = os.getenv("APP_UI_PATCH_ENABLED", "true").lower() == "true"

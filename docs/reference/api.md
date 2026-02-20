@@ -425,6 +425,41 @@ curl -X POST http://localhost:8000/session/my-session/ping
 curl -X POST http://localhost:8000/session/my-session/close
 ```
 
+### Conversational Generated UI (Feature-Flagged)
+
+These endpoints are available when `APP_CONVERSATIONAL_UI_ENABLED=true`.
+
+#### POST `/app/_generated/{target}/{ui_id}/{name}/chat/sessions`
+Create an editor draft session for conversational UI updates.
+
+#### POST `/app/_generated/{target}/{ui_id}/{name}/chat/sessions/{session_id}/messages`
+Send a conversational update message and receive SSE events:
+- `assistant`
+- `ui_updated`
+- `done`
+- `error`
+
+Request body:
+```json
+{
+  "message": "Add summary cards and move filters into a top bar",
+  "tools": ["list_items", "get_metrics"],
+  "tool_choice": "auto"
+}
+```
+
+#### GET `/app/_generated/{target}/{ui_id}/{name}/draft?session_id={session_id}&as=page|snippet|card`
+Fetch the draft UI for the owning editor session.
+
+#### POST `/app/_generated/{target}/{ui_id}/{name}/chat/sessions/{session_id}/publish`
+Publish draft to canonical UI version with optimistic version check.
+
+#### DELETE `/app/_generated/{target}/{ui_id}/{name}/chat/sessions/{session_id}`
+Discard/close a draft session.
+
+#### GET `/app/_generated/{target}/{ui_id}/{name}/container`
+Serve the bridge-hosted conversational editing container UI.
+
 ## Client Libraries
 
 ### Python
