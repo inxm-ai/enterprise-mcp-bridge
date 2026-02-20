@@ -776,6 +776,7 @@ async def get_generated_ui_container(
       padding: 12px;
       overflow-y: auto;
       min-height: 0;
+      max-height: 79vh;
       background: #fafbfc;
     }}
     .bubble {{

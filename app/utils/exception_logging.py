@@ -56,10 +56,16 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
         The first exception matching the target type, or None if not found
     """
     try:
-        print(f"Searching for {target_type.__name__} in exception: {exception}")
         if isinstance(exception, target_type):
-            print(f"Found {target_type.__name__} in exception: {exception}")
             return exception
+
+        # Convert upstream HTTP transport status failures into FastAPI HTTP exceptions
+        # so callers can pass through the remote status code (e.g. 401) instead of 500.
+        converted_http_exception = _convert_http_status_error(
+            exception, target_type
+        )
+        if converted_http_exception is not None:
+            return converted_http_exception
 
         # Check for sub-exceptions if this is an exception group
         if hasattr(exception, "exceptions"):
@@ -67,13 +73,38 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
             for sub_exc in sub_exceptions:
                 inner_exc = find_exception_in_exception_groups(sub_exc, target_type)
                 if inner_exc is not None:
-                    print(f"Found {target_type.__name__} in sub-exception: {inner_exc}")
                     return inner_exc
 
         return None
     except Exception:
         # If anything goes wrong, we assume we didn't find the target type
         return None
+
+
+def _convert_http_status_error(exception: Exception, target_type: any):
+    """
+    Convert httpx.HTTPStatusError into FastAPI HTTPException when requested.
+
+    This keeps upstream HTTP status codes visible to clients instead of
+    collapsing them into generic 500 responses.
+    """
+    try:
+        from fastapi import HTTPException as FastAPIHTTPException
+        import httpx
+    except Exception:
+        return None
+
+    if target_type is not FastAPIHTTPException:
+        return None
+
+    if not isinstance(exception, httpx.HTTPStatusError):
+        return None
+
+    status_code = getattr(getattr(exception, "response", None), "status_code", None)
+    if not isinstance(status_code, int):
+        return None
+
+    return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
 
 
 def log_exception_with_details(

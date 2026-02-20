@@ -3,6 +3,8 @@ import logging
 import io
 from unittest.mock import Mock
 from typing import List
+import httpx
+from fastapi import HTTPException
 
 from app.utils.exception_logging import (
     log_exception_with_details,
@@ -586,6 +588,44 @@ class TestEdgeCasesAndStressTests:
             exc = BrokenGroup()
             found = find_exception_in_exception_groups(exc, ValueError)
             assert found is None
+
+        def test_maps_http_status_error_to_http_exception(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            request = httpx.Request("GET", "https://mcp.atlassian.com/v1/sse")
+            response = httpx.Response(status_code=401, request=request)
+            exc = httpx.HTTPStatusError(
+                "Client error '401 Unauthorized' for url 'https://mcp.atlassian.com/v1/sse'",
+                request=request,
+                response=response,
+            )
+
+            found = find_exception_in_exception_groups(exc, HTTPException)
+
+            assert isinstance(found, HTTPException)
+            assert found.status_code == 401
+            assert "401 Unauthorized" in str(found.detail)
+
+        def test_maps_nested_http_status_error_to_http_exception(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            class MockGroup:
+                def __init__(self, exceptions):
+                    self.exceptions = exceptions
+
+            request = httpx.Request("GET", "https://mcp.atlassian.com/v1/sse")
+            response = httpx.Response(status_code=401, request=request)
+            nested_exc = httpx.HTTPStatusError(
+                "Client error '401 Unauthorized' for url 'https://mcp.atlassian.com/v1/sse'",
+                request=request,
+                response=response,
+            )
+            group = MockGroup([RuntimeError("Other error"), MockGroup([nested_exc])])
+
+            found = find_exception_in_exception_groups(group, HTTPException)
+
+            assert isinstance(found, HTTPException)
+            assert found.status_code == 401
 
 
 if __name__ == "__main__":
