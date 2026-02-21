@@ -61,9 +61,7 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
 
         # Convert upstream HTTP transport status failures into FastAPI HTTP exceptions
         # so callers can pass through the remote status code (e.g. 401) instead of 500.
-        converted_http_exception = _convert_http_status_error(
-            exception, target_type
-        )
+        converted_http_exception = _convert_http_status_error(exception, target_type)
         if converted_http_exception is not None:
             return converted_http_exception
 

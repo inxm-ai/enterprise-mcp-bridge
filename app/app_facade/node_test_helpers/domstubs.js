@@ -14,6 +14,7 @@ const original = {
   FormData: globalThis.FormData,
   CustomEvent: globalThis.CustomEvent,
   requestAnimationFrame: globalThis.requestAnimationFrame,
+  cancelAnimationFrame: globalThis.cancelAnimationFrame,
   CSSStyleSheet: globalThis.CSSStyleSheet,
   fetch: globalThis.fetch,
   localStorage: globalThis.localStorage,
@@ -72,6 +73,16 @@ const connectTree = (node) => {
   };
   walk(node);
 };
+const disconnectTree = (node) => {
+  if (!node) return;
+  const walk = (current) => {
+    if (!current) return;
+    if (typeof current.disconnectedCallback === 'function') current.disconnectedCallback();
+    if (current.childNodes) current.childNodes.forEach(child => walk(child));
+    if (current.shadowRoot?.childNodes) current.shadowRoot.childNodes.forEach(child => walk(child));
+  };
+  walk(node);
+};
 
 const matchSelector = (el, selector) => {
   if (!selector || !el) return false;
@@ -90,11 +101,11 @@ const matchSelector = (el, selector) => {
 
     const baseParts = base.split('.').filter(Boolean);
     let tag = baseParts[0] || base;
-    const classes = baseParts.slice(1);
+    let classes = baseParts.slice(1);
 
     if (base.startsWith('.')) {
       tag = '*';
-      classes.push(base.replace('.', ''));
+      classes = baseParts;
     } else if (base.startsWith('#')) {
       return el.id === base.slice(1);
     }
@@ -214,6 +225,7 @@ class FakeElement {
     const index = this._childNodes.indexOf(node);
     if (index >= 0) {
       this._childNodes.splice(index, 1);
+      disconnectTree(node);
       if (node && typeof node === 'object') node.parentNode = null;
     }
   }
@@ -221,8 +233,10 @@ class FakeElement {
     if (!this.parentNode) return;
     const index = this.parentNode._childNodes.indexOf(this);
     if (index >= 0) {
+      disconnectTree(this);
       this.parentNode._childNodes.splice(index, 1, node);
       node.parentNode = this.parentNode;
+      connectTree(node);
     }
   }
   get childNodes() {
@@ -279,6 +293,7 @@ class FakeElement {
       this.attributeChangedCallback(name, prev, stringValue);
     }
   }
+  get isConnected() { return !!this.parentNode; }
   getAttribute(name) {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
@@ -358,6 +373,7 @@ class FakeElement {
     return this._innerHTML;
   }
   set innerHTML(value) {
+    this._childNodes.forEach(child => disconnectTree(child));
     this._innerHTML = String(value ?? '');
     this._childNodes = [];
     this._textContent = '';
@@ -369,6 +385,7 @@ class FakeElement {
     return this._textContent;
   }
   set textContent(value) {
+    this._childNodes.forEach(child => disconnectTree(child));
     this._childNodes = [];
     this._textContent = String(value ?? '');
   }
@@ -660,6 +677,7 @@ class FakeDocument {
     this._listeners = new Map();
     this.body = new FakeElement('body', this);
     this.documentElement = new FakeElement('html', this);
+    this.cookie = '';
   }
   createElement(tag) {
     const name = String(tag || '');
@@ -726,7 +744,14 @@ class FakeWindow {
   constructor(selection, messageListeners) {
     this._selection = selection;
     this._listeners = messageListeners || new Map();
-    this.location = { origin: 'http://localhost', hostname: 'localhost' };
+    this.location = {
+      origin: 'http://localhost',
+      hostname: 'localhost',
+      pathname: '/',
+      search: '',
+      hash: '',
+      href: 'http://localhost/'
+    };
     this.document = null;
   }
   addEventListener(type, handler) {
@@ -812,6 +837,7 @@ const findCallerFile = () => {
 const PFUSCH_REMOTE_URL = new URL('https://matthiaskainer.github.io/pfusch/pfusch.js');
 const PFUSCH_CDN_RE = /(['"])(?:https:\/\/matthiaskainer\.github\.io\/pfusch\/pfusch(?:\.min)?\.js|\.\/pfusch\.js)\1/g;
 const pfuschImportCache = new Map();
+let pfuschImportEpoch = 0;
 const pfuschRemoteHash = createHash('sha1').update(PFUSCH_REMOTE_URL.href).digest('hex').slice(0, 8);
 const pfuschRemotePath = path.join(os.tmpdir(), `pfusch.remote.${pfuschRemoteHash}.js`);
 let pfuschRemotePromise = null;
@@ -935,7 +961,13 @@ class PfuschNodeCollection {
     return new PfuschNodeCollection(node ? [node] : [], this.host);
   }
   at(index) {
-    return new PfuschNodeCollection([this.nodes[index]]);
+    return new PfuschNodeCollection([this.nodes[index]], this.host);
+  }
+  get state() {
+    return this.host?.state;
+  }
+  get shadowRoot() {
+    return this.host?.shadowRoot || null;
   }
   get value() {
     return this._firstNode()?.value;
@@ -978,7 +1010,7 @@ class PfuschNodeCollection {
         }
       });
     });
-    return new PfuschNodeCollection(matches);
+    return new PfuschNodeCollection(matches, this.host);
   }
   map(fn) {
     return this.nodes.map(node => fn(new PfuschNodeCollection([node], this.host)));
@@ -1047,7 +1079,7 @@ export async function import_for_test(modulePath, pfuschPathOrOptions = null, ex
     }
   }
 
-  const cacheKey = `${moduleUrl.href}::${pfuschUrl.href}::${JSON.stringify(replacements)}`;
+  const cacheKey = `${pfuschImportEpoch}::${moduleUrl.href}::${pfuschUrl.href}::${JSON.stringify(replacements)}`;
   const cached = pfuschImportCache.get(cacheKey);
   if (cached) return import(cached);
 
@@ -1094,6 +1126,7 @@ export async function loadBaseDocument(filePath) {
   }
   if (Array.isArray(doc.body._childNodes)) {
     doc.body._childNodes.forEach(child => {
+      disconnectTree(child);
       if (child?.parentNode === doc.body) child.parentNode = null;
     });
     doc.body._childNodes = [];
@@ -1117,6 +1150,7 @@ export async function loadDocumentFromString(html) {
   }
   if (Array.isArray(doc.body._childNodes)) {
     doc.body._childNodes.forEach(child => {
+      disconnectTree(child);
       if (child?.parentNode === doc.body) child.parentNode = null;
     });
     doc.body._childNodes = [];
@@ -1133,6 +1167,9 @@ export async function loadDocumentFromString(html) {
 }
 
 export function setupDomStubs() {
+  // Recreate module side effects (e.g., customElements registration) for each fresh DOM sandbox.
+  pfuschImportCache.clear();
+  pfuschImportEpoch += 1;
   const messageListeners = new Map();
   const selection = new FakeSelection();
   const fakeWindow = new FakeWindow(selection, messageListeners);
@@ -1212,6 +1249,7 @@ export function setupDomStubs() {
   globalThis.FormData = FakeFormData;
   globalThis.CustomEvent = FakeCustomEvent;
   globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
   globalThis.MutationObserver = FakeMutationObserver;
   globalThis.triggerMutation = triggerMutation;
   return {
@@ -1228,6 +1266,7 @@ export function setupDomStubs() {
       globalThis.FormData = original.FormData || globalThis.FormData;
       globalThis.CustomEvent = original.CustomEvent || globalThis.CustomEvent;
       globalThis.requestAnimationFrame = original.requestAnimationFrame || globalThis.requestAnimationFrame;
+      globalThis.cancelAnimationFrame = original.cancelAnimationFrame || globalThis.cancelAnimationFrame;
       globalThis.fetch = original.fetch || globalThis.fetch;
       globalThis.KeyboardEvent = original.KeyboardEvent || globalThis.KeyboardEvent;
       globalThis.localStorage = original.localStorage || globalThis.localStorage;

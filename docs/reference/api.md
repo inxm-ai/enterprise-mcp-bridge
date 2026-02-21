@@ -429,6 +429,28 @@ curl -X POST http://localhost:8000/session/my-session/close
 
 These endpoints are available when `APP_CONVERSATIONAL_UI_ENABLED=true`.
 
+#### GET `/app/_generated/start`
+Serve a bridge-hosted start page for generation. The page accepts `ui_id` and `prompt`,
+streams generation progress (`log`, `tool_start`, `test_result`, `error`, `done`), and
+redirects to the generated container URL on success.
+
+#### POST `/app/_generated/{target}`
+Create a generated UI via SSE stream.
+
+Request body:
+```json
+{
+  "id": "my-ui",
+  "prompt": "Build a KPI dashboard with filters",
+  "name": "optional-explicit-name",
+  "tools": ["list_items"]
+}
+```
+
+Notes:
+- `name` is optional. If omitted, the server derives it from `prompt`.
+- Auto-generated names use slug + numeric suffix collision handling (`-2`, `-3`, ...).
+
 #### POST `/app/_generated/{target}/{ui_id}/{name}/chat/sessions`
 Create an editor draft session for conversational UI updates.
 

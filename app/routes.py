@@ -6,7 +6,9 @@ from app.vars import (
     EFFECT_TOOLS,
     MCP_BASE_PATH,
     SESSION_FIELD_NAME,
-    TOOL_OUTPUT_SCHEMAS,
+    TGI_ENABLED,
+    APP_CONVERSATIONAL_UI_ENABLED,
+    get_tool_output_schema,
 )
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
@@ -85,6 +87,35 @@ def _pop_user_feedback(args: Optional[dict]) -> tuple[Optional[dict], Optional[s
     if not feedback:
         feedback = None
     return out, feedback
+
+
+@router.get("/")
+async def home():
+    result = {
+        "message": "Welcome to the Enterprise MCP Bridge",
+        "urls": {
+            "list_resources": "/resources",
+            "get_resource_details": "/resources/{resource_name}",
+            "list_prompts": "/prompts",
+            "list_tools": "/tools",
+            "sse session": "/sse",
+            "get_tool_details": "/tools/{tool_name}",
+            "[POST] run_tool": "/tools/{tool_name}",
+            "[POST] run_tool - single call streaming": "/tools/{tool_name}/stream",
+            "[POST] run_prompt": "/prompts/{prompt_name}",
+            "[POST] start_session": "/session/start",
+            "[POST] close_session": "/session/close",
+        },
+    }
+    # if tgi is enabled, provide the TGI endpoints
+    if TGI_ENABLED:
+        result["urls"][
+            "[POST] text_generation conversation"
+        ] = "/tgi/v1/chat/completions"
+        result["urls"]["[POST] text_generation a2a"] = "/tgi/v1/a2a"
+    if APP_CONVERSATIONAL_UI_ENABLED:
+        result["urls"]["conversational_ui"] = "/app/_generated/start"
+    return result
 
 
 @router.get("/resources")
@@ -301,9 +332,17 @@ async def list_tools(
                     )
                 )
                 return result
+    except HTTPException as e:
+        raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tools] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
+    except Exception as e:
+        log_exception_with_details(logger, "[Tools]", e)
+        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
+        if child_http_exception:
+            raise child_http_exception
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/tools/{tool_name}")
@@ -437,7 +476,8 @@ async def run_tool(
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
-        if not result.isError and tool_name in TOOL_OUTPUT_SCHEMAS:
+        output_schema = get_tool_output_schema(tool_name)
+        if not result.isError and output_schema is not None:
             if result.structuredContent:
                 logger.info(
                     f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."

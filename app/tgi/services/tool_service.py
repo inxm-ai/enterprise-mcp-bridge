@@ -8,7 +8,7 @@ import logging
 import inspect
 import time
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
-from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE
+from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE, GENERATED_UI_TOOL_TEXT_CAP
 from opentelemetry import trace
 
 from app.elicitation import (
@@ -51,6 +51,39 @@ def _compact_text(text: str) -> str:
         except (json.JSONDecodeError, TypeError):
             pass
     return compact
+
+
+def _extract_json_block(text: str) -> Optional[str]:
+    if not isinstance(text, str):
+        return None
+    start = -1
+    depth = 0
+    in_string = False
+    escape = False
+    for idx, char in enumerate(text):
+        if start < 0:
+            if char == "{":
+                start = idx
+                depth = 1
+            continue
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if depth == 0:
+            return text[start : idx + 1]
+    return None
 
 
 class ToolService:
@@ -496,22 +529,64 @@ class ToolService:
                             try:
                                 content = json.loads(value)
                             except json.JSONDecodeError:
-                                pass
+                                parsed = self._try_parse_json_value(value)
+                                if parsed is not None:
+                                    content = parsed
+                                else:
+                                    content = self._compact_large_text(value)
+                        if isinstance(content, (dict, list)):
+                            content = json.dumps(
+                                content,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
                     else:
-                        content = json.dumps(
-                            [
-                                {
-                                    "text": (
-                                        item.text
-                                        if hasattr(item, "text")
-                                        else str(item)
-                                    )
-                                }
-                                for item in content_entries
-                            ],
-                            ensure_ascii=False,
-                            separators=(",", ":"),
+                        json_from_text = self._parse_json_from_text_entries(
+                            content_entries
                         )
+                        if json_from_text is not None:
+                            if self._payload_has_error_signal(json_from_text):
+                                resolved_error = self._extract_error_message(
+                                    json_from_text
+                                )
+                                if not resolved_error:
+                                    resolved_error = await self._explain_error_with_llm(
+                                        json_from_text, access_token, span
+                                    )
+                                if not resolved_error:
+                                    resolved_error = "Tool returned an error response."
+                                content = json.dumps(
+                                    {"error": resolved_error},
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            else:
+                                content = json.dumps(
+                                    json_from_text,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                        else:
+                            compact_text_payload = self._compact_text_entries_payload(
+                                content_entries
+                            )
+                            if compact_text_payload is not None:
+                                content = compact_text_payload
+                            else:
+                                content = json.dumps(
+                                    [
+                                        {
+                                            "text": (
+                                                item.text
+                                                if hasattr(item, "text")
+                                                else str(item)
+                                            )
+                                        }
+                                        for item in content_entries
+                                    ],
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
                 else:
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned content: {str(content_entries)[1000:] if content_entries else str(result)[1000:]}"
@@ -521,6 +596,40 @@ class ToolService:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
+
+                if (
+                    isinstance(content, str)
+                    and len(content) > GENERATED_UI_TOOL_TEXT_CAP
+                ):
+                    parsed = self._try_parse_json_value(content)
+                    if parsed is not None:
+                        compact_json = _compact_text(
+                            json.dumps(
+                                parsed,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        )
+                        if len(compact_json) <= GENERATED_UI_TOOL_TEXT_CAP:
+                            content = compact_json
+                        else:
+                            content = json.dumps(
+                                {
+                                    "text": compact_json[:GENERATED_UI_TOOL_TEXT_CAP],
+                                    "truncated": True,
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                    else:
+                        content = json.dumps(
+                            {
+                                "text": self._compact_large_text(content),
+                                "truncated": True,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
 
                 self.logger.debug(
                     f"[ToolService] Tool '{tool_call.function.name}' executed successfully"
@@ -589,6 +698,196 @@ class ToolService:
         except (json.JSONDecodeError, IndexError):
             # Return None if parsing fails
             return None
+
+    @staticmethod
+    def _try_parse_json_value(value: Any) -> Optional[Any]:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            block = _extract_json_block(text)
+            if not block:
+                return None
+            try:
+                return json.loads(block)
+            except Exception:
+                return None
+
+    def _extract_text_entries(self, content_entries: Any) -> List[str]:
+        texts: List[str] = []
+        if not isinstance(content_entries, list):
+            return texts
+        for item in content_entries:
+            if isinstance(item, str):
+                texts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                texts.append(text)
+        return texts
+
+    def _compact_large_text(
+        self, text: str, *, limit: int = GENERATED_UI_TOOL_TEXT_CAP
+    ) -> str:
+        compact = _compact_text(text or "")
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[:limit]}...[truncated {len(compact) - limit} chars]"
+
+    def _compact_text_entries_payload(self, content_entries: Any) -> Optional[str]:
+        texts = self._extract_text_entries(content_entries)
+        if not texts:
+            return None
+        joined = "\n".join(t for t in texts if isinstance(t, str)).strip()
+        if not joined:
+            return None
+
+        compact_joined = self._compact_large_text(joined)
+        is_truncated = len(compact_joined) < len(_compact_text(joined))
+        payload: Dict[str, Any] = {"text": compact_joined}
+        if is_truncated:
+            payload["truncated"] = True
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _parse_json_from_text_entries(self, content_entries: Any) -> Optional[Any]:
+        texts = self._extract_text_entries(content_entries)
+        if not texts:
+            return None
+        if len(texts) == 1:
+            return self._try_parse_json_value(texts[0])
+        joined = "".join(texts).strip()
+        if not joined:
+            return None
+        return self._try_parse_json_value(joined)
+
+    def _payload_has_error_signal(self, payload: Any) -> bool:
+        if isinstance(payload, dict):
+            if payload.get("isError") is True:
+                return True
+            if payload.get("success") is False:
+                return True
+            if payload.get("error"):
+                return True
+            if payload.get("errors"):
+                return True
+            text_json = self._try_parse_json_value(payload.get("text"))
+            if text_json is not None and self._payload_has_error_signal(text_json):
+                return True
+            nested_content = payload.get("content")
+            nested_json = self._parse_json_from_text_entries(nested_content)
+            if nested_json is not None and self._payload_has_error_signal(nested_json):
+                return True
+            return False
+
+        if isinstance(payload, list):
+            return any(self._payload_has_error_signal(item) for item in payload)
+
+        if isinstance(payload, str):
+            parsed = self._try_parse_json_value(payload)
+            if parsed is not None:
+                return self._payload_has_error_signal(parsed)
+            lower = payload.lower()
+            return "error" in lower or "exception" in lower
+
+        return False
+
+    def _extract_error_message(self, payload: Any) -> Optional[str]:
+        if isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return None
+            parsed = self._try_parse_json_value(text)
+            if parsed is not None:
+                return self._extract_error_message(parsed)
+            return text
+
+        if isinstance(payload, dict):
+            for key in (
+                "error",
+                "error_message",
+                "errorMessage",
+                "message",
+                "detail",
+                "reason",
+                "description",
+                "title",
+            ):
+                if key not in payload:
+                    continue
+                resolved = self._extract_error_message(payload.get(key))
+                if resolved:
+                    return resolved
+            text_json = self._try_parse_json_value(payload.get("text"))
+            if text_json is not None:
+                resolved = self._extract_error_message(text_json)
+                if resolved:
+                    return resolved
+            nested_content = payload.get("content")
+            nested_json = self._parse_json_from_text_entries(nested_content)
+            if nested_json is not None:
+                resolved = self._extract_error_message(nested_json)
+                if resolved:
+                    return resolved
+            return None
+
+        if isinstance(payload, list):
+            for item in payload:
+                resolved = self._extract_error_message(item)
+                if resolved:
+                    return resolved
+            return None
+
+        return None
+
+    async def _explain_error_with_llm(
+        self,
+        payload: Any,
+        access_token: Optional[str],
+        parent_span,
+    ) -> Optional[str]:
+        if not getattr(self, "llm_client", None):
+            return None
+
+        payload_text = str(payload)
+        try:
+            payload_text = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            )
+        except Exception:
+            pass
+
+        base_request = ChatCompletionRequest(messages=[], model=TGI_MODEL_NAME)
+        try:
+            explanation = await self.llm_client.ask(
+                base_prompt=(
+                    "You receive raw tool error payloads. Return one concise "
+                    "user-facing error message. Do not return JSON or markdown."
+                ),
+                base_request=base_request,
+                outer_span=parent_span,
+                question=f"Explain this tool error payload:\n{payload_text}",
+                access_token=access_token or "",
+            )
+        except Exception as exc:
+            self.logger.debug(
+                "[ToolService] Failed to explain tool error payload via LLM: %s",
+                exc,
+            )
+            return None
+
+        if not explanation:
+            return None
+        cleaned = explanation.strip()
+        return cleaned or None
 
     def _format_errors(self, errors):
         """
@@ -697,7 +996,30 @@ class ToolService:
                 content = text_content
 
         if isinstance(content, str):
-            content = _compact_text(content)
+            parsed_content = self._try_parse_json_value(content)
+            if parsed_content is not None:
+                try:
+                    content = _compact_text(
+                        json.dumps(
+                            parsed_content,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+                except Exception:
+                    content = _compact_text(content)
+            else:
+                content = _compact_text(content)
+
+            if len(content) > GENERATED_UI_TOOL_TEXT_CAP:
+                content = json.dumps(
+                    {
+                        "text": content[:GENERATED_UI_TOOL_TEXT_CAP],
+                        "truncated": True,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
 
         message = self.model_format.build_tool_message(format, tool_result, content)
         logger.debug(
@@ -712,37 +1034,19 @@ class ToolService:
         if not isinstance(result, dict):
             return False
 
-        if result.get("isError") is True:
-            return True
-        if result.get("success") is False:
+        if result.get("isError") is True or result.get("success") is False:
             return True
 
         content = result.get("content")
-        parsed_content = None
-
+        parsed_content: Any = content
         if isinstance(content, str):
-            try:
-                parsed_content = json.loads(content)
-            except Exception:
-                parsed_content = None
+            parsed_json = self._try_parse_json_value(content)
+            if parsed_json is not None:
+                parsed_content = parsed_json
+            else:
+                return "error" in content.lower()
 
-            # Only check for "error" string if we COULD NOT parse it as JSON
-            if parsed_content is None and "error" in content.lower():
-                return True
-        elif isinstance(content, dict):
-            parsed_content = content
-        elif isinstance(content, list):
-            parsed_content = content
-
-        if isinstance(parsed_content, dict) and parsed_content.get("error"):
-            return True
-
-        if isinstance(parsed_content, list):
-            for item in parsed_content:
-                if isinstance(item, dict) and item.get("error"):
-                    return True
-
-        return False
+        return self._payload_has_error_signal(parsed_content)
 
     async def execute_tool_calls(
         self,

@@ -4,6 +4,13 @@ if [ "$#" -gt 0 ]; then
   export MCP_SERVER_COMMAND="$*"
 fi
 
+if [ -n "$MCP_GIT_CLONE" ]; then
+  echo "Cloning MCP repository from $MCP_GIT_CLONE..."
+  apt-get update && apt-get install -y git
+  rm -rf /mcp
+  git clone "$MCP_GIT_CLONE" /mcp
+fi
+
 # for development purposes another pip install can be triggered in the /mcp directory
 if [ "$ENV" == "dev" ]; then
   echo "Development mode: checking for /mcp directory"

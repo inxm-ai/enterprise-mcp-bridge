@@ -2,11 +2,13 @@ import copy
 import html as _html_escape
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
 from app.app_facade.generated_types import Scope
+from app.vars import MCP_BASE_PATH
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -16,6 +18,7 @@ SERVICE_SCRIPT_PLACEHOLDER = "<!-- include:service_script -->"
 COMPONENTS_SCRIPT_PLACEHOLDER = "<!-- include:components_script -->"
 SCRIPT_BLOCK_TEMPLATE = (
     '<script type="module">\n'
+    "  <!-- include:runtime_bridge -->\n"
     "  <!-- include:service_script -->\n\n"
     "  <!-- include:components_script -->\n"
     "</script>"
@@ -25,6 +28,71 @@ SCRIPT_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 SCRIPT_TAG_RE = re.compile(r"<script[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+RUNTIME_BRIDGE_MARKER = "generated-ui-runtime"
+RUNTIME_BRIDGE_PLACEHOLDER = "<!-- include:runtime_bridge -->"
+MCP_SERVICE_RUNTIME_MARKER = "generated-mcp-service-helper"
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+
+
+def _load_script_template(
+    name: str, replacements: Optional[Dict[str, str]] = None
+) -> str:
+    template_path = _TEMPLATES_DIR / name
+    try:
+        content = template_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to load script template %s: %s", template_path, exc)
+        raise
+
+    for marker, value in (replacements or {}).items():
+        content = content.replace(marker, value)
+
+    if not content.endswith("\n"):
+        content += "\n"
+    return content
+
+
+RUNTIME_BRIDGE_SCRIPT = _load_script_template(
+    "generated_ui_runtime_bridge.js",
+    {"{{RUNTIME_BRIDGE_MARKER}}": RUNTIME_BRIDGE_MARKER},
+)
+_MCP_SERVICE_CLASS_SOURCE = _load_script_template(
+    "generated_mcp_service_class.js",
+    {"{{MCP_BASE_PATH}}": MCP_BASE_PATH},
+)
+MCP_SERVICE_HELPER_SCRIPT = (
+    f"/* {MCP_SERVICE_RUNTIME_MARKER} */\n"
+    "(() => {\n"
+    f"{_MCP_SERVICE_CLASS_SOURCE}\n"
+    "  const needsGeneratedClass =\n"
+    "    typeof globalThis.McpService !== 'function'\n"
+    "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
+    "  if (needsGeneratedClass) {\n"
+    "    globalThis.McpService = __GeneratedMcpService;\n"
+    "  }\n"
+    "  const needsServiceInstance =\n"
+    "    !globalThis.service || typeof globalThis.service.call !== 'function';\n"
+    "  if (needsServiceInstance) {\n"
+    "    globalThis.service = new globalThis.McpService();\n"
+    "  }\n"
+    "})();\n"
+)
+MCP_SERVICE_TEST_HELPER_SCRIPT = (
+    "/* generated-mcp-service-helper-test */\n"
+    "(() => {\n"
+    f"{_MCP_SERVICE_CLASS_SOURCE}\n"
+    "  const __needsGeneratedClassForTests =\n"
+    "    typeof globalThis.McpService !== 'function'\n"
+    "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
+    "  if (__needsGeneratedClassForTests) {\n"
+    "    globalThis.McpService = __GeneratedMcpService;\n"
+    "  }\n"
+    "  if (!globalThis.service || typeof globalThis.service.call !== 'function') {\n"
+    "    globalThis.service = new globalThis.McpService();\n"
+    "  }\n"
+    "})();\n"
+)
+RUNTIME_BOOTSTRAP_SCRIPT = f"{RUNTIME_BRIDGE_SCRIPT}{MCP_SERVICE_HELPER_SCRIPT}"
 
 
 class GeneratedUIOutputFactory:
@@ -36,6 +104,7 @@ class GeneratedUIOutputFactory:
     ) -> str:
         return (
             '<script type="module">\n'
+            f"{RUNTIME_BOOTSTRAP_SCRIPT}"
             f"{service_script or ''}\n\n"
             f"{components_script or ''}\n"
             "</script>"
@@ -120,12 +189,16 @@ class GeneratedUIOutputFactory:
                 page = page.replace(SNIPPET_PLACEHOLDER, page_snippet)
             page = page.replace(SERVICE_SCRIPT_PLACEHOLDER, service_script or "")
             page = page.replace(COMPONENTS_SCRIPT_PLACEHOLDER, components_script or "")
+            page = page.replace(RUNTIME_BRIDGE_PLACEHOLDER, RUNTIME_BOOTSTRAP_SCRIPT)
 
             html_section["page"] = page
 
         if isinstance(snippet_with_placeholders, str):
-            html_section["snippet"] = self._expand_snippet(
+            snippet_expanded = self._expand_snippet(
                 snippet_with_placeholders, service_script, components_script
+            )
+            html_section["snippet"] = snippet_expanded.replace(
+                RUNTIME_BRIDGE_PLACEHOLDER, RUNTIME_BOOTSTRAP_SCRIPT
             )
 
         return expanded
@@ -144,6 +217,41 @@ class GeneratedUIOutputFactory:
                 status_code=502,
                 detail="Generated payload must be a JSON object",
             )
+
+        template_parts = payload.get("template_parts")
+        if isinstance(template_parts, dict):
+            title = _html_escape.escape(
+                str(template_parts.get("title") or "Generated Ui")
+            )
+            styles = str(template_parts.get("styles") or "")
+            body_html = str(template_parts.get("html") or "")
+            parts_script = str(template_parts.get("script") or "")
+
+            if parts_script:
+                existing_components = payload.get("components_script")
+                if isinstance(existing_components, str) and existing_components.strip():
+                    if parts_script not in existing_components:
+                        payload["components_script"] = (
+                            f"{existing_components.rstrip()}\n\n{parts_script}"
+                        )
+                else:
+                    payload["components_script"] = parts_script
+
+            if not isinstance(payload.get("html"), dict):
+                payload["html"] = {
+                    "page": (
+                        '<!DOCTYPE html><html lang="en"><head>'
+                        '<meta charset="utf-8"/>'
+                        '<meta name="viewport" content="width=device-width, initial-scale=1"/>'
+                        f"<title>{title}</title>"
+                        f"<style data-pfusch>{styles}</style>"
+                        "</head><body>"
+                        f"{SNIPPET_PLACEHOLDER}\n"
+                        f"{self._script_block_with_placeholders()}"
+                        "</body></html>"
+                    ),
+                    "snippet": body_html,
+                }
 
         html_section = payload.get("html")
 

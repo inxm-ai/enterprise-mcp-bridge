@@ -2650,46 +2650,78 @@ class WorkflowEngine:
         if not content:
             return False
 
-        # Try to parse as JSON
-        parsed_content = None
-        try:
-            parsed_content = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        def _try_parse(value: Any) -> Any:
+            if not isinstance(value, str):
+                return None
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return json.loads(text)
+            except Exception:
+                return None
 
-        # Check for error key in parsed JSON
-        if isinstance(parsed_content, dict):
-            if parsed_content.get("error"):
-                return True
-            if parsed_content.get("isError") is True:
-                return True
-            if parsed_content.get("success") is False:
-                return True
+        def _parse_text_entries(value: Any) -> Any:
+            if not isinstance(value, list):
+                return None
+            texts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        texts.append(text)
+            if not texts:
+                return None
+            if len(texts) == 1:
+                return _try_parse(texts[0])
+            return _try_parse("".join(texts).strip())
 
-        if isinstance(parsed_content, list):
-            for item in parsed_content:
-                if isinstance(item, dict) and item.get("error"):
+        def _has_error(payload: Any) -> bool:
+            if isinstance(payload, dict):
+                if payload.get("error"):
                     return True
+                if payload.get("isError") is True:
+                    return True
+                if payload.get("success") is False:
+                    return True
+                if payload.get("errors"):
+                    return True
+                nested_json = _parse_text_entries(payload.get("content"))
+                if nested_json is not None and _has_error(nested_json):
+                    return True
+                return False
+            if isinstance(payload, list):
+                if any(_has_error(item) for item in payload):
+                    return True
+                nested_json = _parse_text_entries(payload)
+                if nested_json is not None and _has_error(nested_json):
+                    return True
+                return False
+            if isinstance(payload, str):
+                parsed = _try_parse(payload)
+                if parsed is not None:
+                    return _has_error(parsed)
+                lowered = payload.lower()
+                if '"error":' in lowered or "'error':" in lowered:
+                    return True
+                if "bad request" in lowered or "400" in payload:
+                    return True
+                if "internal server error" in lowered or "500" in payload:
+                    return True
+                if "not found" in lowered and "404" in payload:
+                    return True
+                if "unauthorized" in lowered or "401" in payload:
+                    return True
+                if "forbidden" in lowered or "403" in payload:
+                    return True
+            return False
 
-        # If we couldn't parse as JSON, check for error patterns in the string
-        if parsed_content is None:
-            # Look for common error patterns in plain text
-            lower_content = content.lower()
-            if '"error":' in lower_content or "'error':" in lower_content:
-                return True
-            # Check for HTTP error status codes in error messages
-            if "bad request" in lower_content or "400" in content:
-                return True
-            if "internal server error" in lower_content or "500" in content:
-                return True
-            if "not found" in lower_content and "404" in content:
-                return True
-            if "unauthorized" in lower_content or "401" in content:
-                return True
-            if "forbidden" in lower_content or "403" in content:
-                return True
-
-        return False
+        parsed_content = _try_parse(content)
+        if parsed_content is not None:
+            return _has_error(parsed_content)
+        return _has_error(content)
 
     def _response_has_bad_error(
         self,

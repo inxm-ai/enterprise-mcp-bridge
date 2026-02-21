@@ -1,5 +1,6 @@
 import os
 import json
+import re
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
@@ -11,10 +12,28 @@ INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 # Tools that are modifying or notifying or similar
 EFFECT_TOOLS = [t for t in os.environ.get("EFFECT_TOOLS", "").split(",") if t]
+TGI_ENABLED = os.environ.get("TGI_URL", None) is not None
 
 
 def _load_tool_output_schemas():
-    schemas = json.loads(os.environ.get("TOOL_OUTPUT_SCHEMAS", "{}"))
+    def _load_env_mapping(env_name: str) -> dict:
+        raw = os.environ.get(env_name)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            print(f"Error parsing {env_name}: {e}")
+            return {}
+        if not isinstance(parsed, dict):
+            print(f"Error parsing {env_name}: expected a JSON object mapping")
+            return {}
+        return parsed
+
+    # Backwards compatibility: support legacy singular env name too.
+    schemas = _load_env_mapping("TOOL_OUTPUT_SCHEMA")
+    schemas.update(_load_env_mapping("TOOL_OUTPUT_SCHEMAS"))
+
     for tool_name, schema_or_path in schemas.items():
         if isinstance(schema_or_path, str):
             try:
@@ -28,6 +47,46 @@ def _load_tool_output_schemas():
 
 
 TOOL_OUTPUT_SCHEMAS = _load_tool_output_schemas()
+
+
+def _canonicalize_tool_name(tool_name: str) -> str:
+    if not isinstance(tool_name, str):
+        return ""
+    parts = re.split(r"[^a-z0-9]+", tool_name.lower())
+    normalized = []
+    for part in parts:
+        if not part:
+            continue
+        if len(part) > 3 and part.endswith("ies"):
+            part = f"{part[:-3]}y"
+        elif len(part) > 3 and part.endswith("s") and not part.endswith("ss"):
+            part = part[:-1]
+        normalized.append(part)
+    return "-".join(normalized)
+
+
+def get_tool_output_schema(tool_name: str):
+    """Get output schema by exact match first, then canonicalized alias match."""
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+
+    exact = TOOL_OUTPUT_SCHEMAS.get(tool_name)
+    if exact is not None:
+        return exact
+
+    canonical_name = _canonicalize_tool_name(tool_name)
+    if not canonical_name:
+        return None
+
+    matched_schema = None
+    for name, schema in TOOL_OUTPUT_SCHEMAS.items():
+        if _canonicalize_tool_name(name) != canonical_name:
+            continue
+        if matched_schema is not None and matched_schema != schema:
+            return None
+        matched_schema = schema
+    return matched_schema
+
 
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", os.environ.get("TGI_MODEL_NAME", ""))
 OAUTH_ENV = os.environ.get("OAUTH_ENV", "")
@@ -110,3 +169,10 @@ APP_CONVERSATIONAL_UI_ENABLED = (
 )
 APP_UI_SESSION_TTL_MINUTES = int(os.getenv("APP_UI_SESSION_TTL_MINUTES", "120"))
 APP_UI_PATCH_ENABLED = os.getenv("APP_UI_PATCH_ENABLED", "true").lower() == "true"
+GENERATED_UI_FIX_CODE_FIRST = (
+    os.getenv("GENERATED_UI_FIX_CODE_FIRST", "true").lower() == "true"
+)
+GENERATED_UI_TOOL_TEXT_CAP = int(os.getenv("GENERATED_UI_TOOL_TEXT_CAP", "4000"))
+GENERATED_UI_READ_ONLY_STREAK_LIMIT = int(
+    os.getenv("GENERATED_UI_READ_ONLY_STREAK_LIMIT", "4")
+)

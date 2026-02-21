@@ -23,6 +23,18 @@ class PromptService:
         self.logger = logger
         self.prompt_cache = {}
 
+    @staticmethod
+    def _is_prompt_api_unavailable_error(error: Exception) -> bool:
+        if (
+            isinstance(error, HTTPException)
+            and getattr(error, "status_code", None) == 404
+        ):
+            detail = str(getattr(error, "detail", "") or "").lower()
+            if "method not found" in detail or "not found" in detail:
+                return True
+        message = str(error or "").lower()
+        return "method not found" in message
+
     async def find_prompt_by_name_or_role(
         self, session: MCPSessionBase, prompt_name: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
@@ -152,6 +164,13 @@ class PromptService:
                 return None
 
             except Exception as e:
+                if self._is_prompt_api_unavailable_error(e):
+                    self.logger.info(
+                        "[PromptService] Prompt API not available on MCP server; continuing without system prompt"
+                    )
+                    span.set_attribute("prompt.found", False)
+                    span.set_attribute("prompt.api_unavailable", True)
+                    return None
                 self.logger.error(f"[PromptService] Error finding prompt: {str(e)}")
                 span.set_attribute("error", True)
                 span.set_attribute("error.message", str(e))

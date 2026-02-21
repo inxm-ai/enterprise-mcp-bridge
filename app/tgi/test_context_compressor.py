@@ -257,6 +257,54 @@ class TestHierarchicalSummarizer:
         # Both large messages should be summarized
         assert stats.messages_summarized >= 1
 
+    @pytest.mark.asyncio
+    async def test_first_system_message_is_not_summarized(self, summarizer):
+        """The first system message must remain verbatim even when very large."""
+        large_system = "SYSTEM_CONTRACT " * 1200
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content=large_system),
+                Message(role=MessageRole.USER, content="user content " * 800),
+            ]
+        )
+
+        async def summarize_fn(base_request, content, access_token, outer_span):
+            return "SUMMARIZED"
+
+        compressed, stats = await summarizer.compress(
+            request, max_size=200, summarize_fn=summarize_fn
+        )
+
+        assert compressed.messages[0].content == large_system
+        assert stats.messages_summarized >= 1
+
+    @pytest.mark.asyncio
+    async def test_recent_contract_user_message_is_not_summarized(self, summarizer):
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content="system"),
+                Message(
+                    role=MessageRole.ASSISTANT, content="old assistant block " * 900
+                ),
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Phase 1 contract: required output keys are "
+                        "components_script, service_script, test_script. " * 120
+                    ),
+                ),
+            ]
+        )
+
+        async def summarize_fn(base_request, content, access_token, outer_span):
+            return "SUMMARIZED"
+
+        compressed, _stats = await summarizer.compress(
+            request, max_size=250, summarize_fn=summarize_fn
+        )
+
+        assert "components_script" in (compressed.messages[-1].content or "")
+
 
 class TestAdaptiveCompressor:
     """Test adaptive multi-strategy compression."""
@@ -535,6 +583,35 @@ class TestAdaptiveCompressor:
         # Should still return something, but won't fit
         assert compressed is not None
         assert len(compressed.messages) > 0
+
+    @pytest.mark.asyncio
+    async def test_adaptive_preserves_recent_contract_instruction(self, compressor):
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content="system"),
+                Message(role=MessageRole.TOOL, content="tool output " * 1200),
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Phase-1 required output keys: components_script + test_script. "
+                        * 100
+                    ),
+                ),
+            ]
+        )
+
+        async def summarize_fn(base_request, content, access_token, outer_span):
+            return "SUMMARIZED"
+
+        compressed, _stats = await compressor.compress(
+            request, max_size=300, summarize_fn=summarize_fn
+        )
+
+        assert any(
+            "components_script + test_script" in (msg.content or "")
+            for msg in compressed.messages
+            if msg.role == MessageRole.USER
+        )
 
 
 class TestIntegration:

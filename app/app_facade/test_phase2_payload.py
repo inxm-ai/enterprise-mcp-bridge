@@ -42,7 +42,10 @@ async def test_phase_2_attempt_payload_size():
         assert "We have generated the following components" in content
 
         yield MockChunk(content="", is_done=False)
-        yield MockChunk(content='{"html": {"page": "<div></div>"}}', is_done=False)
+        yield MockChunk(
+            content='{"template_parts":{"title":"Demo","styles":"","html":"<app-root></app-root>","script":""}}',
+            is_done=False,
+        )
         yield MockChunk(content=None, is_done=True)
 
     llm_mock.stream_completion = mock_stream
@@ -59,7 +62,7 @@ async def test_phase_2_attempt_payload_size():
 
     system_prompt = "System Prompt"
     user_prompt = "Generate a UI"
-    instruction = "Generate HTML"
+    instruction = "Generate template parts"
     logic_payload = {
         "service_script": "class Service {}",
         "components_script": "class Component {}",
@@ -85,4 +88,4 @@ async def test_phase_2_attempt_payload_size():
                 result_payload = item.get("payload")
 
     assert result_payload is not None
-    assert "html" in result_payload
+    assert "template_parts" in result_payload

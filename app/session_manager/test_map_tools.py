@@ -1,6 +1,7 @@
 import pytest
 from app.session_manager.session_context import map_tools
 from unittest.mock import patch
+import app.session_manager.session_context as session_context
 
 
 class MockTool:
@@ -70,3 +71,33 @@ def test_include_and_exclude_tools(mock_tools):
         result = map_tools(mock_tools)
         assert len(result) == 2
         assert all(tool["name"] in ["tool1", "tool2"] for tool in result)
+
+
+def test_output_schema_pluralized_name_alias_is_applied():
+    expected_schema = {
+        "type": "object",
+        "properties": {"value": {"type": "array"}},
+        "required": ["value"],
+    }
+    tools = MockTools(
+        [
+            MockTool(
+                "list-team-channels",
+                None,
+                "Retrieve the list of channels in this team.",
+                {"type": "object"},
+                None,
+                {},
+                None,
+            )
+        ]
+    )
+
+    with patch.dict(
+        session_context.TOOL_OUTPUT_SCHEMAS,
+        {"list-teams-channels": expected_schema},
+        clear=True,
+    ):
+        mapped = map_tools(tools)
+
+    assert mapped[0]["outputSchema"] == expected_schema

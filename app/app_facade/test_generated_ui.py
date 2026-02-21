@@ -1,9 +1,9 @@
 from contextlib import asynccontextmanager
+import json
 from typing import Any, Dict, Optional
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
-import json
 
 from app.server import app
 from app.app_facade.generated_service import Actor
@@ -13,6 +13,11 @@ class StubGeneratedService:
     def __init__(self):
         self.last_create: Optional[Dict[str, Any]] = None
         self.last_update: Optional[Dict[str, Any]] = None
+        self.storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
         self.record = {
             "metadata": {
                 "id": "dash1",
@@ -31,81 +36,17 @@ class StubGeneratedService:
             },
         }
 
-    async def create_ui(
-        self,
-        *,
-        session,
-        scope,
-        actor,
-        ui_id,
-        name,
-        prompt,
-        tools,
-        access_token,
-    ):
-        self.last_create = {
-            "session": session,
-            "scope": scope,
-            "actor": actor,
-            "ui_id": ui_id,
-            "name": name,
-            "prompt": prompt,
-            "tools": list(tools or []),
-            "access_token": access_token,
-        }
-        return self.record
-
-    async def update_ui(
-        self,
-        *,
-        session,
-        scope,
-        actor,
-        ui_id,
-        name,
-        prompt,
-        tools,
-        access_token,
-    ):
+    async def stream_update_ui(self, **kwargs):
         self.last_update = {
-            "session": session,
-            "scope": scope,
-            "actor": actor,
-            "ui_id": ui_id,
-            "name": name,
-            "prompt": prompt,
-            "tools": list(tools or []),
-            "access_token": access_token,
+            "session": kwargs.get("session"),
+            "scope": kwargs.get("scope"),
+            "actor": kwargs.get("actor"),
+            "ui_id": kwargs.get("ui_id"),
+            "name": kwargs.get("name"),
+            "prompt": kwargs.get("prompt"),
+            "tools": list(kwargs.get("tools") or []),
+            "access_token": kwargs.get("access_token"),
         }
-        updated = dict(self.record)
-        updated["metadata"] = dict(self.record["metadata"])
-        updated["metadata"]["updated_at"] = "2024-01-02T00:00:00Z"
-        return updated
-
-    async def stream_update_ui(self, **_kwargs):
-        """Provide a minimal streaming implementation for update tests."""
-        try:
-            session = _kwargs.get("session")
-            scope = _kwargs.get("scope")
-            actor = _kwargs.get("actor")
-            ui_id = _kwargs.get("ui_id")
-            name = _kwargs.get("name")
-            prompt = _kwargs.get("prompt")
-            tools = list(_kwargs.get("tools") or [])
-            access_token = _kwargs.get("access_token")
-            self.last_update = {
-                "session": session,
-                "scope": scope,
-                "actor": actor,
-                "ui_id": ui_id,
-                "name": name,
-                "prompt": prompt,
-                "tools": tools,
-                "access_token": access_token,
-            }
-        except Exception:
-            pass
-
         metadata = dict(self.record.get("metadata", {}))
         metadata["updated_at"] = "2024-01-02T00:00:00Z"
         record = {
@@ -115,49 +56,22 @@ class StubGeneratedService:
         payload = json.dumps(
             {"status": "updated", "record": record}, ensure_ascii=False
         )
-        yield f"event: done\ndata: {payload}\n\n".encode("utf-8")
+        yield f"event: done\\ndata: {payload}\\n\\n".encode("utf-8")
 
     def get_ui(self, *, scope, actor, ui_id, name, expand=False):
         return self.record
 
-    async def stream_generate_ui(self, **_kwargs):
-        """Provide a minimal streaming implementation for tests.
-
-        The route expects an async generator yielding bytes. To keep the
-        compatibility with existing tests that call `response.json()` on the
-        TestClient, yield a single JSON document (bytes) representing the
-        created record. Also record the last_create payload similar to
-        create_ui so assertions in tests continue to pass.
-        """
-        # Mirror what create_ui would set in last_create (if present in kwargs)
-        try:
-            # extract commonly used args if provided
-            session = _kwargs.get("session")
-            scope = _kwargs.get("scope")
-            actor = _kwargs.get("actor")
-            ui_id = _kwargs.get("ui_id")
-            name = _kwargs.get("name")
-            prompt = _kwargs.get("prompt")
-            tools = list(_kwargs.get("tools") or [])
-            access_token = _kwargs.get("access_token")
-            self.last_create = {
-                "session": session,
-                "scope": scope,
-                "actor": actor,
-                "ui_id": ui_id,
-                "name": name,
-                "prompt": prompt,
-                "tools": tools,
-                "access_token": access_token,
-            }
-        except Exception:
-            # best-effort; tests should still pass if we cannot populate last_create
-            pass
-
-        # Yield a single JSON payload (no SSE framing) that matches the
-        # route's `_format_ui_response` shape so TestClient.json() returns
-        # the expected top-level `id`, `name`, `scope`, etc.
-        import json as _json
+    async def stream_generate_ui(self, **kwargs):
+        self.last_create = {
+            "session": kwargs.get("session"),
+            "scope": kwargs.get("scope"),
+            "actor": kwargs.get("actor"),
+            "ui_id": kwargs.get("ui_id"),
+            "name": kwargs.get("name"),
+            "prompt": kwargs.get("prompt"),
+            "tools": list(kwargs.get("tools") or []),
+            "access_token": kwargs.get("access_token"),
+        }
 
         metadata = self.record.get("metadata", {})
         current = self.record.get("current", {})
@@ -173,23 +87,21 @@ class StubGeneratedService:
         if metadata.get("history"):
             formatted["history"] = metadata.get("history")
 
-        payload = _json.dumps(formatted, ensure_ascii=False).encode("utf-8")
+        payload = json.dumps(formatted, ensure_ascii=False).encode("utf-8")
         yield payload
 
 
 @pytest.fixture
-def client(monkeypatch):
+def generated_setup(monkeypatch):
     stub_service = StubGeneratedService()
 
     monkeypatch.setenv("TGI_URL", "https://example.com/tgi")
-
     monkeypatch.setattr(
         "app.app_facade.route._get_generated_service", lambda: stub_service
     )
-
     monkeypatch.setattr(
         "app.app_facade.route._extract_actor",
-        lambda access_token: Actor(user_id="user123", groups=["group123"]),
+        lambda _access_token: Actor(user_id="user123", groups=["group123"]),
     )
 
     @asynccontextmanager
@@ -199,22 +111,50 @@ def client(monkeypatch):
     monkeypatch.setattr(
         "app.app_facade.route.mcp_session_context", dummy_session_context
     )
-
-    client = TestClient(app)
-    client.stub_service = stub_service  # type: ignore[attr-defined]
-    return client
+    return stub_service
 
 
-def test_create_generated_ui(client):
-    response = client.post(
-        "/app/_generated/user=user123",
-        json={
-            "id": "dash1",
-            "name": "overview",
-            "prompt": "Build a ui",
-        },
-        headers={"X-Auth-Request-Access-Token": "token"},
+def _client():
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _setup_streaming_client(monkeypatch, stream_impl, actor_override=None):
+    monkeypatch.setenv("TGI_URL", "https://example.com/tgi")
+    monkeypatch.setattr(
+        "app.app_facade.route._get_generated_service", lambda: stream_impl
     )
+    if actor_override is None:
+        monkeypatch.setattr(
+            "app.app_facade.route._extract_actor",
+            lambda _access_token: Actor(user_id="user123", groups=["group123"]),
+        )
+    else:
+        monkeypatch.setattr(
+            "app.app_facade.route._extract_actor", lambda _access_token: actor_override
+        )
+
+    @asynccontextmanager
+    async def dummy_session_context(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(
+        "app.app_facade.route.mcp_session_context", dummy_session_context
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui(generated_setup):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "dash1",
+                "name": "overview",
+                "prompt": "Build a ui",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
 
     assert response.status_code == 200
     payload = response.json()
@@ -222,146 +162,226 @@ def test_create_generated_ui(client):
     assert payload["name"] == "overview"
     assert payload["scope"] == {"type": "user", "id": "user123"}
     assert payload["metadata"]["components"] == ["pfusch-card"]
-    stub = client.stub_service  # type: ignore[attr-defined]
-    assert stub.last_create["prompt"] == "Build a ui"
+    assert generated_setup.last_create["prompt"] == "Build a ui"
+    assert generated_setup.last_create["name"] == "overview"
 
 
-def test_get_generated_ui_snippet(client):
-    response = client.get(
-        "/app/_generated/user=user123/dash1/overview",
-        params={"as": "snippet"},
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+@pytest.mark.asyncio
+async def test_create_generated_ui_without_name_auto_generated(generated_setup):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "dash1",
+                "prompt": "Build a ui",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
+    assert response.status_code == 200
+    assert generated_setup.last_create["name"] == "build-a-ui"
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui_without_name_fallback_slug(generated_setup):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "dash1",
+                "prompt": "!!! ... ---",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
+    assert response.status_code == 200
+    assert generated_setup.last_create["name"] == "generated-ui"
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui_without_name_collision_suffix(generated_setup):
+    existing = {"build-a-ui", "build-a-ui-2"}
+
+    def _exists(_scope, _ui_id, candidate):
+        return candidate in existing
+
+    generated_setup.storage.exists = _exists
+
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "dash1",
+                "prompt": "Build a ui",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
+    assert response.status_code == 200
+    assert generated_setup.last_create["name"] == "build-a-ui-3"
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui_without_name_blank_value_auto_generated(
+    generated_setup,
+):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "dash1",
+                "name": "  ",
+                "prompt": "Build a ui",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
+    assert response.status_code == 200
+    assert generated_setup.last_create["name"] == "build-a-ui"
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui_invalid_ui_id_returns_400(generated_setup):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={
+                "id": "!bad",
+                "prompt": "Build a ui",
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_generated_ui_snippet(generated_setup):
+    async with _client() as client:
+        response = await client.get(
+            "/app/_generated/user=user123/dash1/overview",
+            params={"as": "snippet"},
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
     assert response.status_code == 200
     assert response.text.strip() == "<div>Full Page</div>"
 
 
-def test_update_generated_ui(client):
-    response = client.post(
-        "/app/_generated/user=user123/dash1/overview",
-        json={
-            "prompt": "Refine the ui layout",
-            "tools": ["insights_tool"],
-        },
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+@pytest.mark.asyncio
+async def test_update_generated_ui(generated_setup):
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123/dash1/overview",
+            json={
+                "prompt": "Refine the ui layout",
+                "tools": ["insights_tool"],
+            },
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
+
     assert response.status_code == 200
-    content = response.content.decode("utf-8")
-    marker = "event: done\ndata: "
-    start = content.find(marker)
+    marker = "event: done\\ndata: "
+    start = response.text.find(marker)
     assert start != -1
     start += len(marker)
-    end = content.find("\n\n", start)
+    end = response.text.find("\\n\\n", start)
     assert end != -1
-    body = json.loads(content[start:end])
+    body = json.loads(response.text[start:end])
     assert body["status"] == "updated"
     assert body["record"]["metadata"]["updated_at"] == "2024-01-02T00:00:00Z"
-    stub = client.stub_service  # type: ignore[attr-defined]
-    assert stub.last_update["tools"] == ["insights_tool"]
+    assert generated_setup.last_update["tools"] == ["insights_tool"]
 
 
-def _make_streaming_client(monkeypatch, stream_impl, actor_override=None):
-    """Helper to create a TestClient with a given streaming service implementation.
-
-    stream_impl: an object implementing async def stream_generate_ui(...)
-                 or async def stream_update_ui(...)
-    actor_override: optional Actor to return from _extract_actor
-    """
-    monkeypatch.setenv("TGI_URL", "https://example.com/tgi")
-
-    monkeypatch.setattr(
-        "app.app_facade.route._get_generated_service", lambda: stream_impl
-    )
-
-    if actor_override is not None:
-        monkeypatch.setattr(
-            "app.app_facade.route._extract_actor", lambda access_token: actor_override
-        )
-    else:
-        monkeypatch.setattr(
-            "app.app_facade.route._extract_actor",
-            lambda access_token: Actor(user_id="user123", groups=["group123"]),
-        )
-
-    @asynccontextmanager
-    async def dummy_session_context(*_args, **_kwargs):
-        yield object()
-
-    monkeypatch.setattr(
-        "app.app_facade.route.mcp_session_context", dummy_session_context
-    )
-
-    client = TestClient(app)
-    client.stub_service = stream_impl  # type: ignore[attr-defined]
-    return client
-
-
-def test_create_generated_ui_streaming_already_exists(monkeypatch):
+@pytest.mark.asyncio
+async def test_create_generated_ui_streaming_already_exists(monkeypatch):
     class StreamStub:
+        storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
+
         async def stream_generate_ui(self, **_kwargs):
-            # Simulate immediate error emitted as SSE
-            yield b'event: error\ndata: {"error": "Ui already exists for this id and name"}\n\n'
+            yield b'event: error\\ndata: {"error": "Ui already exists for this id and name"}\\n\\n'
 
-    client = _make_streaming_client(monkeypatch, StreamStub())
+    _setup_streaming_client(monkeypatch, StreamStub())
 
-    response = client.post(
-        "/app/_generated/user=user123",
-        json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
 
     assert response.status_code == 200
-    assert b"Ui already exists for this id and name" in response.content
+    assert "Ui already exists for this id and name" in response.text
 
 
-def test_create_generated_ui_streaming_non_owner_user(monkeypatch):
+@pytest.mark.asyncio
+async def test_create_generated_ui_streaming_non_owner_user(monkeypatch):
     class StreamStub:
-        async def stream_generate_ui(self, **_kwargs):
-            # Simulate permission error emitted as SSE
-            yield b'event: error\ndata: {"error": "User uis may only be created by the owning user"}\n\n'
+        storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
 
-    # Actor not matching scope
+        async def stream_generate_ui(self, **_kwargs):
+            yield b'event: error\\ndata: {"error": "User uis may only be created by the owning user"}\\n\\n'
+
     non_owner = Actor(user_id="other_user", groups=["group123"])
-    client = _make_streaming_client(monkeypatch, StreamStub(), actor_override=non_owner)
+    _setup_streaming_client(monkeypatch, StreamStub(), actor_override=non_owner)
 
-    response = client.post(
-        "/app/_generated/user=user123",
-        json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
 
     assert response.status_code == 200
-    assert b"User uis may only be created by the owning user" in response.content
+    assert "User uis may only be created by the owning user" in response.text
 
 
-def test_create_generated_ui_streaming_group_non_member(monkeypatch):
+@pytest.mark.asyncio
+async def test_create_generated_ui_streaming_group_non_member(monkeypatch):
     class StreamStub:
-        async def stream_generate_ui(self, **_kwargs):
-            yield b'event: error\ndata: {"error": "Group uis may only be created by group members"}\n\n'
+        storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
 
-    # Actor who is not member of target group
+        async def stream_generate_ui(self, **_kwargs):
+            yield b'event: error\\ndata: {"error": "Group uis may only be created by group members"}\\n\\n'
+
     not_member = Actor(user_id="someone", groups=["other_group"])
-    client = _make_streaming_client(
-        monkeypatch, StreamStub(), actor_override=not_member
-    )
+    _setup_streaming_client(monkeypatch, StreamStub(), actor_override=not_member)
 
-    response = client.post(
-        "/app/_generated/group=groupX",
-        json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/group=groupX",
+            json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
 
     assert response.status_code == 200
-    assert b"Group uis may only be created by group members" in response.content
+    assert "Group uis may only be created by group members" in response.text
 
 
-def test_create_generated_ui_streaming_success(monkeypatch):
+@pytest.mark.asyncio
+async def test_create_generated_ui_streaming_success(monkeypatch):
     class StreamStub:
+        storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
+
         async def stream_generate_ui(self, **_kwargs):
-            # Send a keepalive, then a chunk, then final done event
-            yield b":\n\n"  # keepalive
-            yield b'data: {"chunk": "part1"}\n\n'
-            # simulate final created record payload
+            yield b":\\n\\n"
+            yield b'data: {"chunk": "part1"}\\n\\n'
             record = {
                 "status": "created",
                 "record": {
@@ -377,18 +397,18 @@ def test_create_generated_ui_streaming_success(monkeypatch):
                 },
             }
             payload = json.dumps(record, ensure_ascii=False)
-            yield f"event: done\ndata: {payload}\n\n".encode("utf-8")
+            yield f"event: done\\ndata: {payload}\\n\\n".encode("utf-8")
 
-    client = _make_streaming_client(monkeypatch, StreamStub())
+    _setup_streaming_client(monkeypatch, StreamStub())
 
-    response = client.post(
-        "/app/_generated/user=user123",
-        json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
-        headers={"X-Auth-Request-Access-Token": "token"},
-    )
+    async with _client() as client:
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
+            headers={"X-Auth-Request-Access-Token": "token"},
+        )
 
     assert response.status_code == 200
-    # Ensure keepalive and chunk and done event are present
-    assert b":\n\n" in response.content
-    assert b'"chunk": "part1"' in response.content
-    assert b'"status": "created"' in response.content
+    assert ":\\n\\n" in response.text
+    assert '"chunk": "part1"' in response.text
+    assert '"status": "created"' in response.text

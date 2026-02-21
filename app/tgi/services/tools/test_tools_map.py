@@ -302,3 +302,54 @@ def test_map_tools_keeps_duplicate_refs_in_output_schema():
     assert output_schema["alpha"]["properties"]["label"]["type"] == "string"
     assert "label" in output_schema["beta"]["properties"]
     assert output_schema["beta"]["properties"]["label"]["type"] == "string"
+
+
+def test_map_tools_uses_env_output_schema_for_each_tool(monkeypatch):
+    from app import vars as vars_module
+
+    env_schemas = {
+        "tool_alpha": {"type": "object", "properties": {"alpha": {"type": "string"}}},
+        "tool_beta": {"type": "object", "properties": {"beta": {"type": "integer"}}},
+    }
+    monkeypatch.setattr(vars_module, "TOOL_OUTPUT_SCHEMAS", env_schemas)
+
+    tools = [
+        {"name": "tool_alpha", "description": "Alpha tool", "inputSchema": {}},
+        {"name": "tool_beta", "description": "Beta tool", "inputSchema": {}},
+    ]
+
+    result = map_tools(tools, include_output_schema=True)
+
+    by_name = {item["function"]["name"]: item for item in result}
+    assert (
+        by_name["tool_alpha"]["function"]["outputSchema"]["properties"]["alpha"]["type"]
+        == "string"
+    )
+    assert (
+        by_name["tool_beta"]["function"]["outputSchema"]["properties"]["beta"]["type"]
+        == "integer"
+    )
+
+
+def test_map_tools_uses_pluralized_output_schema_name_alias(monkeypatch):
+    from app import vars as vars_module
+
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "array"}},
+        "required": ["value"],
+    }
+    monkeypatch.setattr(
+        vars_module, "TOOL_OUTPUT_SCHEMAS", {"list-teams-channels": schema}
+    )
+
+    tools = [
+        {
+            "name": "list-team-channels",
+            "description": "Retrieve the list of channels in this team.",
+            "inputSchema": {"type": "object"},
+        }
+    ]
+
+    result = map_tools(tools, include_output_schema=True)
+    assert result[0]["function"]["outputSchema"] == schema

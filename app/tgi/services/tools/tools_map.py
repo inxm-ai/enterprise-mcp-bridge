@@ -171,6 +171,8 @@ def map_tools(tools, include_output_schema=False):
             output_schema = tool.get("outputSchema") or tool.get("function", {}).get(
                 "outputSchema"
             )
+            if output_schema is None:
+                output_schema = vars_module.get_tool_output_schema(name)
         else:
             # Object-like tool definitions (e.g., mcp Tool, pydantic Tool)
             if hasattr(tool, "name"):
@@ -186,6 +188,8 @@ def map_tools(tools, include_output_schema=False):
             description = description or getattr(tool, "description", None)
             input_schema = input_schema or getattr(tool, "inputSchema", {}) or {}
             output_schema = output_schema or getattr(tool, "outputSchema", None)
+            if output_schema is None:
+                output_schema = vars_module.get_tool_output_schema(name)
 
         if not name:
             continue

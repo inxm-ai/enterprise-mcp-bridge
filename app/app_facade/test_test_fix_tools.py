@@ -10,6 +10,7 @@ from app.app_facade.test_fix_tools import (
     IterativeTestFixer,
     run_tool_driven_test_fix,
     _parse_tap_output,
+    _summarize_test_output,
 )
 from app.tgi.models import Message, MessageRole
 
@@ -115,6 +116,34 @@ def test_get_current_scripts():
     assert result.metadata["components_lines"] == 3
     assert result.metadata["test_lines"] == 1
 
+    toolkit.cleanup()
+
+
+def test_run_tests_injects_mcp_service_helper_for_components_fallback():
+    """Iterative fixer should provide globalThis.McpService when service script is empty."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+    components = (
+        "const mcp = globalThis.service || new globalThis.McpService();\n"
+        "if (!mcp || typeof mcp.call !== 'function') {\n"
+        "  throw new Error('mcp unavailable');\n"
+        "}\n"
+    )
+    test_script = (
+        "import { describe, it } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('mcp helper prelude', () => {\n"
+        "  it('bootstraps global mcp service', () => {\n"
+        "    assert.equal(typeof globalThis.McpService, 'function');\n"
+        "    assert.equal(typeof globalThis.service?.call, 'function');\n"
+        "  });\n"
+        "});\n"
+    )
+
+    toolkit.setup_test_environment("", components, test_script)
+    result = toolkit.run_tests()
+    assert result.success, result.content
     toolkit.cleanup()
 
 
@@ -279,6 +308,100 @@ describe('Tool-driven cycle', () => {
     assert updated == messages
 
 
+@pytest.mark.asyncio
+async def test_tool_driven_fix_no_tool_calls_does_not_loop_forever():
+    service_script = "export class McpService {}"
+    components_script = "// components"
+    test_script = """
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+describe('fails first', () => {
+    it('fails', () => {
+        assert.equal(1, 2);
+    });
+});
+"""
+
+    class MockLLMClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": "x" * 400,
+                                        "tool_calls": [],
+                                    },
+                                )
+                            },
+                        )
+                    ]
+                },
+            )
+
+    class MockTGIService:
+        def __init__(self):
+            self._mock = MockLLMClient()
+
+            class Client:
+                def __init__(self, mock):
+                    self.client = type(
+                        "Chat",
+                        (),
+                        {"chat": type("Completions", (), {"completions": mock})},
+                    )()
+                    self.model_format = None
+
+                def _build_request_params(self, request):
+                    return {}
+
+            self.llm_client = Client(self._mock)
+
+    messages = [Message(role=MessageRole.SYSTEM, content="system")]
+    tgi = MockTGIService()
+
+    result = await asyncio.wait_for(
+        run_tool_driven_test_fix(
+            tgi_service=tgi,
+            service_script=service_script,
+            components_script=components_script,
+            test_script=test_script,
+            dummy_data=None,
+            messages=messages,
+            allowed_tools=None,
+            access_token=None,
+            max_attempts=3,
+            event_queue=None,
+            extra_headers=None,
+        ),
+        timeout=8,
+    )
+
+    success, _service, _components, _test, _dummy, updated = result
+    assert success is False
+    assert tgi._mock.calls >= 3
+    assert any(
+        (
+            msg.role == MessageRole.USER
+            and "No tool calls were returned" in (msg.content or "")
+        )
+        for msg in updated
+    )
+
+
 def test_run_debug_code():
     """Test running debug snippets without the full test suite."""
     helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
@@ -417,6 +540,29 @@ ok 3 - Test 3
     passed, failed, failed_tests = _parse_tap_output(tap_output_only_summary)
     assert passed == 10
     assert failed == 2
+
+
+def test_summarize_test_output_keeps_failure_context():
+    failure_line = "not ok 19 - weather-forecast: renders forecast data after fetch"
+    long_prefix = "\n".join([f"ok {i} - pass-{i}" for i in range(1, 250)])
+    tap_output = (
+        "TAP version 13\n"
+        f"{long_prefix}\n"
+        f"{failure_line}\n"
+        "# tests 250\n"
+        "# suites 1\n"
+        "# pass 249\n"
+        "# fail 1\n"
+    )
+    summarized = _summarize_test_output(tap_output, limit=500)
+    assert "...(trimmed" in summarized
+    assert failure_line in summarized
+    assert "# fail 1" in summarized
+
+    passed, failed, failed_tests = _parse_tap_output(summarized)
+    assert passed == 249
+    assert failed == 1
+    assert any("weather-forecast" in entry for entry in failed_tests)
 
 
 @pytest.mark.asyncio

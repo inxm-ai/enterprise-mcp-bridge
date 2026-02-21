@@ -174,3 +174,27 @@ async def test_prepare_messages_returns_original_on_error(monkeypatch):
     prepared = await service.prepare_messages(session, [user_message])
 
     assert prepared == [user_message]
+
+
+@pytest.mark.asyncio
+async def test_find_prompt_returns_none_for_method_not_found_404():
+    service = PromptService()
+
+    class SessionWithoutPrompts:
+        async def list_prompts(self):
+            raise HTTPException(status_code=404, detail="Method not found")
+
+    prompt = await service.find_prompt_by_name_or_role(SessionWithoutPrompts())
+    assert prompt is None
+
+
+@pytest.mark.asyncio
+async def test_find_prompt_returns_none_for_method_not_found_exception():
+    service = PromptService()
+
+    class SessionWithoutPrompts:
+        async def list_prompts(self):
+            raise RuntimeError("404: Method not found")
+
+    prompt = await service.find_prompt_by_name_or_role(SessionWithoutPrompts())
+    assert prompt is None

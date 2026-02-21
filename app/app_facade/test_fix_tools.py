@@ -16,8 +16,10 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+from app.app_facade.generated_output_factory import MCP_SERVICE_TEST_HELPER_SCRIPT
+from app.vars import GENERATED_UI_READ_ONLY_STREAK_LIMIT
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
@@ -66,6 +68,18 @@ TOOL_DESCRIPTIONS = {
 }
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        parsed = int(os.environ.get(name, str(default)))
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+NODE_TEST_TIMEOUT_MS = _positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
+READ_ONLY_STREAK_LIMIT = max(1, int(GENERATED_UI_READ_ONLY_STREAK_LIMIT))
+
+
 def _tool_description(
     tool_name: str, arguments: Optional[Dict[str, Any]] = None
 ) -> str:
@@ -76,6 +90,105 @@ def _tool_description(
         except Exception:
             return tool_name
     return tool_name
+
+
+def _extract_fix_explanation(
+    content: Optional[str], max_len: int = 600
+) -> Optional[str]:
+    """
+    Extract a concise fix explanation from assistant text.
+
+    Expected format in assistant content:
+      FIX_EXPLANATION: <why this change should fix tests>
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        if line.lower().startswith("fix_explanation:"):
+            explanation = line.split(":", 1)[1].strip()
+            if not explanation:
+                return None
+            if len(explanation) > max_len:
+                return f"{explanation[:max_len]}...(trimmed {len(explanation) - max_len} chars)"
+            return explanation
+    return None
+
+
+def _extract_general_explanation(
+    content: Optional[str], max_len: int = 600
+) -> Optional[str]:
+    """
+    Best-effort extraction for models that do not emit FIX_EXPLANATION.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower in {"tests_passing", "test_passing"}:
+            continue
+        if lower.startswith("fix_explanation:"):
+            continue
+        if lower.startswith("```") or lower.startswith("{") or lower.startswith("["):
+            continue
+        if len(line) > max_len:
+            return f"{line[:max_len]}...(trimmed {len(line) - max_len} chars)"
+        return line
+    return None
+
+
+def _inferred_tool_explanation(tool_names: List[str]) -> Optional[str]:
+    """
+    Fallback explanation when assistant content has no explicit rationale.
+    """
+    if not tool_names:
+        return None
+
+    unique_names = []
+    for name in tool_names:
+        if name and name not in unique_names:
+            unique_names.append(name)
+
+    if not unique_names:
+        return None
+
+    if all(
+        name in {"get_script_lines", "get_current_scripts", "search_files"}
+        for name in unique_names
+    ):
+        return "Inspecting source context before applying a change."
+
+    mapping = {
+        "run_tests": "Re-running tests to validate current scripts.",
+        "run_debug_code": "Running a debug snippet to inspect runtime behavior.",
+        "update_test_script": "Updating test logic to match intended behavior and remove failing assumptions.",
+        "update_service_script": "Updating service behavior to satisfy test expectations.",
+        "update_components_script": "Updating component rendering/state flow to satisfy test expectations.",
+        "update_dummy_data": "Updating fixtures to match expected payload shapes.",
+        "get_script_lines": "Reading specific source lines for diagnosis.",
+        "get_current_scripts": "Inspecting script metadata before making edits.",
+        "search_files": "Searching source for relevant patterns related to the failure.",
+    }
+
+    reasons = []
+    for name in unique_names[:2]:
+        reason = mapping.get(name)
+        if reason:
+            reasons.append(reason)
+    if not reasons:
+        return (
+            f"Applying tool-driven diagnosis/fix steps: {', '.join(unique_names[:2])}."
+        )
+    return " ".join(reasons)
 
 
 def _parse_tap_output(tap_output: str) -> Tuple[int, int, List[str]]:
@@ -105,15 +218,59 @@ def _parse_tap_output(tap_output: str) -> Tuple[int, int, List[str]]:
     return passed, failed, failed_tests
 
 
+def _summarize_test_output(output: str, limit: int = 4000) -> str:
+    """
+    Trim oversized test output while preserving failing test names and summary lines.
+    """
+    text = output or ""
+    if len(text) <= limit:
+        return text
+
+    failure_lines: List[str] = []
+    seen_failures = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("not ok ") and line not in seen_failures:
+            seen_failures.add(line)
+            failure_lines.append(line)
+
+    summary_lines: List[str] = []
+    for pattern in (
+        r"^# tests\s+\d+",
+        r"^# suites\s+\d+",
+        r"^# pass\s+\d+",
+        r"^# fail\s+\d+",
+    ):
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            summary_lines.append(match.group(0))
+
+    prefix_parts = [f"...(trimmed {len(text) - limit} chars)"]
+    if failure_lines:
+        preview = failure_lines[:8]
+        if len(failure_lines) > 8:
+            preview.append(f"... ({len(failure_lines) - 8} more failing entries)")
+        prefix_parts.append(
+            "Failed tests:\n" + "\n".join(f"- {line}" for line in preview)
+        )
+    if summary_lines:
+        prefix_parts.append("Summary:\n" + "\n".join(summary_lines))
+
+    prefix = "\n".join(prefix_parts).strip() + "\n\n"
+    remaining = max(800, limit - len(prefix))
+    head_budget = max(200, remaining // 3)
+    tail_budget = max(400, remaining - head_budget)
+    head = text[:head_budget]
+    tail = text[-tail_budget:]
+    return f"{prefix}" f"--- OUTPUT HEAD ---\n{head}\n" f"--- OUTPUT TAIL ---\n{tail}"
+
+
 def _log_test_run_output(context: str, output: str) -> None:
     output = output or ""
     if not output.strip():
         logger.info("%s Test run produced no output", context)
         return
-    output_tail = output[-4000:] if len(output) > 4000 else output
-    if len(output) > 4000:
-        output_tail = f"...(trimmed {len(output) - 4000} chars)\n{output_tail}"
-    logger.info("%s Test run output:\n%s", context, output_tail)
+    logger.info("%s Test run output:\n%s", context, _summarize_test_output(output))
 
 
 @dataclass
@@ -215,7 +372,10 @@ class IterativeTestFixer:
             .replace("https://matthiaskainer.github.io/pfusch/pfusch.js", "./pfusch.js")
         )
         combined_script = (
-            (self.current_service_script or "") + "\n\n" + mocked_components
+            f"{MCP_SERVICE_TEST_HELPER_SCRIPT}\n\n"
+            + (self.current_service_script or "")
+            + "\n\n"
+            + mocked_components
         )
         with open(os.path.join(self.tmpdir, "app.js"), "w", encoding="utf-8") as f:
             f.write(combined_script)
@@ -261,7 +421,14 @@ class IterativeTestFixer:
         try:
             self._write_current_files()
 
-            cmd = ["node", "--test", "test.js"]
+            cmd = [
+                "node",
+                "--test",
+                "--test-force-exit",
+                "--test-timeout",
+                str(NODE_TEST_TIMEOUT_MS),
+                "test.js",
+            ]
             if test_name:
                 cmd.extend(["--test-name-pattern", test_name])
 
@@ -295,11 +462,7 @@ class IterativeTestFixer:
             metadata = self._parse_tap_output(output)
 
             if not success:
-                # Truncate output if too long
-                if len(output) > 4000:
-                    output = (
-                        f"...(trimmed {len(output) - 4000} chars)\n{output[-4000:]}"
-                    )
+                output = _summarize_test_output(output)
 
             return ToolResult(
                 success=success,
@@ -309,7 +472,12 @@ class IterativeTestFixer:
 
         except subprocess.TimeoutExpired:
             return ToolResult(
-                success=False, content="Tests timed out after 30 seconds."
+                success=False,
+                content=(
+                    "Tests timed out after 30 seconds. "
+                    "Check for unresolved async waits (for example: await new Promise(...), "
+                    "while(true), or setInterval without cleanup)."
+                ),
             )
         except Exception as e:
             return ToolResult(success=False, content=f"Error running tests: {str(e)}")
@@ -676,6 +844,8 @@ class IterativeTestFixer:
                         "dummyData (if provided). Return a value to print JSON output, "
                         "and console.log output is captured. Prefer to run the tests "
                         "directly using 'run_tests' when possible, only use if stuck."
+                        "You're inside a closure, so don't do top level things but rather "
+                        "ie `const { dummyData } = await import('./dummy_data.js');`"
                     ),
                     "parameters": {
                         "type": "object",
@@ -1032,6 +1202,7 @@ async def run_tool_driven_test_fix(
     max_attempts: int = 25,
     event_queue: Optional[asyncio.Queue] = None,
     extra_headers: Optional[Dict[str, str]] = None,
+    strategy_mode: Literal["default", "fix_code", "adjust_test"] = "default",
 ) -> Tuple[bool, str, str, str, Optional[str], List[Message]]:
     """
     Use LLM with specialized tools to iteratively fix failing tests.
@@ -1060,13 +1231,73 @@ async def run_tool_driven_test_fix(
         )
 
         fix_tools = toolkit.get_tool_definitions()
+        strategy_allowed_tools: Optional[set[str]] = None
+        strategy_instruction = ""
+        objective_instruction = "Use the provided tools to fix the failing tests. "
+        code_fix_instruction = (
+            "If the service or components code is incorrect, fix them accordingly. "
+        )
+        test_fix_instruction = "If tests are wrong, ie have incorrect assumptions, or test things that are unrealistic or not matching the dummy data, correct them with targeted edits that preserve intent. "
+        missing_tests_instruction = "If there are tests missing that should be present, add them to the test script. "
+        fixture_instruction = (
+            "If test fixtures need updates, add data to the dummy data module. "
+            "Do not delete from dummy data. "
+        )
+        if strategy_mode == "fix_code":
+            strategy_allowed_tools = {
+                "run_tests",
+                "run_debug_code",
+                "update_service_script",
+                "update_components_script",
+                "get_script_lines",
+                "get_current_scripts",
+                "search_files",
+            }
+            strategy_instruction = (
+                "Important: prioritize runtime fixes in service_script/components_script. "
+                "Do NOT modify test_script or dummy_data in this mode. "
+                "If failures appear to be test-only issues, note that briefly and continue with runtime-focused fixes. "
+                "Never import './dummy_data.js' or reference dummyData in runtime code."
+            )
+            objective_instruction = "Use the provided tools to fix runtime issues that cause test failures. "
+            test_fix_instruction = ""
+            missing_tests_instruction = ""
+            fixture_instruction = (
+                "Do not change test fixtures in this mode; fix runtime code only. "
+            )
+        elif strategy_mode == "adjust_test":
+            strategy_allowed_tools = {
+                "run_tests",
+                "run_debug_code",
+                "update_test_script",
+                "update_dummy_data",
+                "get_script_lines",
+                "get_current_scripts",
+                "search_files",
+            }
+            strategy_instruction = (
+                "Important: you may and should modify test_script/dummy_data when tests are broken. "
+                "Do NOT modify service_script or components_script in this mode. "
+                "Prefer minimal, targeted edits that keep test intent and coverage strong."
+            )
+            objective_instruction = (
+                "Use the provided tools to repair broken tests and fixtures. "
+            )
+            code_fix_instruction = ""
+            test_fix_instruction = "If tests are wrong, correct them (for example invalid assumptions about wrappers/events/timing/data shape). "
+        if strategy_allowed_tools:
+            fix_tools = [
+                tool
+                for tool in fix_tools
+                if tool.get("function", {}).get("name") in strategy_allowed_tools
+            ]
 
         test_result = toolkit.run_tests()
         _log_test_run_output(
             "[iterative_test_fix] Initial test run",
             test_result.content,
         )
-        initial_passed, _, _ = _parse_tap_output(test_result.content)
+        initial_passed, initial_failed, _ = _parse_tap_output(test_result.content)
         last_passed = initial_passed
         if test_result.success:
             logger.info("[iterative_test_fix] Tests passed on first try!")
@@ -1092,18 +1323,38 @@ async def run_tool_driven_test_fix(
                     "You are an expert JavaScript QA developer tasked with fixing the "
                     "failing tests with the following output:\n\n"
                     f"```\n{test_result.content}\n```\n\n"
-                    "Use the provided tools to fix the failing tests. "
-                    "If there are tests missing that should be present, add them to the test script. "
-                    "If the service or components code is incorrect, fix them accordingly. "
-                    "If test fixtures need updates, add data to the dummy data module. Do not delete from dummy data. "
-                    "If the test are wrong, correct them. "
+                    f"{objective_instruction}"
+                    f"{missing_tests_instruction}"
+                    f"{code_fix_instruction}"
+                    f"{fixture_instruction}"
+                    f"{test_fix_instruction}"
                     "Call run_tests to verify your changes. "
+                    "Harness note: pfuschTest returns a PfuschNodeCollection wrapper around the host component; "
+                    "component internals are on comp.host (for example comp.host.state / comp.host.shadowRoot). "
+                    "Hyphenated custom element names (for example 'air-quality') are valid; do not rename tags just to avoid hyphens. "
+                    "Slot note: avoid slot-only refactors unless tests explicitly provide slotted Light DOM content. "
+                    "Do not use `html.slot() || fallback` patterns and do not depend on `slot.assignedNodes()` / `slot.assignedElements()`. "
+                    "Treat helpers.children(...) as initial Light DOM capture, not dynamic future-child discovery. "
+                    "Selector note: do not assume global button indexes when asserting clicks; use scoped selectors/text. "
+                    "Before any tool calls, add one line in your assistant response as "
+                    "'FIX_EXPLANATION: <brief root cause and why the planned change should help>'. "
+                    f"{strategy_instruction} "
                     "When all tests pass, respond with 'TESTS_PASSING' and nothing else."
                 ),
             )
         )
 
         attempt = 0
+        read_only_streak = 0
+        best_passed = initial_passed
+        best_failed = initial_failed
+        best_snapshot = {
+            "service_script": service_script,
+            "components_script": components_script,
+            "test_script": test_script,
+            "dummy_data": dummy_data,
+            "messages": copy.deepcopy(fix_messages),
+        }
 
         def _reset_attempts_on_progress(passed: int, context: str) -> None:
             nonlocal last_passed, attempt
@@ -1116,6 +1367,38 @@ async def run_tool_driven_test_fix(
                 )
                 attempt = 0
             last_passed = passed
+
+        def _capture_snapshot() -> Dict[str, Any]:
+            return {
+                "service_script": toolkit.current_service_script,
+                "components_script": toolkit.current_components_script,
+                "test_script": toolkit.current_test_script,
+                "dummy_data": toolkit.current_dummy_data,
+                "messages": copy.deepcopy(fix_messages),
+            }
+
+        def _update_best_snapshot(passed: int, failed: int) -> None:
+            nonlocal best_passed, best_failed, best_snapshot
+            if passed > best_passed or (passed == best_passed and failed < best_failed):
+                best_passed = passed
+                best_failed = failed
+                best_snapshot = _capture_snapshot()
+
+        def _restore_best_snapshot(reason: str) -> None:
+            toolkit.current_service_script = best_snapshot["service_script"]
+            toolkit.current_components_script = best_snapshot["components_script"]
+            toolkit.current_test_script = best_snapshot["test_script"]
+            toolkit.current_dummy_data = best_snapshot["dummy_data"]
+            logger.warning("[iterative_test_fix] %s Restored best snapshot.", reason)
+            fix_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"{reason} A previous better script snapshot was restored "
+                        "automatically. Continue from the restored scripts."
+                    ),
+                )
+            )
 
         while attempt < max_attempts:
             attempt += 1
@@ -1188,6 +1471,27 @@ async def run_tool_driven_test_fix(
                     )
             if tool_calls:
                 assistant_msg.tool_calls = tool_calls
+            tool_call_names = [
+                tc.function.name
+                for tc in tool_calls
+                if tc.function and tc.function.name
+            ]
+            fix_explanation = _extract_fix_explanation(content)
+            if not fix_explanation:
+                fix_explanation = _extract_general_explanation(content)
+            if not fix_explanation:
+                fix_explanation = _inferred_tool_explanation(tool_call_names)
+            if fix_explanation:
+                logger.info(
+                    "[iterative_test_fix] Fix explanation (iteration %s): %s",
+                    attempt,
+                    fix_explanation,
+                )
+                logger.info(
+                    "[iterative_test_fix] Why (iteration %s): %s",
+                    attempt,
+                    fix_explanation,
+                )
             fix_messages.append(assistant_msg)
 
             if not tool_calls:
@@ -1196,32 +1500,31 @@ async def run_tool_driven_test_fix(
                 content_preview = content.strip() or "<empty>"
                 if len(content_preview) > 300:
                     content_preview = f"{content_preview[:300]}...[truncated]"
-                    logger.warning(
-                        "[iterative_test_fix] No tool calls returned on iteration %s (consecutive %s): %s",
-                        attempt,
-                        no_tool_call_attempts,
-                        content_preview,
+                logger.warning(
+                    "[iterative_test_fix] No tool calls returned on iteration %s (consecutive %s): %s",
+                    attempt,
+                    no_tool_call_attempts,
+                    content_preview,
+                )
+                if "TESTS_PASSING" in content:
+                    logger.info("[iterative_test_fix] LLM indicates tests are passing")
+                    final_result = toolkit.run_tests()
+                    _log_test_run_output(
+                        "[iterative_test_fix] Verification test run",
+                        final_result.content,
                     )
-                    if "TESTS_PASSING" in content:
-                        logger.info(
-                            "[iterative_test_fix] LLM indicates tests are passing"
+                    passed, failed, _ = _parse_tap_output(final_result.content)
+                    _reset_attempts_on_progress(passed, "verification run")
+                    _update_best_snapshot(passed, failed)
+                    if final_result.success:
+                        return (
+                            True,
+                            toolkit.current_service_script,
+                            toolkit.current_components_script,
+                            toolkit.current_test_script,
+                            toolkit.current_dummy_data,
+                            fix_messages,
                         )
-                        final_result = toolkit.run_tests()
-                        _log_test_run_output(
-                            "[iterative_test_fix] Verification test run",
-                            final_result.content,
-                        )
-                        passed, _, _ = _parse_tap_output(final_result.content)
-                        _reset_attempts_on_progress(passed, "verification run")
-                        if final_result.success:
-                            return (
-                                True,
-                                toolkit.current_service_script,
-                                toolkit.current_components_script,
-                                toolkit.current_test_script,
-                                toolkit.current_dummy_data,
-                                fix_messages,
-                            )
                     fix_messages.append(
                         Message(
                             role=MessageRole.USER,
@@ -1236,18 +1539,28 @@ async def run_tool_driven_test_fix(
                         Message(
                             role=MessageRole.USER,
                             content=(
-                                "Please use the tools to fix the tests or respond "
-                                "with 'TESTS_PASSING' if done."
+                                "No tool calls were returned. Use the provided tools to "
+                                "inspect or modify scripts, then run_tests again."
                             ),
                         )
                     )
-                attempt -= 1
+                # Keep the best snapshot messages current even when no tests were run yet,
+                # so callers receive the latest retry guidance on failure.
+                best_snapshot["messages"] = copy.deepcopy(fix_messages)
+                if no_tool_call_attempts <= 2:
+                    attempt -= 1
+                else:
+                    logger.warning(
+                        "[iterative_test_fix] Consecutive no-tool-call iterations=%s; counting attempts to avoid infinite retry loop",
+                        no_tool_call_attempts,
+                    )
                 continue
             no_tool_call_attempts = 0
 
             tool_results = []
             all_tests_passed = False
             has_modification_tools = False
+            mutation_since_last_test = False
 
             # Don't count attempts that only read/search code
             read_only_tools = {
@@ -1255,16 +1568,46 @@ async def run_tool_driven_test_fix(
                 "get_current_scripts",
                 "search_files",
             }
-            if tool_calls and all(
+            read_only_only = bool(tool_calls) and all(
                 tc.function.name in read_only_tools for tc in tool_calls
-            ):
+            )
+            if read_only_only:
                 logger.info(
                     "[iterative_test_fix] Only read/search tools used - not counting as attempt"
                 )
+                read_only_streak += 1
+            else:
+                read_only_streak = 0
+
+            should_force_run_tests_for_streak = (
+                read_only_only and read_only_streak >= READ_ONLY_STREAK_LIMIT
+            )
+            if should_force_run_tests_for_streak:
+                logger.info(
+                    "[iterative_test_fix] Read-only streak limit reached (%s). Forcing run_tests.",
+                    READ_ONLY_STREAK_LIMIT,
+                )
+                read_only_streak = 0
+            elif read_only_only:
                 attempt -= 1
 
             for tool_call in tool_calls:
                 tool_name = tool_call.function.name
+                if strategy_allowed_tools and tool_name not in strategy_allowed_tools:
+                    disallowed = (
+                        f"Tool '{tool_name}' is not allowed in strategy '{strategy_mode}'. "
+                        "Use an allowed tool and continue."
+                    )
+                    logger.warning("[iterative_test_fix] %s", disallowed)
+                    tool_results.append(
+                        {
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": disallowed,
+                        }
+                    )
+                    continue
                 try:
                     arguments = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
@@ -1299,18 +1642,21 @@ async def run_tool_driven_test_fix(
                 }
                 if tool_name in modification_tools:
                     has_modification_tools = True
+                    mutation_since_last_test = True
 
                 tool_desc = _tool_description(tool_name, arguments)
                 logger.info(f"[iterative_test_fix] {tool_desc}")
 
                 if event_queue:
-                    await event_queue.put(
-                        {
-                            "event": "tool_start",
-                            "tool": tool_name,
-                            "description": tool_desc,
-                        }
-                    )
+                    tool_start_payload = {
+                        "event": "tool_start",
+                        "tool": tool_name,
+                        "description": tool_desc,
+                    }
+                    if fix_explanation:
+                        tool_start_payload["fix_explanation"] = fix_explanation
+                        tool_start_payload["why"] = fix_explanation
+                    await event_queue.put(tool_start_payload)
 
                 result = toolkit.execute_tool(tool_name, arguments)
                 if not result.success and tool_name != "run_tests":
@@ -1330,12 +1676,35 @@ async def run_tool_driven_test_fix(
                 )
 
                 if tool_name == "run_tests":
+                    mutation_since_last_test = False
                     _log_test_run_output(
                         f"[iterative_test_fix] Test run (iteration {attempt})",
                         result.content,
                     )
                     passed, failed, failed_tests = _parse_tap_output(result.content)
                     _reset_attempts_on_progress(passed, f"iteration {attempt}")
+                    _update_best_snapshot(passed, failed)
+                    if best_passed > 0 and (
+                        passed == 0 or passed <= max(0, best_passed - 3)
+                    ):
+                        _restore_best_snapshot(
+                            (
+                                "Sharp test regression detected "
+                                f"(passed={passed}, best_passed={best_passed})."
+                            )
+                        )
+                        if event_queue:
+                            await event_queue.put(
+                                {
+                                    "event": "test_result",
+                                    "status": "regression_rollback",
+                                    "passed": passed,
+                                    "failed": failed,
+                                    "best_passed": best_passed,
+                                    "best_failed": best_failed,
+                                }
+                            )
+                        continue
                     if result.success:
                         all_tests_passed = True
                         logger.info("[iterative_test_fix] All tests passed!")
@@ -1386,6 +1755,84 @@ async def run_tool_driven_test_fix(
                                     }
                                 )
 
+            should_force_run_tests_for_mutation = mutation_since_last_test
+            if should_force_run_tests_for_mutation or should_force_run_tests_for_streak:
+                forced_reason = (
+                    "mutation_without_run_tests"
+                    if should_force_run_tests_for_mutation
+                    else "read_only_streak_limit"
+                )
+                logger.info(
+                    "[iterative_test_fix] Forcing run_tests (%s) before next LLM round",
+                    forced_reason,
+                )
+                forced_result = toolkit.run_tests()
+                _log_test_run_output(
+                    f"[iterative_test_fix] Forced test run (iteration {attempt})",
+                    forced_result.content,
+                )
+                forced_passed, forced_failed, forced_failed_tests = _parse_tap_output(
+                    forced_result.content
+                )
+                _reset_attempts_on_progress(
+                    forced_passed, f"forced iteration {attempt}"
+                )
+                _update_best_snapshot(forced_passed, forced_failed)
+
+                tool_results.append(
+                    {
+                        "tool_call_id": f"forced_run_tests_{attempt}",
+                        "role": "tool",
+                        "name": "run_tests",
+                        "content": forced_result.content,
+                    }
+                )
+
+                if best_passed > 0 and (
+                    forced_passed == 0 or forced_passed <= max(0, best_passed - 3)
+                ):
+                    _restore_best_snapshot(
+                        (
+                            "Sharp test regression detected after forced run "
+                            f"(passed={forced_passed}, best_passed={best_passed})."
+                        )
+                    )
+                    if event_queue:
+                        await event_queue.put(
+                            {
+                                "event": "test_result",
+                                "status": "regression_rollback",
+                                "passed": forced_passed,
+                                "failed": forced_failed,
+                                "best_passed": best_passed,
+                                "best_failed": best_failed,
+                            }
+                        )
+                elif forced_result.success:
+                    all_tests_passed = True
+                    if event_queue:
+                        await event_queue.put(
+                            {
+                                "event": "test_result",
+                                "status": "passed",
+                                "message": "All tests passed!",
+                                "passed": forced_passed,
+                                "failed": forced_failed,
+                                "metadata": forced_result.metadata,
+                            }
+                        )
+                elif event_queue:
+                    await event_queue.put(
+                        {
+                            "event": "test_result",
+                            "status": "failed",
+                            "passed": forced_passed,
+                            "failed": forced_failed,
+                            "failed_tests": forced_failed_tests,
+                            "metadata": forced_result.metadata,
+                        }
+                    )
+
             for tool_result in tool_results:
                 fix_messages.append(
                     Message(
@@ -1403,8 +1850,9 @@ async def run_tool_driven_test_fix(
                     "[iterative_test_fix] Verification test run",
                     final_result.content,
                 )
-                passed, _, _ = _parse_tap_output(final_result.content)
+                passed, failed, _ = _parse_tap_output(final_result.content)
                 _reset_attempts_on_progress(passed, "verification run")
+                _update_best_snapshot(passed, failed)
                 if final_result.success:
                     return (
                         True,
@@ -1438,15 +1886,18 @@ async def run_tool_driven_test_fix(
                 )
 
         logger.warning(
-            "[iterative_test_fix] Failed to fix tests after %s attempts", max_attempts
+            "[iterative_test_fix] Failed to fix tests after %s attempts. Returning best snapshot (passed=%s, failed=%s)",
+            max_attempts,
+            best_passed,
+            best_failed,
         )
         return (
             False,
-            toolkit.current_service_script,
-            toolkit.current_components_script,
-            toolkit.current_test_script,
-            toolkit.current_dummy_data,
-            fix_messages,
+            best_snapshot["service_script"],
+            best_snapshot["components_script"],
+            best_snapshot["test_script"],
+            best_snapshot["dummy_data"],
+            best_snapshot["messages"],
         )
 
     finally:

@@ -13,6 +13,7 @@ from app.tgi.services.tool_service import (
     extract_tool_call_from_streamed_content,
 )
 from app.tgi.models.model_formats import ChatGPTModelFormat
+from app.vars import GENERATED_UI_TOOL_TEXT_CAP
 
 
 class DummySession:
@@ -110,6 +111,46 @@ class DictStructuredSession:
         return await DummySession().list_tools()
 
 
+class JsonTextErrorSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "structuredContent": None,
+            "content": [
+                {
+                    "text": '{"error":"No coordinates found for city: Insheim bei Landau"}'
+                }
+            ],
+        }
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
+class JsonTextDataSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "structuredContent": None,
+            "content": [{"text": '{"payload":{"result":{"plan_id":"plan-1"}}}'}],
+        }
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
+class JsonTextOpaqueErrorSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "structuredContent": None,
+            "content": [{"text": '{"isError":true,"meta":{"code":"E_TOOL"}}'}],
+        }
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
 class CoroutineResultSession:
     def __init__(self):
         self.handler_awaited = False
@@ -138,6 +179,30 @@ class CoroutineErrorSession:
             "Input should be a valid dictionary or instance of PlanExecutionResult "
             "input_value=<coroutine object handle_planner_stream at 0x0> input_type=coroutine"
         )
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
+class HugeTextSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "structuredContent": None,
+            "content": [{"text": "x" * (GENERATED_UI_TOOL_TEXT_CAP + 2000)}],
+        }
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
+class JsonBlockTextSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "structuredContent": None,
+            "content": [{"text": 'prefix {"payload":{"value":42}} suffix'}],
+        }
 
     async def list_tools(self):
         return await DummySession().list_tools()
@@ -248,6 +313,46 @@ class TestToolService:
         result = await tool_service.execute_tool_call(session, tool_call, None)
         assert result["role"] == "tool"
         assert "error" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_parses_json_text_error(self, tool_service):
+        """JSON embedded in content[].text should be normalized to error payload."""
+        session = JsonTextErrorSession()
+        tool_call = make_tool_call(name="list-files", args="{}", id="call_json_err")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert payload["error"] == "No coordinates found for city: Insheim bei Landau"
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_parses_json_text_data(self, tool_service):
+        """JSON embedded in content[].text should be surfaced as structured JSON."""
+        session = JsonTextDataSession()
+        tool_call = make_tool_call(name="list-files", args="{}", id="call_json_data")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert payload == {"payload": {"result": {"plan_id": "plan-1"}}}
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_uses_llm_when_error_message_missing(
+        self, tool_service
+    ):
+        """If no direct error message can be extracted, use LLM explanation fallback."""
+        session = JsonTextOpaqueErrorSession()
+        tool_call = make_tool_call(name="list-files", args="{}", id="call_json_err_llm")
+
+        class FakeLLM:
+            async def ask(self, **kwargs):
+                return "Tool failed with code E_TOOL."
+
+        tool_service.llm_client = FakeLLM()
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert payload["error"] == "Tool failed with code E_TOOL."
 
     @pytest.mark.asyncio
     async def test_execute_tool_call_exception(self, tool_service):
@@ -416,6 +521,18 @@ class TestToolService:
         assert len(result) == 1
         assert result[0].role == MessageRole.TOOL
         assert '"error"' in result[0].content
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_json_text_error_marks_failure(self, tool_service):
+        session = JsonTextErrorSession()
+        tool_call = make_tool_call(name="list-files", args="{}", id="call_json_fail")
+        result, success = await tool_service.execute_tool_calls(
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
+        )
+        assert success is False
+        assert len(result) == 1
+        payload = json.loads(result[0].content)
+        assert payload.get("error")
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_exception(self, tool_service):
@@ -823,6 +940,47 @@ async def test_create_result_message_summarizes_long_content(monkeypatch):
 
     msg = await service.create_result_message(ToolCallFormat.OPENAI_JSON, tool_result)
     assert msg.content == "SHORT_SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_call_compacts_huge_text_content(tool_service):
+    session = HugeTextSession()
+    tool_call = make_tool_call(name="list-files", args="{}", id="call_huge_text")
+
+    result = await tool_service.execute_tool_call(session, tool_call, None)
+
+    payload = json.loads(result["content"])
+    assert payload.get("truncated") is True
+    assert isinstance(payload.get("text"), str)
+    assert len(payload["text"]) <= GENERATED_UI_TOOL_TEXT_CAP + 30
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_call_prefers_json_block_from_text(tool_service):
+    session = JsonBlockTextSession()
+    tool_call = make_tool_call(name="list-files", args="{}", id="call_json_block")
+
+    result = await tool_service.execute_tool_call(session, tool_call, None)
+    payload = json.loads(result["content"])
+
+    assert payload == {"payload": {"value": 42}}
+
+
+@pytest.mark.asyncio
+async def test_create_result_message_caps_large_unsummarized_content():
+    service = ToolService(model_format=ChatGPTModelFormat())
+    tool_result = {
+        "content": "z" * (GENERATED_UI_TOOL_TEXT_CAP + 5000),
+        "tool_call_id": "cap1",
+        "name": "cap_tool",
+    }
+
+    msg = await service.create_result_message(
+        ToolCallFormat.OPENAI_JSON, tool_result, summarize=False
+    )
+    payload = json.loads(msg.content)
+    assert payload["truncated"] is True
+    assert len(payload["text"]) <= GENERATED_UI_TOOL_TEXT_CAP
 
 
 @pytest.mark.asyncio

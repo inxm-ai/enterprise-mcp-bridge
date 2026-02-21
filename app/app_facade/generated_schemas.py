@@ -44,20 +44,19 @@ generation_presentation_schema = {
     "title": "GeneratedPresentation",
     "type": "object",
     "properties": {
-        "html": {
+        "template_parts": {
             "type": "object",
-            "description": "HTML output. Either a full `page` (document) or a `snippet` (embed) is acceptable.",
+            "description": (
+                "Preferred lightweight output mode. The backend will render these parts "
+                "into the standard HTML template and script placeholders."
+            ),
             "properties": {
-                "page": {
-                    "type": "string",
-                    "description": 'Complete HTML document as a string. Do NOT inline snippet or script content. Use <!-- include:snippet --> where the snippet should render, and include a <script type="module"> block containing <!-- include:service_script --> and <!-- include:components_script -->.',
-                },
-                "snippet": {
-                    "type": "string",
-                    "description": 'HTML snippet as a string. Should not include <html> or <body> tags. Do NOT inline scripts; use <!-- include:service_script --> and <!-- include:components_script --> inside a <script type="module"> block.',
-                },
+                "title": {"type": "string"},
+                "styles": {"type": "string"},
+                "html": {"type": "string"},
+                "script": {"type": "string"},
             },
-            "required": ["page", "snippet"],
+            "required": ["html"],
             "additionalProperties": False,
         },
         "metadata": {
@@ -86,7 +85,7 @@ generation_presentation_schema = {
             "additionalProperties": True,
         },
     },
-    "required": ["html"],
+    "required": ["template_parts"],
     "additionalProperties": True,
 }
 
@@ -99,7 +98,7 @@ generation_ui_schema = {
         **generation_logic_schema["properties"],
         **generation_presentation_schema["properties"],
     },
-    "required": ["html"],
+    "required": ["template_parts", "components_script", "test_script"],
     "additionalProperties": True,
 }
 

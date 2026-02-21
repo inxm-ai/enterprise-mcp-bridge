@@ -17,7 +17,12 @@ from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import get_data_access_manager
 from app.utils import mask_token
-from app.vars import MCP_MAP_HEADER_TO_INPUT, TOOL_OUTPUT_SCHEMAS, MCP_BASE_PATH
+from app.vars import (
+    MCP_MAP_HEADER_TO_INPUT,
+    TOOL_OUTPUT_SCHEMAS,
+    MCP_BASE_PATH,
+    get_tool_output_schema,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -102,6 +107,7 @@ def _cache_signature() -> dict:
         "include": INCLUDE_TOOLS,
         "exclude": EXCLUDE_TOOLS,
         "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
+        "tool_output_schemas": TOOL_OUTPUT_SCHEMAS,
         "server": os.environ.get("MCP_SERVER_COMMAND", "")
         or os.environ.get("MCP_REMOTE_SERVER", ""),
     }
@@ -132,8 +138,8 @@ def map_tools(tools):
             output_schema = tool.get("outputSchema")
             if output_schema is None:
                 output_schema = (tool.get("function") or {}).get("outputSchema")
-            if output_schema is None and name in TOOL_OUTPUT_SCHEMAS:
-                output_schema = TOOL_OUTPUT_SCHEMAS[name]
+            if output_schema is None:
+                output_schema = get_tool_output_schema(name)
             annotations = tool.get("annotations")
             meta = tool.get("meta")
         else:
@@ -147,8 +153,8 @@ def map_tools(tools):
             output_schema = getattr(tool, "outputSchema", None)
             if output_schema is None and hasattr(tool, "function"):
                 output_schema = getattr(getattr(tool, "function"), "outputSchema", None)
-            if output_schema is None and name in TOOL_OUTPUT_SCHEMAS:
-                output_schema = TOOL_OUTPUT_SCHEMAS[name]
+            if output_schema is None:
+                output_schema = get_tool_output_schema(name)
             annotations = getattr(tool, "annotations", None)
             meta = getattr(tool, "meta", None)
 

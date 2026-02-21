@@ -3,16 +3,21 @@ import json
 import logging
 import os
 import re
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.app_facade.generated_service import (
+    _DUMMY_DATA_TEST_USAGE_GUIDANCE,
     GeneratedUIService,
     GeneratedUIStorage,
     Scope,
     Actor,
     validate_identifier,
 )
+from app.app_facade.generated_output_factory import RUNTIME_BRIDGE_SCRIPT
+from app.tgi.models import Message, MessageRole
 
 
 class DummyTGIService:
@@ -21,6 +26,400 @@ class DummyTGIService:
         self.llm_client = None
         self.prompt_service = None
         self.tool_service = None
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_samples_unstructured_tool_payload():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    nested_payload = {"city": "Bretten", "temperature_c": 8.2}
+    envelope = {
+        "isError": False,
+        "content": [{"text": json.dumps(nested_payload), "structuredContent": None}],
+        "structuredContent": None,
+    }
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args, access_token):
+            self.calls.append((name, args, access_token))
+            return SimpleNamespace(
+                isError=False,
+                structuredContent=None,
+                content=[SimpleNamespace(text=json.dumps(envelope))],
+            )
+
+    session = Session()
+    allowed_tools = [
+        {
+            "function": {
+                "name": "get_weather_details",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        }
+    ]
+
+    await service._generate_dummy_data(
+        session=session,
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Weather dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    assert len(session.calls) == 1
+    assert session.calls[0][0] == "get_weather_details"
+    assert "city" in session.calls[0][1]
+    assert session.calls[0][2] == "tok"
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    assert kwargs["tool_specs"][0]["sampleStructuredContent"] == nested_payload
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.EFFECT_TOOLS",
+        ["create_ticket"],
+    )
+    dry_run_calls = []
+
+    async def fake_get_tool_dry_run_response(_session, _tool, _args):
+        dry_run_calls.append(True)
+        return SimpleNamespace(
+            isError=False,
+            structuredContent=None,
+            content=[SimpleNamespace(text='{"id":"dry-1"}')],
+        )
+
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.get_tool_dry_run_response",
+        fake_get_tool_dry_run_response,
+    )
+
+    class Session:
+        async def call_tool(self, *_args, **_kwargs):
+            raise AssertionError("call_tool should not run for effect tool dry-run")
+
+    allowed_tools = [
+        {
+            "function": {
+                "name": "create_ticket",
+                "description": "Create ticket",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                },
+            }
+        }
+    ]
+
+    await service._generate_dummy_data(
+        session=Session(),
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Tickets UI",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    assert dry_run_calls == [True]
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    assert kwargs["tool_specs"][0]["sampleStructuredContent"] == {"id": "dry-1"}
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    class RecoveringLLM:
+        async def non_stream_completion(self, request, _token, _span):
+            schema_name = (
+                (request.response_format or {}).get("json_schema", {}).get("name", "")
+            )
+            if schema_name.endswith("_sample_input"):
+                content = '{"city":"f;gadirtg"}'
+            else:
+                content = (
+                    '{"recoverable":true,"reason":"invalid city input",'
+                    '"retry_arguments":{"city":"Berlin"}}'
+                )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    service.tgi_service.llm_client = RecoveringLLM()
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args, access_token):
+            self.calls.append((name, dict(args), access_token))
+            if len(self.calls) == 1:
+                return SimpleNamespace(
+                    isError=True,
+                    structuredContent={
+                        "error": "No coordinates found for city f;gadirtg"
+                    },
+                    content=[],
+                )
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={"city": "Berlin", "temperature_c": 8.2},
+                content=[],
+            )
+
+    session = Session()
+    allowed_tools = [
+        {
+            "function": {
+                "name": "get_weather_details",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        }
+    ]
+
+    await service._generate_dummy_data(
+        session=session,
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Weather dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    assert len(session.calls) == 2
+    assert session.calls[0][1]["city"] == "f;gadirtg"
+    assert session.calls[1][1]["city"] == "Berlin"
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    assert kwargs["tool_specs"][0]["sampleStructuredContent"] == {
+        "city": "Berlin",
+        "temperature_c": 8.2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_uses_error_payload_when_unrecoverable():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    class UnrecoverableLLM:
+        async def non_stream_completion(self, request, _token, _span):
+            schema_name = (
+                (request.response_format or {}).get("json_schema", {}).get("name", "")
+            )
+            if schema_name.endswith("_sample_input"):
+                content = '{"city":"f;gadirtg"}'
+            else:
+                content = (
+                    '{"recoverable":false,'
+                    '"reason":"auth failure cannot be fixed by changing city"}'
+                )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    service.tgi_service.llm_client = UnrecoverableLLM()
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args, access_token):
+            self.calls.append((name, dict(args), access_token))
+            return SimpleNamespace(
+                isError=True,
+                structuredContent={"error": "Invalid API key"},
+                content=[],
+            )
+
+    session = Session()
+    allowed_tools = [
+        {
+            "function": {
+                "name": "get_weather_details",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        }
+    ]
+
+    await service._generate_dummy_data(
+        session=session,
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Weather dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    sampled = kwargs["tool_specs"][0]["sampleStructuredContent"]
+    assert sampled["error"] == "Invalid API key"
+    assert sampled["_dummy_data_error"] is True
+    assert sampled["tool"] == "get_weather_details"
+    assert sampled["attempted_args"]["city"] == "f;gadirtg"
+
+
+def test_build_sample_args_for_time_fields_fallback_is_schema_driven():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    schema = {
+        "type": "object",
+        "properties": {
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+            "timezone_name": {"type": "string"},
+            "datetime_str": {"type": "string"},
+        },
+        "required": ["start_date", "end_date", "timezone_name", "datetime_str"],
+    }
+
+    args = service._build_sample_args_for_tool(schema)
+
+    assert set(args.keys()) == {
+        "start_date",
+        "end_date",
+        "timezone_name",
+        "datetime_str",
+    }
+    assert all(isinstance(v, str) for v in args.values())
+
+
+@pytest.mark.asyncio
+async def test_derive_sample_args_prefers_existing_non_stream_client():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    calls = []
+
+    class FakeLLM:
+        async def non_stream_completion(self, request, _token, _span):
+            calls.append(request)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"timezone_name":"Europe/Berlin"}'
+                        )
+                    )
+                ]
+            )
+
+    service.tgi_service.llm_client = FakeLLM()
+    result = await service._derive_sample_args_with_llm(
+        tool_name="get_current_datetime",
+        tool_description="Get datetime by timezone",
+        input_schema={
+            "type": "object",
+            "properties": {"timezone_name": {"type": "string"}},
+            "required": ["timezone_name"],
+        },
+        prompt="show current time",
+    )
+
+    assert result == {"timezone_name": "Europe/Berlin"}
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_skips_meta_tools_during_sampling():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args, access_token):
+            self.calls.append((name, args, access_token))
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={"ok": True},
+                content=[],
+            )
+
+    session = Session()
+    allowed_tools = [
+        {
+            "function": {
+                "name": "describe_tool",
+                "description": "meta",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                },
+            }
+        },
+        {
+            "function": {
+                "name": "get_weather_details",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        },
+    ]
+
+    await service._generate_dummy_data(
+        session=session,
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Weather dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    assert [call[0] for call in session.calls] == ["get_weather_details"]
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    tool_names = [spec["name"] for spec in kwargs["tool_specs"]]
+    assert tool_names == ["get_weather_details"]
 
 
 @pytest.mark.parametrize("value", ["abc123", "A9_-"])
@@ -180,6 +579,28 @@ def test_normalise_payload_adds_script_blocks():
     assert "<!-- include:components_script -->" in html["snippet"]
 
 
+def test_normalise_payload_supports_template_parts():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    scope = Scope(kind="user", identifier="u1")
+    payload = {
+        "template_parts": {
+            "title": "Weather Board",
+            "styles": ".card { color: red; }",
+            "html": "<weather-dashboard></weather-dashboard>",
+            "script": "console.log('template-script');",
+        },
+        "metadata": {},
+    }
+    service._normalise_payload(payload, scope, "ui1", "name1", "req", previous=None)
+    html = payload["html"]
+    assert "<title>Weather Board</title>" in html["page"]
+    assert "<style data-pfusch>.card { color: red; }</style>" in html["page"]
+    assert "<!-- include:snippet -->" in html["page"]
+    assert "<weather-dashboard></weather-dashboard>" in html["snippet"]
+    assert "template-script" in payload.get("components_script", "")
+
+
 def test_expand_payload_injects_snippet_scripts():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
@@ -201,6 +622,544 @@ def test_expand_payload_injects_snippet_scripts():
     assert "export class McpService" in snippet
     assert "console.log('ok');" in snippet
     assert '<script type="module">' in snippet
+    assert "generated-ui-runtime" in page
+    assert "generated-ui-runtime" in snippet
+    assert "generated-mcp-service-helper" in page
+    assert "generated-mcp-service-helper" in snippet
+
+
+def test_run_tests_injects_mcp_service_helper_when_service_missing():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('runtime helper', () => {\n"
+        "  it('provides global service bindings', () => {\n"
+        "    assert.equal(typeof globalThis.McpService, 'function');\n"
+        "    assert.equal(typeof globalThis.service?.call, 'function');\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_helper_does_not_conflict_with_components_service_const():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    components_code = (
+        "const service = globalThis.service || new globalThis.McpService();\n"
+        "if (!service || typeof service.call !== 'function') {\n"
+        "  throw new Error('service binding missing');\n"
+        "}\n"
+    )
+    test_code = (
+        "import { describe, it } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service const collisions', () => {\n"
+        "  it('loads app module without duplicate symbol errors', () => {\n"
+        "    assert.equal(true, true);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", components_code, test_code)
+    assert success, output
+
+
+def test_run_tests_service_test_api_mocks_calls_without_fetch():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service test api', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('mocks service.call responses directly', async () => {\n"
+        "    svc.test.addResponse('list_items', { structuredContent: { result: [{ id: '1' }] } });\n"
+        "    const result = await svc.call('list_items', {}, { resultKey: 'result' });\n"
+        "    assert.equal(Array.isArray(result), true);\n"
+        "    assert.equal(result.length, 1);\n"
+        "    const calls = svc.test.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    assert.equal(calls[0].mocked, true);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_test_api_accepts_resolved_results_without_extractor_fetch():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service test api resolved responses', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns final resolved values from addResponse/addResolved', async () => {\n"
+        "    svc.test.addResponse('get_weather', { city: 'Berlin', temperature_c: 21 });\n"
+        "    svc.test.addResolved('get_weather_explicit', { city: 'Paris', temperature_c: 19 });\n"
+        "    const a = await svc.call('get_weather', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['city', 'temperature_c'],\n"
+        "        properties: {\n"
+        "          city: { type: 'string' },\n"
+        "          temperature_c: { type: 'number' }\n"
+        "        },\n"
+        "        additionalProperties: true,\n"
+        "      },\n"
+        "    });\n"
+        "    const b = await svc.call('get_weather_explicit', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['city', 'temperature_c'],\n"
+        "        properties: {\n"
+        "          city: { type: 'string' },\n"
+        "          temperature_c: { type: 'number' }\n"
+        "        },\n"
+        "        additionalProperties: true,\n"
+        "      },\n"
+        "    });\n"
+        "    assert.equal(a.city, 'Berlin');\n"
+        "    assert.equal(b.city, 'Paris');\n"
+        "    const calls = svc.test.getCalls();\n"
+        "    assert.equal(calls.length, 2);\n"
+        "    assert.equal(calls[0].mocked, true);\n"
+        "    assert.equal(calls[1].mocked, true);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_test_api_reuses_single_mock_for_repeated_calls():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service test api sticky single mock', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('reuses one mocked response for repeated calls', async () => {\n"
+        "    svc.test.addResolved('get_weather', { city: 'Berlin', temperature_c: 21 });\n"
+        "    const first = await svc.call('get_weather', {});\n"
+        "    const second = await svc.call('get_weather', {});\n"
+        "    assert.equal(first.city, 'Berlin');\n"
+        "    assert.equal(second.city, 'Berlin');\n"
+        "    const calls = svc.test.getCalls();\n"
+        "    assert.equal(calls.length, 2);\n"
+        "    assert.equal(calls[0].mocked, true);\n"
+        "    assert.equal(calls[1].mocked, true);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_test_api_consumes_series_then_reuses_last_mock():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service test api sticky tail in queue', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('uses queue order then repeats final mocked value', async () => {\n"
+        "    svc.test.addResolved('get_weather', { city: 'Berlin', temperature_c: 21 });\n"
+        "    svc.test.addResolved('get_weather', { city: 'Paris', temperature_c: 19 });\n"
+        "    const first = await svc.call('get_weather', {});\n"
+        "    const second = await svc.call('get_weather', {});\n"
+        "    const third = await svc.call('get_weather', {});\n"
+        "    assert.equal(first.city, 'Berlin');\n"
+        "    assert.equal(second.city, 'Paris');\n"
+        "    assert.equal(third.city, 'Paris');\n"
+        "    const calls = svc.test.getCalls();\n"
+        "    assert.equal(calls.length, 3);\n"
+        "    assert.equal(calls[0].mocked, true);\n"
+        "    assert.equal(calls[1].mocked, true);\n"
+        "    assert.equal(calls[2].mocked, true);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_result_key_falls_back_to_root_structured_content():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service resultKey fallback structuredContent', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns full structuredContent when resultKey is missing', async () => {\n"
+        "    svc.test.addResponse('get_current_weather', {\n"
+        "      structuredContent: { city: 'Berlin', temperature_c: 22, condition: 'Sunny' }\n"
+        "    });\n"
+        "    const result = await svc.call('get_current_weather', {}, { resultKey: 'result' });\n"
+        "    assert.equal(result.city, 'Berlin');\n"
+        "    assert.equal(result.temperature_c, 22);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_result_key_falls_back_to_root_extracted_json():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service resultKey fallback extracted json', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns full extracted object when resultKey is missing', async () => {\n"
+        "    svc.test.addResponse('get_current_weather', {\n"
+        '      content: [{ text: \'{"city":"Berlin","temperature_c":22,"condition":"Sunny"}\' }]\n'
+        "    });\n"
+        "    const result = await svc.call('get_current_weather', {}, { resultKey: 'result' });\n"
+        "    assert.equal(result.city, 'Berlin');\n"
+        "    assert.equal(result.temperature_c, 22);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_test_api_unwraps_null_structured_content_envelope():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service null structuredContent envelope', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns null body instead of raw envelope object', async () => {\n"
+        "    svc.test.addResponse('get_weather_details', { structuredContent: null });\n"
+        "    const result = await svc.call('get_weather_details', {}, { resultKey: 'result' });\n"
+        "    assert.equal(result, null);\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_runtime_exchange_collect_and_clear_helpers():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('runtime exchange helpers', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    if (typeof globalThis.__generatedUiClearServiceExchanges === 'function') {\n"
+        "      globalThis.__generatedUiClearServiceExchanges();\n"
+        "    }\n"
+        "  });\n"
+        "  it('collects and clears captured exchanges', async () => {\n"
+        "    assert.equal(typeof globalThis.__generatedUiCollectServiceExchanges, 'function');\n"
+        "    assert.equal(typeof globalThis.__generatedUiClearServiceExchanges, 'function');\n"
+        "    svc.test.addResponse('list_items', { structuredContent: { result: [{ id: '1' }] } });\n"
+        "    const result = await svc.call('list_items', { limit: 3 }, { resultKey: 'result' });\n"
+        "    assert.equal(Array.isArray(result), true);\n"
+        "    const collected = globalThis.__generatedUiCollectServiceExchanges(0, 20);\n"
+        "    assert.equal(Array.isArray(collected.entries), true);\n"
+        "    assert.equal(collected.entries.length, 1);\n"
+        "    assert.equal(collected.entries[0].tool, 'list_items');\n"
+        "    assert.equal(collected.entries[0].request_body.limit, 3);\n"
+        "    const cleared = globalThis.__generatedUiClearServiceExchanges();\n"
+        "    assert.equal(cleared.cleared, true);\n"
+        "    const afterClear = globalThis.__generatedUiCollectServiceExchanges(0, 20);\n"
+        "    assert.equal(afterClear.entries.length, 0);\n"
+        "    assert.equal(afterClear.cursor, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_runtime_bridge_action_collect_and_clear():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('runtime bridge actions', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    if (typeof globalThis.__generatedUiClearServiceExchanges === 'function') {\n"
+        "      globalThis.__generatedUiClearServiceExchanges();\n"
+        "    }\n"
+        "  });\n"
+        "  it('responds to collect and clear actions from parent', async () => {\n"
+        "    const posted = [];\n"
+        "    window.parent = { postMessage: (data) => posted.push(data) };\n"
+        "    console.warn('warning from runtime');\n"
+        "    svc.test.addResponse('list_items', { structuredContent: { result: [{ id: '1' }] } });\n"
+        "    await svc.call('list_items', { limit: 2 }, { resultKey: 'result' });\n"
+        "    window.dispatchEvent({\n"
+        "      type: 'message',\n"
+        "      origin: window.location.origin,\n"
+        "      data: {\n"
+        "        source: 'generated-ui-runtime',\n"
+        "        kind: 'action',\n"
+        "        payload: {\n"
+        "          action: 'collect_service_exchanges',\n"
+        "          request_id: 'req-collect',\n"
+        "          since_cursor: 0,\n"
+        "          limit: 10,\n"
+        "        },\n"
+        "      },\n"
+        "    });\n"
+        "    const collectResponse = posted.find((item) => item?.payload?.request_id === 'req-collect');\n"
+        "    assert.equal(collectResponse?.kind, 'action_response');\n"
+        "    assert.equal(Array.isArray(collectResponse?.payload?.entries), true);\n"
+        "    assert.equal(collectResponse.payload.entries.length, 1);\n"
+        "    const warnResponse = posted.find((item) => item?.kind === 'console_warning');\n"
+        "    assert.equal(warnResponse?.kind, 'console_warning');\n"
+        "    window.dispatchEvent({\n"
+        "      type: 'message',\n"
+        "      origin: window.location.origin,\n"
+        "      data: {\n"
+        "        source: 'generated-ui-runtime',\n"
+        "        kind: 'action',\n"
+        "        payload: {\n"
+        "          action: 'clear_service_exchanges',\n"
+        "          request_id: 'req-clear',\n"
+        "        },\n"
+        "      },\n"
+        "    });\n"
+        "    const clearResponse = posted.find((item) => item?.payload?.request_id === 'req-clear');\n"
+        "    assert.equal(clearResponse?.kind, 'action_response');\n"
+        "    assert.equal(clearResponse?.payload?.cleared, true);\n"
+        "    window.dispatchEvent({\n"
+        "      type: 'message',\n"
+        "      origin: window.location.origin,\n"
+        "      data: {\n"
+        "        source: 'generated-ui-runtime',\n"
+        "        kind: 'action',\n"
+        "        payload: {\n"
+        "          action: 'collect_service_exchanges',\n"
+        "          request_id: 'req-after-clear',\n"
+        "          since_cursor: 0,\n"
+        "          limit: 10,\n"
+        "        },\n"
+        "      },\n"
+        "    });\n"
+        "    const afterClear = posted.find((item) => item?.payload?.request_id === 'req-after-clear');\n"
+        "    assert.equal(afterClear?.kind, 'action_response');\n"
+        "    assert.equal(afterClear.payload.entries.length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", RUNTIME_BRIDGE_SCRIPT, test_code)
+    assert success, output
+
+
+def test_run_tests_service_extract_uses_llm_on_schema_mismatch():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('extract schema mismatch', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('falls back to llm extraction when direct JSON does not match schema', async () => {\n"
+        "    svc.test.addResponse('list_items', { content: [{ text: '{\"ok\":true}' }] });\n"
+        "    globalThis.fetch.addRoute('/tgi/v1/chat/completions', {\n"
+        '      choices: [{ message: { content: \'{"value":"from-llm"}\' } }],\n'
+        "    });\n"
+        "    const result = await svc.call('list_items', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['value'],\n"
+        "        properties: { value: { type: 'string' } },\n"
+        "        additionalProperties: false,\n"
+        "      },\n"
+        "    });\n"
+        "    assert.equal(result.value, 'from-llm');\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    assert.equal(calls[0].url.includes('/tgi/v1/chat/completions'), true);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_extract_returns_direct_when_schema_matches():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('extract schema match', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('keeps direct JSON when it matches schema', async () => {\n"
+        "    svc.test.addResponse('list_items', { content: [{ text: '{\"value\":\"direct\"}' }] });\n"
+        "    const result = await svc.call('list_items', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['value'],\n"
+        "        properties: { value: { type: 'string' } },\n"
+        "        additionalProperties: false,\n"
+        "      },\n"
+        "    });\n"
+        "    assert.equal(result.value, 'direct');\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_extract_handles_object_text_without_type_errors():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('extract object text', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('stringifies object text and still resolves schema-matched direct data', async () => {\n"
+        "    svc.test.addResponse('list_items', { content: [{ text: { value: 'object-direct' } }] });\n"
+        "    const result = await svc.call('list_items', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['value'],\n"
+        "        properties: { value: { type: 'string' } },\n"
+        "        additionalProperties: false,\n"
+        "      },\n"
+        "    });\n"
+        "    assert.equal(result.value, 'object-direct');\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_extract_caps_huge_unstructured_text_without_llm():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('extract huge text cap', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns truncated fallback and skips llm extraction for huge text', async () => {\n"
+        "    svc.test.addResponse('huge_tool', { content: [{ text: 'x'.repeat(9000) }] });\n"
+        "    globalThis.fetch.addRoute('/tgi/v1/chat/completions', {\n"
+        '      choices: [{ message: { content: \'{"value":"from-llm"}\' } }],\n'
+        "    });\n"
+        "    const result = await svc.call('huge_tool', {}, {\n"
+        "      schema: {\n"
+        "        type: 'object',\n"
+        "        required: ['value'],\n"
+        "        properties: { value: { type: 'string' } },\n"
+        "      },\n"
+        "    });\n"
+        "    assert.equal(result.truncated, true);\n"
+        "    assert.equal(typeof result.text, 'string');\n"
+        "    assert.equal(globalThis.fetch.getCalls().length, 0);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
 
 
 @pytest.mark.asyncio
@@ -416,6 +1375,125 @@ def test_load_pfusch_prompt_and_fallback_presence():
 
     s = _load_pfusch_prompt()
     assert "Pfusch" in s or "You are a microsite" in s
+    assert "COMPONENT-SCOPED DATA LOADING" in s
+    assert "targeted refetch only in affected components" in s
+    assert "root-level `Promise.all()` fan-out for unrelated components" in s
+    assert "LOG RUNTIME ERRORS TO CONSOLE" in s
+    assert "SERVICE TESTS (REQUIRED)" not in s
+    assert "COMPONENT TESTS (REQUIRED)" in s
+
+
+def test_dummy_data_test_usage_guidance_prefers_resolved_mocking():
+    guidance = _DUMMY_DATA_TEST_USAGE_GUIDANCE
+    assert "dummyDataSchemaHints" in guidance
+    assert "svc.test.addResolved(toolName, dummyData[toolName])" in guidance
+    assert "ask for schema and regenerate dummy data" in guidance
+    assert "svc.test.addResponse(toolName, dummyData[toolName])" not in guidance
+
+
+def test_compose_regeneration_prompt_includes_component_scoped_constraints():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    prompt = service._compose_regeneration_prompt(
+        user_message="Add quick filters",
+        assistant_message="Will split rendering into sections",
+        history=[{"role": "user", "content": "initial"}],
+    )
+    assert "Component data-loading constraints" in prompt
+    assert "component-owned by default" in prompt
+    assert "targeted refetch in affected components only" in prompt
+    assert "console.error" in prompt
+
+
+def test_run_assistant_message_system_prompt_includes_component_loading_policy():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    captured = {}
+
+    async def fake_non_stream_chat_with_tools(
+        _session, _messages, _selected_tools, request, _access_token, _unused
+    ):
+        captured["request"] = request
+        return {"choices": [{"message": {"content": "assistant-result"}}]}
+
+    service.tgi_service._non_stream_chat_with_tools = fake_non_stream_chat_with_tools
+
+    result = asyncio.run(
+        service._run_assistant_message(
+            session=None,
+            draft_payload={"html": {}, "metadata": {}},
+            history=[],
+            user_message="Refactor the dashboard loading flow",
+            selected_tools=[],
+            tool_choice="auto",
+            runtime_context=None,
+            access_token=None,
+        )
+    )
+
+    assert result == "assistant-result"
+    system_prompt = captured["request"].messages[0].content
+    assert (
+        "Preserve component-owned data loading and partial rendering" in system_prompt
+    )
+    assert "Do not introduce root-level Promise.all() fan-out" in system_prompt
+    assert "targeted refetch in affected components only" in system_prompt
+    assert "console.error" in system_prompt
+    assert "do not ask for permission to proceed" in system_prompt
+    assert "starts with 'I will ...'" in system_prompt
+
+
+def test_attempt_patch_update_prompt_includes_no_global_blocking_loader_guidance():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    captured = {}
+
+    class FakeLLM:
+        async def non_stream_completion(self, request, _token, _unused):
+            captured["request"] = request
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"patch":{"components_script":"console.log(\\"patched\\");"}}'
+                        }
+                    }
+                ]
+            }
+
+    service.tgi_service.llm_client = FakeLLM()
+
+    result = asyncio.run(
+        service._attempt_patch_update(
+            scope=Scope(kind="user", identifier="u1"),
+            ui_id="ui1",
+            name="overview",
+            draft_payload={
+                "html": {
+                    "page": "<!DOCTYPE html><html><body><div>old</div></body></html>",
+                    "snippet": "<div>old</div>",
+                },
+                "metadata": {},
+                "service_script": "",
+                "components_script": "",
+                "test_script": "",
+            },
+            user_message="Avoid full-page loading for independent panels",
+            assistant_message="Split loading by component",
+            access_token=None,
+            previous_metadata={},
+        )
+    )
+
+    assert result is not None
+    system_prompt = captured["request"].messages[0].content
+    assert (
+        "Preserve component-owned data loading and partial rendering" in system_prompt
+    )
+    assert "root-level Promise.all() fan-out" in system_prompt
+    assert "single full-screen blocking loader" in system_prompt
+    assert "console.error" in system_prompt
 
 
 def test_load_pfusch_prompt_error(monkeypatch):
@@ -1750,3 +2828,144 @@ def test_build_phase2_system_prompt_integration(monkeypatch):
     assert "Pfusch Dashboard Presentation Generation System Prompt" in prompt_result
     assert expected_design_system in prompt_result
     assert "{{DESIGN_SYSTEM_PROMPT}}" not in prompt_result
+
+
+def test_build_system_prompt_integration(monkeypatch):
+    """Verify that _build_system_prompt reads pfusch_ui_prompt and injects design system."""
+    storage = GeneratedUIStorage(os.getcwd())
+    tgi = DummyTGIService()
+    service = GeneratedUIService(storage=storage, tgi_service=tgi)
+
+    expected_design_system = "Use deterministic visual tokens."
+
+    class MockPromptService:
+        async def find_prompt_by_name_or_role(self, session, prompt_name=None):
+            if prompt_name == "design-system":
+                return "dummy_id"
+            return None
+
+        async def get_prompt_content(self, session, prompt):
+            if prompt == "dummy_id":
+                return expected_design_system
+            return ""
+
+    service.tgi_service.prompt_service = MockPromptService()
+
+    prompt_result = asyncio.run(service._build_system_prompt(None))
+
+    assert "Pfusch Dashboard Generation System Prompt" in prompt_result
+    assert expected_design_system in prompt_result
+    assert "{{DESIGN_SYSTEM_PROMPT}}" not in prompt_result
+
+
+@pytest.mark.asyncio
+async def test_iterative_test_fix_code_first_success_skips_adjust_test(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.GENERATED_UI_FIX_CODE_FIRST", True
+    )
+
+    calls = []
+
+    async def fake_run_tool_driven_test_fix(**kwargs):
+        calls.append(kwargs.get("strategy_mode", "default"))
+        return (
+            True,
+            "service-fixed",
+            "components-fixed",
+            "test-fixed",
+            None,
+            kwargs.get("messages") or [],
+        )
+
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.run_tool_driven_test_fix",
+        fake_run_tool_driven_test_fix,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_tests",
+        lambda *_args, **_kwargs: (False, "# pass 0\n# fail 1\n"),
+    )
+
+    success, svc, comps, tests, _dummy, _messages = await service._iterative_test_fix(
+        service_script="service-0",
+        components_script="components-0",
+        test_script="test-0",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.USER, content="fix")],
+        allowed_tools=[],
+        access_token=None,
+        max_attempts=25,
+        event_queue=None,
+    )
+
+    assert success is True
+    assert calls == ["fix_code"]
+    assert svc == "service-fixed"
+    assert comps == "components-fixed"
+    assert tests == "test-fixed"
+
+
+@pytest.mark.asyncio
+async def test_iterative_test_fix_preserves_best_snapshot_across_stages(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.GENERATED_UI_FIX_CODE_FIRST", True
+    )
+
+    calls = []
+
+    async def fake_run_tool_driven_test_fix(**kwargs):
+        mode = kwargs.get("strategy_mode", "default")
+        calls.append(mode)
+        if mode == "fix_code":
+            return (
+                False,
+                "service-a",
+                "components-a",
+                "test-a",
+                None,
+                kwargs.get("messages") or [],
+            )
+        return (
+            False,
+            "service-b",
+            "components-b",
+            "test-b",
+            None,
+            kwargs.get("messages") or [],
+        )
+
+    def fake_run_tests(service_script, *_args, **_kwargs):
+        if service_script == "service-a":
+            return False, "# pass 4\n# fail 1\n"
+        if service_script == "service-b":
+            return False, "# pass 0\n# fail 5\n"
+        return False, "# pass 1\n# fail 4\n"
+
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.run_tool_driven_test_fix",
+        fake_run_tool_driven_test_fix,
+    )
+    monkeypatch.setattr(service, "_run_tests", fake_run_tests)
+
+    success, svc, comps, tests, _dummy, _messages = await service._iterative_test_fix(
+        service_script="service-0",
+        components_script="components-0",
+        test_script="test-0",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.USER, content="fix")],
+        allowed_tools=[],
+        access_token=None,
+        max_attempts=25,
+        event_queue=None,
+    )
+
+    assert success is False
+    assert calls == ["fix_code", "adjust_test"]
+    assert svc == "service-a"
+    assert comps == "components-a"
+    assert tests == "test-a"

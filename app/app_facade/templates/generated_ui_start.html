@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Start Generated UI</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7f8;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #4b5563;
+      --border: #d1d5db;
+      --accent: #0f766e;
+      --danger: #b91c1c;
+      --pass: #047857;
+      --warn: #b45309;
+      --tool: #1d4ed8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top left, #e8f5f4 0%, #f5f9fb 45%, #f8fbfc 100%);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 24px 16px 30px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+    }
+    .head {
+      padding: 14px 16px;
+      font-weight: 700;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #ffffff 0%, #fafcfd 100%);
+    }
+    .form {
+      padding: 14px 16px;
+      display: grid;
+      gap: 10px;
+    }
+    label {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font: inherit;
+      color: inherit;
+      padding: 9px 11px;
+      background: #fff;
+    }
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+      line-height: 1.4;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .btn {
+      border: 1px solid #115e59;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .timeline {
+      margin-top: 12px;
+      list-style: none;
+      padding: 0;
+      margin-left: 0;
+      border-top: 1px solid var(--border);
+      max-height: 54vh;
+      overflow-y: auto;
+      font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+      font-size: 13px;
+      background: #fbfdff;
+    }
+    .item {
+      display: grid;
+      grid-template-columns: 88px auto 1fr;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      align-items: baseline;
+    }
+    .time {
+      color: #6b7280;
+      font-size: 12px;
+    }
+    .badge {
+      border-radius: 999px;
+      font-size: 11px;
+      padding: 2px 8px;
+      line-height: 1.3;
+      border: 1px solid transparent;
+      display: inline-block;
+      width: max-content;
+    }
+    .badge.log { color: #475569; background: #f1f5f9; border-color: #cbd5e1; }
+    .badge.tool { color: #1e3a8a; background: #dbeafe; border-color: #93c5fd; }
+    .badge.pass { color: #065f46; background: #d1fae5; border-color: #6ee7b7; }
+    .badge.fail { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+    .badge.error { color: #7f1d1d; background: #fecaca; border-color: #fca5a5; }
+    .message { white-space: pre-wrap; line-height: 1.35; }
+    @media (max-width: 780px) {
+      .item {
+        grid-template-columns: 80px 1fr;
+      }
+      .message {
+        grid-column: 1 / -1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="panel">
+      <div class="head">Start Generated UI</div>
+      <form id="start-form" class="form">
+        <div>
+          <label for="ui-id">UI ID</label>
+          <input id="ui-id" name="ui-id" placeholder="e.g. dashboard-plan-1" required />
+        </div>
+        <div>
+          <label for="prompt">Start prompt</label>
+          <textarea id="prompt" name="prompt" placeholder="Describe the page you want to generate..." required></textarea>
+        </div>
+        <div class="row">
+          <div id="status" class="status">Idle</div>
+          <button id="start-btn" class="btn" type="submit">Start Generation</button>
+        </div>
+      </form>
+      <ol id="timeline" class="timeline"></ol>
+    </section>
+  </main>
+  <script>
+    const target = '{{TARGET}}';
+    const appPrefix = '{{APP_PREFIX}}';
+    const formEl = document.getElementById('start-form');
+    const statusEl = document.getElementById('status');
+    const uiIdEl = document.getElementById('ui-id');
+    const promptEl = document.getElementById('prompt');
+    const startBtn = document.getElementById('start-btn');
+    const timelineEl = document.getElementById('timeline');
+
+    function nowTime() {
+      const date = new Date();
+      return date.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+
+    function addTimeline(kind, message) {
+      const row = document.createElement('li');
+      row.className = 'item';
+
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = `[${nowTime()}]`;
+
+      const badge = document.createElement('span');
+      badge.className = `badge ${kind}`;
+      if (kind === 'tool') badge.textContent = 'TOOL';
+      else if (kind === 'pass') badge.textContent = 'TESTS PASS';
+      else if (kind === 'fail') badge.textContent = 'TESTS FAIL';
+      else if (kind === 'error') badge.textContent = 'ERROR';
+      else badge.textContent = 'LOG';
+
+      const text = document.createElement('div');
+      text.className = 'message';
+      text.textContent = message || '';
+
+      row.appendChild(time);
+      row.appendChild(badge);
+      row.appendChild(text);
+      timelineEl.appendChild(row);
+      timelineEl.scrollTop = timelineEl.scrollHeight;
+    }
+
+    function setGenerating(isGenerating) {
+      uiIdEl.disabled = isGenerating;
+      promptEl.disabled = isGenerating;
+      startBtn.disabled = isGenerating;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    async function consumeStream(response, uiId) {
+      if (!response.ok || !response.body) {
+        const body = await response.text().catch(() => '');
+        throw new Error(body || `Request failed with status ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          return;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+
+          if (!line.startsWith('data: ')) {
+            continue;
+          }
+
+          const raw = line.slice(6).trim();
+          if (!raw || raw === '[DONE]') {
+            continue;
+          }
+
+          let payload;
+          try {
+            payload = JSON.parse(raw);
+          } catch (_err) {
+            continue;
+          }
+
+          if (currentEvent === 'log') {
+            addTimeline('log', payload.message || 'log');
+            setStatus(payload.message || 'Generating...');
+          } else if (currentEvent === 'tool_start') {
+            addTimeline('tool', `${payload.tool || 'tool'} - ${payload.description || 'running'}`);
+            setStatus('Running tools...');
+          } else if (currentEvent === 'test_result') {
+            const passed = Number(payload.passed || 0);
+            const failed = Number(payload.failed || 0);
+            if (payload.status === 'passed') {
+              addTimeline('pass', `Passed: ${passed}, Failed: ${failed}`);
+              setStatus('Tests passing');
+            } else if (payload.status === 'failed') {
+              const failedTests = Array.isArray(payload.failed_tests)
+                ? payload.failed_tests.slice(0, 3).join(', ')
+                : '';
+              const summary = failedTests ? ` | ${failedTests}` : '';
+              addTimeline('fail', `Passed: ${passed}, Failed: ${failed}${summary}`);
+              setStatus('Tests failing, fixing...');
+            } else {
+              addTimeline('error', payload.message || 'Tests errored');
+              setStatus('Tests errored');
+            }
+          } else if (currentEvent === 'error') {
+            const msg = typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error);
+            addTimeline('error', msg);
+            setStatus('Generation failed');
+            throw new Error(msg);
+          } else if (currentEvent === 'done') {
+            const record = payload.record || {};
+            const metadata = record.metadata || {};
+            const generatedName = metadata.name;
+            addTimeline('pass', 'Page successfully generated');
+            setStatus('Generation complete, redirecting...');
+            if (!generatedName) {
+              throw new Error('Generation completed without a UI name');
+            }
+            const containerUrl = `${appPrefix}/_generated/${target}/${encodeURIComponent(uiId)}/${encodeURIComponent(generatedName)}/container`;
+            window.location.assign(containerUrl);
+            return;
+          }
+        }
+      }
+    }
+
+    formEl.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const uiId = uiIdEl.value.trim();
+      const prompt = promptEl.value.trim();
+      if (!uiId || !prompt) {
+        setStatus('UI ID and prompt are required');
+        return;
+      }
+
+      timelineEl.innerHTML = '';
+      setGenerating(true);
+      setStatus('Starting generation...');
+      addTimeline('log', `Starting generation for ${uiId}`);
+
+      try {
+        const response = await fetch(`${appPrefix}/_generated/${target}`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream'
+          },
+          body: JSON.stringify({
+            id: uiId,
+            prompt: prompt,
+            tools: []
+          })
+        });
+
+        await consumeStream(response, uiId);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        addTimeline('error', msg);
+        setStatus('Generation failed');
+        setGenerating(false);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Generated UI Container</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --danger: #991b1b;
+      --pass: #065f46;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #eef4f4 0%, #f8fbfb 100%);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 12px;
+      min-height: 100vh;
+      padding: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .stack {
+      display: grid;
+      grid-template-rows: minmax(320px, 1fr) minmax(220px, 40vh);
+      gap: 12px;
+      min-height: 0;
+    }
+    .preview-panel {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 0;
+    }
+    .chat {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+    }
+    .header {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .history {
+      padding: 12px;
+      overflow-y: auto;
+      min-height: 0;
+      max-height: 79vh;
+      background: #fafbfc;
+    }
+    .bubble {
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+    .bubble.user { background: #e5f4f2; border: 1px solid #c7e5e1; }
+    .bubble.assistant { background: #ffffff; border: 1px solid #dfe4ea; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+    }
+    .input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      resize: vertical;
+      min-height: 72px;
+      font: inherit;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .status-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 11px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent-strong);
+      color: #fff;
+    }
+    .btn.warn {
+      border-color: #b45309;
+      color: #9a3412;
+    }
+    .btn.danger {
+      border-color: #b91c1c;
+      color: #7f1d1d;
+    }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #fff;
+    }
+    .status { color: var(--muted); font-size: 12px; }
+    .test-chip {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 1px 8px;
+      font-size: 11px;
+      width: max-content;
+      color: #334155;
+      background: #f8fafc;
+    }
+    .test-chip.running { border-color: #f59e0b; color: var(--warn); background: #fff7ed; }
+    .test-chip.passed { border-color: #6ee7b7; color: var(--pass); background: #d1fae5; }
+    .test-chip.failed, .test-chip.error, .test-chip.cancelled { border-color: #fca5a5; color: var(--danger); background: #fee2e2; }
+    .test-chip.queued { border-color: #93c5fd; color: #1e3a8a; background: #dbeafe; }
+    .console-panel {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      min-height: 0;
+    }
+    .tabs {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 12px;
+    }
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 999px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .tab-btn.active {
+      background: #ecfeff;
+      border-color: #99f6e4;
+      color: #115e59;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .actions.hidden { display: none; }
+    .actions input {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 8px;
+      min-width: 180px;
+      font-size: 12px;
+    }
+    .console-list {
+      margin: 0;
+      list-style: none;
+      padding: 0;
+      overflow-y: auto;
+      font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+      font-size: 12px;
+      background: #fbfdff;
+    }
+    .console-list.hidden { display: none; }
+    .console-item {
+      display: grid;
+      grid-template-columns: 88px auto 1fr;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      align-items: baseline;
+    }
+    .console-time { color: #6b7280; font-size: 11px; }
+    .console-badge {
+      border-radius: 999px;
+      font-size: 10px;
+      padding: 2px 8px;
+      border: 1px solid transparent;
+      display: inline-block;
+      width: max-content;
+    }
+    .console-badge.log { color: #334155; background: #f1f5f9; border-color: #cbd5e1; }
+    .console-badge.tool { color: #1e3a8a; background: #dbeafe; border-color: #93c5fd; }
+    .console-badge.pass { color: #065f46; background: #d1fae5; border-color: #6ee7b7; }
+    .console-badge.fail { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+    .console-badge.error { color: #7f1d1d; background: #fecaca; border-color: #fca5a5; }
+    .console-message { white-space: pre-wrap; line-height: 1.35; }
+    .console-foot {
+      border-top: 1px solid var(--border);
+      padding: 6px 12px;
+      font-size: 11px;
+      color: var(--muted);
+      background: #fcfcfd;
+    }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+      .stack { grid-template-rows: 60vh minmax(220px, 45vh); }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <section class="panel chat">
+      <div class="header">Conversational UI Editor</div>
+      <div id="history" class="history"></div>
+      <div class="toolbar">
+        <div style="width:100%">
+          <textarea id="message" class="input" placeholder="Describe the UI change..."></textarea>
+          <div class="controls">
+            <div class="status-wrap">
+              <span id="status" class="status">Session initializing...</span>
+              <span id="test-status-chip" class="test-chip">Tests: idle</span>
+            </div>
+            <div style="display:flex; gap:8px">
+              <button id="discard" class="btn" type="button">Discard</button>
+              <button id="publish" class="btn" type="button">Publish</button>
+              <button id="send" class="btn primary" type="button">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <div class="stack">
+      <section class="panel preview-panel">
+        <div class="header">Preview</div>
+        <iframe id="preview" title="Generated UI Preview"></iframe>
+      </section>
+      <section class="panel console-panel">
+        <div class="tabs">
+          <button id="tab-tests" class="tab-btn active" type="button">Tests</button>
+          <button id="tab-runtime" class="tab-btn" type="button">Runtime</button>
+        </div>
+        <div id="test-actions" class="actions hidden">
+          <button id="run-tests" class="btn" type="button">Run tests</button>
+          <button id="fix-code" class="btn primary" type="button">Fix code</button>
+          <button id="adjust-tests" class="btn warn" type="button">Adjust tests</button>
+          <button id="delete-tests" class="btn danger" type="button">Delete failing tests</button>
+          <input id="new-test-name" type="text" placeholder="New test name..." />
+          <button id="add-test" class="btn" type="button">Add test</button>
+        </div>
+        <ol id="tests-console" class="console-list"></ol>
+        <ol id="runtime-console" class="console-list hidden"></ol>
+        <div class="console-foot">Test stream is live per draft session.</div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const basePath = window.location.pathname.replace(/\/container$/, '');
+    const historyEl = document.getElementById('history');
+    const messageEl = document.getElementById('message');
+    const statusEl = document.getElementById('status');
+    const testChipEl = document.getElementById('test-status-chip');
+    const previewEl = document.getElementById('preview');
+    const sendBtn = document.getElementById('send');
+    const publishBtn = document.getElementById('publish');
+    const discardBtn = document.getElementById('discard');
+    const testsConsoleEl = document.getElementById('tests-console');
+    const runtimeConsoleEl = document.getElementById('runtime-console');
+    const testActionsEl = document.getElementById('test-actions');
+    const tabTestsBtn = document.getElementById('tab-tests');
+    const tabRuntimeBtn = document.getElementById('tab-runtime');
+    const runTestsBtn = document.getElementById('run-tests');
+    const fixCodeBtn = document.getElementById('fix-code');
+    const adjustTestsBtn = document.getElementById('adjust-tests');
+    const deleteTestsBtn = document.getElementById('delete-tests');
+    const addTestBtn = document.getElementById('add-test');
+    const newTestNameEl = document.getElementById('new-test-name');
+    let sessionId = null;
+    let testsEventSource = null;
+    let failedTests = [];
+    let latestTestState = 'idle';
+    let runtimeExchangeCursor = 0;
+    let runtimeActionSeq = 0;
+    let pendingRuntimeConsoleEvents = [];
+    const pendingRuntimeActions = new Map();
+    const MAX_RUNTIME_CONSOLE_EVENTS = 30;
+
+    function addBubble(role, text) {
+      const div = document.createElement('div');
+      div.className = `bubble ${role}`;
+      div.textContent = text || '';
+      historyEl.appendChild(div);
+      historyEl.scrollTop = historyEl.scrollHeight;
+      return div;
+    }
+
+    function nowTime() {
+      const date = new Date();
+      return date.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+
+    function addConsoleLine(container, kind, message) {
+      const row = document.createElement('li');
+      row.className = 'console-item';
+      const time = document.createElement('span');
+      time.className = 'console-time';
+      time.textContent = `[${nowTime()}]`;
+      const badge = document.createElement('span');
+      badge.className = `console-badge ${kind}`;
+      if (kind === 'tool') badge.textContent = 'TOOL';
+      else if (kind === 'pass') badge.textContent = 'PASS';
+      else if (kind === 'fail') badge.textContent = 'FAIL';
+      else if (kind === 'error') badge.textContent = 'ERROR';
+      else badge.textContent = 'LOG';
+      const text = document.createElement('div');
+      text.className = 'console-message';
+      text.textContent = message || '';
+      row.appendChild(time);
+      row.appendChild(badge);
+      row.appendChild(text);
+      container.appendChild(row);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function trimRuntimeValue(value, maxLen = 2000) {
+      const text = String(value == null ? '' : value);
+      return text.length > maxLen ? `${text.slice(0, maxLen)}...[truncated]` : text;
+    }
+
+    function pushRuntimeConsoleEvent(kind, payload = {}) {
+      pendingRuntimeConsoleEvents.push({
+        kind: trimRuntimeValue(kind, 80),
+        message: trimRuntimeValue(payload.message),
+        stack: trimRuntimeValue(payload.stack),
+        filename: trimRuntimeValue(payload.filename, 200),
+        line: payload.line == null ? null : Number(payload.line) || null,
+        column: payload.column == null ? null : Number(payload.column) || null,
+        timestamp: Date.now(),
+      });
+      if (pendingRuntimeConsoleEvents.length > MAX_RUNTIME_CONSOLE_EVENTS) {
+        pendingRuntimeConsoleEvents = pendingRuntimeConsoleEvents.slice(-MAX_RUNTIME_CONSOLE_EVENTS);
+      }
+    }
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function setControlsDisabled(disabled) {
+      sendBtn.disabled = disabled;
+      publishBtn.disabled = disabled;
+      discardBtn.disabled = disabled;
+    }
+
+    function setSendLoading(isLoading) {
+      sendBtn.textContent = isLoading ? 'loading...' : 'Send';
+    }
+
+    function setTestChip(state, message) {
+      latestTestState = state || 'idle';
+      testChipEl.className = `test-chip ${latestTestState}`;
+      const label = message || latestTestState;
+      testChipEl.textContent = `Tests: ${label}`;
+      const showActions = latestTestState === 'failed' || latestTestState === 'error' || latestTestState === 'passed';
+      testActionsEl.classList.toggle('hidden', !showActions);
+      deleteTestsBtn.disabled = failedTests.length === 0;
+    }
+
+    function draftUrl() {
+      return `${basePath}/draft?session_id=${encodeURIComponent(sessionId)}&as=page&_ts=${Date.now()}`;
+    }
+
+    function nextRuntimeActionRequestId() {
+      runtimeActionSeq += 1;
+      return `runtime-${Date.now()}-${runtimeActionSeq}`;
+    }
+
+    function requestRuntimeAction(action, payload = {}, timeoutMs = 1200) {
+      const frameWindow = previewEl.contentWindow;
+      if (!frameWindow) return Promise.resolve(null);
+
+      const requestId = nextRuntimeActionRequestId();
+      return new Promise((resolve) => {
+        const timer = window.setTimeout(() => {
+          pendingRuntimeActions.delete(requestId);
+          resolve(null);
+        }, timeoutMs);
+        pendingRuntimeActions.set(requestId, { resolve, timer });
+        try {
+          frameWindow.postMessage(
+            {
+              source: 'generated-ui-runtime',
+              kind: 'action',
+              payload: {
+                action,
+                request_id: requestId,
+                ...payload,
+              },
+            },
+            window.location.origin
+          );
+        } catch (_err) {
+          window.clearTimeout(timer);
+          pendingRuntimeActions.delete(requestId);
+          resolve(null);
+        }
+      });
+    }
+
+    async function collectRuntimeContext() {
+      const response = await requestRuntimeAction(
+        'collect_service_exchanges',
+        { since_cursor: runtimeExchangeCursor, limit: 20 },
+        1500
+      );
+      let entries = [];
+      if (response && Array.isArray(response.entries)) {
+        const nextCursor = Number(response.cursor || 0);
+        if (Number.isFinite(nextCursor) && nextCursor >= 0) {
+          runtimeExchangeCursor = nextCursor;
+        }
+        entries = response.entries;
+      }
+      const consoleEvents = pendingRuntimeConsoleEvents.slice(-20);
+      if (entries.length === 0 && consoleEvents.length === 0) return null;
+      return {
+        type: 'runtime_service_exchanges',
+        cursor: runtimeExchangeCursor,
+        captured_at: new Date().toISOString(),
+        entries,
+        console_events: consoleEvents,
+      };
+    }
+
+    async function clearRuntimeServiceExchanges() {
+      await requestRuntimeAction('clear_service_exchanges', {}, 1500);
+      runtimeExchangeCursor = 0;
+      pendingRuntimeConsoleEvents = [];
+      Array.from(pendingRuntimeActions.entries()).forEach(([requestId, pending]) => {
+        window.clearTimeout(pending.timer);
+        pending.resolve(null);
+        pendingRuntimeActions.delete(requestId);
+      });
+    }
+
+    async function queueTestAction(action, testName) {
+      if (!sessionId) return;
+      const payload = { action };
+      if (testName) payload.test_name = testName;
+      const res = await fetch(`${basePath}/chat/sessions/${encodeURIComponent(sessionId)}/tests/actions`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        addConsoleLine(testsConsoleEl, 'error', `Failed to queue ${action}: ${text}`);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      addConsoleLine(testsConsoleEl, 'log', `Queued ${action} (${data.run_id || 'run'})`);
+    }
+
+    function connectTestsStream() {
+      if (!sessionId) return;
+      if (testsEventSource) {
+        testsEventSource.close();
+      }
+      const url = `${basePath}/chat/sessions/${encodeURIComponent(sessionId)}/tests/stream`;
+      testsEventSource = new EventSource(url, { withCredentials: true });
+      testsEventSource.addEventListener('test_status', (event) => {
+        let payload = {};
+        try { payload = JSON.parse(event.data); } catch (_err) { return; }
+        const state = payload.state || 'idle';
+        setTestChip(state, payload.message || state);
+        addConsoleLine(testsConsoleEl, 'log', `${state.toUpperCase()} ${payload.message || ''}`.trim());
+      });
+      testsEventSource.addEventListener('tool_start', (event) => {
+        let payload = {};
+        try { payload = JSON.parse(event.data); } catch (_err) { return; }
+        addConsoleLine(testsConsoleEl, 'tool', `${payload.tool || 'tool'} - ${payload.description || 'running'}`);
+      });
+      testsEventSource.addEventListener('test_result', (event) => {
+        let payload = {};
+        try { payload = JSON.parse(event.data); } catch (_err) { return; }
+        const passed = Number(payload.passed || 0);
+        const failed = Number(payload.failed || 0);
+        failedTests = Array.isArray(payload.failed_tests) ? payload.failed_tests : [];
+        deleteTestsBtn.disabled = failedTests.length === 0;
+        if (payload.status === 'passed') {
+          addConsoleLine(testsConsoleEl, 'pass', `Passed: ${passed}, Failed: ${failed}`);
+        } else {
+          const summary = failedTests.length ? ` | ${failedTests.slice(0, 3).join(', ')}` : '';
+          addConsoleLine(testsConsoleEl, 'fail', `Passed: ${passed}, Failed: ${failed}${summary}`);
+        }
+      });
+      testsEventSource.addEventListener('test_output', (event) => {
+        let payload = {};
+        try { payload = JSON.parse(event.data); } catch (_err) { return; }
+        if (payload.output_tail) addConsoleLine(testsConsoleEl, 'log', payload.output_tail);
+      });
+      testsEventSource.addEventListener('ui_updated', (event) => {
+        let payload = {};
+        try { payload = JSON.parse(event.data); } catch (_err) { return; }
+        previewEl.src = draftUrl();
+        if (payload.draft_version) setStatus(`Draft v${payload.draft_version} (${payload.update_mode || 'updated'})`);
+      });
+      testsEventSource.addEventListener('error', () => {
+        addConsoleLine(testsConsoleEl, 'error', 'Test stream disconnected, retrying...');
+      });
+    }
+
+    async function initSession() {
+      const res = await fetch(`${basePath}/chat/sessions`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      sessionId = data.session_id;
+      previewEl.src = draftUrl();
+      setStatus(`Draft v${data.draft_version}`);
+      setTestChip('idle', 'idle');
+      connectTestsStream();
+    }
+
+    async function sendMessage() {
+      const message = messageEl.value.trim();
+      if (!message || !sessionId) return;
+      messageEl.value = '';
+      setControlsDisabled(true);
+      setSendLoading(true);
+
+      addBubble('user', message);
+      const assistantBubble = addBubble('assistant', '');
+      setStatus('checking the feedback');
+      let controlsUnlocked = false;
+      let streamAttempted = false;
+      let assistantReplied = false;
+
+      try {
+        const draftAction = await collectRuntimeContext();
+        const requestPayload = draftAction ? { message, draft_action: draftAction } : { message };
+
+        const res = await fetch(`${basePath}/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream'
+          },
+          body: JSON.stringify(requestPayload)
+        });
+        streamAttempted = true;
+
+        if (!res.ok || !res.body) {
+          assistantBubble.textContent = `Error: ${await res.text()}`;
+          setStatus('Error');
+          if (!controlsUnlocked) {
+            setControlsDisabled(false);
+            setSendLoading(false);
+            controlsUnlocked = true;
+          }
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+              continue;
+            }
+            if (!line.startsWith('data: ')) continue;
+            const raw = line.slice(6).trim();
+            if (raw === '[DONE]') continue;
+            let data = null;
+            try { data = JSON.parse(raw); } catch (_err) { continue; }
+            if (currentEvent === 'assistant' && data.delta) {
+              assistantBubble.textContent += data.delta;
+              if (!assistantReplied) {
+                setStatus('running smoke tests and performing final fixes');
+                assistantReplied = true;
+              }
+            } else if (currentEvent === 'ui_updated') {
+              previewEl.src = draftUrl();
+              setStatus(`Draft v${data.draft_version} (${data.update_mode})`);
+              if (!controlsUnlocked) {
+                setControlsDisabled(false);
+                setSendLoading(false);
+                controlsUnlocked = true;
+              }
+            } else if (currentEvent === 'tests_queued') {
+              addConsoleLine(testsConsoleEl, 'log', `Queued post-update tests (${data.run_id || 'run'})`);
+            } else if (currentEvent === 'error') {
+              assistantBubble.textContent += `\nError: ${typeof data.error === 'string' ? data.error : JSON.stringify(data.error)}`;
+              setStatus('Error');
+              if (!controlsUnlocked) {
+                setControlsDisabled(false);
+                setSendLoading(false);
+                controlsUnlocked = true;
+              }
+            } else if (currentEvent === 'done') {
+              if (!controlsUnlocked) {
+                setControlsDisabled(false);
+                setSendLoading(false);
+                controlsUnlocked = true;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        const messageText = err?.message || String(err);
+        assistantBubble.textContent += `\nError: ${messageText}`;
+        setStatus('Error');
+      } finally {
+        if (streamAttempted) {
+          try {
+            await clearRuntimeServiceExchanges();
+          } catch (_err) {}
+        }
+        if (!controlsUnlocked) {
+          setControlsDisabled(false);
+          controlsUnlocked = true;
+        }
+        setSendLoading(false);
+      }
+    }
+
+    async function publishDraft() {
+      if (!sessionId) return;
+      setStatus('Publishing...');
+      const res = await fetch(`${basePath}/chat/sessions/${encodeURIComponent(sessionId)}/publish`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus('Publish failed');
+        addBubble('assistant', `Publish failed: ${JSON.stringify(payload)}`);
+        return;
+      }
+      setStatus(`Published v${payload.version}`);
+      addBubble('assistant', `Published successfully as version ${payload.version}.`);
+    }
+
+    async function discardDraft() {
+      if (!sessionId) return;
+      await fetch(`${basePath}/chat/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      await clearRuntimeServiceExchanges();
+      setStatus('Draft discarded, creating new session...');
+      await initSession();
+      historyEl.innerHTML = '';
+      testsConsoleEl.innerHTML = '';
+      runtimeConsoleEl.innerHTML = '';
+      failedTests = [];
+      deleteTestsBtn.disabled = true;
+    }
+
+    function activateTab(tab) {
+      const showTests = tab === 'tests';
+      tabTestsBtn.classList.toggle('active', showTests);
+      tabRuntimeBtn.classList.toggle('active', !showTests);
+      testsConsoleEl.classList.toggle('hidden', !showTests);
+      runtimeConsoleEl.classList.toggle('hidden', showTests);
+      testActionsEl.classList.toggle('hidden', !showTests || (latestTestState !== 'failed' && latestTestState !== 'error' && latestTestState !== 'passed'));
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data || {};
+      if (data.source !== 'generated-ui-runtime') return;
+      const payload = data.payload || {};
+      if (data.kind === 'action_response') {
+        const requestId = String(payload.request_id || '');
+        const pending = pendingRuntimeActions.get(requestId);
+        if (pending) {
+          window.clearTimeout(pending.timer);
+          pendingRuntimeActions.delete(requestId);
+          pending.resolve(payload);
+        }
+        return;
+      }
+      if (
+        data.kind === 'console_error'
+        || data.kind === 'console_warning'
+        || data.kind === 'window_error'
+        || data.kind === 'unhandled_rejection'
+      ) {
+        pushRuntimeConsoleEvent(data.kind, payload);
+      }
+      const title = data.kind || 'runtime';
+      const message = [payload.message, payload.stack].filter(Boolean).join('\n');
+      const logKind = data.kind === 'console_warning' ? 'log' : 'error';
+      addConsoleLine(runtimeConsoleEl, logKind, `${title}: ${message || '(no details)'}`);
+    });
+
+    tabTestsBtn.addEventListener('click', () => activateTab('tests'));
+    tabRuntimeBtn.addEventListener('click', () => activateTab('runtime'));
+    runTestsBtn.addEventListener('click', () => { void queueTestAction('run'); });
+    fixCodeBtn.addEventListener('click', () => { void queueTestAction('fix_code'); });
+    adjustTestsBtn.addEventListener('click', () => { void queueTestAction('adjust_test'); });
+    deleteTestsBtn.addEventListener('click', () => {
+      if (failedTests.length === 0) return;
+      const confirmed = window.confirm(`Delete failing tests?\n\n${failedTests.join('\n')}`);
+      if (!confirmed) return;
+      void queueTestAction('delete_test');
+    });
+    addTestBtn.addEventListener('click', () => {
+      const testName = (newTestNameEl.value || '').trim();
+      if (!testName) return;
+      newTestNameEl.value = '';
+      void queueTestAction('add_test', testName);
+    });
+    sendBtn.addEventListener('click', () => { void sendMessage(); });
+    publishBtn.addEventListener('click', () => { void publishDraft(); });
+    discardBtn.addEventListener('click', () => { void discardDraft(); });
+    void initSession().catch((err) => {
+      setStatus('Failed to initialize session');
+      addBubble('assistant', `Initialization failed: ${err.message}`);
+    });
+    activateTab('tests');
+  </script>
+</body>
+</html>

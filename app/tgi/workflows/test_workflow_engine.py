@@ -3486,6 +3486,11 @@ async def test_tool_error_detection_various_formats(tmp_path, monkeypatch):
 
     # List with error item
     assert engine._tool_result_has_error('[{"error": "fail"}]') is True
+    # MCP-style content[] text wrapping JSON error
+    assert (
+        engine._tool_result_has_error('[{"text":"{\\"error\\":\\"wrapped fail\\"}"}]')
+        is True
+    )
 
     # Plain text with HTTP error
     assert engine._tool_result_has_error("Client error '400 Bad Request'") is True
@@ -3494,6 +3499,12 @@ async def test_tool_error_detection_various_formats(tmp_path, monkeypatch):
 
     # Normal successful responses
     assert engine._tool_result_has_error('{"result": "success"}') is False
+    assert (
+        engine._tool_result_has_error(
+            '[{"text":"{\\"payload\\":{\\"result\\":{\\"id\\":\\"p1\\"}}"}]'
+        )
+        is False
+    )
     assert engine._tool_result_has_error("Plan saved successfully") is False
     assert engine._tool_result_has_error('{"data": [1, 2, 3]}') is False
     assert engine._tool_result_has_error("") is False

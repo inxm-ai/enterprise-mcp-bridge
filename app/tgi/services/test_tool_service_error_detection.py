@@ -84,3 +84,25 @@ class TestToolServiceErrorDetection:
         result = {"success": False, "content": "some content"}
 
         assert service._result_has_error(result) is True
+
+    def test_result_has_error_nested_json_text_error(self):
+        """Test that JSON error embedded in content[].text is detected."""
+        service = ToolService()
+        result = {
+            "content": '[{"text":"{\\"error\\":\\"No coordinates found\\"}"}]',
+            "role": "tool",
+            "tool_call_id": "123",
+            "name": "weather_lookup",
+        }
+        assert service._result_has_error(result) is True
+
+    def test_result_has_error_nested_json_text_success(self):
+        """Test that JSON success payload embedded in content[].text is not flagged."""
+        service = ToolService()
+        result = {
+            "content": '[{"text":"{\\"payload\\":{\\"plan_id\\":\\"plan-1\\"}}"}]',
+            "role": "tool",
+            "tool_call_id": "123",
+            "name": "plan_lookup",
+        }
+        assert service._result_has_error(result) is False

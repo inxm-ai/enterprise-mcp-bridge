@@ -21,6 +21,43 @@ from app.tgi.models import (
 
 logger = logging.getLogger("uvicorn.error")
 
+_CONTRACT_HINTS = (
+    "components_script",
+    "service_script",
+    "test_script",
+    "template_parts",
+    "response_format",
+    "json_schema",
+    "phase 1",
+    "phase-1",
+    "required output",
+)
+_RECENT_CONTRACT_WINDOW = 6
+
+
+def _is_contract_bearing_user_message(
+    message: Message, index: int, total_messages: int
+) -> bool:
+    if message.role != MessageRole.USER:
+        return False
+    if not isinstance(message.content, str):
+        return False
+    if index < max(0, total_messages - _RECENT_CONTRACT_WINDOW):
+        return False
+
+    text = message.content.lower()
+    if any(hint in text for hint in _CONTRACT_HINTS):
+        return True
+    if "```json" in text and ("required" in text or "schema" in text):
+        return True
+    return False
+
+
+def _is_protected_message(message: Message, index: int, total_messages: int) -> bool:
+    if index == 0 and message.role == MessageRole.SYSTEM:
+        return True
+    return _is_contract_bearing_user_message(message, index, total_messages)
+
 
 @dataclass
 class CompressionStats:
@@ -129,6 +166,7 @@ class SlidingWindowCompressor(CompressionStrategy):
             return request, stats
 
         # Identify messages to compress: all except last window_size messages
+        # while protecting contract-bearing messages.
         messages = request.messages or []
         if len(messages) <= self.window_size + 1:
             # Not enough messages to apply sliding window, skip
@@ -138,12 +176,28 @@ class SlidingWindowCompressor(CompressionStrategy):
             )
             return request, stats
 
-        # Keep system message and last window_size messages
-        system_messages = [m for m in messages if m.role == MessageRole.SYSTEM]
-        other_messages = [m for m in messages if m.role != MessageRole.SYSTEM]
+        protected_indexes = {
+            idx
+            for idx, message in enumerate(messages)
+            if _is_protected_message(message, idx, len(messages))
+        }
 
-        to_summarize = other_messages[: -self.window_size]
-        to_keep = other_messages[-self.window_size :]
+        # Keep all system messages, plus protected non-system messages,
+        # plus the most recent `window_size` unprotected non-system messages.
+        system_messages = [m for m in messages if m.role == MessageRole.SYSTEM]
+        non_system_indexed = [
+            (idx, m) for idx, m in enumerate(messages) if m.role != MessageRole.SYSTEM
+        ]
+        keep_indexes = {
+            idx for idx, _ in non_system_indexed if idx in protected_indexes
+        }
+        unprotected_indexes = [
+            idx for idx, _ in non_system_indexed if idx not in keep_indexes
+        ]
+        keep_indexes.update(unprotected_indexes[-self.window_size :])
+
+        to_summarize = [m for idx, m in non_system_indexed if idx not in keep_indexes]
+        to_keep = [m for idx, m in non_system_indexed if idx in keep_indexes]
 
         # Summarize the old messages together
         if to_summarize:
@@ -239,33 +293,53 @@ class HierarchicalSummarizer(CompressionStrategy):
         if original_size <= max_size:
             return request, stats
 
-        # Find and compress large messages
-        for message in request.messages or []:
-            if (
-                message.content
-                and isinstance(message.content, str)
-                and len(message.content) > self.chunk_size_chars
-            ):
-                self.logger.info(
-                    f"[HierarchicalSummarizer] Found large message "
-                    f"(role={message.role}, size={len(message.content)}), "
-                    f"applying hierarchical summarization"
+        # Find and compress large messages while preserving protected contract instructions.
+        messages = request.messages or []
+        role_priority = {
+            MessageRole.TOOL: 0,
+            MessageRole.ASSISTANT: 1,
+            MessageRole.USER: 2,
+            MessageRole.SYSTEM: 3,
+        }
+        candidates = []
+        for idx, message in enumerate(messages):
+            if _is_protected_message(message, idx, len(messages)):
+                continue
+            if not (message.content and isinstance(message.content, str)):
+                continue
+            if len(message.content) <= self.chunk_size_chars:
+                continue
+            candidates.append(
+                (
+                    role_priority.get(message.role, 4),
+                    idx,
+                    message,
                 )
+            )
 
-                message.content = await self._hierarchical_summarize(
-                    message.content, request, summarize_fn
+        candidates.sort(key=lambda item: (item[0], item[1]))
+
+        for _, _, message in candidates:
+            self.logger.info(
+                f"[HierarchicalSummarizer] Found large message "
+                f"(role={message.role}, size={len(message.content)}), "
+                f"applying hierarchical summarization"
+            )
+
+            message.content = await self._hierarchical_summarize(
+                message.content, request, summarize_fn
+            )
+            stats.messages_summarized += 1
+
+            # Check if we're under the limit
+            new_size = self._get_payload_size_from_request(request)
+            if new_size <= max_size:
+                stats.compressed_size = new_size
+                stats.compression_ratio = (
+                    new_size / original_size if original_size > 0 else 1.0
                 )
-                stats.messages_summarized += 1
-
-                # Check if we're under the limit
-                new_size = self._get_payload_size_from_request(request)
-                if new_size <= max_size:
-                    stats.compressed_size = new_size
-                    stats.compression_ratio = (
-                        new_size / original_size if original_size > 0 else 1.0
-                    )
-                    self.logger.info(f"[HierarchicalSummarizer] {stats.summary()}")
-                    return request, stats
+                self.logger.info(f"[HierarchicalSummarizer] {stats.summary()}")
+                return request, stats
 
         # Update stats
         new_size = self._get_payload_size_from_request(request)
@@ -562,11 +636,15 @@ class AdaptiveCompressor(CompressionStrategy):
         """Find the oldest message span that can be safely dropped."""
         messages = request.messages or []
         for idx, message in enumerate(messages):
-            if idx == 0:
-                continue  # keep first message (likely system)
+            if _is_protected_message(message, idx, len(messages)):
+                continue
             if message.role == MessageRole.ASSISTANT and bool(message.tool_calls):
                 end = idx + 1
-                while end < len(messages) and messages[end].role == MessageRole.TOOL:
+                while (
+                    end < len(messages)
+                    and messages[end].role == MessageRole.TOOL
+                    and not _is_protected_message(messages[end], end, len(messages))
+                ):
                     end += 1
                 return idx, end
             if message.role == MessageRole.TOOL:

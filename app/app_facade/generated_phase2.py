@@ -27,10 +27,10 @@ async def run_phase2_attempt(
 ) -> AsyncIterator[Union[bytes, Dict[str, Any]]]:
     """
     Executes Phase 2: Presentation generation.
-    Generate the HTML page that uses the components generated in Phase 1.
+    Generate template parts for the HTML shell that uses Phase 1 components.
     """
     logger.info("[stream_generate_ui] Phase 2: Presentation")
-    payload = json.dumps({"message": "Phase 2: Generating HTML interface"})
+    payload = json.dumps({"message": "Phase 2: Generating template parts"})
     yield f"event: log\ndata: {payload}\n\n".encode("utf-8")
 
     service_script = logic_payload.get("service_script", "")
@@ -42,7 +42,8 @@ async def run_phase2_attempt(
         f"```javascript\n{components_script}\n```\n\n"
         f"And service logic:\n"
         f"```javascript\n{service_script}\n```\n\n"
-        f"{instruction}"
+        f"{instruction}\n\n"
+        "Return template_parts only."
     )
 
     messages = [

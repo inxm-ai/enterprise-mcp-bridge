@@ -3,11 +3,13 @@ from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 from app.server import app as fastapi_app
 import app.vars
+from app.routes import run_tool
 import json
 from pydantic import BaseModel
 import importlib
 import tempfile
 import os
+from types import SimpleNamespace
 
 
 class MockContent(BaseModel):
@@ -105,3 +107,56 @@ def test_tool_output_schema_from_file():
         # cleanup: reload vars with empty env to reset state
         with patch.dict(os.environ, {"TOOL_OUTPUT_SCHEMAS": "{}"}):
             importlib.reload(app.vars)
+
+
+def test_tool_output_schema_singular_env_alias_is_supported():
+    schemas = {
+        "tool_a": {"type": "object", "properties": {"a": {"type": "string"}}},
+        "tool_b": {"type": "object", "properties": {"b": {"type": "number"}}},
+    }
+    try:
+        with patch.dict(
+            os.environ,
+            {
+                "TOOL_OUTPUT_SCHEMA": json.dumps(schemas),
+                "TOOL_OUTPUT_SCHEMAS": "{}",
+            },
+        ):
+            importlib.reload(app.vars)
+            assert app.vars.TOOL_OUTPUT_SCHEMAS == schemas
+    finally:
+        with patch.dict(
+            os.environ, {"TOOL_OUTPUT_SCHEMA": "{}", "TOOL_OUTPUT_SCHEMAS": "{}"}
+        ):
+            importlib.reload(app.vars)
+
+
+@pytest.mark.asyncio
+async def test_tool_output_schema_parsing_pluralized_name_alias():
+    test_schema = {
+        "type": "object",
+        "properties": {"value": {"type": "array"}},
+        "required": ["value"],
+    }
+
+    with patch.dict(
+        app.vars.TOOL_OUTPUT_SCHEMAS, {"list-teams-channels": test_schema}, clear=True
+    ), patch("app.routes.mcp_session_context") as mock_ctx:
+        tool_response_content = MockContent(text=json.dumps({"value": []}))
+        tool_result = MockResult(content=[tool_response_content])
+        mock_session = AsyncMock()
+        mock_session.call_tool.return_value = tool_result
+        mock_ctx.return_value.__aenter__.return_value = mock_session
+
+        result = await run_tool(
+            "list-team-channels",
+            request=SimpleNamespace(headers={}),
+            x_inxm_mcp_session_header="test-session",
+            x_inxm_mcp_session_cookie=None,
+            x_inxm_dry_run=None,
+            access_token=None,
+            args={"teamId": "abc"},
+            group=None,
+        )
+
+        assert result.structuredContent == {"value": []}

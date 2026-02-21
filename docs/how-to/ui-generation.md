@@ -91,6 +91,16 @@ Feature flags:
 - `APP_UI_SESSION_TTL_MINUTES=120` (default)
 - `APP_UI_PATCH_ENABLED=true` (default)
 
+Start page:
+```bash
+open http://localhost:8000/app/_generated/start
+```
+
+The start page accepts `ui_id` and `prompt`, creates the UI through
+`POST /app/_generated/user=<current-user>`, shows a full event timeline
+(`log`, `tool_start`, `test_result`, `error`, `done`), then redirects to
+`/app/_generated/{target}/{ui_id}/{name}/container` when generation completes.
+
 Flow:
 1. Create a draft session:
 ```bash
@@ -131,6 +141,11 @@ Behavior:
 - Live updates apply to draft only (editor-session scoped).
 - Publish uses optimistic version checks to prevent stale overwrites.
 - Update strategy is patch-first with automatic regenerate fallback.
+- Conversational container shows a bottom test/runtime console.
+- Every conversational update queues background tests (`tests_queued` event) without blocking preview updates.
+- Test console receives lifecycle/tool/result/output events from `.../tests/stream`.
+- On failures, users can queue actions: `fix_code`, `adjust_test`, `delete_test`, `add_test`.
+- Runtime `window.onerror`, `unhandledrejection`, and `console.error` from the generated app are surfaced in the runtime tab.
 
 ### Progressive Enhancement with pfusch
 
