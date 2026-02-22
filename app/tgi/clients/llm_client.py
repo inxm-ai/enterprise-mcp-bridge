@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import uuid
+import json
 from typing import AsyncGenerator, List, Optional
 from openai import AsyncOpenAI, APIConnectionError
 from app.vars import LLM_MAX_PAYLOAD_BYTES, TGI_MODEL_NAME
@@ -61,9 +62,54 @@ class LLMClient:
 
     def _payload_size(self, request: ChatCompletionRequest) -> int:
         """Calculate payload size in bytes."""
-        import json
-
         return len(json.dumps(request.model_dump(exclude_none=True)).encode("utf-8"))
+
+    def _message_size_summary(self, request: ChatCompletionRequest) -> List[dict]:
+        summaries: List[dict] = []
+        for index, message in enumerate(request.messages or []):
+            content = message.content if message.content is not None else ""
+            size = len(str(content).encode("utf-8"))
+            summaries.append(
+                {
+                    "index": index,
+                    "role": getattr(message, "role", "unknown"),
+                    "bytes": size,
+                }
+            )
+        summaries.sort(key=lambda item: item.get("bytes", 0), reverse=True)
+        return summaries[:5]
+
+    def _message_json_section_summary(
+        self, request: ChatCompletionRequest
+    ) -> List[dict]:
+        sections: List[dict] = []
+        for index, message in enumerate(request.messages or []):
+            content = message.content if message.content is not None else ""
+            if not isinstance(content, str):
+                continue
+            stripped = content.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for key, value in parsed.items():
+                size = len(
+                    json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+                )
+                sections.append(
+                    {
+                        "index": index,
+                        "role": getattr(message, "role", "unknown"),
+                        "section": key,
+                        "bytes": size,
+                    }
+                )
+        sections.sort(key=lambda item: item.get("bytes", 0), reverse=True)
+        return sections[:8]
 
     def _sanitize_message_contents(self, request: ChatCompletionRequest) -> None:
         """Ensure all message contents are strings to satisfy API validation."""
@@ -116,6 +162,16 @@ class LLMClient:
             size,
             LLM_MAX_PAYLOAD_BYTES,
         )
+        self.logger.warning(
+            "[LLMClient] Largest message contents before compression: %s",
+            self._message_size_summary(request),
+        )
+        section_summary = self._message_json_section_summary(request)
+        if section_summary:
+            self.logger.warning(
+                "[LLMClient] Largest JSON sections before compression: %s",
+                section_summary,
+            )
 
         compressor = get_default_compressor()
         compressed_request, stats = await compressor.compress(
@@ -128,8 +184,23 @@ class LLMClient:
         size = self._payload_size(request)
 
         self.logger.info(f"[LLMClient] Compression result: {stats.summary()}")
+        oversized_sources = stats.metadata.get("oversized_sources") or []
+        if oversized_sources:
+            self.logger.warning(
+                "[LLMClient] Oversized payload sources after analysis: %s",
+                oversized_sources,
+            )
 
         if size > LLM_MAX_PAYLOAD_BYTES:
+            if oversized_sources:
+                top = oversized_sources[0]
+                self.logger.error(
+                    "[LLMClient] Payload still too large; primary source role=%s index=%s source=%s total_bytes=%s",
+                    top.get("role"),
+                    top.get("index"),
+                    top.get("source"),
+                    top.get("total_bytes"),
+                )
             raise HTTPException(
                 status_code=413,
                 detail=f"LLM payload size {size} remains above limit {LLM_MAX_PAYLOAD_BYTES} after compression",

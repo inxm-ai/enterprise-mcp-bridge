@@ -34,7 +34,12 @@ class StubConversationalService:
 
     async def stream_test_events(self, **_kwargs):
         yield b'event: test_status\ndata: {"run_id":"run-2","state":"queued","trigger":"manual_run"}\n\n'
-        yield b'event: test_result\ndata: {"status":"passed","passed":3,"failed":0}\n\n'
+        yield (
+            b'event: test_result\ndata: {"status":"failed","passed":1,"failed":2,'
+            b'"is_final":true,'
+            b'"analysis":{"what_failed":"2 tests failed","why_it_ended":"handoff to adjust_test","next_step_text":"Recommended next action: adjust_test. Alternative: fix_code."},'
+            b'"recommended_action":"adjust_test","alternative_action":"fix_code"}\n\n'
+        )
         yield b"data: [DONE]\n\n"
 
     def get_draft_ui(self, **_kwargs):
@@ -138,6 +143,7 @@ async def test_test_action_and_stream_endpoints(conversational_setup):
     assert stream_resp.status_code == 200
     assert "event: test_status" in stream_resp.text
     assert "event: test_result" in stream_resp.text
+    assert "recommended_action" in stream_resp.text
 
 
 @pytest.mark.asyncio

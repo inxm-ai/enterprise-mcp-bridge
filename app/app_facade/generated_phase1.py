@@ -11,6 +11,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     Set,
     Tuple,
     Union,
@@ -183,7 +184,9 @@ def _build_dummy_data_key_index(dummy_payload: Dict[str, Any]) -> Dict[str, Set[
     return index
 
 
-def _find_schema_drift_candidate(field_name: str, valid_keys: Set[str]) -> Optional[str]:
+def _find_schema_drift_candidate(
+    field_name: str, valid_keys: Set[str]
+) -> Optional[str]:
     if not field_name or not valid_keys or field_name in valid_keys:
         return None
 
@@ -199,7 +202,9 @@ def _find_schema_drift_candidate(field_name: str, valid_keys: Set[str]) -> Optio
     if exact_normalized:
         return exact_normalized[0]
 
-    near_matches = difflib.get_close_matches(field_name, sorted(valid_keys), n=1, cutoff=0.74)
+    near_matches = difflib.get_close_matches(
+        field_name, sorted(valid_keys), n=1, cutoff=0.74
+    )
     if near_matches:
         return near_matches[0]
 
@@ -276,10 +281,7 @@ def _detect_schema_contract_risks(
     for field_name in component_leafs:
         candidate = _find_schema_drift_candidate(field_name, all_dummy_keys)
         if candidate:
-            risks.append(
-                "schema_field_drift:components:"
-                f"{field_name}->{candidate}"
-            )
+            risks.append("schema_field_drift:components:" f"{field_name}->{candidate}")
 
     test_dummy_refs_pattern = re.compile(
         r"dummyData\.([A-Za-z_]\w*)((?:\s*\?*\.\s*[A-Za-z_]\w*)+)",
@@ -296,8 +298,7 @@ def _detect_schema_contract_risks(
         candidate = _find_schema_drift_candidate(field_name, tool_keys)
         if candidate:
             risks.append(
-                "schema_field_drift:test_ref:"
-                f"{tool_name}.{field_name}->{candidate}"
+                "schema_field_drift:test_ref:" f"{tool_name}.{field_name}->{candidate}"
             )
 
     for tool_name, key_name, source in _extract_mock_object_literal_keys(test_text):
@@ -325,7 +326,104 @@ def _detect_schema_contract_risks(
     ):
         risks.append("weak_assertion:unit_only_disjunction")
 
+    hard_fail_schema_hint_patterns = (
+        r"dummyDataSchemaHints[\s\S]{0,200}?throw\s+new\s+Error",
+        r"dummyDataSchemaHints[\s\S]{0,200}?assert\.(?:fail|ok\s*\(\s*false)",
+    )
+    if any(
+        re.search(pattern, test_text, re.IGNORECASE)
+        for pattern in hard_fail_schema_hint_patterns
+    ):
+        risks.append("hard_fail_schema_hint_guard")
+
     return sorted(set(risks))
+
+
+def _apply_hard_fail_schema_hint_autofix(test_script: str) -> Tuple[str, bool]:
+    text = test_script
+    changed = False
+    block_pattern = re.compile(
+        r"if\s*\(\s*dummyDataSchemaHints\?\.[A-Za-z_]\w*\s*\)\s*\{([\s\S]{0,260}?)\}",
+        re.IGNORECASE,
+    )
+    failing_signal = re.compile(
+        r"throw\s+new\s+Error|assert\.(?:fail|ok\s*\(\s*false)",
+        re.IGNORECASE,
+    )
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal changed
+        block_body = match.group(1)
+        if not failing_signal.search(block_body):
+            return match.group(0)
+        changed = True
+        condition = match.group(0).split("{", 1)[0].rstrip()
+        return (
+            f"{condition}{{\n"
+            "    // schema hint is informational; avoid hard-failing this test\n"
+            "  }"
+        )
+
+    return block_pattern.sub(_replace, text), changed
+
+
+def _apply_schema_field_drift_autofix(
+    test_script: str,
+    schema_contract_risks: Sequence[str],
+) -> Tuple[str, List[str]]:
+    text = test_script
+    notes: List[str] = []
+    replacements: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+
+    for risk in schema_contract_risks:
+        marker = "schema_field_drift:"
+        if not risk.startswith(marker) or "->" not in risk:
+            continue
+        before_after = risk.rsplit(":", 1)[-1]
+        source, candidate = before_after.split("->", 1)
+        if "." in source:
+            field_name = source.rsplit(".", 1)[-1].strip()
+        else:
+            field_name = source.strip()
+        replacement = candidate.strip()
+        if not field_name or not replacement or field_name == replacement:
+            continue
+        pair = (field_name, replacement)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        replacements.append(pair)
+
+    for field_name, replacement in replacements:
+        key_pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(field_name)}(?=\s*:)")
+        prop_pattern = re.compile(rf"(?<=\.){re.escape(field_name)}\b")
+        next_text = key_pattern.sub(replacement, text)
+        next_text = prop_pattern.sub(replacement, next_text)
+        if next_text != text:
+            notes.append(f"{field_name}->{replacement}")
+            text = next_text
+
+    return text, notes
+
+
+def _apply_schema_contract_autofix(
+    *,
+    test_script: str,
+    schema_contract_risks: Sequence[str],
+) -> Tuple[str, List[str]]:
+    notes: List[str] = []
+    text = test_script
+
+    text, hint_changed = _apply_hard_fail_schema_hint_autofix(text)
+    if hint_changed:
+        notes.append("removed_hard_fail_schema_hint_guard")
+
+    text, drift_notes = _apply_schema_field_drift_autofix(text, schema_contract_risks)
+    if drift_notes:
+        notes.extend([f"schema_field_drift_fix:{item}" for item in drift_notes])
+
+    return text, notes
 
 
 async def run_phase1_attempt(
@@ -578,6 +676,23 @@ async def run_phase1_attempt(
             components_script=components_script,
             dummy_data=dummy_data,
         )
+        if schema_contract_risks:
+            test_script, autofix_notes = _apply_schema_contract_autofix(
+                test_script=test_script,
+                schema_contract_risks=schema_contract_risks,
+            )
+            if autofix_notes:
+                logger.info(
+                    "[stream_generate_ui] Phase 1 attempt %s applied schema auto-fix hints: %s",
+                    attempt,
+                    ", ".join(autofix_notes),
+                )
+                schema_contract_risks = _detect_schema_contract_risks(
+                    test_script=test_script,
+                    components_script=components_script,
+                    dummy_data=dummy_data,
+                )
+
         def _schema_post_success_validator(
             current_service_script: str,
             current_components_script: str,
@@ -596,6 +711,7 @@ async def run_phase1_attempt(
                 False,
                 "schema_contract_risk_after_fix: " f"{', '.join(current_risks)}",
             )
+
         schema_contract_reason: Optional[str] = None
         if schema_contract_risks:
             schema_contract_reason = (
@@ -659,7 +775,8 @@ async def run_phase1_attempt(
                         content=(
                             "Schema contract issues were detected and must be fixed while repairing tests. "
                             "Use exact dummyData/schema keys in components and tests, remove mismatched fallback "
-                            "shapes, and avoid weak assertions that pass on units/labels only. "
+                            "shapes, avoid weak assertions that pass on units/labels only, and never throw/fail "
+                            "tests solely because dummyDataSchemaHints entries exist. "
                             f"Details: {schema_contract_reason}"
                         ),
                     )

@@ -261,3 +261,39 @@ async def test_generate_dummy_data_adds_schema_hints_for_missing_output_schema(
     assert "dummyDataSchemaHints" in result
     assert '"schema_status": "missing_output_schema"' in result
     assert '"next_action": "ask_for_schema_then_regenerate_dummy_data"' in result
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_does_not_apply_error_shaped_observed_sample(
+    dummy_data_generator, mock_tgi_service
+):
+    tool_specs = [
+        {
+            "name": "get_weather_byDateTimeRange",
+            "outputSchema": None,
+            "sampleStructuredContent": {
+                "_dummy_data_error": True,
+                "error": "Weather API returned status 400",
+            },
+        }
+    ]
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps(
+        {
+            "get_weather_byDateTimeRange": {
+                "forecast": [{"date": "2026-02-22", "temperature_max_c": 8.2}]
+            }
+        }
+    )
+    mock_tgi_service.llm_client.client.chat.completions.create.return_value = (
+        mock_response
+    )
+
+    result = await dummy_data_generator.generate_dummy_data(
+        prompt="Weather UI", tool_specs=tool_specs
+    )
+
+    assert '"forecast": [' in result
+    assert '"_dummy_data_error": true' not in result

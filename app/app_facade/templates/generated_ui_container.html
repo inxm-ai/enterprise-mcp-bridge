@@ -525,6 +525,32 @@
           const summary = failedTests.length ? ` | ${failedTests.slice(0, 3).join(', ')}` : '';
           addConsoleLine(testsConsoleEl, 'fail', `Passed: ${passed}, Failed: ${failed}${summary}`);
         }
+        if (payload.is_final && payload.analysis && typeof payload.analysis === 'object') {
+          const analysis = payload.analysis;
+          if (analysis.what_failed) {
+            addConsoleLine(testsConsoleEl, 'fail', `What failed: ${analysis.what_failed}`);
+          }
+          if (analysis.why_it_ended) {
+            addConsoleLine(testsConsoleEl, 'log', `Why it ended: ${analysis.why_it_ended}`);
+          }
+          if (analysis.next_step_text) {
+            addConsoleLine(testsConsoleEl, 'log', analysis.next_step_text);
+          }
+          const actionLabel = (action) => {
+            if (action === 'fix_code') return 'Fix code';
+            if (action === 'adjust_test') return 'Adjust tests';
+            if (action === 'run') return 'Run tests';
+            return '';
+          };
+          const recommended = actionLabel(String(payload.recommended_action || '').trim());
+          const alternative = actionLabel(String(payload.alternative_action || '').trim());
+          if (recommended) {
+            const recommendation = alternative
+              ? `Recommended: ${recommended}. Alternative: ${alternative}.`
+              : `Recommended: ${recommended}.`;
+            addConsoleLine(testsConsoleEl, 'log', recommendation);
+          }
+        }
       });
       testsEventSource.addEventListener('test_output', (event) => {
         let payload = {};

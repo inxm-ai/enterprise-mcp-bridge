@@ -9,6 +9,9 @@ Implements multiple strategies for handling payload size limits:
 
 import json
 import logging
+import asyncio
+import re
+import hashlib
 from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -33,6 +36,8 @@ _CONTRACT_HINTS = (
     "required output",
 )
 _RECENT_CONTRACT_WINDOW = 6
+_HUGE_BLOCK_CHUNK_RATIO = 0.75
+_HUGE_BLOCK_OVERLAP_RATIO = 0.15
 
 
 def _is_contract_bearing_user_message(
@@ -303,31 +308,42 @@ class HierarchicalSummarizer(CompressionStrategy):
         }
         candidates = []
         for idx, message in enumerate(messages):
-            if _is_protected_message(message, idx, len(messages)):
+            is_protected = _is_protected_message(message, idx, len(messages))
+            if idx == 0 and message.role == MessageRole.SYSTEM:
                 continue
             if not (message.content and isinstance(message.content, str)):
                 continue
-            if len(message.content) <= self.chunk_size_chars:
+            message_size = len(message.content.encode("utf-8"))
+            if message_size <= self.chunk_size_chars:
+                continue
+            if is_protected and message_size <= max_size:
                 continue
             candidates.append(
                 (
                     role_priority.get(message.role, 4),
                     idx,
                     message,
+                    is_protected,
                 )
             )
 
         candidates.sort(key=lambda item: (item[0], item[1]))
 
-        for _, _, message in candidates:
+        for _, _, message, is_protected in candidates:
+            source = self._classify_message_source(message)
             self.logger.info(
                 f"[HierarchicalSummarizer] Found large message "
-                f"(role={message.role}, size={len(message.content)}), "
+                f"(role={message.role}, size={len((message.content or '').encode('utf-8'))}, "
+                f"source={source}, protected={is_protected}), "
                 f"applying hierarchical summarization"
             )
 
-            message.content = await self._hierarchical_summarize(
-                message.content, request, summarize_fn
+            message.content = await self._summarize_message_content(
+                content=message.content,
+                base_request=request,
+                summarize_fn=summarize_fn,
+                max_size=max_size,
+                preserve_prefix=is_protected,
             )
             stats.messages_summarized += 1
 
@@ -349,8 +365,47 @@ class HierarchicalSummarizer(CompressionStrategy):
 
         return request, stats
 
+    async def _summarize_message_content(
+        self,
+        *,
+        content: str,
+        base_request: ChatCompletionRequest,
+        summarize_fn,
+        max_size: int,
+        preserve_prefix: bool,
+    ) -> str:
+        summary = await self._hierarchical_summarize(
+            content=content,
+            base_request=base_request,
+            summarize_fn=summarize_fn,
+            max_size=max_size,
+        )
+        if not preserve_prefix:
+            return summary
+
+        head_keep = min(2500, max(500, int(max_size * 0.15)))
+        tail_keep = min(1200, max(200, int(max_size * 0.08)))
+        prefix = content[:head_keep]
+        suffix = content[-tail_keep:] if len(content) > (head_keep + tail_keep) else ""
+        compacted = (
+            "[PROTECTED CONTEXT COMPACTION]\n"
+            "Critical instruction/source content was oversized and compacted.\n"
+            "Most important bullet points:\n"
+            f"{summary}\n"
+            "\n[PRESERVED PREFIX]\n"
+            f"{prefix}"
+        )
+        if suffix:
+            compacted += f"\n\n[PRESERVED SUFFIX]\n{suffix}"
+        return compacted
+
     async def _hierarchical_summarize(
-        self, content: str, base_request: ChatCompletionRequest, summarize_fn
+        self,
+        *,
+        content: str,
+        base_request: ChatCompletionRequest,
+        summarize_fn,
+        max_size: int,
     ) -> str:
         """
         Recursively summarize content in a hierarchical manner.
@@ -361,7 +416,19 @@ class HierarchicalSummarizer(CompressionStrategy):
         3. Group summaries and summarize groups (map-reduce pattern)
         4. Return final summary
         """
-        chunks = self._split_into_chunks(content, self.chunk_size_chars)
+        target_chunk_size = max(
+            self.chunk_size_chars,
+            int(max_size * _HUGE_BLOCK_CHUNK_RATIO),
+        )
+        overlap_size = max(100, int(target_chunk_size * _HUGE_BLOCK_OVERLAP_RATIO))
+        if len(content.encode("utf-8")) > max_size:
+            chunks = self._split_into_overlapping_chunks(
+                content,
+                chunk_size=target_chunk_size,
+                overlap=overlap_size,
+            )
+        else:
+            chunks = self._split_into_chunks(content, self.chunk_size_chars)
 
         if len(chunks) == 1:
             # Single chunk, no hierarchical processing needed
@@ -371,7 +438,11 @@ class HierarchicalSummarizer(CompressionStrategy):
             )
             return await summarize_fn(
                 base_request=base_request,
-                content=content,
+                content=(
+                    "Summarize to the most important bullet points. "
+                    "Preserve key facts, IDs, constraints, and decisions.\n\n"
+                    f"{content}"
+                ),
                 access_token="",
                 outer_span=None,
             )
@@ -380,19 +451,23 @@ class HierarchicalSummarizer(CompressionStrategy):
         self.logger.debug(
             f"[HierarchicalSummarizer] Summarizing {len(chunks)} chunks at level 0"
         )
-        chunk_summaries = []
-        for i, chunk in enumerate(chunks):
-            summary = await summarize_fn(
+        chunk_tasks = [
+            summarize_fn(
                 base_request=base_request,
-                content=f"Summarize this section:\n\n{chunk}",
+                content=(
+                    "Summarize this section into the most important bullet points. "
+                    "Keep critical facts and constraints.\n\n"
+                    f"{chunk}"
+                ),
                 access_token="",
                 outer_span=None,
             )
-            chunk_summaries.append(summary)
-            if (i + 1) % 5 == 0:
-                self.logger.debug(
-                    f"[HierarchicalSummarizer] Summarized {i + 1}/{len(chunks)} chunks"
-                )
+            for chunk in chunks
+        ]
+        chunk_summaries = list(await asyncio.gather(*chunk_tasks))
+        self.logger.debug(
+            f"[HierarchicalSummarizer] Summarized {len(chunk_summaries)}/{len(chunks)} chunks"
+        )
 
         # Step 2-N: Recursively summarize summaries (map-reduce)
         level = 1
@@ -423,22 +498,28 @@ class HierarchicalSummarizer(CompressionStrategy):
                 f"grouping {len(chunk_summaries)} summaries "
                 f"(group_size={self.group_size})"
             )
-            grouped_summaries = []
+            grouped_inputs = []
             for i in range(0, len(chunk_summaries), self.group_size):
                 group = chunk_summaries[i : i + self.group_size]
                 group_text = "\n\n".join(
                     [f"[Part {j + 1}]\n{s}" for j, s in enumerate(group)]
                 )
-                group_summary = await summarize_fn(
+                grouped_inputs.append(group_text)
+
+            group_tasks = [
+                summarize_fn(
                     base_request=base_request,
                     content=(
-                        "Summarize these related sections into a coherent overview:\n\n"
+                        "Combine these section summaries into the most important bullet points. "
+                        "Remove duplication and keep key facts/constraints.\n\n"
                         f"{group_text}"
                     ),
                     access_token="",
                     outer_span=None,
                 )
-                grouped_summaries.append(group_summary)
+                for group_text in grouped_inputs
+            ]
+            grouped_summaries = list(await asyncio.gather(*group_tasks))
 
             chunk_summaries = grouped_summaries
             level += 1
@@ -478,6 +559,37 @@ class HierarchicalSummarizer(CompressionStrategy):
 
         return chunks
 
+    @staticmethod
+    def _split_into_overlapping_chunks(
+        content: str, chunk_size: int, overlap: int
+    ) -> List[str]:
+        if len(content) <= chunk_size:
+            return [content]
+        if overlap >= chunk_size:
+            overlap = max(1, chunk_size // 4)
+
+        chunks: List[str] = []
+        step = max(1, chunk_size - overlap)
+        start = 0
+        while start < len(content):
+            end = min(len(content), start + chunk_size)
+            chunks.append(content[start:end])
+            if end >= len(content):
+                break
+            start += step
+        return chunks
+
+    @staticmethod
+    def _classify_message_source(message: Message) -> str:
+        text = (message.content or "").lower()
+        if message.role == MessageRole.TOOL:
+            return "tool_output"
+        if "json_schema" in text or "response_format" in text or '"schema"' in text:
+            return "schema"
+        if "tool" in text and ("result" in text or "structuredcontent" in text):
+            return "tool_output"
+        return "single_message_content"
+
 
 class AdaptiveCompressor(CompressionStrategy):
     """
@@ -485,9 +597,10 @@ class AdaptiveCompressor(CompressionStrategy):
 
     Strategy selection:
     1. First pass: Compact JSON and whitespace
-    2. Second pass: Apply hierarchical summarization to large messages
-    3. Third pass: Apply sliding window compression to conversation history
-    4. Final pass: Drop oldest tool-related messages if still oversized
+    2. Second pass: Offload oversized context into bullet summaries + retrieval refs
+    3. Third pass: Apply hierarchical summarization to large messages
+    4. Fourth pass: Apply sliding window compression to conversation history
+    5. Final pass: Drop oldest tool-related messages if still oversized
     """
 
     def __init__(
@@ -535,6 +648,10 @@ class AdaptiveCompressor(CompressionStrategy):
         if original_size <= max_size:
             return request, stats
 
+        stats.metadata["oversized_sources"] = self._diagnose_oversized_sources(
+            request, max_size
+        )
+
         # Step 1: Compact JSON and whitespace
         self.logger.info("[AdaptiveCompressor] Step 1: Compacting JSON and whitespace")
         request = self._compact_request(request)
@@ -547,8 +664,25 @@ class AdaptiveCompressor(CompressionStrategy):
             self.logger.info(f"[AdaptiveCompressor] {stats.summary()}")
             return request, stats
 
-        # Step 2: Apply hierarchical summarization to large messages
-        self.logger.info("[AdaptiveCompressor] Step 2: Hierarchical summarization")
+        # Step 2: Offload oversized context to compact bullet summaries.
+        self.logger.info(
+            "[AdaptiveCompressor] Step 2: Context offload to bullet summaries"
+        )
+        request, offload_meta = self._offload_context_to_bullets(request, max_size)
+        current_size = self._get_payload_size_from_request(request)
+        if offload_meta.get("items"):
+            stats.metadata["offloaded_context"] = offload_meta
+
+        if current_size <= max_size:
+            stats.compressed_size = current_size
+            stats.compression_ratio = current_size / original_size
+            stats.messages_summarized = int(offload_meta.get("count", 0))
+            stats.metadata["steps_used"] = ["compact", "offload_context"]
+            self.logger.info(f"[AdaptiveCompressor] {stats.summary()}")
+            return request, stats
+
+        # Step 3: Apply hierarchical summarization to large messages
+        self.logger.info("[AdaptiveCompressor] Step 3: Hierarchical summarization")
         request, hier_stats = await self.hierarchical.compress(
             request, max_size, summarize_fn
         )
@@ -557,13 +691,19 @@ class AdaptiveCompressor(CompressionStrategy):
         if current_size <= max_size:
             stats.compressed_size = current_size
             stats.compression_ratio = current_size / original_size
-            stats.messages_summarized = hier_stats.messages_summarized
-            stats.metadata["steps_used"] = ["compact", "hierarchical"]
+            stats.messages_summarized = (
+                int(offload_meta.get("count", 0)) + hier_stats.messages_summarized
+            )
+            stats.metadata["steps_used"] = [
+                "compact",
+                "offload_context",
+                "hierarchical",
+            ]
             self.logger.info(f"[AdaptiveCompressor] {stats.summary()}")
             return request, stats
 
-        # Step 3: Apply sliding window compression
-        self.logger.info("[AdaptiveCompressor] Step 3: Sliding window compression")
+        # Step 4: Apply sliding window compression
+        self.logger.info("[AdaptiveCompressor] Step 4: Sliding window compression")
         request, window_stats = await self.sliding_window.compress(
             request, max_size, summarize_fn
         )
@@ -573,21 +713,34 @@ class AdaptiveCompressor(CompressionStrategy):
             stats.compressed_size = current_size
             stats.compression_ratio = current_size / original_size
             stats.messages_summarized = (
-                hier_stats.messages_summarized + window_stats.messages_summarized
+                int(offload_meta.get("count", 0))
+                + hier_stats.messages_summarized
+                + window_stats.messages_summarized
             )
-            stats.metadata["steps_used"] = ["compact", "hierarchical", "sliding_window"]
+            stats.metadata["steps_used"] = [
+                "compact",
+                "offload_context",
+                "hierarchical",
+                "sliding_window",
+            ]
             self.logger.info(f"[AdaptiveCompressor] {stats.summary()}")
             return request, stats
 
-        # Step 4: Drop oldest tool-related messages
-        self.logger.info("[AdaptiveCompressor] Step 4: Dropping old messages")
+        # Step 5: Drop oldest tool-related messages
+        self.logger.info("[AdaptiveCompressor] Step 5: Dropping old messages")
         request = self._drop_oldest_messages(request, max_size)
         current_size = self._get_payload_size_from_request(request)
 
         stats.compressed_size = current_size
         stats.compression_ratio = current_size / original_size
+        stats.messages_summarized = (
+            int(offload_meta.get("count", 0))
+            + hier_stats.messages_summarized
+            + window_stats.messages_summarized
+        )
         stats.metadata["steps_used"] = [
             "compact",
+            "offload_context",
             "hierarchical",
             "sliding_window",
             "drop",
@@ -595,6 +748,129 @@ class AdaptiveCompressor(CompressionStrategy):
         self.logger.info(f"[AdaptiveCompressor] {stats.summary()}")
 
         return request, stats
+
+    def _offload_context_to_bullets(
+        self, request: ChatCompletionRequest, max_size: int
+    ) -> Tuple[ChatCompletionRequest, Dict[str, Any]]:
+        messages = request.messages or []
+        current_size = self._get_payload_size_from_request(request)
+        threshold = max(2048, int(max_size * 0.35))
+        offloaded_items: List[Dict[str, Any]] = []
+
+        if current_size <= max_size:
+            return request, {"count": 0, "items": []}
+
+        candidates: List[Tuple[int, int, Message]] = []
+        for idx, message in enumerate(messages):
+            if _is_protected_message(message, idx, len(messages)):
+                continue
+            if not isinstance(message.content, str) or not message.content:
+                continue
+            content_bytes = len(message.content.encode("utf-8"))
+            if content_bytes < threshold:
+                continue
+            candidates.append((content_bytes, idx, message))
+
+        candidates.sort(reverse=True)
+
+        for content_bytes, idx, message in candidates:
+            if current_size <= max_size:
+                break
+            original_content = message.content or ""
+            ref_id = self._build_context_ref_id(idx, message.role, original_content)
+            source = HierarchicalSummarizer._classify_message_source(message)
+            bullets = self._content_bullets(original_content)
+            summary_block = self._build_offload_summary(
+                ref_id=ref_id,
+                source=source,
+                content_bytes=content_bytes,
+                bullets=bullets,
+            )
+
+            message.content = summary_block
+            current_size = self._get_payload_size_from_request(request)
+            offloaded_items.append(
+                {
+                    "ref_id": ref_id,
+                    "index": idx,
+                    "role": str(message.role),
+                    "source": source,
+                    "original_bytes": content_bytes,
+                    "summary_bullets": bullets,
+                }
+            )
+
+        if offloaded_items:
+            self.logger.warning(
+                "[AdaptiveCompressor] Offloaded %d oversized context blocks to summary refs",
+                len(offloaded_items),
+            )
+
+        return request, {"count": len(offloaded_items), "items": offloaded_items}
+
+    @staticmethod
+    def _build_context_ref_id(index: int, role: MessageRole, content: str) -> str:
+        digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:10]
+        role_name = str(role).split(".")[-1].lower()
+        return f"ctx_{index}_{role_name}_{digest}"
+
+    @staticmethod
+    def _build_offload_summary(
+        *, ref_id: str, source: str, content_bytes: int, bullets: List[str]
+    ) -> str:
+        bullet_lines = "\n".join(f"- {item}" for item in bullets[:6])
+        if not bullet_lines:
+            bullet_lines = "- Context omitted due to payload limits"
+        return (
+            "[CONTEXT OFFLOAD SUMMARY]\n"
+            f"- ref_id: {ref_id}\n"
+            f"- source: {source}\n"
+            f"- original_size_bytes: {content_bytes}\n"
+            "- retrieval_tool: request_context(ref_id)\n"
+            "- retrieval_hint: Ask for specific ref_id if exact raw payload is required.\n"
+            "- key_points:\n"
+            f"{bullet_lines}"
+        )
+
+    @staticmethod
+    def _content_bullets(content: str) -> List[str]:
+        text = (content or "").strip()
+        if not text:
+            return []
+
+        bullets: List[str] = []
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    keys = list(parsed.keys())
+                    if keys:
+                        bullets.append("top-level keys: " + ", ".join(keys[:10]))
+                    for key in keys[:4]:
+                        value = parsed.get(key)
+                        if isinstance(value, dict):
+                            bullets.append(f"{key}: object with {len(value)} keys")
+                        elif isinstance(value, list):
+                            bullets.append(f"{key}: list with {len(value)} entries")
+                        elif isinstance(value, str):
+                            bullets.append(f"{key}: text ({len(value)} chars)")
+                        else:
+                            bullets.append(f"{key}: {type(value).__name__}")
+                elif isinstance(parsed, list):
+                    bullets.append(f"array payload with {len(parsed)} entries")
+                    if parsed:
+                        bullets.append(f"first item type: {type(parsed[0]).__name__}")
+            except Exception:
+                pass
+
+        if not bullets:
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            for line in lines[:6]:
+                if len(line) > 180:
+                    line = line[:177] + "..."
+                bullets.append(line)
+
+        return bullets[:6]
 
     @staticmethod
     def _compact_text(text: str) -> str:
@@ -674,6 +950,60 @@ class AdaptiveCompressor(CompressionStrategy):
             current_size = self._get_payload_size_from_request(request)
 
         return request
+
+    def _diagnose_oversized_sources(
+        self, request: ChatCompletionRequest, max_size: int
+    ) -> List[Dict[str, Any]]:
+        diagnostics: List[Dict[str, Any]] = []
+        messages = request.messages or []
+
+        for idx, message in enumerate(messages):
+            content = message.content if isinstance(message.content, str) else ""
+            message_bytes = len(content.encode("utf-8"))
+            tool_arg_bytes = 0
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    args = getattr(
+                        getattr(tool_call, "function", None), "arguments", ""
+                    )
+                    if isinstance(args, str):
+                        tool_arg_bytes += len(args.encode("utf-8"))
+
+            total_bytes = message_bytes + tool_arg_bytes
+            if total_bytes <= max(2048, int(max_size * 0.1)):
+                continue
+
+            source = HierarchicalSummarizer._classify_message_source(message)
+            if tool_arg_bytes > message_bytes and tool_arg_bytes > 0:
+                source = "tool_call_arguments"
+            if source == "single_message_content" and re.search(
+                r"schema|response_format|properties|required|json",
+                content,
+                re.IGNORECASE,
+            ):
+                source = "schema"
+
+            diagnostics.append(
+                {
+                    "index": idx,
+                    "role": str(message.role),
+                    "source": source,
+                    "content_bytes": message_bytes,
+                    "tool_args_bytes": tool_arg_bytes,
+                    "total_bytes": total_bytes,
+                    "protected": _is_protected_message(message, idx, len(messages)),
+                }
+            )
+
+        diagnostics.sort(key=lambda item: item["total_bytes"], reverse=True)
+        top = diagnostics[:5]
+        if top:
+            self.logger.warning(
+                "[AdaptiveCompressor] Oversized source diagnostics (top=%d): %s",
+                len(top),
+                top,
+            )
+        return top
 
 
 # Default compressor instance

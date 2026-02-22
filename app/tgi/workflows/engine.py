@@ -602,7 +602,9 @@ class WorkflowEngine:
                     a
                     for a in workflow_def.agents
                     if a.agent not in completed_agents
-                    and (not a.depends_on or set(a.depends_on).issubset(completed_agents))
+                    and (
+                        not a.depends_on or set(a.depends_on).issubset(completed_agents)
+                    )
                 ]
                 parallel_candidates = [
                     a for a in runnable_agents if self._can_parallelize_agent(a)
@@ -686,7 +688,9 @@ class WorkflowEngine:
                                 ):
                                     last_visible_output = result.get("content")
                                 if status == "done" and workflow_def.loop:
-                                    assistant_text = (result.get("content") or "").strip()
+                                    assistant_text = (
+                                        result.get("content") or ""
+                                    ).strip()
                                     if result.get("pass_through") and assistant_text:
                                         self._append_assistant_message(
                                             state, assistant_text

@@ -266,6 +266,40 @@ describe('Test Suite', () => {
     toolkit.cleanup()
 
 
+def test_run_tests_uses_focus_precheck_when_single_failure_is_set():
+    """When focus is set, run_tests should precheck that test name pattern first."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+
+    service = "export class McpService {}"
+    components = ""
+    test = """
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+describe('Focused Suite', () => {
+    it('focus target fails', () => {
+        assert.equal(1, 2);
+    });
+    it('other test passes', () => {
+        assert.equal(2, 2);
+    });
+});
+"""
+
+    toolkit.setup_test_environment(service, components, test)
+    toolkit.set_focus_test_name("focus target fails")
+
+    result = toolkit.run_tests()
+
+    assert not result.success
+    assert result.metadata is not None
+    assert result.metadata.get("focus_precheck") is True
+    assert result.metadata.get("test_name_pattern") == "focus target fails"
+
+    toolkit.cleanup()
+
+
 @pytest.mark.asyncio
 async def test_tool_driven_cycle_passes_without_llm():
     service_script = "export class McpService {}"

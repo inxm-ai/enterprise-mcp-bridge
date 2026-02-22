@@ -15,6 +15,7 @@ from app.app_facade.generated_service import (
     Scope,
     Actor,
     validate_identifier,
+    _PATCH_UPDATE_SCHEMA,
 )
 from app.app_facade.generated_output_factory import RUNTIME_BRIDGE_SCRIPT
 from app.tgi.models import Message, MessageRole
@@ -149,6 +150,151 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_attempt_patch_update_uses_structured_response_format():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    captured = {}
+
+    async def fake_non_stream_completion(request, _access_token, _parent_span):
+        captured["request"] = request
+        return {
+            "choices": [
+                {"message": {"content": json.dumps({"patch": {"metadata": {"x": 1}}})}}
+            ]
+        }
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+
+    result = await service._attempt_patch_update(
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="dashboard",
+        draft_payload={
+            "html": {
+                "page": "<html><body><div>old</div></body></html>",
+                "snippet": "<div>old</div>",
+            },
+            "metadata": {},
+        },
+        user_message="small patch",
+        assistant_message="update metadata",
+        access_token=None,
+        previous_metadata={},
+    )
+
+    assert result is not None
+    request = captured["request"]
+    assert request.response_format is not None
+    fmt = request.response_format
+    assert isinstance(fmt, dict)
+    assert fmt.get("type") == "json_schema"
+    schema = fmt.get("json_schema", {}).get("schema")
+    assert schema == _PATCH_UPDATE_SCHEMA
+
+
+@pytest.mark.asyncio
+async def test_attempt_patch_update_records_failure_reason_for_missing_patch_object():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    async def fake_non_stream_completion(_request, _access_token, _parent_span):
+        return {
+            "choices": [{"message": {"content": json.dumps({"not_patch": {"x": 1}})}}]
+        }
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+
+    result = await service._attempt_patch_update(
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="dashboard",
+        draft_payload={"html": {"page": "<html></html>", "snippet": "<div></div>"}},
+        user_message="small patch",
+        assistant_message="update",
+        access_token=None,
+        previous_metadata={},
+    )
+
+    assert result is None
+    assert service._last_patch_failure_reason == "missing_patch_object"
+
+
+@pytest.mark.asyncio
+async def test_attempt_patch_update_runs_fix_loop_when_patch_tests_fail(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    async def fake_non_stream_completion(_request, _access_token, _parent_span):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "patch": {
+                                    "service_script": "export class McpService { broken() {} }",
+                                    "components_script": "export const init = () => {};",
+                                    "test_script": "import { test } from 'node:test'; test('x', () => {});",
+                                }
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+
+    monkeypatch.setattr(service, "_run_tests", lambda *_args, **_kwargs: (False, "tap"))
+
+    async def fake_fix_loop(**_kwargs):
+        return (
+            True,
+            "export class McpService { fixed() {} }",
+            "export const init = () => { return 'ok'; };",
+            "import { test } from 'node:test'; test('ok', () => {});",
+            "export const dummyData = {};",
+            [],
+        )
+
+    monkeypatch.setattr(service, "_iterative_test_fix", fake_fix_loop)
+
+    result = await service._attempt_patch_update(
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="dashboard",
+        draft_payload={
+            "html": {
+                "page": "<html><body><div>old</div></body></html>",
+                "snippet": "<div>old</div>",
+            },
+            "metadata": {},
+            "service_script": "export class McpService {}",
+            "components_script": "export const init = () => {};",
+            "test_script": "import { test } from 'node:test'; test('old', () => {});",
+        },
+        user_message="patch this",
+        assistant_message="apply update",
+        access_token=None,
+        previous_metadata={},
+        selected_tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+
+    assert result is not None
+    payload = result["payload"]
+    assert "fixed()" in payload["service_script"]
+    assert "return 'ok'" in payload["components_script"]
+    assert service._last_patch_failure_reason is None
+
+
+@pytest.mark.asyncio
 async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
@@ -230,7 +376,7 @@ async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
 
 
 @pytest.mark.asyncio
-async def test_generate_dummy_data_uses_error_payload_when_unrecoverable():
+async def test_generate_dummy_data_ignores_error_payload_when_unrecoverable():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     service.dummy_data_generator.generate_dummy_data = AsyncMock(
@@ -293,11 +439,136 @@ async def test_generate_dummy_data_uses_error_payload_when_unrecoverable():
     )
 
     kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
-    sampled = kwargs["tool_specs"][0]["sampleStructuredContent"]
-    assert sampled["error"] == "Invalid API key"
-    assert sampled["_dummy_data_error"] is True
-    assert sampled["tool"] == "get_weather_details"
-    assert sampled["attempted_args"]["city"] == "f;gadirtg"
+    tool_spec = kwargs["tool_specs"][0]
+    assert "sampleStructuredContent" not in tool_spec
+
+
+@pytest.mark.asyncio
+async def test_augment_tools_with_derived_output_schemas_from_dummy_data_module():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    class SchemaLLM:
+        async def non_stream_completion(self, request, _token, _span):
+            schema_name = (
+                (request.response_format or {}).get("json_schema", {}).get("name", "")
+            )
+            assert schema_name.endswith("_derived_output_schema")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "forecast": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "time": {"type": "string"},
+                                                        "temperature_c": {
+                                                            "type": "number"
+                                                        },
+                                                    },
+                                                    "required": [
+                                                        "time",
+                                                        "temperature_c",
+                                                    ],
+                                                    "additionalProperties": True,
+                                                },
+                                            }
+                                        },
+                                        "required": ["forecast"],
+                                        "additionalProperties": True,
+                                    }
+                                }
+                            )
+                        )
+                    )
+                ]
+            )
+
+    service.tgi_service.llm_client = SchemaLLM()
+    allowed_tools = [
+        {
+            "function": {
+                "name": "get_weather_details",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        }
+    ]
+    dummy_data = (
+        'export const dummyData = {"get_weather_details": {'
+        '"forecast": [{"time": "2026-02-22T00:00", "temperature_c": 7.1}]}};\n'
+        "export const dummyDataSchemaHints = {};"
+    )
+
+    enriched_tools, derived_count = (
+        await service._augment_tools_with_derived_output_schemas(
+            allowed_tools=allowed_tools,
+            dummy_data_module=dummy_data,
+        )
+    )
+
+    assert derived_count == 1
+    schema = enriched_tools[0]["function"]["outputSchema"]
+    assert schema["type"] == "object"
+    assert "forecast" in schema.get("properties", {})
+
+
+@pytest.mark.asyncio
+async def test_augment_tools_with_derived_output_schemas_skips_error_samples():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    class CountingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def non_stream_completion(self, request, _token, _span):
+            self.calls += 1
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"schema":{"type":"object"}}')
+                    )
+                ]
+            )
+
+    llm = CountingLLM()
+    service.tgi_service.llm_client = llm
+    allowed_tools = [
+        {
+            "function": {
+                "name": "get_weather_details",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        }
+    ]
+    dummy_data = (
+        'export const dummyData = {"get_weather_details": '
+        '{"_dummy_data_error": true, "error": "Tool unavailable"}};\n'
+        "export const dummyDataSchemaHints = {};"
+    )
+
+    enriched_tools, derived_count = (
+        await service._augment_tools_with_derived_output_schemas(
+            allowed_tools=allowed_tools,
+            dummy_data_module=dummy_data,
+        )
+    )
+
+    assert derived_count == 0
+    assert llm.calls == 0
+    assert "outputSchema" not in enriched_tools[0]["function"]
 
 
 def test_build_sample_args_for_time_fields_fallback_is_schema_driven():
@@ -599,6 +870,27 @@ def test_normalise_payload_supports_template_parts():
     assert "<!-- include:snippet -->" in html["page"]
     assert "<weather-dashboard></weather-dashboard>" in html["snippet"]
     assert "template-script" in payload.get("components_script", "")
+
+
+def test_normalise_payload_supports_legacy_top_level_parts_with_empty_html():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    scope = Scope(kind="user", identifier="u1")
+    payload = {
+        "title": "Weather Dashboard - Berlin",
+        "styles": ".root { color: blue; }",
+        "html": "",
+        "script": "pfusch('weather-dashboard', {}, () => [html.div('ok')]);",
+        "metadata": {},
+    }
+
+    service._normalise_payload(payload, scope, "ui1", "name1", "req", previous=None)
+
+    assert isinstance(payload.get("template_parts"), dict)
+    html = payload["html"]
+    assert "<title>Weather Dashboard - Berlin</title>" in html["page"]
+    assert "<weather-dashboard></weather-dashboard>" in html["snippet"]
+    assert "pfusch('weather-dashboard'" in payload.get("components_script", "")
 
 
 def test_expand_payload_injects_snippet_scripts():
@@ -1304,6 +1596,38 @@ def test_assert_scope_consistency_and_permissions():
             existing, Scope(kind="user", identifier="u1"), "n1"
         )
 
+
+def test_cap_message_payload_for_prompt_returns_compaction_diagnostics():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    message_payload = {
+        "ui": {"id": "ui1", "name": "dash", "scope": {"type": "user", "id": "u1"}},
+        "request": {"prompt": "x" * 5000, "tools": ["toolA"]},
+        "context": {
+            "history": [{"role": "user", "content": "h" * 3000} for _ in range(5)],
+            "current_state": {"blob": "y" * 8000},
+            "runtime_service_exchanges": [
+                {"event": "e", "payload": "z" * 3000} for _ in range(3)
+            ],
+            "runtime_console_events": [{"kind": "warn", "message": "m" * 2000}],
+        },
+    }
+
+    capped, diagnostics = service._cap_message_payload_for_prompt(
+        message_payload,
+        max_bytes=2200,
+    )
+
+    assert isinstance(capped, dict)
+    assert isinstance(diagnostics, dict)
+    assert diagnostics["original_bytes"] > diagnostics["final_bytes"]
+    assert (
+        diagnostics["final_bytes"] <= diagnostics["budget_bytes"]
+        or diagnostics["final_bytes"] > 0
+    )
+    assert diagnostics["steps"]
+
     # ensure_update_permissions
     actor = Actor(user_id="u2", groups=["g2"])
     with pytest.raises(Exception):
@@ -1347,6 +1671,28 @@ def test_history_for_prompt_strips_payload_html_without_mutating():
     assert "payload_scripts" not in sanitized[0]
     # original history entry still retains payload_html
     assert "payload_html" in history[0]
+
+
+def test_context_state_for_prompt_truncates_large_fields():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    large_script = "x" * 10000
+    state = {
+        "service_script": large_script,
+        "components_script": large_script,
+        "metadata": {"title": "demo"},
+    }
+
+    sanitized = service._context_state_for_prompt(state)
+
+    assert isinstance(sanitized, dict)
+    assert sanitized.get("metadata", {}).get("title") == "demo"
+    assert isinstance(sanitized.get("service_script"), str)
+    assert isinstance(sanitized.get("components_script"), str)
+    assert len(sanitized["service_script"]) < len(large_script)
+    assert len(sanitized["components_script"]) < len(large_script)
+    assert "[truncated]" in sanitized["service_script"]
 
 
 def test_build_system_prompt_reads_pfusch_and_fallback(monkeypatch):

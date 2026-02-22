@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import contextlib
 import shutil
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from app.app_facade.generated_output_factory import MCP_SERVICE_TEST_HELPER_SCRIPT
-from app.vars import GENERATED_UI_READ_ONLY_STREAK_LIMIT
+from app.vars import GENERATED_UI_READ_ONLY_STREAK_LIMIT, LLM_MAX_PAYLOAD_BYTES
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
@@ -78,7 +79,186 @@ def _positive_int_env(name: str, default: int) -> int:
 
 NODE_TEST_TIMEOUT_MS = _positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
 READ_ONLY_STREAK_LIMIT = max(1, int(GENERATED_UI_READ_ONLY_STREAK_LIMIT))
-FIX_CODE_ASSERTION_BAILOUT_LIMIT = 2
+FIX_CODE_ASSERTION_BAILOUT_LIMIT = _positive_int_env(
+    "GENERATED_UI_FIX_CODE_ASSERTION_BAILOUT_LIMIT", 3
+)
+ITERATIVE_FIX_MAX_MESSAGES = _positive_int_env("GENERATED_UI_FIX_MAX_MESSAGES", 80)
+ITERATIVE_FIX_MAX_MESSAGE_BYTES = _positive_int_env(
+    "GENERATED_UI_FIX_MAX_MESSAGE_BYTES", 12000
+)
+ITERATIVE_FIX_MAX_TOOL_MESSAGE_BYTES = _positive_int_env(
+    "GENERATED_UI_FIX_MAX_TOOL_MESSAGE_BYTES", 6000
+)
+ITERATIVE_FIX_MAX_PAYLOAD_BYTES = _positive_int_env(
+    "GENERATED_UI_FIX_MAX_PAYLOAD_BYTES",
+    max(10000, int(LLM_MAX_PAYLOAD_BYTES * 0.9)),
+)
+FOCUS_SINGLE_FAILURE_ENABLED = (
+    os.getenv("GENERATED_UI_FOCUS_SINGLE_FAILING_TEST", "true").lower() == "true"
+)
+
+
+def _bytes_len(value: Any) -> int:
+    with contextlib.suppress(Exception):
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+    return len(str(value).encode("utf-8"))
+
+
+def _truncate_text_for_bytes(text: str, max_bytes: int) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    if max_bytes <= 0:
+        return ""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    suffix = "...[truncated]"
+    suffix_bytes = len(suffix.encode("utf-8"))
+    budget = max(0, max_bytes - suffix_bytes)
+    low = 0
+    high = len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        candidate = text[:mid]
+        if len(candidate.encode("utf-8")) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low] + suffix
+
+
+def _message_role_value(message: Message) -> str:
+    role = getattr(message, "role", "")
+    if hasattr(role, "value"):
+        return str(role.value)
+    return str(role)
+
+
+def _message_content_text(message: Message) -> str:
+    content = getattr(message, "content", "")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
+def _copy_message_with_content(message: Message, content: str) -> Message:
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update={"content": content})
+    cloned = copy.deepcopy(message)
+    cloned.content = content
+    return cloned
+
+
+def _messages_payload_bytes(messages: List[Message]) -> int:
+    return sum(_bytes_len(_message_content_text(message)) for message in messages)
+
+
+def _collect_payload_diagnostics(
+    messages: List[Message], tools: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    top_messages: List[Dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        text = _message_content_text(message)
+        top_messages.append(
+            {
+                "index": index,
+                "role": _message_role_value(message),
+                "bytes": _bytes_len(text),
+            }
+        )
+    top_messages.sort(key=lambda item: item["bytes"], reverse=True)
+
+    section_sizes: List[Dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        text = _message_content_text(message).strip()
+        if not text.startswith("{"):
+            continue
+        with contextlib.suppress(Exception):
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    section_sizes.append(
+                        {
+                            "index": index,
+                            "role": _message_role_value(message),
+                            "section": key,
+                            "bytes": _bytes_len(value),
+                        }
+                    )
+    section_sizes.sort(key=lambda item: item["bytes"], reverse=True)
+
+    return {
+        "message_count": len(messages),
+        "messages_bytes": _messages_payload_bytes(messages),
+        "tools_count": len(tools or []),
+        "tools_bytes": _bytes_len(tools or []),
+        "top_messages": top_messages[:6],
+        "top_sections": section_sizes[:8],
+    }
+
+
+def _cap_fix_messages_for_request(
+    messages: List[Message],
+    *,
+    max_messages: int,
+    max_total_bytes: int,
+    max_message_bytes: int,
+    max_tool_message_bytes: int,
+) -> Tuple[List[Message], Dict[str, Any]]:
+    capped: List[Message] = []
+    trimmed_messages = 0
+    dropped_messages = 0
+    original_bytes = _messages_payload_bytes(messages)
+
+    for message in messages:
+        content = _message_content_text(message)
+        role = _message_role_value(message)
+        per_message_limit = (
+            max_tool_message_bytes
+            if role == MessageRole.TOOL.value
+            else max_message_bytes
+        )
+        if _bytes_len(content) > per_message_limit:
+            content = _truncate_text_for_bytes(content, per_message_limit)
+            trimmed_messages += 1
+        capped.append(_copy_message_with_content(message, content))
+
+    has_system_prefix = (
+        bool(capped) and _message_role_value(capped[0]) == MessageRole.SYSTEM.value
+    )
+    while len(capped) > max_messages:
+        drop_index = 1 if has_system_prefix and len(capped) > 1 else 0
+        capped.pop(drop_index)
+        dropped_messages += 1
+        has_system_prefix = (
+            bool(capped) and _message_role_value(capped[0]) == MessageRole.SYSTEM.value
+        )
+
+    while len(capped) > 1 and _messages_payload_bytes(capped) > max_total_bytes:
+        has_system_prefix = (
+            bool(capped) and _message_role_value(capped[0]) == MessageRole.SYSTEM.value
+        )
+        drop_index = None
+        start = 1 if has_system_prefix else 0
+        for index in range(start, len(capped)):
+            if _message_role_value(capped[index]) == MessageRole.TOOL.value:
+                drop_index = index
+                break
+        if drop_index is None:
+            drop_index = 1 if has_system_prefix and len(capped) > 1 else 0
+        capped.pop(drop_index)
+        dropped_messages += 1
+
+    stats = {
+        "original_messages": len(messages),
+        "final_messages": len(capped),
+        "original_bytes": original_bytes,
+        "final_bytes": _messages_payload_bytes(capped),
+        "trimmed_messages": trimmed_messages,
+        "dropped_messages": dropped_messages,
+    }
+    return capped, stats
 
 
 def _tool_description(
@@ -190,6 +370,33 @@ def _inferred_tool_explanation(tool_names: List[str]) -> Optional[str]:
             f"Applying tool-driven diagnosis/fix steps: {', '.join(unique_names[:2])}."
         )
     return " ".join(reasons)
+
+
+def _extract_bail_override(content: Optional[str], max_len: int = 600) -> Optional[str]:
+    """
+    Extract explicit bailout override from assistant text.
+
+    Expected format in assistant content:
+      BAIL_OVERRIDE: <runtime hypothesis>
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        if line.lower().startswith("bail_override:"):
+            override = line.split(":", 1)[1].strip()
+            if not override:
+                return None
+            if len(override) > max_len:
+                return (
+                    f"{override[:max_len]}...(trimmed {len(override) - max_len} chars)"
+                )
+            return override
+    return None
 
 
 def _parse_tap_output(tap_output: str) -> Tuple[int, int, List[str]]:
@@ -309,6 +516,12 @@ class IterativeTestFixer:
         self.current_test_script: Optional[str] = None
         self.current_dummy_data: Optional[str] = None
         self.tmpdir: Optional[str] = None
+        self.focus_test_name: Optional[str] = None
+
+    def set_focus_test_name(self, test_name: Optional[str]) -> None:
+        """Set or clear the focused failing test name used for targeted prechecks."""
+        normalized = (test_name or "").strip()
+        self.focus_test_name = normalized or None
 
     def setup_test_environment(
         self,
@@ -422,54 +635,80 @@ class IterativeTestFixer:
         try:
             self._write_current_files()
 
-            cmd = [
-                "node",
-                "--test",
-                "--test-force-exit",
-                "--test-timeout",
-                str(NODE_TEST_TIMEOUT_MS),
-                "test.js",
-            ]
+            def _run_node_tests_once(pattern: Optional[str]) -> ToolResult:
+                cmd = [
+                    "node",
+                    "--test",
+                    "--test-force-exit",
+                    "--test-timeout",
+                    str(NODE_TEST_TIMEOUT_MS),
+                    "test.js",
+                ]
+                if pattern:
+                    cmd.extend(["--test-name-pattern", pattern])
+
+                env = os.environ.copy()
+                env["NODE_PATH"] = self.tmpdir
+
+                logger.info(
+                    "[iterative_test_fix] Running node tests%s",
+                    f" (pattern: {pattern})" if pattern else "",
+                )
+                start = time.monotonic()
+                result = subprocess.run(
+                    cmd,
+                    cwd=self.tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                )
+                duration = time.monotonic() - start
+                logger.info(
+                    "[iterative_test_fix] Node tests completed with code %s in %.2fs",
+                    result.returncode,
+                    duration,
+                )
+
+                output = result.stdout + "\n" + result.stderr
+                success = result.returncode == 0
+                metadata = self._parse_tap_output(output)
+                metadata["test_name_pattern"] = pattern
+
+                if not success:
+                    output = _summarize_test_output(output)
+
+                return ToolResult(
+                    success=success,
+                    content=output,
+                    metadata=metadata,
+                )
+
             if test_name:
-                cmd.extend(["--test-name-pattern", test_name])
+                return _run_node_tests_once(test_name)
 
-            env = os.environ.copy()
-            env["NODE_PATH"] = self.tmpdir
+            focused_name = self.focus_test_name
+            if focused_name:
+                focused_result = _run_node_tests_once(focused_name)
+                focused_metadata = focused_result.metadata or {}
+                focused_metadata["focus_precheck"] = True
+                focused_result.metadata = focused_metadata
+                if not focused_result.success:
+                    return focused_result
 
-            logger.info(
-                "[iterative_test_fix] Running node tests%s",
-                f" (pattern: {test_name})" if test_name else "",
-            )
-            start = time.monotonic()
-            result = subprocess.run(
-                cmd,
-                cwd=self.tmpdir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-            )
-            duration = time.monotonic() - start
-            logger.info(
-                "[iterative_test_fix] Node tests completed with code %s in %.2fs",
-                result.returncode,
-                duration,
-            )
+                logger.info(
+                    "[iterative_test_fix] Focused precheck passed for '%s'; running full suite",
+                    focused_name,
+                )
+                full_result = _run_node_tests_once(None)
+                full_metadata = full_result.metadata or {}
+                full_metadata["focus_precheck"] = True
+                full_metadata["focus_precheck_pattern"] = focused_name
+                full_metadata["focus_precheck_passed"] = True
+                full_result.metadata = full_metadata
+                return full_result
 
-            output = result.stdout + "\n" + result.stderr
-            success = result.returncode == 0
-
-            # Extract summary from TAP output
-            metadata = self._parse_tap_output(output)
-
-            if not success:
-                output = _summarize_test_output(output)
-
-            return ToolResult(
-                success=success,
-                content=output,
-                metadata=metadata,
-            )
+            return _run_node_tests_once(None)
 
         except subprocess.TimeoutExpired:
             return ToolResult(
@@ -1261,7 +1500,9 @@ async def run_tool_driven_test_fix(
                 "Important: prioritize runtime fixes in service_script/components_script. "
                 "Do NOT modify test_script or dummy_data in this mode. "
                 "If failures appear to be test-only issues, note that briefly and continue with runtime-focused fixes. "
-                "Never import './dummy_data.js' or reference dummyData in runtime code."
+                "Never import './dummy_data.js' or reference dummyData in runtime code. "
+                "If the harness warns about repeated assertion-signature failures and you have a strong runtime hypothesis, "
+                "respond with 'BAIL_OVERRIDE: <runtime hypothesis>' before tool calls to continue one focused runtime attempt."
             )
             objective_instruction = "Use the provided tools to fix runtime issues that cause test failures. "
             test_fix_instruction = ""
@@ -1304,6 +1545,58 @@ async def run_tool_driven_test_fix(
         )
         initial_passed, initial_failed, _ = _parse_tap_output(test_result.content)
         last_passed = initial_passed
+        focused_failure_name: Optional[str] = None
+
+        def _sync_single_failure_focus(
+            failed: int,
+            failed_tests: List[str],
+            *,
+            context: str,
+        ) -> None:
+            nonlocal focused_failure_name
+            if not FOCUS_SINGLE_FAILURE_ENABLED:
+                return
+
+            next_focus: Optional[str] = None
+            if failed == 1 and failed_tests:
+                candidate = (failed_tests[0] or "").strip()
+                if candidate:
+                    next_focus = candidate
+
+            if next_focus == focused_failure_name:
+                return
+
+            previous_focus = focused_failure_name
+            focused_failure_name = next_focus
+            toolkit.set_focus_test_name(next_focus)
+
+            if next_focus:
+                logger.info(
+                    "[iterative_test_fix] Single failing test focus (%s): %s",
+                    context,
+                    next_focus,
+                )
+                fix_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            "Focus mode: exactly one failing test is active. "
+                            f"Prioritize fixing '{next_focus}' with minimal, localized changes, "
+                            "then run the full suite to guard against regressions."
+                        ),
+                    )
+                )
+            elif previous_focus:
+                logger.info(
+                    "[iterative_test_fix] Clearing single-test focus (%s)",
+                    context,
+                )
+
+        _sync_single_failure_focus(
+            initial_failed,
+            _parse_tap_output(test_result.content)[2],
+            context="initial run",
+        )
 
         fix_messages.append(
             Message(
@@ -1336,6 +1629,9 @@ async def run_tool_driven_test_fix(
         attempt = 0
         read_only_streak = 0
         fix_code_assertion_failures = 0
+        fix_code_pending_bail_decision = False
+        fix_code_bail_override_used = False
+        fix_code_bail_override_grace_failures = 0
         best_passed = initial_passed
         best_failed = initial_failed
         best_snapshot = {
@@ -1414,6 +1710,75 @@ async def run_tool_driven_test_fix(
                     }
                 )
 
+        def _contract_failure_requires_adjust_test(reason: Optional[str]) -> bool:
+            if strategy_mode != "fix_code":
+                return False
+            normalized_reason = (reason or "").lower()
+            return any(
+                marker in normalized_reason
+                for marker in (
+                    "schema_field_drift:test_mock:",
+                    "schema_field_drift:test_ref:",
+                    "weak_assertion:",
+                )
+            )
+
+        async def _return_for_adjust_test_handoff(
+            reason: Optional[str],
+            *,
+            reason_code: str,
+            use_best_snapshot: bool = False,
+            handoff_message: Optional[str] = None,
+            passed: Optional[int] = None,
+            failed: Optional[int] = None,
+        ) -> Tuple[bool, str, str, str, Optional[str], List[Message]]:
+            normalized_reason = (
+                reason or "contract_validation_requires_adjust_test"
+            ).strip()
+            handoff_note = handoff_message or (
+                "Contract validation issue appears to require test/fixture edits "
+                "(not allowed in fix_code mode). Handing off to adjust_test stage. "
+                f"Reason: {normalized_reason}"
+            )
+            logger.info("[iterative_test_fix] %s", handoff_note)
+            fix_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=handoff_note,
+                )
+            )
+            best_snapshot["messages"] = copy.deepcopy(fix_messages)
+            if event_queue:
+                await event_queue.put(
+                    {
+                        "event": "test_result",
+                        "status": "handoff",
+                        "message": "Handing off to adjust_test stage.",
+                        "reason_code": reason_code,
+                        "reason": normalized_reason,
+                        "suggested_action": "adjust_test",
+                        "passed": int(best_passed if passed is None else passed),
+                        "failed": int(best_failed if failed is None else failed),
+                    }
+                )
+            if use_best_snapshot:
+                return (
+                    False,
+                    best_snapshot["service_script"],
+                    best_snapshot["components_script"],
+                    best_snapshot["test_script"],
+                    best_snapshot["dummy_data"],
+                    best_snapshot["messages"],
+                )
+            return (
+                False,
+                toolkit.current_service_script,
+                toolkit.current_components_script,
+                toolkit.current_test_script,
+                toolkit.current_dummy_data,
+                fix_messages,
+            )
+
         initial_validation_ok = False
         initial_validation_reason: Optional[str] = None
         if test_result.success:
@@ -1442,6 +1807,11 @@ async def run_tool_driven_test_fix(
                 failed=initial_failed,
                 metadata=test_result.metadata,
             )
+            if _contract_failure_requires_adjust_test(initial_validation_reason):
+                return await _return_for_adjust_test_handoff(
+                    initial_validation_reason,
+                    reason_code="contract_validation_requires_adjust_test",
+                )
 
         logger.info(
             "[iterative_test_fix] Initial checks failed or contract validation rejected candidate, starting fix loop (max %s attempts)",
@@ -1507,12 +1877,24 @@ async def run_tool_driven_test_fix(
             )
             return has_assertion_signal and has_test_reference
 
-        def _should_bail_to_adjust_test(output: str, failed: int) -> bool:
+        def _reset_fix_code_bail_tracking() -> None:
             nonlocal fix_code_assertion_failures
+            nonlocal fix_code_pending_bail_decision
+            nonlocal fix_code_bail_override_used
+            nonlocal fix_code_bail_override_grace_failures
+            fix_code_assertion_failures = 0
+            fix_code_pending_bail_decision = False
+            fix_code_bail_override_used = False
+            fix_code_bail_override_grace_failures = 0
+
+        def _register_fix_code_assertion_failure(output: str, failed: int) -> bool:
+            nonlocal fix_code_assertion_failures
+            nonlocal fix_code_pending_bail_decision
             if strategy_mode != "fix_code":
+                _reset_fix_code_bail_tracking()
                 return False
             if failed <= 0:
-                fix_code_assertion_failures = 0
+                _reset_fix_code_bail_tracking()
                 return False
             if _looks_like_test_assertion_shape_failure(output):
                 fix_code_assertion_failures += 1
@@ -1522,29 +1904,140 @@ async def run_tool_driven_test_fix(
                     FIX_CODE_ASSERTION_BAILOUT_LIMIT,
                 )
             else:
-                fix_code_assertion_failures = 0
+                _reset_fix_code_bail_tracking()
+                return False
 
             if fix_code_assertion_failures < FIX_CODE_ASSERTION_BAILOUT_LIMIT:
                 return False
 
-            reason = (
-                "Repeated assertion-signature failures in fix_code mode suggest test/fixture-shape mismatch. "
-                "Bailing out early so adjust_test strategy can repair assertions/fixtures."
+            if not fix_code_pending_bail_decision:
+                fix_code_pending_bail_decision = True
+                decision_note = (
+                    "Repeated assertion-signature failures in fix_code mode suggest possible test/fixture-shape mismatch. "
+                    "Before handing off to adjust_test, decide explicitly: "
+                    "If runtime fix is still likely, respond with "
+                    "'BAIL_OVERRIDE: <runtime hypothesis>' and continue with focused runtime-only edits; "
+                    "otherwise proceed without override and handoff will occur on the next repeated signal."
+                )
+                logger.warning("[iterative_test_fix] %s", decision_note)
+                fix_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=decision_note,
+                    )
+                )
+                best_snapshot["messages"] = copy.deepcopy(fix_messages)
+                return False
+
+            return True
+
+        def _apply_fix_code_bail_override(content: str) -> None:
+            nonlocal fix_code_pending_bail_decision
+            nonlocal fix_code_bail_override_used
+            nonlocal fix_code_bail_override_grace_failures
+            override = _extract_bail_override(content)
+            if not override:
+                return
+            if strategy_mode != "fix_code":
+                return
+            if not fix_code_pending_bail_decision:
+                logger.info(
+                    "[iterative_test_fix] Ignoring BAIL_OVERRIDE because bail-decision mode is not active"
+                )
+                return
+            fix_code_pending_bail_decision = False
+            fix_code_bail_override_used = True
+            fix_code_bail_override_grace_failures = 1
+            logger.info(
+                "[iterative_test_fix] BAIL_OVERRIDE accepted; continuing fix_code with focused runtime attempt: %s",
+                override,
             )
-            logger.warning("[iterative_test_fix] %s", reason)
             fix_messages.append(
                 Message(
                     role=MessageRole.USER,
-                    content=reason,
+                    content=(
+                        "BAIL_OVERRIDE accepted. Continue with one focused runtime-only attempt "
+                        "(service/components) and run_tests. "
+                        f"Hypothesis: {override}"
+                    ),
                 )
             )
             best_snapshot["messages"] = copy.deepcopy(fix_messages)
-            return True
+
+        async def _should_handoff_after_assertion_failure(
+            *,
+            output: str,
+            passed: int,
+            failed: int,
+        ) -> Optional[Tuple[bool, str, str, str, Optional[str], List[Message]]]:
+            nonlocal fix_code_bail_override_grace_failures
+            should_handoff = _register_fix_code_assertion_failure(output, failed)
+            if not should_handoff:
+                return None
+            if fix_code_bail_override_grace_failures > 0:
+                fix_code_bail_override_grace_failures -= 1
+                logger.warning(
+                    "[iterative_test_fix] assertion signature persists after BAIL_OVERRIDE; grace remaining=%s",
+                    fix_code_bail_override_grace_failures,
+                )
+                return None
+            if fix_code_pending_bail_decision:
+                reason = (
+                    "Repeated assertion-signature failures persisted without BAIL_OVERRIDE. "
+                    "Handing off to adjust_test so assertions/fixtures can be repaired."
+                )
+            elif fix_code_bail_override_used:
+                reason = (
+                    "Repeated assertion-signature failures persisted after BAIL_OVERRIDE focused runtime attempt. "
+                    "Handing off to adjust_test so assertions/fixtures can be repaired."
+                )
+            else:
+                reason = (
+                    "Repeated assertion-signature failures in fix_code mode suggest test/fixture-shape mismatch. "
+                    "Handing off to adjust_test so assertions/fixtures can be repaired."
+                )
+            return await _return_for_adjust_test_handoff(
+                reason,
+                reason_code="assertion_signature_repeat",
+                use_best_snapshot=True,
+                handoff_message=reason,
+                passed=passed,
+                failed=failed,
+            )
 
         while attempt < max_attempts:
             attempt += 1
             logger.info(
                 "[iterative_test_fix] Fix iteration %s/%s", attempt, max_attempts
+            )
+
+            before_diag = _collect_payload_diagnostics(fix_messages, fix_tools)
+            logger.info(
+                "[iterative_test_fix] Payload diagnostics before cap (iteration %s): %s",
+                attempt,
+                before_diag,
+            )
+
+            capped_messages, cap_stats = _cap_fix_messages_for_request(
+                fix_messages,
+                max_messages=ITERATIVE_FIX_MAX_MESSAGES,
+                max_total_bytes=ITERATIVE_FIX_MAX_PAYLOAD_BYTES,
+                max_message_bytes=ITERATIVE_FIX_MAX_MESSAGE_BYTES,
+                max_tool_message_bytes=ITERATIVE_FIX_MAX_TOOL_MESSAGE_BYTES,
+            )
+            if cap_stats["trimmed_messages"] or cap_stats["dropped_messages"]:
+                logger.warning(
+                    "[iterative_test_fix] Message history capped before request (iteration %s): %s",
+                    attempt,
+                    cap_stats,
+                )
+            fix_messages = capped_messages
+
+            after_diag = _collect_payload_diagnostics(fix_messages, fix_tools)
+            logger.info(
+                "[iterative_test_fix] Payload diagnostics after cap (iteration %s): %s",
+                attempt,
+                after_diag,
             )
 
             chat_request = ChatCompletionRequest(
@@ -1560,8 +2053,24 @@ async def run_tool_driven_test_fix(
                     "[iterative_test_fix] Requesting LLM response (iteration %s)",
                     attempt,
                 )
-                response = await tgi_service.llm_client.client.chat.completions.create(
-                    **tgi_service.llm_client._build_request_params(chat_request)
+                llm_client = getattr(tgi_service, "llm_client", None)
+                if llm_client is None:
+                    raise RuntimeError("LLM client unavailable for iterative_test_fix")
+
+                if hasattr(llm_client, "_prepare_payload"):
+                    chat_request = await llm_client._prepare_payload(
+                        chat_request,
+                        access_token or "",
+                    )
+                if hasattr(llm_client, "_payload_size"):
+                    logger.info(
+                        "[iterative_test_fix] Prepared chat request payload bytes (iteration %s): %s",
+                        attempt,
+                        llm_client._payload_size(chat_request),
+                    )
+
+                response = await llm_client.client.chat.completions.create(
+                    **llm_client._build_request_params(chat_request)
                 )
                 logger.info(
                     "[iterative_test_fix] LLM response received (iteration %s)",
@@ -1634,6 +2143,7 @@ async def run_tool_driven_test_fix(
                     fix_explanation,
                 )
             fix_messages.append(assistant_msg)
+            _apply_fix_code_bail_override(content)
 
             if not tool_calls:
                 no_tool_call_attempts += 1
@@ -1655,6 +2165,11 @@ async def run_tool_driven_test_fix(
                         final_result.content,
                     )
                     passed, failed, _ = _parse_tap_output(final_result.content)
+                    _sync_single_failure_focus(
+                        failed,
+                        _parse_tap_output(final_result.content)[2],
+                        context="verification run",
+                    )
                     _reset_attempts_on_progress(passed, "verification run")
                     _update_best_snapshot(passed, failed)
                     if final_result.success:
@@ -1681,6 +2196,11 @@ async def run_tool_driven_test_fix(
                             failed=max(failed, 1),
                             metadata=final_result.metadata,
                         )
+                        if _contract_failure_requires_adjust_test(validation_reason):
+                            return await _return_for_adjust_test_handoff(
+                                validation_reason,
+                                reason_code="contract_validation_requires_adjust_test",
+                            )
                     else:
                         fix_messages.append(
                             Message(
@@ -1839,6 +2359,11 @@ async def run_tool_driven_test_fix(
                         result.content,
                     )
                     passed, failed, failed_tests = _parse_tap_output(result.content)
+                    _sync_single_failure_focus(
+                        failed,
+                        failed_tests,
+                        context=f"iteration {attempt} run_tests",
+                    )
                     _reset_attempts_on_progress(passed, f"iteration {attempt}")
                     _update_best_snapshot(passed, failed)
                     if best_passed > 0 and (
@@ -1893,6 +2418,13 @@ async def run_tool_driven_test_fix(
                                 failed=max(failed, 1),
                                 metadata=result.metadata,
                             )
+                            if _contract_failure_requires_adjust_test(
+                                validation_reason
+                            ):
+                                return await _return_for_adjust_test_handoff(
+                                    validation_reason,
+                                    reason_code="contract_validation_requires_adjust_test",
+                                )
                     else:
                         if failed > 0:
                             test_list = ", ".join(failed_tests[:3])
@@ -1915,15 +2447,15 @@ async def run_tool_driven_test_fix(
                                         "metadata": result.metadata,
                                     }
                                 )
-                            if _should_bail_to_adjust_test(result.content, failed):
-                                return (
-                                    False,
-                                    best_snapshot["service_script"],
-                                    best_snapshot["components_script"],
-                                    best_snapshot["test_script"],
-                                    best_snapshot["dummy_data"],
-                                    best_snapshot["messages"],
+                            handoff_result = (
+                                await _should_handoff_after_assertion_failure(
+                                    output=result.content,
+                                    passed=passed,
+                                    failed=failed,
                                 )
+                            )
+                            if handoff_result is not None:
+                                return handoff_result
                         else:
                             logger.warning(
                                 "[iterative_test_fix] Test run failed with unexpected output"
@@ -1955,6 +2487,11 @@ async def run_tool_driven_test_fix(
                 )
                 forced_passed, forced_failed, forced_failed_tests = _parse_tap_output(
                     forced_result.content
+                )
+                _sync_single_failure_focus(
+                    forced_failed,
+                    forced_failed_tests,
+                    context=f"forced iteration {attempt}",
                 )
                 _reset_attempts_on_progress(
                     forced_passed, f"forced iteration {attempt}"
@@ -2019,6 +2556,11 @@ async def run_tool_driven_test_fix(
                             failed=max(forced_failed, 1),
                             metadata=forced_result.metadata,
                         )
+                        if _contract_failure_requires_adjust_test(validation_reason):
+                            return await _return_for_adjust_test_handoff(
+                                validation_reason,
+                                reason_code="contract_validation_requires_adjust_test",
+                            )
                 elif event_queue:
                     await event_queue.put(
                         {
@@ -2031,15 +2573,13 @@ async def run_tool_driven_test_fix(
                         }
                     )
 
-                if _should_bail_to_adjust_test(forced_result.content, forced_failed):
-                    return (
-                        False,
-                        best_snapshot["service_script"],
-                        best_snapshot["components_script"],
-                        best_snapshot["test_script"],
-                        best_snapshot["dummy_data"],
-                        best_snapshot["messages"],
-                    )
+                handoff_result = await _should_handoff_after_assertion_failure(
+                    output=forced_result.content,
+                    passed=forced_passed,
+                    failed=forced_failed,
+                )
+                if handoff_result is not None:
+                    return handoff_result
 
             for tool_result in tool_results:
                 fix_messages.append(
@@ -2059,6 +2599,11 @@ async def run_tool_driven_test_fix(
                     final_result.content,
                 )
                 passed, failed, _ = _parse_tap_output(final_result.content)
+                _sync_single_failure_focus(
+                    failed,
+                    _parse_tap_output(final_result.content)[2],
+                    context="verification run",
+                )
                 _reset_attempts_on_progress(passed, "verification run")
                 _update_best_snapshot(passed, failed)
                 if final_result.success:
@@ -2085,6 +2630,11 @@ async def run_tool_driven_test_fix(
                         failed=max(failed, 1),
                         metadata=final_result.metadata,
                     )
+                    if _contract_failure_requires_adjust_test(validation_reason):
+                        return await _return_for_adjust_test_handoff(
+                            validation_reason,
+                            reason_code="contract_validation_requires_adjust_test",
+                        )
                 else:
                     fix_messages.append(
                         Message(

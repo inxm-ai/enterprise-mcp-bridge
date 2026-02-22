@@ -32,8 +32,19 @@ from app.vars import (
     MCP_BASE_PATH,
     GENERATED_UI_PROMPT_DUMP,
     APP_UI_SESSION_TTL_MINUTES,
+    APP_UI_PATCH_ONLY,
+    APP_UI_PATCH_RETRIES,
     GENERATED_UI_FIX_CODE_FIRST,
     EFFECT_TOOLS,
+    GENERATED_UI_INCLUDE_OUTPUT_SCHEMA,
+    GENERATED_UI_MAX_HISTORY_ENTRIES,
+    GENERATED_UI_MAX_HISTORY_BYTES,
+    GENERATED_UI_MAX_RUNTIME_EXCHANGES,
+    GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
+    GENERATED_UI_MAX_RUNTIME_BYTES,
+    GENERATED_UI_MAX_TOOLS,
+    GENERATED_UI_MAX_TOOLS_BYTES,
+    GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES,
 )
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
@@ -44,7 +55,11 @@ from app.app_facade.generated_output_factory import (
 )
 from app.app_facade.generated_phase1 import run_phase1_attempt
 from app.app_facade.generated_phase2 import run_phase2_attempt
-from app.app_facade.generated_dummy_data import DummyDataGenerator
+from app.app_facade.generated_dummy_data import (
+    DummyDataGenerator,
+    SCHEMA_DERIVATION_RESPONSE_SCHEMA,
+    SCHEMA_DERIVATION_SYSTEM_PROMPT,
+)
 from app.app_facade.generated_schemas import (
     generation_response_format,
 )
@@ -75,6 +90,7 @@ MAX_RUNTIME_CONTEXT_ENTRIES = 20
 MAX_RUNTIME_CONTEXT_DEPTH = 3
 MAX_RUNTIME_CONTEXT_TEXT = 2000
 MAX_RUNTIME_CONSOLE_EVENTS = 20
+TEST_FAILURE_ACTION_CHOICES = ["run", "fix_code", "adjust_test"]
 _DUMMY_DATA_SAMPLING_EXCLUDED_TOOLS = {"describe_tool", "select-from-tool-response"}
 _DUMMY_DATA_TEST_USAGE_GUIDANCE = (
     "Dummy data module for tests is available as ./dummy_data.js. "
@@ -83,6 +99,9 @@ _DUMMY_DATA_TEST_USAGE_GUIDANCE = (
     "or globalThis.fetch.addRoute(...) when validating raw transport/extraction paths. "
     "If dummyDataSchemaHints[toolName] exists, that tool is missing output schema; "
     "the client should ask for schema and regenerate dummy data before relying on that fixture. "
+    "Tests MUST NOT throw or fail solely because a schema hint exists; "
+    "when hints are present, either inject explicit per-test resolved mocks for asserted fields "
+    "or assert resilient UI behavior without assuming unavailable schema fields. "
     "Never import './dummy_data.js' in service_script/components_script; "
     "it is test-only and not browser-delivered at runtime. "
     "Do NOT inject fetched domain data directly via component initial state or "
@@ -114,6 +133,53 @@ _DUMMY_DATA_ERROR_RECOVERY_SCHEMA = {
     "required": ["recoverable"],
     "additionalProperties": False,
 }
+_TEST_FAILURE_EXPLANATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "what_failed": {"type": "string"},
+        "why_it_ended": {"type": "string"},
+        "recommended_action": {"type": "string", "enum": TEST_FAILURE_ACTION_CHOICES},
+        "alternative_action": {"type": "string", "enum": TEST_FAILURE_ACTION_CHOICES},
+        "next_step_text": {"type": "string"},
+    },
+    "required": [
+        "what_failed",
+        "why_it_ended",
+        "recommended_action",
+        "alternative_action",
+        "next_step_text",
+    ],
+    "additionalProperties": False,
+}
+_PATCH_UPDATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "patch": {
+            "type": "object",
+            "properties": {
+                "html": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "string"},
+                        "snippet": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "service_script": {"type": "string"},
+                "components_script": {"type": "string"},
+                "test_script": {"type": "string"},
+                "dummy_data": {"type": "string"},
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": False,
+        }
+    },
+    "required": ["patch"],
+    "additionalProperties": False,
+}
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -132,6 +198,16 @@ def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:
         f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
             "utf-8"
         )
+    )
+
+
+def _assistant_status_event(status: str) -> bytes:
+    return _sse_event(
+        "assistant",
+        {
+            "delta": status,
+            "is_status": True,
+        },
     )
 
 
@@ -181,6 +257,7 @@ class GeneratedUIService:
         self._test_run_tasks: Dict[str, asyncio.Task] = {}
         self._test_run_locks: Dict[str, asyncio.Lock] = {}
         self._test_run_seq = 0
+        self._last_patch_failure_reason: Optional[str] = None
 
     def _current_version(self, metadata: Dict[str, Any]) -> int:
         raw = metadata.get("version")
@@ -960,6 +1037,174 @@ class GeneratedUIService:
             analysis_reason=str(analysis.get("reason") or ""),
         )
 
+    def _extract_dummy_data_payload_from_module(
+        self, module_source: Optional[str]
+    ) -> Dict[str, Any]:
+        text = (module_source or "").strip()
+        if not text:
+            return {}
+
+        marker = "export const dummyData ="
+        start = text.find(marker)
+        if start < 0:
+            return {}
+
+        remainder = text[start + len(marker) :].lstrip()
+        if not remainder.startswith("{"):
+            return {}
+
+        end_marker = "export const dummyDataSchemaHints"
+        end = remainder.find(end_marker)
+        candidate = remainder[:end].strip() if end >= 0 else remainder
+        candidate = candidate.rstrip()
+        if candidate.endswith(";"):
+            candidate = candidate[:-1].rstrip()
+
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    async def _derive_output_schema_from_sample_with_llm(
+        self,
+        *,
+        tool_name: str,
+        tool_description: Optional[str],
+        input_schema: Any,
+        sample_payload: Any,
+    ) -> Optional[Dict[str, Any]]:
+        llm_client = getattr(self.tgi_service, "llm_client", None)
+        if not llm_client:
+            return None
+        has_non_stream = callable(getattr(llm_client, "non_stream_completion", None))
+        if not has_non_stream and not getattr(llm_client, "client", None):
+            return None
+
+        request = ChatCompletionRequest(
+            messages=[
+                Message(
+                    role=MessageRole.SYSTEM,
+                    content=SCHEMA_DERIVATION_SYSTEM_PROMPT,
+                ),
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Derive output schema for the resolved service value from this observed tool data:\n"
+                        + json.dumps(
+                            {
+                                "name": tool_name,
+                                "description": tool_description,
+                                "inputSchema": input_schema,
+                                "sampleResolvedValue": sample_payload,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\nReturn only JSON."
+                    ),
+                ),
+            ],
+            tools=None,
+            stream=False,
+            response_format=_generation_response_format(
+                schema=SCHEMA_DERIVATION_RESPONSE_SCHEMA,
+                name=f"{tool_name}_derived_output_schema",
+            ),
+            extra_headers=UI_MODEL_HEADERS,
+        )
+
+        try:
+            if has_non_stream:
+                response = await llm_client.non_stream_completion(request, None, None)
+            else:
+                response = await llm_client.client.chat.completions.create(
+                    **llm_client._build_request_params(request)
+                )
+        except Exception as exc:
+            logger.warning(
+                "[GeneratedUI] Failed deriving output schema for '%s' from dummy data: %s",
+                tool_name,
+                exc,
+            )
+            return None
+
+        try:
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                return None
+            choice = choices[0]
+            content = getattr(getattr(choice, "message", None), "content", None) or ""
+            if not content and getattr(
+                getattr(choice, "message", None), "tool_calls", None
+            ):
+                content = choice.message.tool_calls[0].function.arguments
+            parsed = json.loads(content) if content else {}
+            schema = parsed.get("schema") if isinstance(parsed, dict) else None
+            if isinstance(schema, dict) and schema:
+                return schema
+        except Exception as exc:
+            logger.warning(
+                "[GeneratedUI] Failed parsing derived output schema for '%s': %s",
+                tool_name,
+                exc,
+            )
+        return None
+
+    async def _augment_tools_with_derived_output_schemas(
+        self,
+        *,
+        allowed_tools: Optional[List[Dict[str, Any]]],
+        dummy_data_module: Optional[str],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        tools = copy.deepcopy(list(allowed_tools or []))
+        if not tools:
+            return [], 0
+
+        dummy_payload = self._extract_dummy_data_payload_from_module(dummy_data_module)
+        if not dummy_payload:
+            return tools, 0
+
+        derived_count = 0
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = (
+                tool.get("function") if isinstance(tool.get("function"), dict) else {}
+            )
+            tool_name = function.get("name") or tool.get("name")
+            if not tool_name:
+                continue
+            if function.get("outputSchema") or tool.get("outputSchema"):
+                continue
+
+            sample_payload = dummy_payload.get(tool_name)
+            if sample_payload is None:
+                continue
+            if isinstance(sample_payload, dict) and sample_payload.get(
+                "_dummy_data_error"
+            ):
+                continue
+            if self._payload_has_error_markers(sample_payload):
+                continue
+
+            derived_schema = await self._derive_output_schema_from_sample_with_llm(
+                tool_name=str(tool_name),
+                tool_description=function.get("description") or tool.get("description"),
+                input_schema=function.get("parameters")
+                or tool.get("inputSchema")
+                or {},
+                sample_payload=sample_payload,
+            )
+            if not derived_schema:
+                continue
+
+            tool["outputSchema"] = derived_schema
+            if isinstance(function, dict):
+                function["outputSchema"] = derived_schema
+            derived_count += 1
+
+        return tools, derived_count
+
     async def _generate_dummy_data(
         self,
         *,
@@ -1026,7 +1271,13 @@ class GeneratedUIService:
                     access_token=access_token,
                 )
                 if sampled is not None:
-                    tool_spec["sampleStructuredContent"] = sampled
+                    if isinstance(sampled, dict) and sampled.get("_dummy_data_error"):
+                        logger.info(
+                            "[GeneratedUI] Ignoring error-shaped sampled output for tool '%s' while building dummy data",
+                            tool_name,
+                        )
+                    else:
+                        tool_spec["sampleStructuredContent"] = sampled
             return tool_spec
 
         tool_specs_results = await asyncio.gather(
@@ -1525,6 +1776,18 @@ class GeneratedUIService:
                 access_token=access_token,
             )
 
+            allowed_tools, derived_schema_count = (
+                await self._augment_tools_with_derived_output_schemas(
+                    allowed_tools=allowed_tools,
+                    dummy_data_module=dummy_data,
+                )
+            )
+            if derived_schema_count:
+                logger.info(
+                    "[stream_generate_ui] Added %s derived output schemas from dummy data to allowed tools",
+                    derived_schema_count,
+                )
+
             messages.append(
                 Message(
                     role=MessageRole.USER,
@@ -1809,7 +2072,9 @@ class GeneratedUIService:
                     "history": self._history_for_prompt(
                         previous_metadata.get("history", [])
                     ),
-                    "current_state": existing.get("current", {}),
+                    "current_state": self._context_state_for_prompt(
+                        existing.get("current", {})
+                    ),
                 },
             }
 
@@ -3117,7 +3382,12 @@ class GeneratedUIService:
         }
 
     def _runtime_context_for_prompt(
-        self, runtime_context: Optional[Dict[str, Any]], *, limit: int = 8
+        self,
+        runtime_context: Optional[Dict[str, Any]],
+        *,
+        limit: int = 8,
+        max_console_events: int = MAX_RUNTIME_CONSOLE_EVENTS,
+        max_bytes: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(runtime_context, dict):
             return None
@@ -3142,7 +3412,7 @@ class GeneratedUIService:
 
         prompt_console_events: List[Dict[str, Any]] = []
         if isinstance(console_events, list):
-            for event in console_events[-MAX_RUNTIME_CONSOLE_EVENTS:]:
+            for event in console_events[-max_console_events:]:
                 if not isinstance(event, dict):
                     continue
                 prompt_console_events.append(
@@ -3161,7 +3431,45 @@ class GeneratedUIService:
             payload["service_exchanges"] = prompt_entries
         if prompt_console_events:
             payload["console_events"] = prompt_console_events
+        if max_bytes and max_bytes > 0:
+            while payload and self._payload_bytes(payload) > max_bytes:
+                if prompt_entries:
+                    prompt_entries.pop(0)
+                    if prompt_entries:
+                        payload["service_exchanges"] = prompt_entries
+                    else:
+                        payload.pop("service_exchanges", None)
+                    continue
+                if prompt_console_events:
+                    prompt_console_events.pop(0)
+                    if prompt_console_events:
+                        payload["console_events"] = prompt_console_events
+                    else:
+                        payload.pop("console_events", None)
+                    continue
+                break
         return payload or None
+
+    def _context_state_for_prompt(
+        self, current_state: Any, *, max_bytes: Optional[int] = None
+    ) -> Any:
+        """Return a bounded representation of previous/current UI state for prompts."""
+        sanitized = self._sanitize_runtime_value(current_state)
+        if not max_bytes or max_bytes <= 0:
+            return sanitized
+        if self._payload_bytes(sanitized) <= max_bytes:
+            return sanitized
+        return self._trim_runtime_text(
+            json.dumps(sanitized, ensure_ascii=False, default=str),
+            limit=max_bytes,
+        )
+
+    def _payload_bytes(self, value: Any) -> int:
+        with contextlib.suppress(Exception):
+            return len(
+                json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+            )
+        return len(str(value).encode("utf-8"))
 
     def _prompt_with_runtime_context(
         self,
@@ -3217,7 +3525,15 @@ class GeneratedUIService:
         session_payload: Dict[str, Any],
         action: TestAction,
         access_token: Optional[str],
-    ) -> Tuple[bool, str, int, int, List[str], Optional[Dict[str, Any]]]:
+    ) -> Tuple[
+        bool,
+        str,
+        int,
+        int,
+        List[str],
+        Optional[Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         draft_payload = copy.deepcopy(session_payload.get("draft_payload", {}))
         service_script = str(draft_payload.get("service_script") or "")
         components_script = str(draft_payload.get("components_script") or "")
@@ -3228,6 +3544,40 @@ class GeneratedUIService:
         )
 
         event_queue: asyncio.Queue = asyncio.Queue()
+        strategy_context: Dict[str, Any] = {
+            "reason_code": "",
+            "reason": "",
+            "suggested_action": "",
+            "tool_why": [],
+        }
+
+        def _capture_strategy_context(event_data: Dict[str, Any]) -> None:
+            event_name = str(event_data.get("event") or "").strip()
+            if event_name == "tool_start":
+                why = str(
+                    event_data.get("why") or event_data.get("fix_explanation") or ""
+                ).strip()
+                if why:
+                    tool_why = strategy_context.setdefault("tool_why", [])
+                    if why not in tool_why:
+                        tool_why.append(self._trim_runtime_text(why, limit=240))
+                    strategy_context["tool_why"] = tool_why[-6:]
+                return
+            if event_name != "test_result":
+                return
+            status = str(event_data.get("status") or "").strip().lower()
+            if status not in {"handoff", "contract_failed", "failed", "error"}:
+                return
+            reason_code = str(event_data.get("reason_code") or "").strip()
+            reason = str(event_data.get("reason") or "").strip()
+            suggested_action = str(event_data.get("suggested_action") or "").strip()
+            if reason_code:
+                strategy_context["reason_code"] = reason_code
+            if reason:
+                strategy_context["reason"] = self._trim_runtime_text(reason, limit=300)
+            if suggested_action:
+                strategy_context["suggested_action"] = suggested_action
+
         strategy_mode: Literal["fix_code", "adjust_test"]
         strategy_mode = "fix_code" if action == "fix_code" else "adjust_test"
         fix_task = asyncio.create_task(
@@ -3253,6 +3603,7 @@ class GeneratedUIService:
                 except asyncio.QueueEmpty:
                     await asyncio.sleep(0.05)
                     continue
+                _capture_strategy_context(event_data)
                 await self._emit_tool_or_test_event(
                     scope=scope,
                     ui_id=ui_id,
@@ -3276,6 +3627,7 @@ class GeneratedUIService:
 
         while not event_queue.empty():
             event_data = event_queue.get_nowait()
+            _capture_strategy_context(event_data)
             await self._emit_tool_or_test_event(
                 scope=scope,
                 ui_id=ui_id,
@@ -3309,6 +3661,7 @@ class GeneratedUIService:
             int(failed),
             list(failed_tests),
             updated_payload,
+            strategy_context,
         )
 
     async def _execute_test_run(
@@ -3378,6 +3731,7 @@ class GeneratedUIService:
             passed = 0
             failed = 0
             failed_tests: List[str] = []
+            strategy_context: Optional[Dict[str, Any]] = None
 
             if action == "run":
                 success, output = await asyncio.to_thread(
@@ -3397,6 +3751,7 @@ class GeneratedUIService:
                     failed,
                     failed_tests,
                     updated_payload,
+                    strategy_context,
                 ) = await self._execute_strategy_fix_action(
                     scope=scope,
                     ui_id=ui_id,
@@ -3465,14 +3820,46 @@ class GeneratedUIService:
                     update_mode=f"tests_{action}",
                 )
 
+            output_tail = self._trim_output(output)
+            failure_analysis: Optional[Dict[str, str]] = None
+            if not success:
+                failure_analysis = await self._explain_test_failure_for_user(
+                    action=action,
+                    passed=int(passed),
+                    failed=int(failed),
+                    failed_tests=list(failed_tests),
+                    output_tail=output_tail,
+                    strategy_context=strategy_context,
+                    access_token=access_token,
+                )
+
             result_payload = {
                 "run_id": run_id,
                 "status": "passed" if success else "failed",
                 "passed": int(passed),
                 "failed": int(failed),
                 "failed_tests": list(failed_tests),
-                "message": "All tests passed" if success else "Tests failed",
+                "message": (
+                    "All tests passed"
+                    if success
+                    else str(
+                        (failure_analysis or {}).get("next_step_text") or "Tests failed"
+                    )
+                ),
+                "is_final": True,
             }
+            if failure_analysis:
+                result_payload["analysis"] = {
+                    "what_failed": str(failure_analysis.get("what_failed") or ""),
+                    "why_it_ended": str(failure_analysis.get("why_it_ended") or ""),
+                    "next_step_text": str(failure_analysis.get("next_step_text") or ""),
+                }
+                result_payload["recommended_action"] = str(
+                    failure_analysis.get("recommended_action") or ""
+                )
+                result_payload["alternative_action"] = str(
+                    failure_analysis.get("alternative_action") or ""
+                )
             await self._append_test_event(
                 scope=scope,
                 ui_id=ui_id,
@@ -3484,7 +3871,6 @@ class GeneratedUIService:
                 run_id=run_id,
             )
 
-            output_tail = self._trim_output(output)
             await self._append_test_event(
                 scope=scope,
                 ui_id=ui_id,
@@ -3497,6 +3883,12 @@ class GeneratedUIService:
             )
 
             completed_at = self._now()
+            status_message = "Tests passing" if success else "Tests failing"
+            if failure_analysis:
+                status_message = self._trim_runtime_text(
+                    failure_analysis.get("next_step_text") or status_message,
+                    limit=240,
+                )
             await self._update_test_state(
                 scope=scope,
                 ui_id=ui_id,
@@ -3506,7 +3898,7 @@ class GeneratedUIService:
                 run_id=run_id,
                 state="passed" if success else "failed",
                 trigger=trigger,
-                message="Tests passing" if success else "Tests failing",
+                message=status_message,
                 completed_at=completed_at,
                 summary_updates={
                     "passed": int(passed),
@@ -3574,6 +3966,7 @@ class GeneratedUIService:
             return
 
         try:
+            yield _assistant_status_event("I will prepare the update request now.")
             session_payload = self._load_session(
                 scope=scope, ui_id=ui_id, name=name, session_id=session_id
             )
@@ -3585,6 +3978,9 @@ class GeneratedUIService:
                 if tools is not None
                 else list(session_payload.get("last_tools") or [])
             )
+            yield _assistant_status_event(
+                "I will select the best tools for this update."
+            )
             selected_tools = await self._select_tools(session, requested_tools, message)
             selected_tool_names = [
                 t.get("function", {}).get("name")
@@ -3594,6 +3990,9 @@ class GeneratedUIService:
             selected_tool_names = [name for name in selected_tool_names if name]
 
             draft_payload = copy.deepcopy(session_payload.get("draft_payload", {}))
+            yield _assistant_status_event(
+                "I will analyze your request against the current draft now."
+            )
             assistant_text = await self._run_assistant_message(
                 session=session,
                 draft_payload=draft_payload,
@@ -3610,26 +4009,73 @@ class GeneratedUIService:
             updated_payload: Optional[Dict[str, Any]] = None
             update_mode = "regenerated_fallback"
             patch_error: Optional[str] = None
+            patch_failure_reasons: List[str] = []
 
             patch_enabled = os.environ.get(
                 "APP_UI_PATCH_ENABLED", "true"
             ).strip().lower() in {"1", "true", "yes", "on"}
             if patch_enabled:
-                patch_attempt = await self._attempt_patch_update(
-                    scope=scope,
-                    ui_id=ui_id,
-                    name=name,
-                    draft_payload=draft_payload,
-                    user_message=message,
-                    assistant_message=assistant_text,
-                    access_token=access_token,
-                    previous_metadata=session_payload.get("metadata_snapshot", {}),
-                )
-                if patch_attempt:
-                    updated_payload = patch_attempt.get("payload")
-                    update_mode = "patch_applied"
-                else:
-                    patch_error = "Patch validation failed, using full regenerate"
+                max_attempts = max(1, int(APP_UI_PATCH_RETRIES))
+                for attempt_index in range(max_attempts):
+                    yield _assistant_status_event(
+                        f"I will try a targeted patch first (attempt {attempt_index + 1}/{max_attempts})."
+                    )
+                    patch_attempt = await self._attempt_patch_update(
+                        scope=scope,
+                        ui_id=ui_id,
+                        name=name,
+                        draft_payload=draft_payload,
+                        user_message=message,
+                        assistant_message=assistant_text,
+                        selected_tools=selected_tools,
+                        access_token=access_token,
+                        previous_metadata=session_payload.get("metadata_snapshot", {}),
+                    )
+                    if patch_attempt:
+                        updated_payload = patch_attempt.get("payload")
+                        update_mode = "patch_applied"
+                        if attempt_index > 0:
+                            logger.info(
+                                "[GeneratedUI] Patch update succeeded on retry attempt %s/%s",
+                                attempt_index + 1,
+                                max_attempts,
+                            )
+                        break
+
+                    patch_reason = (
+                        self._last_patch_failure_reason or "unknown_patch_failure"
+                    )
+                    patch_failure_reasons.append(
+                        f"attempt={attempt_index + 1}/{max_attempts}:{patch_reason}"
+                    )
+                    logger.warning(
+                        "[GeneratedUI] Patch attempt %s/%s failed: %s",
+                        attempt_index + 1,
+                        max_attempts,
+                        patch_reason,
+                    )
+
+                if updated_payload is None:
+                    attempts_text = "; ".join(patch_failure_reasons) or "no_attempts"
+                    patch_error = (
+                        "Patch validation failed, using full regenerate"
+                        f" (attempts={attempts_text})"
+                    )
+                    yield _assistant_status_event(
+                        "I will switch to full regeneration because patch attempts failed."
+                    )
+                    logger.warning(
+                        "[GeneratedUI] Falling back to regenerate after patch failures: %s",
+                        attempts_text,
+                    )
+                    if APP_UI_PATCH_ONLY:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Patch update failed and APP_UI_PATCH_ONLY=true prevents full regeneration "
+                                f"(attempts={attempts_text})"
+                            ),
+                        )
 
             if updated_payload is None:
                 previous = {
@@ -3638,6 +4084,9 @@ class GeneratedUIService:
                     ),
                     "current": draft_payload,
                 }
+                yield _assistant_status_event(
+                    "I will generate a full updated draft now."
+                )
                 regenerate_prompt = self._compose_regeneration_prompt(
                     user_message=message,
                     assistant_message=assistant_text,
@@ -3677,7 +4126,23 @@ class GeneratedUIService:
             }
             if patch_error:
                 ui_event_payload["warning"] = patch_error
+            metadata_obj = (
+                updated_payload.get("metadata")
+                if isinstance(updated_payload, dict)
+                else None
+            )
+            if isinstance(metadata_obj, dict):
+                diagnostics_obj = metadata_obj.get("generation_diagnostics")
+                if isinstance(diagnostics_obj, dict):
+                    prompt_compaction = diagnostics_obj.get(
+                        "message_payload_compaction"
+                    )
+                    if isinstance(prompt_compaction, dict):
+                        ui_event_payload["context_compaction"] = prompt_compaction
             yield _sse_event("ui_updated", ui_event_payload)
+            yield _assistant_status_event(
+                "I will run the validation tests for this updated draft now."
+            )
             queued = await self._queue_test_run(
                 scope=scope,
                 ui_id=ui_id,
@@ -3793,7 +4258,12 @@ class GeneratedUIService:
                 ),
             )
         )
-        runtime_prompt_context = self._runtime_context_for_prompt(runtime_context)
+        runtime_prompt_context = self._runtime_context_for_prompt(
+            runtime_context,
+            limit=GENERATED_UI_MAX_RUNTIME_EXCHANGES,
+            max_console_events=GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
+            max_bytes=GENERATED_UI_MAX_RUNTIME_BYTES,
+        )
         if runtime_prompt_context:
             messages.append(
                 Message(
@@ -3804,7 +4274,12 @@ class GeneratedUIService:
                     ),
                 )
             )
-        for item in history or []:
+        bounded_history = self._history_for_prompt(
+            history,
+            max_entries=GENERATED_UI_MAX_HISTORY_ENTRIES,
+            max_bytes=GENERATED_UI_MAX_HISTORY_BYTES,
+        )
+        for item in bounded_history:
             role = str(item.get("role") or "").lower()
             content = str(item.get("content") or "")
             if role == MessageRole.USER.value:
@@ -3849,6 +4324,169 @@ class GeneratedUIService:
                     return str(content)
         return ""
 
+    def _normalize_failure_action_choice(self, value: Any, default: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in TEST_FAILURE_ACTION_CHOICES:
+            return normalized
+        return default
+
+    def _fallback_test_failure_analysis(
+        self,
+        *,
+        action: TestAction,
+        passed: int,
+        failed: int,
+        failed_tests: Sequence[str],
+        strategy_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        failed_preview = ", ".join(list(failed_tests)[:3]).strip()
+        if failed_preview:
+            if len(list(failed_tests)) > 3:
+                failed_preview += f", ... ({len(list(failed_tests)) - 3} more)"
+            what_failed = f"{failed} tests failed after {passed} passed. Failing tests: {failed_preview}."
+        elif failed > 0:
+            what_failed = f"{failed} tests failed after {passed} passed."
+        else:
+            what_failed = "Tests did not complete successfully."
+
+        strategy_reason = str((strategy_context or {}).get("reason") or "").strip()
+        if strategy_reason:
+            why_it_ended = f"The run ended with a strategy handoff/stop condition: {strategy_reason}"
+        elif action == "fix_code":
+            why_it_ended = (
+                "fix_code mode only applies runtime edits; the remaining failures likely need "
+                "test or fixture adjustments."
+            )
+        elif action == "adjust_test":
+            why_it_ended = "adjust_test mode could not fully resolve the failing assertions with test/fixture edits."
+        else:
+            why_it_ended = "The latest test run still contains failures."
+
+        default_recommended = {
+            "run": "fix_code",
+            "fix_code": "adjust_test",
+            "adjust_test": "fix_code",
+        }.get(action, "fix_code")
+        suggested = self._normalize_failure_action_choice(
+            (strategy_context or {}).get("suggested_action"),
+            default_recommended,
+        )
+        alternative = "adjust_test" if suggested == "fix_code" else "fix_code"
+        if suggested == "run":
+            alternative = "fix_code"
+
+        next_step_text = (
+            f"Recommended next action: {suggested}. Alternative: {alternative}."
+        )
+        return {
+            "what_failed": self._trim_runtime_text(what_failed, limit=600),
+            "why_it_ended": self._trim_runtime_text(why_it_ended, limit=600),
+            "recommended_action": suggested,
+            "alternative_action": alternative,
+            "next_step_text": self._trim_runtime_text(next_step_text, limit=240),
+        }
+
+    async def _explain_test_failure_for_user(
+        self,
+        *,
+        action: TestAction,
+        passed: int,
+        failed: int,
+        failed_tests: Sequence[str],
+        output_tail: str,
+        strategy_context: Optional[Dict[str, Any]],
+        access_token: Optional[str],
+    ) -> Dict[str, str]:
+        fallback = self._fallback_test_failure_analysis(
+            action=action,
+            passed=passed,
+            failed=failed,
+            failed_tests=failed_tests,
+            strategy_context=strategy_context,
+        )
+        llm_client = getattr(self.tgi_service, "llm_client", None)
+        non_stream = getattr(llm_client, "non_stream_completion", None)
+        if not callable(non_stream):
+            return fallback
+
+        payload = {
+            "action": action,
+            "passed": int(passed),
+            "failed": int(failed),
+            "failed_tests": list(failed_tests)[:8],
+            "output_tail": output_tail,
+            "strategy_context": strategy_context or {},
+            "requirements": {
+                "explain_what_failed": True,
+                "explain_why_it_ended": True,
+                "recommend_one_next_action": TEST_FAILURE_ACTION_CHOICES,
+            },
+        }
+        request = ChatCompletionRequest(
+            messages=[
+                Message(
+                    role=MessageRole.SYSTEM,
+                    content=(
+                        "You explain generated-ui test failures to end users. "
+                        "Be concise, practical, and action-oriented. "
+                        "Always explain why the run ended and what the user should do next."
+                    ),
+                ),
+                Message(
+                    role=MessageRole.USER,
+                    content=json.dumps(payload, ensure_ascii=False),
+                ),
+            ],
+            stream=False,
+            response_format=_generation_response_format(
+                schema=_TEST_FAILURE_EXPLANATION_SCHEMA,
+                name="test_failure_explanation",
+            ),
+            extra_headers=UI_MODEL_HEADERS,
+        )
+        try:
+            response = await non_stream(request, access_token or "", None)
+            content = self._assistant_text_from_response(response)
+            if not content.strip():
+                return fallback
+            parsed = self._parse_json(content)
+        except Exception as exc:
+            logger.warning(
+                "[GeneratedUI] Failed to generate test failure explanation via LLM: %s",
+                exc,
+            )
+            return fallback
+
+        what_failed = str(parsed.get("what_failed") or "").strip()
+        why_it_ended = str(parsed.get("why_it_ended") or "").strip()
+        next_step_text = str(parsed.get("next_step_text") or "").strip()
+        recommended_action = self._normalize_failure_action_choice(
+            parsed.get("recommended_action"),
+            fallback["recommended_action"],
+        )
+        alternative_action = self._normalize_failure_action_choice(
+            parsed.get("alternative_action"),
+            fallback["alternative_action"],
+        )
+        if not what_failed:
+            what_failed = fallback["what_failed"]
+        if not why_it_ended:
+            why_it_ended = fallback["why_it_ended"]
+        if not next_step_text:
+            next_step_text = fallback["next_step_text"]
+        if alternative_action == recommended_action:
+            alternative_action = (
+                "adjust_test" if recommended_action == "fix_code" else "fix_code"
+            )
+
+        return {
+            "what_failed": self._trim_runtime_text(what_failed, limit=600),
+            "why_it_ended": self._trim_runtime_text(why_it_ended, limit=600),
+            "recommended_action": recommended_action,
+            "alternative_action": alternative_action,
+            "next_step_text": self._trim_runtime_text(next_step_text, limit=240),
+        }
+
     async def _attempt_patch_update(
         self,
         *,
@@ -3860,7 +4498,25 @@ class GeneratedUIService:
         assistant_message: str,
         access_token: Optional[str],
         previous_metadata: Dict[str, Any],
+        selected_tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
+        self._last_patch_failure_reason = None
+
+        def _fail(
+            reason: str, detail: Optional[str] = None
+        ) -> Optional[Dict[str, Any]]:
+            message = reason if not detail else f"{reason}: {detail}"
+            self._last_patch_failure_reason = message
+            logger.warning(
+                "[GeneratedUI] Patch update failed (%s) scope=%s:%s ui_id=%s name=%s",
+                message,
+                scope.kind,
+                scope.identifier,
+                ui_id,
+                name,
+            )
+            return None
+
         try:
             system_prompt = (
                 "You are a UI patch planner. Return valid JSON only in this shape: "
@@ -3891,6 +4547,10 @@ class GeneratedUIService:
                     ),
                 ],
                 stream=False,
+                response_format=_generation_response_format(
+                    schema=_PATCH_UPDATE_SCHEMA,
+                    name="generated_ui_patch",
+                ),
                 extra_headers=UI_MODEL_HEADERS,
             )
 
@@ -3899,12 +4559,15 @@ class GeneratedUIService:
             )
             content = self._assistant_text_from_response(response)
             if not content:
-                return None
+                return _fail("empty_patch_response")
 
-            parsed = self._parse_json(content)
+            try:
+                parsed = self._parse_json(content)
+            except Exception as exc:
+                return _fail("invalid_patch_json", str(exc))
             patch = parsed.get("patch")
             if not isinstance(patch, dict):
-                return None
+                return _fail("missing_patch_object")
 
             candidate = copy.deepcopy(draft_payload)
             html_patch = patch.get("html")
@@ -3965,11 +4628,50 @@ class GeneratedUIService:
                     candidate.get("dummy_data"),
                 )
                 if not success:
-                    return None
+                    logger.warning(
+                        "[GeneratedUI] Patch candidate failed tests; invoking iterative fixer loop"
+                    )
+                    fix_messages = [
+                        Message(role=MessageRole.USER, content=user_message),
+                    ]
+                    if isinstance(assistant_message, str) and assistant_message.strip():
+                        fix_messages.append(
+                            Message(
+                                role=MessageRole.ASSISTANT,
+                                content=assistant_message,
+                            )
+                        )
+                    (
+                        fix_success,
+                        fixed_service,
+                        fixed_components,
+                        fixed_test,
+                        fixed_dummy_data,
+                        _updated_messages,
+                    ) = await self._iterative_test_fix(
+                        service_script=service_script,
+                        components_script=components_script,
+                        test_script=test_script,
+                        dummy_data=candidate.get("dummy_data"),
+                        messages=fix_messages,
+                        allowed_tools=selected_tools,
+                        access_token=access_token,
+                        max_attempts=8,
+                    )
+                    if fix_success:
+                        candidate["service_script"] = fixed_service
+                        candidate["components_script"] = fixed_components
+                        candidate["test_script"] = fixed_test
+                        candidate["dummy_data"] = fixed_dummy_data
+                        logger.info(
+                            "[GeneratedUI] Patch candidate repaired via iterative fixer loop"
+                        )
+                        return {"payload": candidate}
+                    return _fail("patch_tests_failed_fix_loop_failed")
 
             return {"payload": candidate}
-        except Exception:
-            return None
+        except Exception as exc:
+            return _fail("patch_exception", f"{type(exc).__name__}: {exc}")
 
     async def _generate_ui_payload(
         self,
@@ -4004,14 +4706,25 @@ class GeneratedUIService:
 
         if previous:
             previous_metadata = previous.get("metadata", {})
+            bounded_history = self._history_for_prompt(
+                previous_metadata.get("history", []),
+                max_entries=GENERATED_UI_MAX_HISTORY_ENTRIES,
+                max_bytes=GENERATED_UI_MAX_HISTORY_BYTES,
+            )
             message_payload["context"] = {
                 "original_prompt": self._initial_prompt(previous_metadata),
-                "history": self._history_for_prompt(
-                    previous_metadata.get("history", [])
+                "history": bounded_history,
+                "current_state": self._context_state_for_prompt(
+                    previous.get("current", {}),
+                    max_bytes=max(2048, GENERATED_UI_MAX_HISTORY_BYTES // 2),
                 ),
-                "current_state": previous.get("current", {}),
             }
-        runtime_prompt_context = self._runtime_context_for_prompt(runtime_context)
+        runtime_prompt_context = self._runtime_context_for_prompt(
+            runtime_context,
+            limit=GENERATED_UI_MAX_RUNTIME_EXCHANGES,
+            max_console_events=GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
+            max_bytes=GENERATED_UI_MAX_RUNTIME_BYTES,
+        )
         if runtime_prompt_context:
             context_obj = message_payload.setdefault("context", {})
             if runtime_prompt_context.get("service_exchanges"):
@@ -4023,6 +4736,11 @@ class GeneratedUIService:
                     "console_events"
                 )
 
+        message_payload, prompt_compaction = self._cap_message_payload_for_prompt(
+            message_payload,
+            max_bytes=GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES,
+        )
+
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             Message(
@@ -4032,6 +4750,11 @@ class GeneratedUIService:
         ]
 
         allowed_tools = await self._select_tools(session, tools, prompt)
+        allowed_tools = self._cap_tools_for_prompt(
+            allowed_tools,
+            max_tools=GENERATED_UI_MAX_TOOLS,
+            max_bytes=GENERATED_UI_MAX_TOOLS_BYTES,
+        )
 
         dummy_data = await self._generate_dummy_data(
             session=session,
@@ -4043,6 +4766,19 @@ class GeneratedUIService:
             access_token=access_token,
             runtime_context=runtime_context,
         )
+
+        allowed_tools, derived_schema_count = (
+            await self._augment_tools_with_derived_output_schemas(
+                allowed_tools=allowed_tools,
+                dummy_data_module=dummy_data,
+            )
+        )
+        if derived_schema_count:
+            logger.info(
+                "[_generate_ui_payload] Added %s derived output schemas from dummy data to allowed tools",
+                derived_schema_count,
+            )
+
         messages.append(
             Message(
                 role=MessageRole.USER,
@@ -4089,6 +4825,16 @@ class GeneratedUIService:
         payload = self._parse_json(content)
         payload["dummy_data"] = payload.get("dummy_data") or dummy_data
         self._normalise_payload(payload, scope, ui_id, name, prompt, previous)
+        if prompt_compaction:
+            metadata_obj = payload.get("metadata")
+            if not isinstance(metadata_obj, dict):
+                metadata_obj = {}
+                payload["metadata"] = metadata_obj
+            diagnostics_obj = metadata_obj.get("generation_diagnostics")
+            if not isinstance(diagnostics_obj, dict):
+                diagnostics_obj = {}
+                metadata_obj["generation_diagnostics"] = diagnostics_obj
+            diagnostics_obj["message_payload_compaction"] = prompt_compaction
         return payload
 
     async def _build_system_prompt(self, session: MCPSessionBase) -> str:
@@ -4142,7 +4888,7 @@ class GeneratedUIService:
         """
         # Get all tools with output schema for UI generation
         available = await self.tgi_service.tool_service.get_all_mcp_tools(
-            session, include_output_schema=True
+            session, include_output_schema=GENERATED_UI_INCLUDE_OUTPUT_SCHEMA
         )
 
         if not available:
@@ -4503,7 +5249,11 @@ class GeneratedUIService:
         return entry
 
     def _history_for_prompt(
-        self, history_entries: Sequence[Any]
+        self,
+        history_entries: Sequence[Any],
+        *,
+        max_entries: Optional[int] = None,
+        max_bytes: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         sanitized: List[Dict[str, Any]] = []
         for entry in history_entries or []:
@@ -4513,7 +5263,183 @@ class GeneratedUIService:
             entry_copy.pop("payload_html", None)
             entry_copy.pop("payload_scripts", None)
             sanitized.append(entry_copy)
+
+        if max_entries and max_entries > 0 and len(sanitized) > max_entries:
+            sanitized = sanitized[-max_entries:]
+
+        if max_bytes and max_bytes > 0:
+            while sanitized and self._payload_bytes(sanitized) > max_bytes:
+                sanitized.pop(0)
         return sanitized
+
+    def _cap_tools_for_prompt(
+        self,
+        tools: Optional[List[Dict[str, Any]]],
+        *,
+        max_tools: Optional[int],
+        max_bytes: Optional[int],
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not tools:
+            return tools
+
+        capped = copy.deepcopy(list(tools))
+        original_count = len(capped)
+        original_bytes = self._payload_bytes(capped)
+
+        if max_tools and max_tools > 0 and len(capped) > max_tools:
+            capped = capped[:max_tools]
+
+        if max_bytes and max_bytes > 0 and self._payload_bytes(capped) > max_bytes:
+            for tool in capped:
+                if not isinstance(tool, dict):
+                    continue
+                function = tool.get("function")
+                if isinstance(function, dict):
+                    function.pop("outputSchema", None)
+                tool.pop("outputSchema", None)
+
+        if max_bytes and max_bytes > 0:
+            while len(capped) > 1 and self._payload_bytes(capped) > max_bytes:
+                capped.pop()
+
+        if (
+            len(capped) != original_count
+            or self._payload_bytes(capped) != original_bytes
+        ):
+            logger.info(
+                "[GeneratedUI] Tool payload capped: count %s -> %s, bytes %s -> %s",
+                original_count,
+                len(capped),
+                original_bytes,
+                self._payload_bytes(capped),
+            )
+
+        return capped
+
+    def _cap_message_payload_for_prompt(
+        self,
+        message_payload: Dict[str, Any],
+        *,
+        max_bytes: Optional[int],
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        if not isinstance(message_payload, dict):
+            return message_payload, None
+        if not max_bytes or max_bytes <= 0:
+            return message_payload, None
+
+        capped = copy.deepcopy(message_payload)
+        original_bytes = self._payload_bytes(capped)
+        steps_applied: List[str] = []
+        if self._payload_bytes(capped) <= max_bytes:
+            return capped, None
+
+        context_obj = capped.get("context")
+        if isinstance(context_obj, dict):
+            context_obj.pop("runtime_console_events", None)
+            steps_applied.append("drop_runtime_console_events")
+        if self._payload_bytes(capped) <= max_bytes:
+            return (
+                capped,
+                {
+                    "original_bytes": original_bytes,
+                    "final_bytes": self._payload_bytes(capped),
+                    "budget_bytes": max_bytes,
+                    "steps": steps_applied,
+                },
+            )
+
+        context_obj = capped.get("context")
+        if isinstance(context_obj, dict):
+            exchanges = context_obj.get("runtime_service_exchanges")
+            if isinstance(exchanges, list):
+                removed = 0
+                while exchanges and self._payload_bytes(capped) > max_bytes:
+                    exchanges.pop(0)
+                    removed += 1
+                if not exchanges:
+                    context_obj.pop("runtime_service_exchanges", None)
+                if removed:
+                    steps_applied.append(f"trim_runtime_service_exchanges:{removed}")
+        if self._payload_bytes(capped) <= max_bytes:
+            return (
+                capped,
+                {
+                    "original_bytes": original_bytes,
+                    "final_bytes": self._payload_bytes(capped),
+                    "budget_bytes": max_bytes,
+                    "steps": steps_applied,
+                },
+            )
+
+        context_obj = capped.get("context")
+        if isinstance(context_obj, dict):
+            history = context_obj.get("history")
+            if isinstance(history, list):
+                removed = 0
+                while history and self._payload_bytes(capped) > max_bytes:
+                    history.pop(0)
+                    removed += 1
+                if not history:
+                    context_obj.pop("history", None)
+                if removed:
+                    steps_applied.append(f"trim_history:{removed}")
+        if self._payload_bytes(capped) <= max_bytes:
+            return (
+                capped,
+                {
+                    "original_bytes": original_bytes,
+                    "final_bytes": self._payload_bytes(capped),
+                    "budget_bytes": max_bytes,
+                    "steps": steps_applied,
+                },
+            )
+
+        context_obj = capped.get("context")
+        if isinstance(context_obj, dict) and "current_state" in context_obj:
+            context_obj["current_state"] = self._context_state_for_prompt(
+                context_obj.get("current_state"),
+                max_bytes=max(512, max_bytes // 6),
+            )
+            steps_applied.append("compact_current_state")
+        if self._payload_bytes(capped) <= max_bytes:
+            return (
+                capped,
+                {
+                    "original_bytes": original_bytes,
+                    "final_bytes": self._payload_bytes(capped),
+                    "budget_bytes": max_bytes,
+                    "steps": steps_applied,
+                },
+            )
+
+        context_obj = capped.get("context")
+        if isinstance(context_obj, dict):
+            context_obj.pop("current_state", None)
+            if not context_obj:
+                capped.pop("context", None)
+            steps_applied.append("drop_current_state")
+
+        if self._payload_bytes(capped) > max_bytes:
+            logger.warning(
+                "[GeneratedUI] message payload still above budget after capping: bytes=%s budget=%s",
+                self._payload_bytes(capped),
+                max_bytes,
+            )
+        else:
+            logger.info(
+                "[GeneratedUI] Message payload capped to %s bytes (budget=%s)",
+                self._payload_bytes(capped),
+                max_bytes,
+            )
+        return (
+            capped,
+            {
+                "original_bytes": original_bytes,
+                "final_bytes": self._payload_bytes(capped),
+                "budget_bytes": max_bytes,
+                "steps": steps_applied,
+            },
+        )
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

@@ -408,6 +408,35 @@ class TestAdaptiveCompressor:
         assert "hierarchical" in stats.metadata.get("steps_used", [])
 
     @pytest.mark.asyncio
+    async def test_offload_context_step_adds_summary_refs(
+        self, compressor, mock_summarize_fn
+    ):
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role=MessageRole.SYSTEM, content="System"),
+                Message(
+                    role=MessageRole.USER,
+                    content='{"request":' + '"x"' * 6000 + "}",
+                ),
+            ]
+        )
+
+        compressed, stats = await compressor.compress(
+            request, max_size=700, summarize_fn=mock_summarize_fn
+        )
+
+        assert "offload_context" in stats.metadata.get("steps_used", [])
+        offloaded = stats.metadata.get("offloaded_context") or {}
+        assert int(offloaded.get("count", 0)) >= 1
+        first = (offloaded.get("items") or [])[0]
+        assert "ref_id" in first
+        assert "summary_bullets" in first
+        assert "[CONTEXT OFFLOAD SUMMARY]" in (compressed.messages[1].content or "")
+        assert "retrieval_tool: request_context(ref_id)" in (
+            compressed.messages[1].content or ""
+        )
+
+    @pytest.mark.asyncio
     async def test_sliding_window_step(self, compressor, mock_summarize_fn):
         """Test sliding window compression step."""
         messages = [Message(role=MessageRole.SYSTEM, content="System")]

@@ -868,3 +868,181 @@ async def test_phase1_passes_schema_validator_to_iterative_fix():
     assert validator_state["seen"] is True
     assert validator_state["calls"] >= 2
     assert run_tests_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_phase1_autofixes_hard_fail_schema_hint_guards():
+    class MockChunk:
+        def __init__(self, content=None, is_done=False):
+            self.content = content
+            self.is_done = is_done
+            self.tool_calls = None
+            self.accumulated_tool_calls = None
+            self.finish_reason = None
+
+    async def mock_stream(*_args, **_kwargs):
+        payload = {
+            "components_script": "pfusch('x-widget', { data: null }, () => [html.div('ok')]);",
+            "test_script": (
+                "import { it } from 'node:test';\n"
+                "import { dummyDataSchemaHints } from './dummy_data.js';\n"
+                "it('hard-fails on schema hint', () => {\n"
+                "  if (dummyDataSchemaHints?.get_current_weather) {\n"
+                "    throw new Error('missing schema');\n"
+                "  }\n"
+                "});"
+            ),
+        }
+        yield MockChunk(content=json.dumps(payload), is_done=False)
+        yield MockChunk(content=None, is_done=True)
+
+    tgi_service = MagicMock()
+    tgi_service.llm_client = MagicMock()
+    tgi_service.llm_client.stream_completion = mock_stream
+
+    run_tests_called = False
+    iterative_fix_called = False
+
+    def run_tests(_service_script, _components_script, _test_script, _dummy_data):
+        nonlocal run_tests_called
+        run_tests_called = True
+        assert "throw new Error('missing schema')" not in _test_script
+        assert "schema hint is informational" in _test_script
+        return True, "ok"
+
+    async def iterative_test_fix(**_kwargs):
+        nonlocal iterative_fix_called
+        iterative_fix_called = True
+        return False, "", "", "", _kwargs.get("dummy_data"), _kwargs.get("messages")
+
+    @asynccontextmanager
+    async def mock_chunk_reader(stream_source):
+        class Reader:
+            def as_parsed(self):
+                return stream_source
+
+        yield Reader()
+
+    messages = [
+        Message(role=MessageRole.SYSTEM, content="sys"),
+        Message(role=MessageRole.USER, content="user"),
+    ]
+
+    dummy_data = (
+        "export const dummyData = {};\n"
+        "export const dummyDataSchemaHints = {\n"
+        '  "get_current_weather": {"schema_status": "missing_output_schema"}\n'
+        "};"
+    )
+
+    result_payload = None
+    async for item in run_phase1_attempt(
+        attempt=1,
+        max_attempts=3,
+        messages=messages,
+        allowed_tools=[],
+        dummy_data=dummy_data,
+        access_token=None,
+        tgi_service=tgi_service,
+        parse_json=lambda content: json.loads(content),
+        run_tests=run_tests,
+        iterative_test_fix=iterative_test_fix,
+        chunk_reader=mock_chunk_reader,
+        ui_model_headers={},
+    ):
+        if isinstance(item, dict) and item.get("type") == "result":
+            result_payload = item
+
+    assert result_payload is not None
+    assert result_payload["success"] is True
+    assert run_tests_called is True
+    assert iterative_fix_called is False
+
+
+@pytest.mark.asyncio
+async def test_phase1_autofixes_schema_field_drift_in_test_script():
+    class MockChunk:
+        def __init__(self, content=None, is_done=False):
+            self.content = content
+            self.is_done = is_done
+            self.tool_calls = None
+            self.accumulated_tool_calls = None
+            self.finish_reason = None
+
+    async def mock_stream(*_args, **_kwargs):
+        payload = {
+            "components_script": "pfusch('x-widget', { data: null }, () => [html.div('ok')]);",
+            "test_script": (
+                "import { it } from 'node:test';\n"
+                "import { dummyData } from './dummy_data.js';\n"
+                "it('drift key', () => {\n"
+                "  const mockData = dummyData.get_current_weather ?? { wind_speed_kmh: 15 };\n"
+                "  const speed = dummyData.get_current_weather?.wind_speed_kmh ?? mockData.wind_speed_kmh;\n"
+                "  if (speed) { return; }\n"
+                "});"
+            ),
+        }
+        yield MockChunk(content=json.dumps(payload), is_done=False)
+        yield MockChunk(content=None, is_done=True)
+
+    tgi_service = MagicMock()
+    tgi_service.llm_client = MagicMock()
+    tgi_service.llm_client.stream_completion = mock_stream
+
+    run_tests_called = False
+    iterative_fix_called = False
+
+    def run_tests(_service_script, _components_script, _test_script, _dummy_data):
+        nonlocal run_tests_called
+        run_tests_called = True
+        assert "wind_speed_kmh" not in _test_script
+        assert "wind_speed" in _test_script
+        return True, "ok"
+
+    async def iterative_test_fix(**_kwargs):
+        nonlocal iterative_fix_called
+        iterative_fix_called = True
+        return False, "", "", "", _kwargs.get("dummy_data"), _kwargs.get("messages")
+
+    @asynccontextmanager
+    async def mock_chunk_reader(stream_source):
+        class Reader:
+            def as_parsed(self):
+                return stream_source
+
+        yield Reader()
+
+    messages = [
+        Message(role=MessageRole.SYSTEM, content="sys"),
+        Message(role=MessageRole.USER, content="user"),
+    ]
+
+    dummy_data = (
+        "export const dummyData = {\n"
+        '  "get_current_weather": {"wind_speed": 12}\n'
+        "};\n"
+        "export const dummyDataSchemaHints = {};"
+    )
+
+    result_payload = None
+    async for item in run_phase1_attempt(
+        attempt=1,
+        max_attempts=3,
+        messages=messages,
+        allowed_tools=[],
+        dummy_data=dummy_data,
+        access_token=None,
+        tgi_service=tgi_service,
+        parse_json=lambda content: json.loads(content),
+        run_tests=run_tests,
+        iterative_test_fix=iterative_test_fix,
+        chunk_reader=mock_chunk_reader,
+        ui_model_headers={},
+    ):
+        if isinstance(item, dict) and item.get("type") == "result":
+            result_payload = item
+
+    assert result_payload is not None
+    assert result_payload["success"] is True
+    assert run_tests_called is True
+    assert iterative_fix_called is False

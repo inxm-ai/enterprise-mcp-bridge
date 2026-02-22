@@ -13,3 +13,12 @@ def test_mcp_map_header_to_input_parsing(monkeypatch):
     assert isinstance(mapping, dict)
     assert mapping.get("userId") == "x-auth-user-id"
     assert mapping.get("email") == "x-auth-user-email"
+
+
+def test_app_ui_patch_only_defaults_true(monkeypatch):
+    monkeypatch.delenv("APP_UI_PATCH_ONLY", raising=False)
+    import app.vars as vars_module
+
+    importlib.reload(vars_module)
+
+    assert vars_module.APP_UI_PATCH_ONLY is True

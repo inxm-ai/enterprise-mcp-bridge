@@ -214,6 +214,18 @@ class DummyDataGenerator:
             return value.get("structuredContent")
         return value
 
+    def _is_error_observed_sample(self, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("_dummy_data_error") is True:
+            return True
+        if value.get("isError") is True:
+            return True
+        explicit_error = value.get("error")
+        if isinstance(explicit_error, (str, dict, list)) and explicit_error:
+            return True
+        return False
+
     def _normalize_payload_for_tools(
         self, payload: Dict[str, Any], tool_specs: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -238,6 +250,8 @@ class DummyDataGenerator:
             if observed is None:
                 observed = spec.get("sampleStructuredContent")
             if not tool_name or observed is None:
+                continue
+            if self._is_error_observed_sample(observed):
                 continue
             payload[tool_name] = observed
         return payload

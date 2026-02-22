@@ -96,6 +96,21 @@ RUNTIME_BOOTSTRAP_SCRIPT = f"{RUNTIME_BRIDGE_SCRIPT}{MCP_SERVICE_HELPER_SCRIPT}"
 
 
 class GeneratedUIOutputFactory:
+    def _infer_root_tag_from_script(self, script: str) -> Optional[str]:
+        if not isinstance(script, str) or not script.strip():
+            return None
+        try:
+            match = re.search(
+                r"\bpfusch\s*\(\s*['\"]([a-z][a-z0-9-]*)['\"]",
+                script,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return match.group(1)
+        except Exception:
+            return None
+        return None
+
     def _script_block_with_placeholders(self) -> str:
         return SCRIPT_BLOCK_TEMPLATE
 
@@ -218,6 +233,39 @@ class GeneratedUIOutputFactory:
                 detail="Generated payload must be a JSON object",
             )
 
+        if not isinstance(payload.get("template_parts"), dict):
+            legacy_title = payload.get("title")
+            legacy_styles = payload.get("styles")
+            legacy_script = payload.get("script")
+            legacy_html = payload.get("html")
+
+            has_legacy_parts = any(
+                isinstance(value, str) and value.strip()
+                for value in (legacy_title, legacy_styles, legacy_script)
+            )
+            if has_legacy_parts or isinstance(legacy_html, str):
+                snippet_html = legacy_html if isinstance(legacy_html, str) else ""
+                if not snippet_html.strip():
+                    inferred_tag = self._infer_root_tag_from_script(
+                        str(legacy_script or "")
+                    )
+                    snippet_html = (
+                        f"<{inferred_tag}></{inferred_tag}>"
+                        if inferred_tag
+                        else '<div class="generated-root"></div>'
+                    )
+
+                payload["template_parts"] = {
+                    "title": str(legacy_title or "Generated Ui"),
+                    "styles": str(legacy_styles or ""),
+                    "html": snippet_html,
+                    "script": str(legacy_script or ""),
+                }
+                logger.warning(
+                    "Generated payload used legacy top-level parts; auto-upgraded to template_parts. keys=%s",
+                    list(payload.keys()),
+                )
+
         template_parts = payload.get("template_parts")
         if isinstance(template_parts, dict):
             title = _html_escape.escape(
@@ -257,7 +305,10 @@ class GeneratedUIOutputFactory:
 
         # If the model returned a bare string for the html section, accept it
         if isinstance(html_section, str):
-            html_section = {"page": html_section}
+            if html_section.strip():
+                html_section = {"page": html_section}
+            else:
+                html_section = None
 
         # If there is no explicit `html` key, attempt to salvage common
         # alternatives (top-level `page`, `snippet`, `content`, `body`, etc.)

@@ -746,6 +746,9 @@ async def test_tool_fix_read_only_streak_forces_run_tests(monkeypatch):
 @pytest.mark.asyncio
 async def test_fix_code_bails_early_on_repeated_assertion_signature(monkeypatch):
     monkeypatch.setattr("app.app_facade.test_fix_tools.READ_ONLY_STREAK_LIMIT", 1)
+    monkeypatch.setattr(
+        "app.app_facade.test_fix_tools.FIX_CODE_ASSERTION_BAILOUT_LIMIT", 3
+    )
 
     run_calls = {"count": 0}
 
@@ -792,6 +795,7 @@ async def test_fix_code_bails_early_on_repeated_assertion_signature(monkeypatch)
         def __init__(self):
             self.llm_client = MockClient()
 
+    event_queue: asyncio.Queue = asyncio.Queue()
     success, *_ = await run_tool_driven_test_fix(
         tgi_service=MockTGIService(),
         service_script="export class McpService {}",
@@ -802,13 +806,149 @@ async def test_fix_code_bails_early_on_repeated_assertion_signature(monkeypatch)
         allowed_tools=None,
         access_token=None,
         max_attempts=12,
-        event_queue=None,
+        event_queue=event_queue,
         extra_headers=None,
         strategy_mode="fix_code",
     )
 
+    handoff_events = []
+    while not event_queue.empty():
+        event = event_queue.get_nowait()
+        if event.get("event") == "test_result" and event.get("status") == "handoff":
+            handoff_events.append(event)
+
     assert success is False
-    assert run_calls["count"] <= 3
+    assert run_calls["count"] >= 5
+    assert handoff_events
+    assert handoff_events[-1].get("reason_code") == "assertion_signature_repeat"
+    assert handoff_events[-1].get("suggested_action") == "adjust_test"
+
+
+@pytest.mark.asyncio
+async def test_fix_code_bail_override_allows_one_more_focused_attempt(monkeypatch):
+    monkeypatch.setattr("app.app_facade.test_fix_tools.READ_ONLY_STREAK_LIMIT", 1)
+    monkeypatch.setattr(
+        "app.app_facade.test_fix_tools.FIX_CODE_ASSERTION_BAILOUT_LIMIT", 3
+    )
+
+    run_calls = {"count": 0}
+
+    def fake_run_tests(self, test_name=None):
+        run_calls["count"] += 1
+        return ToolResult(
+            success=False,
+            content=(
+                "TAP version 13\n"
+                "not ok 1 - Weather Dashboard Tests\n"
+                "AssertionError [ERR_ASSERTION]: expected true\n"
+                "at TestContext.<anonymous> (file:///tmp/tmpx/user_test.js:27:10)\n"
+                "# pass 1\n"
+                "# fail 2\n"
+            ),
+        )
+
+    monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
+
+    class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            content = None
+            if self.calls == 4:
+                content = "BAIL_OVERRIDE: Response field mapping still looks wrong in runtime component normalization."
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": content,
+                                        "tool_calls": [
+                                            type(
+                                                "ToolCall",
+                                                (),
+                                                {
+                                                    "id": f"call_{self.calls}",
+                                                    "type": "function",
+                                                    "function": type(
+                                                        "Function",
+                                                        (),
+                                                        {
+                                                            "name": "search_files",
+                                                            "arguments": json.dumps(
+                                                                {
+                                                                    "regex": "aqData\\.pm2_5",
+                                                                    "script_type": "test",
+                                                                }
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            )
+                                        ],
+                                    },
+                                )
+                            },
+                        )
+                    ]
+                },
+            )
+
+    class MockClient:
+        def __init__(self):
+            self.client = type(
+                "Chat",
+                (),
+                {
+                    "chat": type(
+                        "CompletionsWrap", (), {"completions": MockCompletions()}
+                    )()
+                },
+            )()
+            self.model_format = None
+
+        def _build_request_params(self, request):
+            return {"chat_request": request}
+
+    class MockTGIService:
+        def __init__(self):
+            self.llm_client = MockClient()
+
+    event_queue: asyncio.Queue = asyncio.Queue()
+    success, *_ = await run_tool_driven_test_fix(
+        tgi_service=MockTGIService(),
+        service_script="export class McpService {}",
+        components_script="export const init = () => {};",
+        test_script="import { test } from 'node:test'; test('x', () => { throw new Error('fail'); });",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.SYSTEM, content="system")],
+        allowed_tools=None,
+        access_token=None,
+        max_attempts=14,
+        event_queue=event_queue,
+        extra_headers=None,
+        strategy_mode="fix_code",
+    )
+
+    handoff_events = []
+    while not event_queue.empty():
+        event = event_queue.get_nowait()
+        if event.get("event") == "test_result" and event.get("status") == "handoff":
+            handoff_events.append(event)
+
+    assert success is False
+    assert run_calls["count"] >= 6
+    assert handoff_events
+    assert "BAIL_OVERRIDE" in str(handoff_events[-1].get("reason", ""))
 
 
 @pytest.mark.asyncio
@@ -1184,3 +1324,79 @@ async def test_post_success_validator_allows_success_after_mutation(monkeypatch)
     assert success is True
     assert "mode = 'good'" in comps
     assert validator_calls["count"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_fix_code_mode_handoffs_test_side_contract_failures(monkeypatch):
+    def fake_run_tests(self, test_name=None):
+        return ToolResult(
+            success=True,
+            content="# pass 1\n# fail 0\n",
+            metadata={"passed": 1, "failed": 0},
+        )
+
+    monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
+
+    class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            return _make_tool_call_response("run_tests", "{}")
+
+    class MockClient:
+        def __init__(self):
+            self.completions = MockCompletions()
+            self.client = type(
+                "Chat",
+                (),
+                {
+                    "chat": type(
+                        "CompletionsWrap",
+                        (),
+                        {"completions": self.completions},
+                    )()
+                },
+            )()
+            self.model_format = None
+
+        def _build_request_params(self, request):
+            return {"chat_request": request}
+
+    class MockTGIService:
+        def __init__(self):
+            self.llm_client = MockClient()
+
+    def validator(_svc, _comps, _tests, _fixtures):
+        return (
+            False,
+            "schema_contract_risk_after_fix: schema_field_drift:test_mock:addResolved:get_weather_details.daily_forecast->forecast",
+        )
+
+    service = MockTGIService()
+    success, _svc, _comps, _tests, _dummy, updated = await run_tool_driven_test_fix(
+        tgi_service=service,
+        service_script="export class McpService {}",
+        components_script="export const mode = 'ok';",
+        test_script="import { test } from 'node:test'; test('x', () => {});",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.SYSTEM, content="system")],
+        allowed_tools=None,
+        access_token=None,
+        max_attempts=5,
+        event_queue=None,
+        extra_headers=None,
+        strategy_mode="fix_code",
+        post_success_validator=validator,
+    )
+
+    assert success is False
+    assert service.llm_client.completions.calls == 0
+    assert any(
+        (
+            msg.role == MessageRole.USER
+            and "Handing off to adjust_test stage" in (msg.content or "")
+        )
+        for msg in updated
+    )

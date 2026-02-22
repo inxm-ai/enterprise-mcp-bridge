@@ -1,11 +1,13 @@
 import copy
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
 
+import app.app_facade.generated_service as generated_service_module
 from app.app_facade.generated_service import Actor, GeneratedUIService, Scope
 from app.app_facade.generated_storage import GeneratedUIStorage
 
@@ -161,6 +163,14 @@ async def test_stream_chat_update_falls_back_to_regenerate(tmp_path, monkeypatch
         payload["html"][
             "page"
         ] = "<!DOCTYPE html><html><body><div>regen</div></body></html>"
+        payload["metadata"]["generation_diagnostics"] = {
+            "message_payload_compaction": {
+                "original_bytes": 90000,
+                "final_bytes": 28000,
+                "budget_bytes": 32000,
+                "steps": ["trim_history:8", "compact_current_state"],
+            }
+        }
         return payload
 
     async def fake_queue_tests(**_kwargs):
@@ -171,6 +181,9 @@ async def test_stream_chat_update_falls_back_to_regenerate(tmp_path, monkeypatch
     monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
     monkeypatch.setattr(service, "_generate_ui_payload", fake_regenerate)
     monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
 
     chunks = []
     async for chunk in service.stream_chat_update(
@@ -190,6 +203,177 @@ async def test_stream_chat_update_falls_back_to_regenerate(tmp_path, monkeypatch
     joined = "".join(chunks)
     assert "regenerated_fallback" in joined
     assert "tests_queued" in joined
+    assert "attempt=1/2:unknown_patch_failure" in joined
+    assert "context_compaction" in joined
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_update_patch_only_blocks_regenerate(tmp_path, monkeypatch):
+    service, storage = _new_service(tmp_path)
+    scope = Scope(kind="user", identifier="user123")
+    actor = Actor(user_id="user123", groups=["eng"])
+    storage.write(scope, "dash1", "overview", _base_record())
+    session_id = service.create_draft_session(
+        scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
+    )["session_id"]
+
+    async def fake_select_tools(_session, _requested_tools, _prompt):
+        return [{"type": "function", "function": {"name": "list_items"}}]
+
+    async def fake_assistant(**_kwargs):
+        return "Patch-only path"
+
+    async def no_patch(**_kwargs):
+        return None
+
+    async def fail_regenerate(**_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("Regenerate should not run when patch-only is enabled")
+
+    monkeypatch.setattr(service, "_select_tools", fake_select_tools)
+    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
+    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
+    monkeypatch.setattr(service, "_generate_ui_payload", fail_regenerate)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", True)
+
+    chunks = []
+    async for chunk in service.stream_chat_update(
+        session=object(),
+        scope=scope,
+        actor=actor,
+        ui_id="dash1",
+        name="overview",
+        session_id=session_id,
+        message="Patch only",
+        tools=["list_items"],
+        tool_choice="auto",
+        access_token=None,
+    ):
+        chunks.append(chunk.decode("utf-8"))
+
+    joined = "".join(chunks)
+    assert "event: error" in joined
+    assert "APP_UI_PATCH_ONLY=true prevents full regeneration" in joined
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_update_patch_retry_succeeds_before_regenerate(
+    tmp_path, monkeypatch
+):
+    service, storage = _new_service(tmp_path)
+    scope = Scope(kind="user", identifier="user123")
+    actor = Actor(user_id="user123", groups=["eng"])
+    storage.write(scope, "dash1", "overview", _base_record())
+    session_id = service.create_draft_session(
+        scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
+    )["session_id"]
+
+    attempts = {"count": 0}
+
+    async def fake_select_tools(_session, _requested_tools, _prompt):
+        return [{"type": "function", "function": {"name": "list_items"}}]
+
+    async def fake_assistant(**_kwargs):
+        return "Retry patch"
+
+    async def flaky_patch(**_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            service._last_patch_failure_reason = "patch_tests_failed"
+            return None
+        rec = storage.read(scope, "dash1", "overview")
+        patched = copy.deepcopy(rec["current"])
+        patched["html"]["snippet"] = "<div>patched-retry</div>"
+        patched["html"][
+            "page"
+        ] = "<!DOCTYPE html><html><body><div>patched-retry</div></body></html>"
+        return {"payload": patched}
+
+    async def fail_regenerate(**_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("Regenerate should not run when retry patch succeeds")
+
+    async def fake_queue_tests(**_kwargs):
+        return {"status": "queued", "run_id": "run-retry", "trigger": "post_update"}
+
+    monkeypatch.setattr(service, "_select_tools", fake_select_tools)
+    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
+    monkeypatch.setattr(service, "_attempt_patch_update", flaky_patch)
+    monkeypatch.setattr(service, "_generate_ui_payload", fail_regenerate)
+    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_RETRIES", 2)
+
+    chunks = []
+    async for chunk in service.stream_chat_update(
+        session=object(),
+        scope=scope,
+        actor=actor,
+        ui_id="dash1",
+        name="overview",
+        session_id=session_id,
+        message="Retry patch",
+        tools=["list_items"],
+        tool_choice="auto",
+        access_token=None,
+    ):
+        chunks.append(chunk.decode("utf-8"))
+
+    joined = "".join(chunks)
+    assert "patch_applied" in joined
+    assert attempts["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_update_emits_progress_status_updates(tmp_path, monkeypatch):
+    service, storage = _new_service(tmp_path)
+    scope = Scope(kind="user", identifier="user123")
+    actor = Actor(user_id="user123", groups=["eng"])
+    storage.write(scope, "dash1", "overview", _base_record())
+    session_id = service.create_draft_session(
+        scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
+    )["session_id"]
+
+    async def fake_select_tools(_session, _requested_tools, _prompt):
+        return [{"type": "function", "function": {"name": "list_items"}}]
+
+    async def fake_assistant(**_kwargs):
+        return ""
+
+    async def fake_patch(**_kwargs):
+        rec = storage.read(scope, "dash1", "overview")
+        patched = copy.deepcopy(rec["current"])
+        patched["html"]["snippet"] = "<div>patched-status</div>"
+        patched["html"][
+            "page"
+        ] = "<!DOCTYPE html><html><body><div>patched-status</div></body></html>"
+        return {"payload": patched}
+
+    async def fake_queue_tests(**_kwargs):
+        return {"status": "queued", "run_id": "run-status", "trigger": "post_update"}
+
+    monkeypatch.setattr(service, "_select_tools", fake_select_tools)
+    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
+    monkeypatch.setattr(service, "_attempt_patch_update", fake_patch)
+    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+
+    chunks = []
+    async for chunk in service.stream_chat_update(
+        session=object(),
+        scope=scope,
+        actor=actor,
+        ui_id="dash1",
+        name="overview",
+        session_id=session_id,
+        message="Show progress",
+        tools=["list_items"],
+        tool_choice="auto",
+        access_token=None,
+    ):
+        chunks.append(chunk.decode("utf-8"))
+
+    joined = "".join(chunks)
+    assert "I will prepare the update request now." in joined
+    assert "I will select the best tools for this update." in joined
+    assert "I will run the validation tests for this updated draft now." in joined
 
 
 @pytest.mark.asyncio
@@ -232,6 +416,7 @@ async def test_stream_chat_update_runtime_context_is_single_use(tmp_path, monkey
     monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
     monkeypatch.setattr(service, "_generate_ui_payload", fake_regenerate)
     monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
 
     runtime_action = {
         "type": "runtime_service_exchanges",
@@ -282,15 +467,20 @@ async def test_stream_chat_update_runtime_context_is_single_use(tmp_path, monkey
     ):
         pass
 
-    assert captured_runtime[0][0] == "assistant"
-    assert captured_runtime[0][1] is not None
-    assert captured_runtime[0][1]["console_events"][0]["kind"] == "console_warning"
-    assert captured_runtime[1][0] == "regenerate"
-    assert captured_runtime[1][1] is not None
-    assert captured_runtime[2][0] == "assistant"
-    assert captured_runtime[2][1] is None
-    assert captured_runtime[3][0] == "regenerate"
-    assert captured_runtime[3][1] is None
+    assistant_contexts = [ctx for role, ctx in captured_runtime if role == "assistant"]
+    regenerate_contexts = [
+        ctx for role, ctx in captured_runtime if role == "regenerate"
+    ]
+
+    assert len(assistant_contexts) == 2
+    assert len(regenerate_contexts) == 2
+
+    assert assistant_contexts[0] is not None
+    assert assistant_contexts[0]["console_events"][0]["kind"] == "console_warning"
+    assert assistant_contexts[1] is None
+
+    assert regenerate_contexts[0] is not None
+    assert regenerate_contexts[1] is None
 
 
 @pytest.mark.asyncio
@@ -343,6 +533,7 @@ async def test_stream_chat_update_runtime_context_not_reused_after_error(
     monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
     monkeypatch.setattr(service, "_generate_ui_payload", flaky_regenerate)
     monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
 
     first_chunks = []
     async for chunk in service.stream_chat_update(
@@ -640,3 +831,159 @@ async def test_add_test_action_updates_test_script(tmp_path, monkeypatch):
     )
     script = final_payload["draft_payload"]["test_script"]
     assert "adds coverage for cards" in script
+
+
+@pytest.mark.asyncio
+async def test_queue_test_action_failed_run_includes_analysis_payload(
+    tmp_path, monkeypatch
+):
+    service, storage = _new_service(tmp_path)
+    scope = Scope(kind="user", identifier="user123")
+    actor = Actor(user_id="user123", groups=["eng"])
+    storage.write(scope, "dash1", "overview", _base_record())
+    session_id = service.create_draft_session(
+        scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
+    )["session_id"]
+
+    monkeypatch.setattr(
+        service,
+        "_run_tests",
+        lambda *_args, **_kwargs: (
+            False,
+            (
+                "TAP version 13\n"
+                "not ok 1 - Weather Dashboard Tests\n"
+                "not ok 2 - weather-forecast: refetches when city changes\n"
+                "# pass 1\n"
+                "# fail 2\n"
+            ),
+        ),
+    )
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    async def fake_explain(**_kwargs):
+        return {
+            "what_failed": "2 tests failed: Weather Dashboard Tests, weather-forecast",
+            "why_it_ended": "fix_code run ended after repeated assertion-signature failures.",
+            "recommended_action": "adjust_test",
+            "alternative_action": "fix_code",
+            "next_step_text": "Recommended next action: adjust_test. Alternative: fix_code.",
+        }
+
+    monkeypatch.setattr(service, "_explain_test_failure_for_user", fake_explain)
+
+    run_id = "run-99999999"
+    stream_key = service._test_stream_key(
+        scope=scope, ui_id="dash1", name="overview", session_id=session_id
+    )
+    session_payload = storage.read_session(scope, "dash1", "overview", session_id)
+    session_payload["test_run_id"] = run_id
+    session_payload["test_state"] = "queued"
+    storage.write_session(scope, "dash1", "overview", session_id, session_payload)
+
+    await service._execute_test_run(
+        scope=scope,
+        ui_id="dash1",
+        name="overview",
+        session_id=session_id,
+        stream_key=stream_key,
+        run_id=run_id,
+        action="run",
+        trigger="manual_run",
+        test_name=None,
+        access_token=None,
+    )
+
+    final_payload = storage.read_session(scope, "dash1", "overview", session_id)
+    result_events = [
+        item.get("payload", {})
+        for item in final_payload.get("test_events", [])
+        if item.get("event") == "test_result"
+    ]
+    assert result_events
+    final_result = result_events[-1]
+    assert final_result["is_final"] is True
+    assert final_result["recommended_action"] == "adjust_test"
+    assert final_result["alternative_action"] == "fix_code"
+    assert final_result["analysis"]["why_it_ended"].startswith("fix_code run ended")
+    assert (
+        final_payload["test_summary"]["message"]
+        == "Recommended next action: adjust_test. Alternative: fix_code."
+    )
+
+
+@pytest.mark.asyncio
+async def test_explain_test_failure_for_user_uses_fallback_without_llm(tmp_path):
+    service, _storage = _new_service(tmp_path)
+
+    analysis = await service._explain_test_failure_for_user(
+        action="fix_code",
+        passed=1,
+        failed=2,
+        failed_tests=["Weather Dashboard Tests", "forecast test"],
+        output_tail="# pass 1\n# fail 2\n",
+        strategy_context={
+            "reason": "Repeated assertion-signature failures persisted.",
+            "suggested_action": "adjust_test",
+        },
+        access_token=None,
+    )
+
+    assert analysis["recommended_action"] == "adjust_test"
+    assert analysis["alternative_action"] == "fix_code"
+    assert "Repeated assertion-signature failures persisted" in analysis["why_it_ended"]
+
+
+@pytest.mark.asyncio
+async def test_explain_test_failure_for_user_parses_llm_structured_response(tmp_path):
+    service, _storage = _new_service(tmp_path)
+
+    class StubLLMClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def non_stream_completion(self, request, _token, _span):
+            self.calls += 1
+            assert request.response_format is not None
+            content = json.dumps(
+                {
+                    "what_failed": "Two weather tests failed after the latest run.",
+                    "why_it_ended": "fix_code stopped because assertion-shape failures persisted.",
+                    "recommended_action": "adjust_test",
+                    "alternative_action": "fix_code",
+                    "next_step_text": "Use adjust_test next; fall back to fix_code if needed.",
+                }
+            )
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {"message": type("Message", (), {"content": content})()},
+                        )
+                    ]
+                },
+            )()
+
+    service.tgi_service.llm_client = StubLLMClient()
+
+    analysis = await service._explain_test_failure_for_user(
+        action="fix_code",
+        passed=2,
+        failed=2,
+        failed_tests=["a", "b"],
+        output_tail="TAP version 13\n# pass 2\n# fail 2\n",
+        strategy_context={"reason_code": "assertion_signature_repeat"},
+        access_token=None,
+    )
+
+    assert analysis["recommended_action"] == "adjust_test"
+    assert analysis["alternative_action"] == "fix_code"
+    assert "assertion-shape failures persisted" in analysis["why_it_ended"]
