@@ -89,8 +89,51 @@ const matchSelector = (el, selector) => {
   const normalized = selector.trim();
   if (!normalized) return false;
 
-  const selectors = normalized.split(',').map(s => s.trim()).filter(Boolean);
-  const matchesSingle = (sel) => {
+  const splitSelectors = (input, separatorRegex) => {
+    const parts = [];
+    let current = '';
+    let attrDepth = 0;
+    let quote = null;
+
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if (quote) {
+        current += ch;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === '\'') {
+        quote = ch;
+        current += ch;
+        continue;
+      }
+      if (ch === '[') {
+        attrDepth++;
+        current += ch;
+        continue;
+      }
+      if (ch === ']') {
+        attrDepth = Math.max(0, attrDepth - 1);
+        current += ch;
+        continue;
+      }
+
+      if (attrDepth === 0 && separatorRegex.test(ch)) {
+        const part = current.trim();
+        if (part) parts.push(part);
+        current = '';
+        continue;
+      }
+      current += ch;
+    }
+
+    const last = current.trim();
+    if (last) parts.push(last);
+    return parts;
+  };
+
+  const selectors = splitSelectors(normalized, /,/);
+  const matchesSimple = (target, sel) => {
     let base = sel;
     let attr = null;
     const attrMatch = sel.match(/^(.*?)\[([^=\]]+)=\s*"?([^\]"]+)"?\s*\]$/);
@@ -107,13 +150,13 @@ const matchSelector = (el, selector) => {
       tag = '*';
       classes = baseParts;
     } else if (base.startsWith('#')) {
-      return el.id === base.slice(1);
+      return target.id === base.slice(1);
     }
 
     const customMatchOnly = !base.startsWith('.') && !base.startsWith('#') && base.includes('-') && globalThis.customElements?.get?.(base);
-    const tagMatch = el.tagName?.toLowerCase() === tag.toLowerCase();
-    const classMatch = el.classList.contains(tag);
-    const idMatch = el.id === tag;
+    const tagMatch = target.tagName?.toLowerCase() === tag.toLowerCase();
+    const classMatch = target.classList.contains(tag);
+    const idMatch = target.id === tag;
     const tagMatches = tag === '*'
       ? true
       : customMatchOnly
@@ -121,10 +164,32 @@ const matchSelector = (el, selector) => {
         : (tagMatch || classMatch || idMatch);
 
     if (!tagMatches) return false;
-    if (classes.length && !classes.every(cls => el.classList.contains(cls))) return false;
+    if (classes.length && !classes.every(cls => target.classList.contains(cls))) return false;
     if (attr) {
-      const val = el.getAttribute(attr.name);
+      const val = target.getAttribute(attr.name);
       if (val == null || String(val) !== String(attr.value)) return false;
+    }
+    return true;
+  };
+
+  const findAncestorMatch = (node, sel) => {
+    let current = node?.parentNode || node?.host || null;
+    while (current) {
+      if (matchesSimple(current, sel)) return current;
+      current = current.parentNode || current.host || null;
+    }
+    return null;
+  };
+
+  const matchesSingle = (sel) => {
+    const chain = splitSelectors(sel, /\s/);
+    if (!chain.length) return false;
+
+    let current = el;
+    if (!matchesSimple(current, chain[chain.length - 1])) return false;
+    for (let i = chain.length - 2; i >= 0; i--) {
+      current = findAncestorMatch(current, chain[i]);
+      if (!current) return false;
     }
     return true;
   };

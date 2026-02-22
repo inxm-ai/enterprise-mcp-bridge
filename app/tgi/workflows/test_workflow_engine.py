@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -5604,3 +5605,148 @@ async def test_workflow_handoff_preserves_user_query_and_messages(
         "Generate a plan to create a news summary for the last 24 hours",
         "Create a new one please",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_agents_parallelizes_safe_independent_agents(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "parallel_safe_flow",
+        "root_intent": "PARALLEL_SAFE",
+        "agents": [
+            {"agent": "alpha", "description": "Alpha", "tools": []},
+            {"agent": "beta", "description": "Beta", "tools": []},
+            {
+                "agent": "finalize",
+                "description": "Finalize",
+                "depends_on": ["alpha", "beta"],
+                "tools": [],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class TrackingEngine(WorkflowEngine):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.running = 0
+            self.max_running = 0
+            self.started: list[str] = []
+
+        async def _execute_agent(
+            self,
+            workflow_def,
+            agent_def,
+            state,
+            session,
+            request,
+            access_token,
+            span,
+            persist_inner_thinking=False,
+            no_reroute=False,
+        ):
+            self.started.append(agent_def.agent)
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            try:
+                await asyncio.sleep(0.03)
+            finally:
+                self.running -= 1
+            yield {
+                "status": "done",
+                "content": f"{agent_def.agent} complete",
+                "pass_through": False,
+            }
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = TrackingEngine(repo, store, StubLLMClient({}))
+    engine.max_parallel_agents = 4
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        use_workflow="parallel_safe_flow",
+        workflow_execution_id="exec-parallel-safe",
+        stream=True,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert engine.max_running >= 2
+    assert "alpha" in engine.started and "beta" in engine.started
+    assert engine.started.index("finalize") > max(
+        engine.started.index("alpha"), engine.started.index("beta")
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agents_keeps_unsafe_agents_serial(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "parallel_guard_flow",
+        "root_intent": "PARALLEL_GUARD",
+        "agents": [
+            {
+                "agent": "unsafe_first",
+                "description": "Unsafe",
+                "tools": [],
+                "reroute": {"on": ["X"], "to": "safe_second"},
+            },
+            {"agent": "safe_second", "description": "Safe", "tools": []},
+        ],
+    }
+    _write_workflow(workflows_dir, "flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class TrackingEngine(WorkflowEngine):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.running = 0
+            self.max_running = 0
+
+        async def _execute_agent(
+            self,
+            workflow_def,
+            agent_def,
+            state,
+            session,
+            request,
+            access_token,
+            span,
+            persist_inner_thinking=False,
+            no_reroute=False,
+        ):
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            try:
+                await asyncio.sleep(0.02)
+            finally:
+                self.running -= 1
+            yield {
+                "status": "done",
+                "content": f"{agent_def.agent} complete",
+                "pass_through": False,
+            }
+
+    repo = WorkflowRepository()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = TrackingEngine(repo, store, StubLLMClient({}))
+    engine.max_parallel_agents = 4
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="run")],
+        use_workflow="parallel_guard_flow",
+        workflow_execution_id="exec-parallel-guard",
+        stream=True,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert engine.max_running == 1

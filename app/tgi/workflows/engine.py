@@ -32,7 +32,7 @@ from app.tgi.workflows.models import (
 from app.tgi.workflows.passthrough_filter import PassThroughFilter
 from app.tgi.workflows.repository import WorkflowRepository
 from app.tgi.workflows.state import WorkflowStateStore
-from app.vars import TGI_MODEL_NAME
+from app.vars import TGI_MODEL_NAME, WORKFLOW_MAX_PARALLEL_AGENTS
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -98,6 +98,7 @@ class WorkflowEngine:
             logger_obj=logger,
             message_summarization_service=None,
         )
+        self.max_parallel_agents = max(1, int(WORKFLOW_MAX_PARALLEL_AGENTS))
 
     async def start_or_resume_workflow(
         self,
@@ -495,6 +496,56 @@ class WorkflowEngine:
         logger.info("[WorkflowEngine] Completed agents: %s", completed)
         return completed
 
+    def _can_parallelize_agent(self, agent_def: WorkflowAgentDef) -> bool:
+        """
+        Conservative safety gate for parallel execution.
+
+        Parallel execution is limited to agents with disabled tools and no reroute
+        or stop semantics, to avoid side effects and control-flow races.
+        """
+        if agent_def.stop_point:
+            return False
+        if agent_def.reroute or agent_def.on_tool_error:
+            return False
+        if agent_def.pass_through:
+            return False
+        return agent_def.tools == []
+
+    async def _collect_agent_execution(
+        self,
+        workflow_def: WorkflowDefinition,
+        agent_def: WorkflowAgentDef,
+        state: WorkflowExecutionState,
+        session: Any,
+        request: ChatCompletionRequest,
+        access_token: Optional[str],
+        span,
+        persist_inner_thinking: bool,
+        no_reroute: bool,
+    ) -> dict[str, Any]:
+        emitted_chunks: list[str] = []
+        status_events: list[dict[str, Any]] = []
+        async for result in self._execute_agent(
+            workflow_def,
+            agent_def,
+            state,
+            session,
+            request,
+            access_token,
+            span,
+            persist_inner_thinking,
+            no_reroute,
+        ):
+            if isinstance(result, str):
+                emitted_chunks.append(result)
+            else:
+                status_events.append(result)
+        return {
+            "agent": agent_def,
+            "chunks": emitted_chunks,
+            "status_events": status_events,
+        }
+
     async def _run_agents(
         self,
         workflow_def: WorkflowDefinition,
@@ -545,6 +596,242 @@ class WorkflowEngine:
 
             progress_made = False
             retry_triggered = False
+
+            if not forced_next and self.max_parallel_agents > 1:
+                runnable_agents = [
+                    a
+                    for a in workflow_def.agents
+                    if a.agent not in completed_agents
+                    and (not a.depends_on or set(a.depends_on).issubset(completed_agents))
+                ]
+                parallel_candidates = [
+                    a for a in runnable_agents if self._can_parallelize_agent(a)
+                ]
+                if len(parallel_candidates) > 1:
+                    batch = parallel_candidates[: self.max_parallel_agents]
+                    condition_checks = await asyncio.gather(
+                        *[
+                            self._condition_met(
+                                agent_def,
+                                state.context,
+                                session,
+                                request,
+                                access_token,
+                                span,
+                                workflow_def,
+                                execution_id=state.execution_id,
+                            )
+                            for agent_def in batch
+                        ]
+                    )
+                    runnable_batch: list[WorkflowAgentDef] = []
+                    for agent_def, is_allowed in zip(batch, condition_checks):
+                        if is_allowed:
+                            runnable_batch.append(agent_def)
+                            continue
+                        state.context["agents"][agent_def.agent] = {
+                            "content": "",
+                            "pass_through": agent_def.pass_through,
+                            "skipped": True,
+                            "reason": "condition_not_met",
+                            "completed": True,
+                        }
+                        self.state_store.save_state(state)
+                        completed_agents.add(agent_def.agent)
+                        progress_made = True
+                        yield self._record_event(
+                            state,
+                            f"Skipping {agent_def.agent} (condition not met)",
+                            status="skipped",
+                        )
+
+                    if len(runnable_batch) > 1:
+                        outcomes = await asyncio.gather(
+                            *[
+                                self._collect_agent_execution(
+                                    workflow_def,
+                                    agent_def,
+                                    state,
+                                    session,
+                                    request,
+                                    access_token,
+                                    span,
+                                    persist_inner_thinking,
+                                    no_reroute,
+                                )
+                                for agent_def in runnable_batch
+                            ]
+                        )
+
+                        by_agent = {o["agent"].agent: o for o in outcomes}
+                        for agent_def in runnable_batch:
+                            outcome = by_agent.get(agent_def.agent)
+                            if not outcome:
+                                continue
+                            for chunk in outcome["chunks"]:
+                                yield chunk
+
+                            for result in outcome["status_events"]:
+                                status = result.get("status")
+                                logger.debug(
+                                    "[WorkflowEngine._run_agents] Agent '%s' yielded status: %s, target: %s",
+                                    agent_def.agent,
+                                    status,
+                                    result.get("target"),
+                                )
+                                if (
+                                    status == "done"
+                                    and result.get("content")
+                                    and not result.get("pass_through")
+                                ):
+                                    last_visible_output = result.get("content")
+                                if status == "done" and workflow_def.loop:
+                                    assistant_text = (result.get("content") or "").strip()
+                                    if result.get("pass_through") and assistant_text:
+                                        self._append_assistant_message(
+                                            state, assistant_text
+                                        )
+                                        self.state_store.save_state(state)
+                                if status == "feedback":
+                                    logger.info(
+                                        "[WorkflowEngine._run_agents] Agent '%s' requested feedback, pausing workflow",
+                                        agent_def.agent,
+                                    )
+                                    return
+                                if status == "reroute":
+                                    forced_next = result.get("target")
+                                    if forced_next:
+                                        logger.info(
+                                            "[WorkflowEngine._run_agents] Agent '%s' rerouting to '%s'",
+                                            agent_def.agent,
+                                            forced_next,
+                                        )
+                                        yield self._record_event(
+                                            state,
+                                            f"\nRerouting to {forced_next}\n",
+                                            status="reroute",
+                                        )
+                                elif status == "workflow_reroute":
+                                    target_workflow = result.get("target_workflow")
+                                    start_with_payload = result.get("start_with")
+                                    start_with_payload = (
+                                        self._augment_workflow_handoff_start_with(
+                                            start_with_payload, state
+                                        )
+                                    )
+                                    metadata: dict[str, Any] = {
+                                        "target_workflow": target_workflow
+                                    }
+                                    if start_with_payload is not None:
+                                        metadata["start_with"] = start_with_payload
+                                    if not target_workflow:
+                                        state.completed = True
+                                        self.state_store.save_state(state)
+                                        yield self._record_event(
+                                            state,
+                                            "\nWorkflow reroute target was not provided.\n",
+                                            status="error",
+                                            metadata=metadata,
+                                        )
+                                        handoff_state["workflow_handoff"] = True
+                                        yield "data: [DONE]\n\n"
+                                        return
+                                    yield self._record_event(
+                                        state,
+                                        f"\nRerouting to workflow '{target_workflow}'\n",
+                                        status="reroute",
+                                        metadata=metadata,
+                                    )
+                                    if target_workflow in workflow_chain:
+                                        state.completed = True
+                                        self.state_store.save_state(state)
+                                        yield self._record_event(
+                                            state,
+                                            (
+                                                f"\nWorkflow reroute loop detected for '{target_workflow}'. "
+                                                "Aborting.\n"
+                                            ),
+                                            status="error",
+                                            metadata={
+                                                "target_workflow": target_workflow,
+                                                "workflow_chain": workflow_chain,
+                                            },
+                                        )
+                                        handoff_state["workflow_handoff"] = True
+                                        yield "data: [DONE]\n\n"
+                                        return
+                                    state.completed = True
+                                    self.state_store.save_state(state)
+                                    new_chain = list(workflow_chain)
+                                    new_chain.append(target_workflow)
+                                    new_request = self._build_workflow_reroute_request(
+                                        request,
+                                        target_workflow,
+                                        start_with_payload,
+                                        execution_id=state.execution_id,
+                                    )
+                                    new_stream = await self.start_or_resume_workflow(
+                                        session,
+                                        new_request,
+                                        user_token,
+                                        access_token,
+                                        span,
+                                        workflow_chain=new_chain,
+                                        handoff=True,
+                                    )
+                                    if not new_stream:
+                                        yield self._record_event(
+                                            state,
+                                            f"\nWorkflow '{target_workflow}' is not defined.\n",
+                                            status="error",
+                                            metadata={
+                                                "target_workflow": target_workflow
+                                            },
+                                        )
+                                        handoff_state["workflow_handoff"] = True
+                                        yield "data: [DONE]\n\n"
+                                        return
+                                    handoff_state["workflow_handoff"] = True
+                                    async for new_event in new_stream:
+                                        yield new_event
+                                    return
+                                elif status == "retry":
+                                    retry_triggered = True
+                                    progress_made = True
+                                    break
+                                elif status == "abort":
+                                    return
+                                else:
+                                    forced_next = None
+
+                            if state.completed:
+                                yield "data: [DONE]\n\n"
+                                return
+
+                            if retry_triggered:
+                                break
+
+                            completed_agents.add(agent_def.agent)
+                            progress_made = True
+
+                            if agent_def.stop_point:
+                                state.completed = True
+                                self.state_store.save_state(state)
+                                yield self._record_event(
+                                    state,
+                                    f"Stop point reached at {agent_def.agent}; halting workflow execution.",
+                                    status="stop_point",
+                                )
+
+                            if state.completed:
+                                yield "data: [DONE]\n\n"
+                                return
+
+                    if retry_triggered:
+                        continue
+                    if progress_made:
+                        continue
+
             for agent_def in workflow_def.agents:
                 if agent_def.agent in completed_agents:
                     continue
