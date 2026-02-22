@@ -78,6 +78,7 @@ def _positive_int_env(name: str, default: int) -> int:
 
 NODE_TEST_TIMEOUT_MS = _positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
 READ_ONLY_STREAK_LIMIT = max(1, int(GENERATED_UI_READ_ONLY_STREAK_LIMIT))
+FIX_CODE_ASSERTION_BAILOUT_LIMIT = 2
 
 
 def _tool_description(
@@ -1203,6 +1204,9 @@ async def run_tool_driven_test_fix(
     event_queue: Optional[asyncio.Queue] = None,
     extra_headers: Optional[Dict[str, str]] = None,
     strategy_mode: Literal["default", "fix_code", "adjust_test"] = "default",
+    post_success_validator: Optional[
+        Callable[[str, str, str, Optional[str]], Tuple[bool, Optional[str]]]
+    ] = None,
 ) -> Tuple[bool, str, str, str, Optional[str], List[Message]]:
     """
     Use LLM with specialized tools to iteratively fix failing tests.
@@ -1292,6 +1296,7 @@ async def run_tool_driven_test_fix(
                 if tool.get("function", {}).get("name") in strategy_allowed_tools
             ]
 
+        fix_messages = copy.deepcopy(messages)
         test_result = toolkit.run_tests()
         _log_test_run_output(
             "[iterative_test_fix] Initial test run",
@@ -1299,29 +1304,13 @@ async def run_tool_driven_test_fix(
         )
         initial_passed, initial_failed, _ = _parse_tap_output(test_result.content)
         last_passed = initial_passed
-        if test_result.success:
-            logger.info("[iterative_test_fix] Tests passed on first try!")
-            return (
-                True,
-                service_script,
-                components_script,
-                test_script,
-                dummy_data,
-                messages,
-            )
 
-        logger.info(
-            "[iterative_test_fix] Initial tests failed, starting fix loop (max %s attempts)",
-            max_attempts,
-        )
-
-        fix_messages = copy.deepcopy(messages)
         fix_messages.append(
             Message(
                 role=MessageRole.USER,
                 content=(
                     "You are an expert JavaScript QA developer tasked with fixing the "
-                    "failing tests with the following output:\n\n"
+                    "failing tests and/or contract validation issues with the following output:\n\n"
                     f"```\n{test_result.content}\n```\n\n"
                     f"{objective_instruction}"
                     f"{missing_tests_instruction}"
@@ -1346,6 +1335,7 @@ async def run_tool_driven_test_fix(
 
         attempt = 0
         read_only_streak = 0
+        fix_code_assertion_failures = 0
         best_passed = initial_passed
         best_failed = initial_failed
         best_snapshot = {
@@ -1355,6 +1345,108 @@ async def run_tool_driven_test_fix(
             "dummy_data": dummy_data,
             "messages": copy.deepcopy(fix_messages),
         }
+
+        def _validate_post_success(
+            *,
+            context: str,
+            current_service_script: str,
+            current_components_script: str,
+            current_test_script: str,
+            current_dummy_data: Optional[str],
+        ) -> Tuple[bool, Optional[str]]:
+            if not post_success_validator:
+                return True, None
+            try:
+                is_valid, reason = post_success_validator(
+                    current_service_script,
+                    current_components_script,
+                    current_test_script,
+                    current_dummy_data,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[iterative_test_fix] Post-success validator errored during %s: %s",
+                    context,
+                    exc,
+                    exc_info=exc,
+                )
+                return False, f"post_success_validator_exception: {exc}"
+            if is_valid:
+                return True, None
+            normalized_reason = (reason or "post_success_validation_failed").strip()
+            logger.warning(
+                "[iterative_test_fix] Post-success validation failed during %s: %s",
+                context,
+                normalized_reason,
+            )
+            return False, normalized_reason
+
+        async def _handle_post_success_validation_failure(
+            *,
+            context: str,
+            reason: Optional[str],
+            passed: int,
+            failed: int,
+            metadata: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            normalized_reason = (reason or "post_success_validation_failed").strip()
+            fix_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Tests are passing but contract validation failed "
+                        f"({context}): {normalized_reason}. "
+                        "Continue fixing scripts until BOTH tests and contract checks pass."
+                    ),
+                )
+            )
+            best_snapshot["messages"] = copy.deepcopy(fix_messages)
+            if event_queue:
+                await event_queue.put(
+                    {
+                        "event": "test_result",
+                        "status": "contract_failed",
+                        "message": "Tests passed but contract validation failed.",
+                        "reason": normalized_reason,
+                        "passed": passed,
+                        "failed": failed,
+                        "metadata": metadata,
+                    }
+                )
+
+        initial_validation_ok = False
+        initial_validation_reason: Optional[str] = None
+        if test_result.success:
+            initial_validation_ok, initial_validation_reason = _validate_post_success(
+                context="initial run",
+                current_service_script=service_script,
+                current_components_script=components_script,
+                current_test_script=test_script,
+                current_dummy_data=dummy_data,
+            )
+            if initial_validation_ok:
+                logger.info("[iterative_test_fix] Tests passed on first try!")
+                return (
+                    True,
+                    service_script,
+                    components_script,
+                    test_script,
+                    dummy_data,
+                    messages,
+                )
+            initial_failed = max(1, initial_failed)
+            await _handle_post_success_validation_failure(
+                context="initial run",
+                reason=initial_validation_reason,
+                passed=initial_passed,
+                failed=initial_failed,
+                metadata=test_result.metadata,
+            )
+
+        logger.info(
+            "[iterative_test_fix] Initial checks failed or contract validation rejected candidate, starting fix loop (max %s attempts)",
+            max_attempts,
+        )
 
         def _reset_attempts_on_progress(passed: int, context: str) -> None:
             nonlocal last_passed, attempt
@@ -1399,6 +1491,55 @@ async def run_tool_driven_test_fix(
                     ),
                 )
             )
+
+        def _looks_like_test_assertion_shape_failure(output: str) -> bool:
+            text = output or ""
+            lowered = text.lower()
+            has_assertion_signal = (
+                "assertionerror" in lowered
+                or "err_assertion" in lowered
+                or "cannot read properties of undefined" in lowered
+            )
+            has_test_reference = (
+                "user_test.js" in text
+                or "testcontext.<anonymous>" in lowered
+                or "failuretype: 'subtestsfailed'" in lowered
+            )
+            return has_assertion_signal and has_test_reference
+
+        def _should_bail_to_adjust_test(output: str, failed: int) -> bool:
+            nonlocal fix_code_assertion_failures
+            if strategy_mode != "fix_code":
+                return False
+            if failed <= 0:
+                fix_code_assertion_failures = 0
+                return False
+            if _looks_like_test_assertion_shape_failure(output):
+                fix_code_assertion_failures += 1
+                logger.warning(
+                    "[iterative_test_fix] fix_code assertion-style failure signal (%s/%s)",
+                    fix_code_assertion_failures,
+                    FIX_CODE_ASSERTION_BAILOUT_LIMIT,
+                )
+            else:
+                fix_code_assertion_failures = 0
+
+            if fix_code_assertion_failures < FIX_CODE_ASSERTION_BAILOUT_LIMIT:
+                return False
+
+            reason = (
+                "Repeated assertion-signature failures in fix_code mode suggest test/fixture-shape mismatch. "
+                "Bailing out early so adjust_test strategy can repair assertions/fixtures."
+            )
+            logger.warning("[iterative_test_fix] %s", reason)
+            fix_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=reason,
+                )
+            )
+            best_snapshot["messages"] = copy.deepcopy(fix_messages)
+            return True
 
         while attempt < max_attempts:
             attempt += 1
@@ -1517,23 +1658,39 @@ async def run_tool_driven_test_fix(
                     _reset_attempts_on_progress(passed, "verification run")
                     _update_best_snapshot(passed, failed)
                     if final_result.success:
-                        return (
-                            True,
-                            toolkit.current_service_script,
-                            toolkit.current_components_script,
-                            toolkit.current_test_script,
-                            toolkit.current_dummy_data,
-                            fix_messages,
+                        validation_ok, validation_reason = _validate_post_success(
+                            context="verification run",
+                            current_service_script=toolkit.current_service_script,
+                            current_components_script=toolkit.current_components_script,
+                            current_test_script=toolkit.current_test_script,
+                            current_dummy_data=toolkit.current_dummy_data,
                         )
-                    fix_messages.append(
-                        Message(
-                            role=MessageRole.USER,
-                            content=(
-                                "Tests are still failing:\n"
-                                f"```\n{final_result.content}\n```\nContinue fixing."
+                        if validation_ok:
+                            return (
+                                True,
+                                toolkit.current_service_script,
+                                toolkit.current_components_script,
+                                toolkit.current_test_script,
+                                toolkit.current_dummy_data,
+                                fix_messages,
+                            )
+                        await _handle_post_success_validation_failure(
+                            context="verification run",
+                            reason=validation_reason,
+                            passed=passed,
+                            failed=max(failed, 1),
+                            metadata=final_result.metadata,
+                        )
+                    else:
+                        fix_messages.append(
+                            Message(
+                                role=MessageRole.USER,
+                                content=(
+                                    "Tests are still failing:\n"
+                                    f"```\n{final_result.content}\n```\nContinue fixing."
+                                ),
                             ),
                         )
-                    )
                 else:
                     fix_messages.append(
                         Message(
@@ -1706,19 +1863,35 @@ async def run_tool_driven_test_fix(
                             )
                         continue
                     if result.success:
-                        all_tests_passed = True
-                        logger.info("[iterative_test_fix] All tests passed!")
+                        validation_ok, validation_reason = _validate_post_success(
+                            context=f"iteration {attempt} run_tests",
+                            current_service_script=toolkit.current_service_script,
+                            current_components_script=toolkit.current_components_script,
+                            current_test_script=toolkit.current_test_script,
+                            current_dummy_data=toolkit.current_dummy_data,
+                        )
+                        if validation_ok:
+                            all_tests_passed = True
+                            logger.info("[iterative_test_fix] All tests passed!")
 
-                        if event_queue:
-                            await event_queue.put(
-                                {
-                                    "event": "test_result",
-                                    "status": "passed",
-                                    "message": "All tests passed!",
-                                    "passed": passed,
-                                    "failed": failed,
-                                    "metadata": result.metadata,
-                                }
+                            if event_queue:
+                                await event_queue.put(
+                                    {
+                                        "event": "test_result",
+                                        "status": "passed",
+                                        "message": "All tests passed!",
+                                        "passed": passed,
+                                        "failed": failed,
+                                        "metadata": result.metadata,
+                                    }
+                                )
+                        else:
+                            await _handle_post_success_validation_failure(
+                                context=f"iteration {attempt} run_tests",
+                                reason=validation_reason,
+                                passed=passed,
+                                failed=max(failed, 1),
+                                metadata=result.metadata,
                             )
                     else:
                         if failed > 0:
@@ -1741,6 +1914,15 @@ async def run_tool_driven_test_fix(
                                         "failed_tests": failed_tests,
                                         "metadata": result.metadata,
                                     }
+                                )
+                            if _should_bail_to_adjust_test(result.content, failed):
+                                return (
+                                    False,
+                                    best_snapshot["service_script"],
+                                    best_snapshot["components_script"],
+                                    best_snapshot["test_script"],
+                                    best_snapshot["dummy_data"],
+                                    best_snapshot["messages"],
                                 )
                         else:
                             logger.warning(
@@ -1809,17 +1991,33 @@ async def run_tool_driven_test_fix(
                             }
                         )
                 elif forced_result.success:
-                    all_tests_passed = True
-                    if event_queue:
-                        await event_queue.put(
-                            {
-                                "event": "test_result",
-                                "status": "passed",
-                                "message": "All tests passed!",
-                                "passed": forced_passed,
-                                "failed": forced_failed,
-                                "metadata": forced_result.metadata,
-                            }
+                    validation_ok, validation_reason = _validate_post_success(
+                        context=f"forced iteration {attempt}",
+                        current_service_script=toolkit.current_service_script,
+                        current_components_script=toolkit.current_components_script,
+                        current_test_script=toolkit.current_test_script,
+                        current_dummy_data=toolkit.current_dummy_data,
+                    )
+                    if validation_ok:
+                        all_tests_passed = True
+                        if event_queue:
+                            await event_queue.put(
+                                {
+                                    "event": "test_result",
+                                    "status": "passed",
+                                    "message": "All tests passed!",
+                                    "passed": forced_passed,
+                                    "failed": forced_failed,
+                                    "metadata": forced_result.metadata,
+                                }
+                            )
+                    else:
+                        await _handle_post_success_validation_failure(
+                            context=f"forced iteration {attempt}",
+                            reason=validation_reason,
+                            passed=forced_passed,
+                            failed=max(forced_failed, 1),
+                            metadata=forced_result.metadata,
                         )
                 elif event_queue:
                     await event_queue.put(
@@ -1831,6 +2029,16 @@ async def run_tool_driven_test_fix(
                             "failed_tests": forced_failed_tests,
                             "metadata": forced_result.metadata,
                         }
+                    )
+
+                if _should_bail_to_adjust_test(forced_result.content, forced_failed):
+                    return (
+                        False,
+                        best_snapshot["service_script"],
+                        best_snapshot["components_script"],
+                        best_snapshot["test_script"],
+                        best_snapshot["dummy_data"],
+                        best_snapshot["messages"],
                     )
 
             for tool_result in tool_results:
@@ -1854,23 +2062,39 @@ async def run_tool_driven_test_fix(
                 _reset_attempts_on_progress(passed, "verification run")
                 _update_best_snapshot(passed, failed)
                 if final_result.success:
-                    return (
-                        True,
-                        toolkit.current_service_script,
-                        toolkit.current_components_script,
-                        toolkit.current_test_script,
-                        toolkit.current_dummy_data,
-                        fix_messages,
+                    validation_ok, validation_reason = _validate_post_success(
+                        context="verification run",
+                        current_service_script=toolkit.current_service_script,
+                        current_components_script=toolkit.current_components_script,
+                        current_test_script=toolkit.current_test_script,
+                        current_dummy_data=toolkit.current_dummy_data,
                     )
-                fix_messages.append(
-                    Message(
-                        role=MessageRole.USER,
-                        content=(
-                            "Tests are still failing:\n"
-                            f"```\n{final_result.content}\n```\nContinue fixing."
-                        ),
+                    if validation_ok:
+                        return (
+                            True,
+                            toolkit.current_service_script,
+                            toolkit.current_components_script,
+                            toolkit.current_test_script,
+                            toolkit.current_dummy_data,
+                            fix_messages,
+                        )
+                    await _handle_post_success_validation_failure(
+                        context="verification run",
+                        reason=validation_reason,
+                        passed=passed,
+                        failed=max(failed, 1),
+                        metadata=final_result.metadata,
                     )
-                )
+                else:
+                    fix_messages.append(
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "Tests are still failing:\n"
+                                f"```\n{final_result.content}\n```\nContinue fixing."
+                            ),
+                        )
+                    )
                 if not has_modification_tools:
                     attempt -= 1
                 continue

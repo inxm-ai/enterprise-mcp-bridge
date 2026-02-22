@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
     Union,
 )
@@ -154,14 +156,101 @@ def _extract_dummy_data_payload(dummy_data: Optional[str]) -> Dict[str, Any]:
         return {}
 
 
-def _contains_key_recursive(value: Any, key: str) -> bool:
+def _collect_object_keys_recursive(value: Any) -> Set[str]:
+    keys: Set[str] = set()
     if isinstance(value, dict):
-        if key in value:
-            return True
-        return any(_contains_key_recursive(item, key) for item in value.values())
+        for item_key, item_value in value.items():
+            keys.add(item_key)
+            keys.update(_collect_object_keys_recursive(item_value))
+        return keys
     if isinstance(value, list):
-        return any(_contains_key_recursive(item, key) for item in value)
-    return False
+        for item in value:
+            keys.update(_collect_object_keys_recursive(item))
+    return keys
+
+
+def _normalize_schema_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _build_dummy_data_key_index(dummy_payload: Dict[str, Any]) -> Dict[str, Set[str]]:
+    index: Dict[str, Set[str]] = {}
+    for tool_name, tool_payload in dummy_payload.items():
+        if isinstance(tool_payload, (dict, list)):
+            keys = _collect_object_keys_recursive(tool_payload)
+            if keys:
+                index[tool_name] = keys
+    return index
+
+
+def _find_schema_drift_candidate(field_name: str, valid_keys: Set[str]) -> Optional[str]:
+    if not field_name or not valid_keys or field_name in valid_keys:
+        return None
+
+    normalized_field = _normalize_schema_key(field_name)
+    if not normalized_field:
+        return None
+
+    normalized_to_keys: Dict[str, List[str]] = {}
+    for key in sorted(valid_keys):
+        normalized_to_keys.setdefault(_normalize_schema_key(key), []).append(key)
+
+    exact_normalized = normalized_to_keys.get(normalized_field)
+    if exact_normalized:
+        return exact_normalized[0]
+
+    near_matches = difflib.get_close_matches(field_name, sorted(valid_keys), n=1, cutoff=0.74)
+    if near_matches:
+        return near_matches[0]
+
+    near_normalized = difflib.get_close_matches(
+        normalized_field,
+        sorted(normalized_to_keys.keys()),
+        n=1,
+        cutoff=0.74,
+    )
+    if near_normalized:
+        return normalized_to_keys[near_normalized[0]][0]
+
+    return None
+
+
+def _extract_js_property_chain_leafs(text: str, root_pattern: str) -> List[str]:
+    leafs: List[str] = []
+    chain_pattern = re.compile(
+        rf"{root_pattern}((?:\s*\?*\.\s*[A-Za-z_]\w*)+)",
+        re.IGNORECASE,
+    )
+    for match in chain_pattern.finditer(text):
+        chain = match.group(1)
+        segments = re.findall(r"[A-Za-z_]\w*", chain)
+        if segments:
+            leafs.append(segments[-1])
+    return leafs
+
+
+def _extract_mock_object_literal_keys(test_text: str) -> List[Tuple[str, str, str]]:
+    extracted: List[Tuple[str, str, str]] = []
+
+    add_resolved_pattern = re.compile(
+        r"addResolved\s*\(\s*['\"]([A-Za-z_]\w*)['\"]\s*,\s*\{([\s\S]{0,1200}?)\}\s*\)",
+        re.IGNORECASE,
+    )
+    fallback_pattern = re.compile(
+        r"dummyData\.([A-Za-z_]\w*)\s*\?\?\s*\{([\s\S]{0,1200}?)\}",
+        re.IGNORECASE,
+    )
+    key_pattern = re.compile(r"(?:^|[,{]\s*)(?:['\"])?([A-Za-z_]\w*)(?:['\"])?\s*:")
+
+    for tool_name, object_body in add_resolved_pattern.findall(test_text):
+        for key in key_pattern.findall(object_body):
+            extracted.append((tool_name, key, "addResolved"))
+
+    for tool_name, object_body in fallback_pattern.findall(test_text):
+        for key in key_pattern.findall(object_body):
+            extracted.append((tool_name, key, "fallback"))
+
+    return extracted
 
 
 def _detect_schema_contract_risks(
@@ -174,32 +263,53 @@ def _detect_schema_contract_risks(
     test_text = test_script or ""
     components_text = components_script or ""
     dummy_payload = _extract_dummy_data_payload(dummy_data)
-    weather_payload = dummy_payload.get("get_weather_details")
 
-    if isinstance(weather_payload, dict):
-        has_temperature_c = _contains_key_recursive(weather_payload, "temperature_c")
-        has_temperature = _contains_key_recursive(weather_payload, "temperature")
-        if has_temperature_c and not has_temperature:
-            if re.search(
-                r"state\.data(?:\.current)?\?*\.temperature\b|state\.data\.temperature\b",
-                components_text,
-                re.IGNORECASE,
-            ):
-                risks.append("weather_field_mismatch:temperature_vs_temperature_c")
+    key_index = _build_dummy_data_key_index(dummy_payload)
+    all_dummy_keys: Set[str] = set()
+    for keys in key_index.values():
+        all_dummy_keys.update(keys)
 
-            if re.search(
-                r"dummyData\.get_weather_details\s*\?\?\s*\{[\s\S]{0,800}?\btemperature\b",
-                test_text,
-                re.IGNORECASE,
-            ):
-                risks.append("weather_fallback_mock_mismatch:uses_temperature")
+    component_leafs = _extract_js_property_chain_leafs(
+        components_text,
+        r"state\s*\.\s*data",
+    )
+    for field_name in component_leafs:
+        candidate = _find_schema_drift_candidate(field_name, all_dummy_keys)
+        if candidate:
+            risks.append(
+                "schema_field_drift:components:"
+                f"{field_name}->{candidate}"
+            )
 
-            if re.search(
-                r"addResolved\s*\(\s*['\"]get_weather_details['\"]\s*,\s*\{[\s\S]{0,400}?\btemperature\b",
-                test_text,
-                re.IGNORECASE,
-            ):
-                risks.append("weather_mock_mismatch:addResolved_temperature")
+    test_dummy_refs_pattern = re.compile(
+        r"dummyData\.([A-Za-z_]\w*)((?:\s*\?*\.\s*[A-Za-z_]\w*)+)",
+        re.IGNORECASE,
+    )
+    for tool_name, chain in test_dummy_refs_pattern.findall(test_text):
+        tool_keys = key_index.get(tool_name)
+        if not tool_keys:
+            continue
+        segments = re.findall(r"[A-Za-z_]\w*", chain)
+        if not segments:
+            continue
+        field_name = segments[-1]
+        candidate = _find_schema_drift_candidate(field_name, tool_keys)
+        if candidate:
+            risks.append(
+                "schema_field_drift:test_ref:"
+                f"{tool_name}.{field_name}->{candidate}"
+            )
+
+    for tool_name, key_name, source in _extract_mock_object_literal_keys(test_text):
+        tool_keys = key_index.get(tool_name)
+        if not tool_keys:
+            continue
+        candidate = _find_schema_drift_candidate(key_name, tool_keys)
+        if candidate:
+            risks.append(
+                "schema_field_drift:test_mock:"
+                f"{source}:{tool_name}.{key_name}->{candidate}"
+            )
 
     if re.search(
         r"assert\.ok\([^\n]*includes\(['\"][0-9]+['\"]\)[^\n]*\|\|[^\n]*includes\(['\"]°C['\"]\)",
@@ -468,6 +578,24 @@ async def run_phase1_attempt(
             components_script=components_script,
             dummy_data=dummy_data,
         )
+        def _schema_post_success_validator(
+            current_service_script: str,
+            current_components_script: str,
+            current_test_script: str,
+            current_dummy_data: Optional[str],
+        ) -> Tuple[bool, Optional[str]]:
+            del current_service_script
+            current_risks = _detect_schema_contract_risks(
+                test_script=current_test_script,
+                components_script=current_components_script,
+                dummy_data=current_dummy_data,
+            )
+            if not current_risks:
+                return True, None
+            return (
+                False,
+                "schema_contract_risk_after_fix: " f"{', '.join(current_risks)}",
+            )
         schema_contract_reason: Optional[str] = None
         if schema_contract_risks:
             schema_contract_reason = (
@@ -501,10 +629,10 @@ async def run_phase1_attempt(
             output = f"{schema_output}\n\n{output or ''}".strip()
             if success:
                 logger.warning(
-                    "[stream_generate_ui] Phase 1 attempt %s forcing iterative fix due to schema contract risks",
+                    "[stream_generate_ui] Phase 1 attempt %s schema contract gate failed; continuing iterative fix in the same attempt",
                     attempt,
                 )
-                yield f"event: log\ndata: {json.dumps({'message': 'Schema contract validation failed; running iterative auto-fix'})}\n\n".encode(
+                yield f"event: log\ndata: {json.dumps({'message': 'Schema contract gate failed; continuing iterative fix in this attempt'})}\n\n".encode(
                     "utf-8"
                 )
             success = False
@@ -516,7 +644,7 @@ async def run_phase1_attempt(
                 attempt,
                 output_tail or "<empty>",
             )
-            yield f"event: log\ndata: {json.dumps({'message': 'Initial tests failed', 'output_tail': output_tail})}\n\n".encode(
+            yield f"event: log\ndata: {json.dumps({'message': 'Initial checks failed (tests and/or schema contract)', 'output_tail': output_tail})}\n\n".encode(
                 "utf-8"
             )
             yield f"event: log\ndata: {json.dumps({'message': 'Tests failed, starting iterative fix with tools...'})}\n\n".encode(
@@ -556,6 +684,7 @@ async def run_phase1_attempt(
                     access_token=access_token,
                     max_attempts=25,
                     event_queue=tool_events_queue,
+                    post_success_validator=_schema_post_success_validator,
                 )
 
             fix_task = asyncio.create_task(stream_tool_events())
@@ -646,7 +775,7 @@ async def run_phase1_attempt(
                         f"{', '.join(post_fix_schema_risks)}"
                     )
                     logger.warning(
-                        "[stream_generate_ui] Phase 1 attempt %s failed after iterative fix: %s",
+                        "[stream_generate_ui] Phase 1 attempt %s failed after iterative fix (defensive fallback): %s",
                         attempt,
                         fix_reason,
                     )

@@ -1388,6 +1388,8 @@ def test_dummy_data_test_usage_guidance_prefers_resolved_mocking():
     assert "dummyDataSchemaHints" in guidance
     assert "svc.test.addResolved(toolName, dummyData[toolName])" in guidance
     assert "ask for schema and regenerate dummy data" in guidance
+    assert "derive expectations from a normalized shape" in guidance
+    assert "Do NOT hardcode dynamic time/value literals" in guidance
     assert "svc.test.addResponse(toolName, dummyData[toolName])" not in guidance
 
 
@@ -2886,7 +2888,7 @@ async def test_iterative_test_fix_code_first_success_skips_adjust_test(monkeypat
     monkeypatch.setattr(
         service,
         "_run_tests",
-        lambda *_args, **_kwargs: (False, "# pass 0\n# fail 1\n"),
+        lambda *_args, **_kwargs: (True, "# pass 1\n# fail 0\n"),
     )
 
     success, svc, comps, tests, _dummy, _messages = await service._iterative_test_fix(
@@ -2969,3 +2971,58 @@ async def test_iterative_test_fix_preserves_best_snapshot_across_stages(monkeypa
     assert svc == "service-a"
     assert comps == "components-a"
     assert tests == "test-a"
+
+
+@pytest.mark.asyncio
+async def test_iterative_test_fix_stage_success_is_gated_by_validator(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.GENERATED_UI_FIX_CODE_FIRST", True
+    )
+
+    calls = []
+
+    async def fake_run_tool_driven_test_fix(**kwargs):
+        mode = kwargs.get("strategy_mode", "default")
+        calls.append(mode)
+        return (
+            True,
+            f"service-{mode}",
+            f"components-{mode}",
+            f"test-{mode}",
+            None,
+            kwargs.get("messages") or [],
+        )
+
+    monkeypatch.setattr(
+        "app.app_facade.generated_service.run_tool_driven_test_fix",
+        fake_run_tool_driven_test_fix,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_tests",
+        lambda *_args, **_kwargs: (True, "# pass 3\n# fail 0\n"),
+    )
+
+    def reject_all_validator(_svc, _comps, _tests, _fixtures):
+        return False, "schema_contract_rejected"
+
+    success, svc, comps, tests, _dummy, _messages = await service._iterative_test_fix(
+        service_script="service-0",
+        components_script="components-0",
+        test_script="test-0",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.USER, content="fix")],
+        allowed_tools=[],
+        access_token=None,
+        max_attempts=25,
+        event_queue=None,
+        post_success_validator=reject_all_validator,
+    )
+
+    assert success is False
+    assert calls == ["fix_code", "adjust_test"]
+    assert svc == "service-0"
+    assert comps == "components-0"
+    assert tests == "test-0"

@@ -83,6 +83,33 @@ const disconnectTree = (node) => {
   };
   walk(node);
 };
+const toDispatchEvent = (event) => {
+  if (typeof event === 'string') return { type: event };
+  if (!event || typeof event !== 'object') return {};
+
+  const NativeEvent = globalThis.Event;
+  if (typeof NativeEvent === 'function' && event instanceof NativeEvent) {
+    const evt = {
+      type: event.type,
+      bubbles: !!event.bubbles,
+      cancelable: !!event.cancelable,
+      composed: !!event.composed,
+      defaultPrevented: !!event.defaultPrevented,
+      preventDefault() {
+        this.defaultPrevented = true;
+        event.preventDefault?.();
+      },
+      stopPropagation() {
+        this._stopped = true;
+        event.stopPropagation?.();
+      }
+    };
+    if ('detail' in event) evt.detail = event.detail;
+    return evt;
+  }
+
+  return event;
+};
 
 const matchSelector = (el, selector) => {
   if (!selector || !el) return false;
@@ -387,12 +414,12 @@ class FakeElement {
     this._listeners.get(type)?.delete(handler);
   }
   dispatchEvent(event) {
-    const evt = typeof event === 'string' ? { type: event } : (event || {});
+    const evt = toDispatchEvent(event);
     evt.preventDefault ??= () => { evt.defaultPrevented = true; };
     evt.stopPropagation ??= () => { evt._stopped = true; };
     const handlers = Array.from(this._listeners.get(evt?.type) || []);
     try {
-      if (evt && evt.target === undefined) evt.target = this;
+      if (evt && evt.target == null) evt.target = this;
       evt.currentTarget = this;
     } catch (err) {
       /* ignore read-only target */
@@ -790,12 +817,16 @@ class FakeDocument {
     this._listeners.get(type)?.delete(handler);
   }
   dispatchEvent(event) {
-    const evt = typeof event === 'string' ? { type: event } : (event || {});
+    const evt = toDispatchEvent(event);
     evt.preventDefault ??= () => { evt.defaultPrevented = true; };
     evt.stopPropagation ??= () => { evt._stopped = true; };
     const handlers = this._listeners.get(evt?.type) || new Set();
-    if (evt && evt.target === undefined) evt.target = this;
-    evt.currentTarget = this;
+    try {
+      if (evt && evt.target == null) evt.target = this;
+      evt.currentTarget = this;
+    } catch (err) {
+      /* ignore read-only target/currentTarget on native events */
+    }
     handlers.forEach(handler => handler.call(this, evt));
     if (evt.bubbles && !evt._stopped) {
       const win = this.defaultView || globalThis.window;
@@ -827,12 +858,16 @@ class FakeWindow {
     this._listeners.get(type)?.delete(handler);
   }
   dispatchEvent(event) {
-    const evt = typeof event === 'string' ? { type: event } : (event || {});
+    const evt = toDispatchEvent(event);
     evt.preventDefault ??= () => { evt.defaultPrevented = true; };
     evt.stopPropagation ??= () => { evt._stopped = true; };
     const handlers = this._listeners.get(evt?.type) || new Set();
-    if (evt && evt.target === undefined) evt.target = this;
-    evt.currentTarget = this;
+    try {
+      if (evt && evt.target == null) evt.target = this;
+      evt.currentTarget = this;
+    } catch (err) {
+      /* ignore read-only target/currentTarget on native events */
+    }
     handlers.forEach(handler => handler.call(this, evt));
     return true;
   }

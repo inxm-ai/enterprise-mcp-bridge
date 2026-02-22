@@ -744,6 +744,74 @@ async def test_tool_fix_read_only_streak_forces_run_tests(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fix_code_bails_early_on_repeated_assertion_signature(monkeypatch):
+    monkeypatch.setattr("app.app_facade.test_fix_tools.READ_ONLY_STREAK_LIMIT", 1)
+
+    run_calls = {"count": 0}
+
+    def fake_run_tests(self, test_name=None):
+        run_calls["count"] += 1
+        return ToolResult(
+            success=False,
+            content=(
+                "TAP version 13\n"
+                "not ok 1 - Weather Dashboard Tests\n"
+                "AssertionError [ERR_ASSERTION]: expected true\n"
+                "at TestContext.<anonymous> (file:///tmp/tmpx/user_test.js:27:10)\n"
+                "# pass 1\n"
+                "# fail 2\n"
+            ),
+        )
+
+    monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
+
+    class MockCompletions:
+        async def create(self, **kwargs):
+            return _make_tool_call_response(
+                "search_files",
+                json.dumps({"regex": "aqData\\.pm2_5", "script_type": "test"}),
+            )
+
+    class MockClient:
+        def __init__(self):
+            self.client = type(
+                "Chat",
+                (),
+                {
+                    "chat": type(
+                        "CompletionsWrap", (), {"completions": MockCompletions()}
+                    )()
+                },
+            )()
+            self.model_format = None
+
+        def _build_request_params(self, request):
+            return {"chat_request": request}
+
+    class MockTGIService:
+        def __init__(self):
+            self.llm_client = MockClient()
+
+    success, *_ = await run_tool_driven_test_fix(
+        tgi_service=MockTGIService(),
+        service_script="export class McpService {}",
+        components_script="export const init = () => {};",
+        test_script="import { test } from 'node:test'; test('x', () => { throw new Error('fail'); });",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.SYSTEM, content="system")],
+        allowed_tools=None,
+        access_token=None,
+        max_attempts=12,
+        event_queue=None,
+        extra_headers=None,
+        strategy_mode="fix_code",
+    )
+
+    assert success is False
+    assert run_calls["count"] <= 3
+
+
+@pytest.mark.asyncio
 async def test_tool_start_event_includes_fix_explanation(monkeypatch):
     run_calls = {"count": 0}
 
@@ -957,3 +1025,162 @@ async def test_tool_start_event_infers_fix_explanation_when_missing(monkeypatch)
     assert tool_start_events[0]["tool"] == "search_files"
     assert str(tool_start_events[0].get("fix_explanation", "")).strip()
     assert str(tool_start_events[0].get("why", "")).strip()
+
+
+@pytest.mark.asyncio
+async def test_post_success_validator_retries_instead_of_returning_success(monkeypatch):
+    run_calls = {"count": 0}
+
+    def fake_run_tests(self, test_name=None):
+        run_calls["count"] += 1
+        if run_calls["count"] == 1:
+            return ToolResult(success=False, content="# pass 0\n# fail 1\n")
+        return ToolResult(
+            success=True,
+            content="# pass 1\n# fail 0\n",
+            metadata={"passed": 1, "failed": 0},
+        )
+
+    monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
+
+    class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            return _make_tool_call_response("run_tests", "{}")
+
+    class MockClient:
+        def __init__(self):
+            self.completions = MockCompletions()
+            self.client = type(
+                "Chat",
+                (),
+                {
+                    "chat": type(
+                        "CompletionsWrap",
+                        (),
+                        {"completions": self.completions},
+                    )()
+                },
+            )()
+            self.model_format = None
+
+        def _build_request_params(self, request):
+            return {"chat_request": request}
+
+    class MockTGIService:
+        def __init__(self):
+            self.llm_client = MockClient()
+
+    validator_calls = {"count": 0}
+
+    def always_fail_validator(_svc, _comps, _tests, _fixtures):
+        validator_calls["count"] += 1
+        return False, "schema_contract_rejected"
+
+    success, _svc, _comps, _tests, _dummy, updated = await run_tool_driven_test_fix(
+        tgi_service=MockTGIService(),
+        service_script="export class McpService {}",
+        components_script="export const mode = 'bad';",
+        test_script="import { test } from 'node:test'; test('x', () => { throw new Error('fail'); });",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.SYSTEM, content="system")],
+        allowed_tools=None,
+        access_token=None,
+        max_attempts=2,
+        event_queue=None,
+        extra_headers=None,
+        post_success_validator=always_fail_validator,
+    )
+
+    assert success is False
+    assert validator_calls["count"] >= 2
+    assert any(
+        (
+            msg.role == MessageRole.USER
+            and "contract validation failed" in (msg.content or "")
+        )
+        for msg in updated
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_success_validator_allows_success_after_mutation(monkeypatch):
+    run_calls = {"count": 0}
+
+    def fake_run_tests(self, test_name=None):
+        run_calls["count"] += 1
+        if run_calls["count"] == 1:
+            return ToolResult(success=False, content="# pass 0\n# fail 1\n")
+        return ToolResult(
+            success=True,
+            content="# pass 1\n# fail 0\n",
+            metadata={"passed": 1, "failed": 0},
+        )
+
+    monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
+
+    class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _make_tool_call_response("run_tests", "{}")
+            return _make_tool_call_response(
+                "update_components_script",
+                json.dumps({"new_script": "export const mode = 'good';"}),
+            )
+
+    class MockClient:
+        def __init__(self):
+            self.completions = MockCompletions()
+            self.client = type(
+                "Chat",
+                (),
+                {
+                    "chat": type(
+                        "CompletionsWrap",
+                        (),
+                        {"completions": self.completions},
+                    )()
+                },
+            )()
+            self.model_format = None
+
+        def _build_request_params(self, request):
+            return {"chat_request": request}
+
+    class MockTGIService:
+        def __init__(self):
+            self.llm_client = MockClient()
+
+    validator_calls = {"count": 0}
+
+    def mode_validator(_svc, comps, _tests, _fixtures):
+        validator_calls["count"] += 1
+        if "mode = 'good'" in comps:
+            return True, None
+        return False, "mode_not_fixed"
+
+    success, _svc, comps, _tests, _dummy, _updated = await run_tool_driven_test_fix(
+        tgi_service=MockTGIService(),
+        service_script="export class McpService {}",
+        components_script="export const mode = 'bad';",
+        test_script="import { test } from 'node:test'; test('x', () => { throw new Error('fail'); });",
+        dummy_data=None,
+        messages=[Message(role=MessageRole.SYSTEM, content="system")],
+        allowed_tools=None,
+        access_token=None,
+        max_attempts=3,
+        event_queue=None,
+        extra_headers=None,
+        post_success_validator=mode_validator,
+    )
+
+    assert success is True
+    assert "mode = 'good'" in comps
+    assert validator_calls["count"] >= 2

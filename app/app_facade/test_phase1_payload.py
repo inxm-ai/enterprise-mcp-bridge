@@ -741,3 +741,130 @@ async def test_phase1_rejects_iterative_fix_result_when_schema_risks_remain():
     assert result_payload["success"] is False
     assert "schema_contract_risk_after_fix" in result_payload["reason"]
     assert run_tests_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_phase1_passes_schema_validator_to_iterative_fix():
+    class MockChunk:
+        def __init__(self, content=None, is_done=False):
+            self.content = content
+            self.is_done = is_done
+            self.tool_calls = None
+            self.accumulated_tool_calls = None
+            self.finish_reason = None
+
+    async def mock_stream(*_args, **_kwargs):
+        payload = {
+            "components_script": (
+                "pfusch('current-weather', { city: 'Berlin', data: null }, (state) => [\n"
+                "  html.div(`${Math.round(state.data.temperature ?? 0)}°C`)\n"
+                "]);"
+            ),
+            "test_script": "import { it } from 'node:test'; it('placeholder', () => {});",
+        }
+        yield MockChunk(content=json.dumps(payload), is_done=False)
+        yield MockChunk(content=None, is_done=True)
+
+    tgi_service = MagicMock()
+    tgi_service.llm_client = MagicMock()
+    tgi_service.llm_client.stream_completion = mock_stream
+
+    run_tests_calls = 0
+
+    def run_tests(_service_script, _components_script, _test_script, _dummy_data):
+        nonlocal run_tests_calls
+        run_tests_calls += 1
+        return True, "ok"
+
+    validator_state = {"calls": 0, "seen": False}
+
+    async def iterative_test_fix(**kwargs):
+        validator = kwargs.get("post_success_validator")
+        assert callable(validator)
+        validator_state["seen"] = True
+
+        invalid_components = (
+            "pfusch('current-weather', { city: 'Berlin', data: null }, (state) => ["
+            "html.div(`${Math.round(state.data.temperature ?? 0)}°C`)"
+            "]);"
+        )
+        valid_components = (
+            "pfusch('current-weather', { city: 'Berlin', data: null }, (state) => ["
+            "html.div(`${Math.round(state.data.temperature_c ?? 0)}°C`)"
+            "]);"
+        )
+        valid_test = "import { it } from 'node:test'; it('ok', () => {});"
+
+        valid, _reason = validator(
+            "",
+            invalid_components,
+            valid_test,
+            kwargs.get("dummy_data"),
+        )
+        validator_state["calls"] += 1
+        assert valid is False
+
+        valid, _reason = validator(
+            "",
+            valid_components,
+            valid_test,
+            kwargs.get("dummy_data"),
+        )
+        validator_state["calls"] += 1
+        assert valid is True
+
+        return (
+            True,
+            "",
+            valid_components,
+            valid_test,
+            kwargs.get("dummy_data"),
+            kwargs.get("messages") or [],
+        )
+
+    @asynccontextmanager
+    async def mock_chunk_reader(stream_source):
+        class Reader:
+            def as_parsed(self):
+                return stream_source
+
+        yield Reader()
+
+    messages = [
+        Message(role=MessageRole.SYSTEM, content="sys"),
+        Message(role=MessageRole.USER, content="user"),
+    ]
+
+    dummy_data = (
+        "export const dummyData = {\n"
+        '  "get_weather_details": {\n'
+        '    "city": "Berlin",\n'
+        '    "temperature_c": 7.7\n'
+        "  }\n"
+        "};\n"
+        "export const dummyDataSchemaHints = {};"
+    )
+
+    result_payload = None
+    async for item in run_phase1_attempt(
+        attempt=1,
+        max_attempts=3,
+        messages=messages,
+        allowed_tools=[],
+        dummy_data=dummy_data,
+        access_token=None,
+        tgi_service=tgi_service,
+        parse_json=lambda content: json.loads(content),
+        run_tests=run_tests,
+        iterative_test_fix=iterative_test_fix,
+        chunk_reader=mock_chunk_reader,
+        ui_model_headers={},
+    ):
+        if isinstance(item, dict) and item.get("type") == "result":
+            result_payload = item
+
+    assert result_payload is not None
+    assert result_payload["success"] is True
+    assert validator_state["seen"] is True
+    assert validator_state["calls"] >= 2
+    assert run_tests_calls >= 1

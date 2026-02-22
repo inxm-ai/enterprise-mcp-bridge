@@ -11,7 +11,18 @@ import copy
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 from typing import AsyncIterator
 
 from fastapi import HTTPException
@@ -75,7 +86,11 @@ _DUMMY_DATA_TEST_USAGE_GUIDANCE = (
     "Never import './dummy_data.js' in service_script/components_script; "
     "it is test-only and not browser-delivered at runtime. "
     "Do NOT inject fetched domain data directly via component initial state or "
-    "test-only event payloads; components must fetch/refetch themselves."
+    "test-only event payloads; components must fetch/refetch themselves. "
+    "When asserting concrete field values in tests, derive expectations from a normalized shape (e.g. "
+    "const normalized = data.current_air_quality || data; const pm25 = normalized.pm2_5) instead of assuming flat paths. "
+    "Do NOT hardcode dynamic time/value literals when fixture payload already provides source-of-truth fields; "
+    "assert against transformed fixture values."
 )
 _DUMMY_DATA_ERROR_RECOVERY_SYSTEM_PROMPT = (
     "You are diagnosing a failed tool call used only for generating dummy test data. "
@@ -1043,6 +1058,9 @@ class GeneratedUIService:
         access_token: Optional[str],
         max_attempts: int = 25,
         event_queue: Optional[asyncio.Queue] = None,
+        post_success_validator: Optional[
+            Callable[[str, str, str, Optional[str]], Tuple[bool, Optional[str]]]
+        ] = None,
     ) -> Tuple[bool, str, str, str, Optional[str], List[Message]]:
         if not GENERATED_UI_FIX_CODE_FIRST:
             return await run_tool_driven_test_fix(
@@ -1057,6 +1075,7 @@ class GeneratedUIService:
                 max_attempts=max_attempts,
                 event_queue=event_queue,
                 extra_headers=UI_MODEL_HEADERS,
+                post_success_validator=post_success_validator,
             )
 
         def _score_candidate(
@@ -1067,7 +1086,28 @@ class GeneratedUIService:
             except Exception:
                 return False, -1, 10**9
             passed, failed, _ = _parse_tap_output(output or "")
-            return ok, passed, failed
+            if not ok:
+                return False, passed, failed
+            if not post_success_validator:
+                return True, passed, failed
+            try:
+                validation_ok, validation_reason = post_success_validator(
+                    svc, comps, tests, fixtures
+                )
+            except Exception as exc:
+                logger.error(
+                    "[iterative_test_fix] Post-success validator errored while scoring candidate: %s",
+                    exc,
+                    exc_info=exc,
+                )
+                return False, passed, max(1, failed)
+            if validation_ok:
+                return True, passed, failed
+            logger.info(
+                "[iterative_test_fix] Candidate rejected by post-success validator: %s",
+                (validation_reason or "post_success_validation_failed").strip(),
+            )
+            return False, passed, max(1, failed)
 
         test_source = test_script or ""
         likely_pfusch_collection_mismatch = bool(
@@ -1121,6 +1161,7 @@ class GeneratedUIService:
             event_queue=event_queue,
             extra_headers=UI_MODEL_HEADERS,
             strategy_mode="fix_code",
+            post_success_validator=post_success_validator,
         )
         (
             stage_a_success,
@@ -1150,9 +1191,13 @@ class GeneratedUIService:
                 "failed": stage_a_failed,
             }
 
-        if stage_a_success:
+        if stage_a_success and stage_a_ok:
             logger.info("[iterative_test_fix] Code-first stage succeeded")
             return stage_a
+        if stage_a_success and not stage_a_ok:
+            logger.warning(
+                "[iterative_test_fix] Code-first stage reported success but failed post-success validation; continuing to fallback stage"
+            )
 
         if stage_b_attempts <= 0:
             logger.warning(
@@ -1183,6 +1228,7 @@ class GeneratedUIService:
             event_queue=event_queue,
             extra_headers=UI_MODEL_HEADERS,
             strategy_mode="adjust_test",
+            post_success_validator=post_success_validator,
         )
         (
             stage_b_success,
@@ -1212,9 +1258,13 @@ class GeneratedUIService:
                 "failed": stage_b_failed,
             }
 
-        if stage_b_success:
+        if stage_b_success and stage_b_ok:
             logger.info("[iterative_test_fix] Fallback adjust-test stage succeeded")
             return stage_b
+        if stage_b_success and not stage_b_ok:
+            logger.warning(
+                "[iterative_test_fix] Fallback adjust-test stage reported success but failed post-success validation"
+            )
 
         logger.warning(
             "[iterative_test_fix] All fix stages failed. Returning best snapshot (passed=%s, failed=%s)",
