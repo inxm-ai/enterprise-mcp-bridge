@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: enterprise-mcp-bridge-weather
+    runtime: image
+    image:
+      url: ghcr.io/inxm-ai/enterprise-mcp-bridge:latest
+    plan: starter
+    autoDeploy: false
+    healthCheckPath: /docs
+    envVars:
+      - key: TGI_URL
+        value: https://api.openai.com/v1
+      - key: TGI_TOKEN
+        sync: false
+      - key: TGI_CONVERSATION_MODE
+        value: responses
+      - key: DEFAULT_MODEL
+        sync: false
+      - key: MCP_TEST_ACTOR
+        value: test-user
+      - key: MCP_GIT_CLONE
+        value: https://github.com/isdaniel/mcp_weather_server.git
+      - key: APP_CONVERSATIONAL_UI_ENABLED
+        value: "true"
+      - key: GENERATED_WEB_PATH
+        value: /opt
+      - key: ENV
+        value: dev
+      - key: MCP_SERVER_COMMAND
+        value: python -m mcp_weather_server

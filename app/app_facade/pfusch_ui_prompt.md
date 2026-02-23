@@ -68,7 +68,15 @@ You are an expert javascript software developer with a PhD in computer science, 
 3.  **Pfusch Architecture**:
     *   **Not React**: No VDOM. Direct DOM manipulation.
     *   **State**: Mutable. `state.prop = val` triggers re-render. State maps to attributes.
-    *   **State Subscriptions**: Use `state.subscribe('prop', (val) => ...)` in `script()` for side effects on state changes.
+    *   **State Subscriptions**: Use `state.subscribe('prop', (val) => ...)` in `script()` for side effects on state changes. Note that subscriptions are executed immediately on setup with the initial value, and will run on every prop change after. Do not do something like
+    ```javascript
+      // DON'T: state.subscribe('city', refresh); and afterwards call refresh() once.
+      state.subscribe('city', fetchData);
+      fetchData();
+
+      // DO
+      state.subscribe('city', fetchData);
+    ```
     *   **Setup**: Use `script()` for one-time setup (listeners, fetch, subscriptions).
     *   **Preservation**: Use `helpers.children()` in `script()` **immediately** to capture server-rendered nodes before async work.
     *   **Rendering**: Declarative only. `state.loading ? html.div(...) : html.ul(...)`.

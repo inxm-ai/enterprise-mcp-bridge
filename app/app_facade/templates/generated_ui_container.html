@@ -133,6 +133,59 @@
       border: 0;
       background: #fff;
     }
+    .preview-frame-wrap {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .preview-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(248, 251, 251, 0.93);
+      backdrop-filter: blur(3px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      z-index: 10;
+      transition: opacity 0.3s ease;
+    }
+    .preview-overlay.hidden { opacity: 0; pointer-events: none; }
+    .preview-spinner {
+      width: 38px;
+      height: 38px;
+      border: 2.5px solid #d1fae5;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: ui-spin 0.85s linear infinite;
+    }
+    @keyframes ui-spin { to { transform: rotate(360deg); } }
+    .preview-overlay-label { text-align: center; }
+    .preview-overlay-title {
+      display: block;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+    .preview-overlay-sub {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .preview-overlay-dots::after {
+      content: '';
+      display: inline-block;
+      animation: overlay-dots 1.8s steps(4, end) infinite;
+    }
+    @keyframes overlay-dots {
+      0%   { content: ''; }
+      25%  { content: '.'; }
+      50%  { content: '..'; }
+      75%  { content: '...'; }
+      100% { content: ''; }
+    }
     .status { color: var(--muted); font-size: 12px; }
     .test-chip {
       display: inline-flex;
@@ -261,7 +314,16 @@
     <div class="stack">
       <section class="panel preview-panel">
         <div class="header">Preview</div>
-        <iframe id="preview" title="Generated UI Preview"></iframe>
+        <div class="preview-frame-wrap">
+          <iframe id="preview" title="Generated UI Preview"></iframe>
+          <div id="preview-overlay" class="preview-overlay hidden">
+            <div class="preview-spinner"></div>
+            <div class="preview-overlay-label">
+              <span class="preview-overlay-title">Applying your changes<span class="preview-overlay-dots"></span></span>
+              <span class="preview-overlay-sub">Your updated interface will appear here shortly.</span>
+            </div>
+          </div>
+        </div>
       </section>
       <section class="panel console-panel">
         <div class="tabs">
@@ -289,6 +351,7 @@
     const statusEl = document.getElementById('status');
     const testChipEl = document.getElementById('test-status-chip');
     const previewEl = document.getElementById('preview');
+    const previewOverlayEl = document.getElementById('preview-overlay');
     const sendBtn = document.getElementById('send');
     const publishBtn = document.getElementById('publish');
     const discardBtn = document.getElementById('discard');
@@ -374,6 +437,9 @@
         pendingRuntimeConsoleEvents = pendingRuntimeConsoleEvents.slice(-MAX_RUNTIME_CONSOLE_EVENTS);
       }
     }
+
+    function showPreviewOverlay() { previewOverlayEl.classList.remove('hidden'); }
+    function hidePreviewOverlay() { previewOverlayEl.classList.add('hidden'); }
 
     function setStatus(text) { statusEl.textContent = text; }
 
@@ -561,6 +627,7 @@
         let payload = {};
         try { payload = JSON.parse(event.data); } catch (_err) { return; }
         previewEl.src = draftUrl();
+        hidePreviewOverlay();
         if (payload.draft_version) setStatus(`Draft v${payload.draft_version} (${payload.update_mode || 'updated'})`);
       });
       testsEventSource.addEventListener('error', () => {
@@ -590,6 +657,7 @@
       messageEl.value = '';
       setControlsDisabled(true);
       setSendLoading(true);
+      showPreviewOverlay();
 
       addBubble('user', message);
       const assistantBubble = addBubble('assistant', '');
@@ -653,6 +721,7 @@
               }
             } else if (currentEvent === 'ui_updated') {
               previewEl.src = draftUrl();
+              hidePreviewOverlay();
               setStatus(`Draft v${data.draft_version} (${data.update_mode})`);
               if (!controlsUnlocked) {
                 setControlsDisabled(false);
@@ -683,6 +752,7 @@
         assistantBubble.textContent += `\nError: ${messageText}`;
         setStatus('Error');
       } finally {
+        hidePreviewOverlay();
         if (streamAttempted) {
           try {
             await clearRuntimeServiceExchanges();

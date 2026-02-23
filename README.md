@@ -75,6 +75,29 @@ docker run -it -p 8000:8000 \
 
 **[See deployment guides →](https://inxm-ai.github.io/enterprise-mcp-bridge/#/how-to/deploy-production)** | **[Docker →](https://inxm-ai.github.io/enterprise-mcp-bridge/#/how-to/docker)** | **[Kubernetes →](https://inxm-ai.github.io/enterprise-mcp-bridge/#/how-to/kubernetes)**
 
+### Deploy on Render (Weather MCP Example)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/inxm-ai/enterprise-mcp-bridge)
+
+This uses the same settings as `tmp/deploy_weather.sh` and deploys `ghcr.io/inxm-ai/enterprise-mcp-bridge:latest` with the weather MCP server.
+
+Environment variables used by this setup:
+
+- `TGI_URL` - LLM API base URL (`https://api.openai.com/v1`)
+- `TGI_TOKEN` - API token for the LLM provider (**set this as a secret in Render**)
+- `DEFAULT_MODEL` - Default model name (for example `gpt-5.2-codex`)
+
+- `MCP_GIT_CLONE` - MCP repo cloned into the container at startup - the mcp that will be running
+- `MCP_SERVER_COMMAND` - Command used to start the MCP server (`python -m mcp_weather_server`) you cloned earlier
+
+- `TGI_CONVERSATION_MODE` - LLM API mode (`responses`)
+- `MCP_TEST_ACTOR` - Default actor id for testing/demo flows
+- `APP_CONVERSATIONAL_UI_ENABLED` - Enables generated conversational UI features
+- `GENERATED_WEB_PATH` - Path where generated UI artifacts are stored
+- `ENV` - Runtime mode (`dev`)
+
+⚠️ **Token usage warning:** When the service runs, calls to your configured model provider consume tokens and can incur costs. Keep `TGI_TOKEN` secret and monitor usage limits/billing.
+
 ### OAuth Configuration
 
 The bridge includes built-in OAuth2 token exchange for secure access to downstream resources.

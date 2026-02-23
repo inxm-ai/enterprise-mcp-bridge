@@ -533,20 +533,52 @@ async def run_phase1_attempt(
             tool_calls_seen,
             last_finish_reason or "unknown",
         )
+
+        def _extract_payload_candidate_from_tool_args(raw_args: Any) -> Optional[str]:
+            candidate_obj: Optional[Dict[str, Any]] = None
+            if isinstance(raw_args, dict):
+                if isinstance(raw_args.get("input"), dict):
+                    candidate_obj = raw_args.get("input")
+                else:
+                    candidate_obj = raw_args
+            elif isinstance(raw_args, str):
+                raw_text = raw_args.strip()
+                if not raw_text:
+                    return None
+                try:
+                    parsed = json.loads(raw_text)
+                except Exception:
+                    return None
+                if isinstance(parsed, dict):
+                    candidate_obj = parsed
+
+            if not isinstance(candidate_obj, dict):
+                return None
+
+            # Only recover from tool arguments when they already carry the
+            # phase-1 required payload shape.
+            if (
+                isinstance(candidate_obj.get("components_script"), str)
+                and candidate_obj.get("components_script", "").strip()
+                and isinstance(candidate_obj.get("test_script"), str)
+                and candidate_obj.get("test_script", "").strip()
+            ):
+                return json.dumps(candidate_obj, ensure_ascii=False)
+
+            return None
+
         for idx in sorted(tool_calls_accumulated.keys()):
             args = tool_calls_accumulated[idx].get("arguments")
             if args is None:
                 continue
-            if isinstance(args, dict) and isinstance(args.get("input"), dict):
-                content = json.dumps(args["input"], ensure_ascii=False)
+            candidate = _extract_payload_candidate_from_tool_args(args)
+            if candidate:
+                content = candidate
+                logger.info(
+                    "[stream_generate_ui] Phase 1 attempt %s recovered payload from tool-call arguments",
+                    attempt,
+                )
                 break
-            if isinstance(args, str):
-                if not args:
-                    continue
-                content = args
-                break
-            content = json.dumps(args, ensure_ascii=False)
-            break
 
     logger.info(
         "[stream_generate_ui] Phase 1 attempt %s stream summary: content_chars=%s, tool_calls_seen=%s, finish_reason=%s",

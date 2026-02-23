@@ -20,6 +20,17 @@ The Enterprise MCP Bridge includes a powerful AI-powered UI generation feature t
 - MCP tools available
 - OAuth authentication configured (for user scoping)
 
+### Model Endpoint Mode
+
+If your configured model rejects `/chat/completions` (common with Codex-style models),
+set:
+
+```bash
+TGI_CONVERSATION_MODE="responses"
+```
+
+`chat/completions` remains the default mode for compatibility.
+
 ## Quick Start
 
 ### 1. Generate Your First App

@@ -2069,9 +2069,13 @@ async def run_tool_driven_test_fix(
                         llm_client._payload_size(chat_request),
                     )
 
-                response = await llm_client.client.chat.completions.create(
-                    **llm_client._build_request_params(chat_request)
-                )
+                non_stream = getattr(llm_client, "non_stream_completion", None)
+                if callable(non_stream):
+                    response = await non_stream(chat_request, access_token or "", None)
+                else:
+                    response = await llm_client.client.chat.completions.create(
+                        **llm_client._build_request_params(chat_request)
+                    )
                 logger.info(
                     "[iterative_test_fix] LLM response received (iteration %s)",
                     attempt,
@@ -2498,13 +2502,14 @@ async def run_tool_driven_test_fix(
                 )
                 _update_best_snapshot(forced_passed, forced_failed)
 
-                tool_results.append(
-                    {
-                        "tool_call_id": f"forced_run_tests_{attempt}",
-                        "role": "tool",
-                        "name": "run_tests",
-                        "content": forced_result.content,
-                    }
+                fix_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"[forced run_tests result (iteration {attempt})]\n"
+                            f"{forced_result.content}"
+                        ),
+                    )
                 )
 
                 if best_passed > 0 and (

@@ -95,6 +95,20 @@ PORT = os.environ.get("PORT", "")
 
 TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", os.environ.get("DEFAULT_MODEL", ""))
 
+
+def normalize_tgi_conversation_mode(value: str | None) -> str:
+    mode = (value or "").strip().lower()
+    if mode in ("", "chat/completions", "/chat/completions", "chat", "chat_completions"):
+        return "chat/completions"
+    if mode in ("responses", "/responses"):
+        return "responses"
+    return "chat/completions"
+
+
+TGI_CONVERSATION_MODE = normalize_tgi_conversation_mode(
+    os.getenv("TGI_CONVERSATION_MODE", "chat/completions")
+)
+
 TOOL_CHUNK_SIZE = int(os.getenv("TOOL_CHUNK_SIZE", "10000"))
 AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 

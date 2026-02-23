@@ -3127,6 +3127,12 @@ async def test_iterative_test_fix_resets_attempts_on_progress(monkeypatch, caplo
     tgi_service = DummyTGIService()
     tgi_service.llm_client = mock_wrapper
 
+    # uvicorn.error logger has propagate=False when other tests have already
+    # imported uvicorn. Force propagation so caplog (which attaches to the root
+    # logger) can capture the records.
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    original_propagate = uvicorn_logger.propagate
+    uvicorn_logger.propagate = True
     caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     messages = [Message(role=MessageRole.USER, content="Fix tests.")]
@@ -3141,6 +3147,8 @@ async def test_iterative_test_fix_resets_attempts_on_progress(monkeypatch, caplo
         access_token=None,
         max_attempts=2,
     )
+
+    uvicorn_logger.propagate = original_propagate
 
     assert mock_client.call_count == 3
     assert call_index["idx"] == 4

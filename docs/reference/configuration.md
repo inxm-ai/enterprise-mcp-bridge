@@ -43,6 +43,29 @@ MCP_BASE_PATH="/api/v1/mcp"
 # API available at: http://host:port/api/v1/mcp/docs
 ```
 
+### LLM Configuration
+
+#### TGI_CONVERSATION_MODE
+
+Controls which OpenAI-compatible endpoint style the bridge uses for LLM calls.
+
+- **Type:** String
+- **Values:** `chat/completions`, `/chat/completions`, `chat`, `chat_completions`, `responses`, `/responses`
+- **Default:** `chat/completions`
+- **Required:** No
+
+Notes:
+- Invalid values fall back to `chat/completions` and emit a warning.
+- For Codex-style models that reject chat-completions, set this to `responses`.
+
+```bash
+# Default behavior (chat-completions)
+TGI_CONVERSATION_MODE="chat/completions"
+
+# Codex / responses-style models
+TGI_CONVERSATION_MODE="responses"
+```
+
 #### ENV
 
 Environment mode.

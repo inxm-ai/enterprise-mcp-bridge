@@ -262,6 +262,8 @@
           if (currentEvent === 'log') {
             addTimeline('log', payload.message || 'log');
             setStatus(payload.message || 'Generating...');
+          } else if (currentEvent === 'progress') {
+            setStatus('Generating presentation...');
           } else if (currentEvent === 'tool_start') {
             addTimeline('tool', `${payload.tool || 'tool'} - ${payload.description || 'running'}`);
             setStatus('Running tools...');

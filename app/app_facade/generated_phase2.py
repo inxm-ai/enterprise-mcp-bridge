@@ -84,7 +84,7 @@ async def run_phase2_attempt(
                 content_piece = parsed.content
                 content += content_piece
                 payload = json.dumps({"chunk": content_piece})
-                yield f"data: {payload}\n\n".encode("utf-8")
+                yield f"event: progress\ndata: {payload}\n\n".encode("utf-8")
             else:
                 yield b":\n\n"
 

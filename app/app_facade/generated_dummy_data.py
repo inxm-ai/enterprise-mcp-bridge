@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import logging
 
 from fastapi import HTTPException
+from genson import SchemaBuilder
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.app_facade.generated_schemas import generation_response_format
 
@@ -20,13 +21,20 @@ DUMMY_DATA_SYSTEM_PROMPT = (
 SCHEMA_DERIVATION_SYSTEM_PROMPT = (
     "You are a strict JSON Schema expert. "
     "Given observed tool output data, infer a JSON Schema Draft-07 compatible schema "
-    "for the resolved service value returned to callers."
+    "for the resolved service value returned to callers. "
+    "Return schema fields from this subset only: "
+    "type, properties, required, items, additionalProperties, enum."
 )
 
 MISSING_OUTPUT_SCHEMA_FALLBACK = {
     "anyOf": [
         {"type": "object", "additionalProperties": True},
-        {"type": "array", "items": {}},
+        {
+            "type": "array",
+            "items": {
+                "type": ["object", "array", "string", "number", "boolean", "null"]
+            },
+        },
         {"type": "string"},
         {"type": "number"},
         {"type": "boolean"},
@@ -40,17 +48,61 @@ SCHEMA_DERIVATION_RESPONSE_SCHEMA = {
         "schema": {
             "type": "object",
             "properties": {
-                "type": {"type": "string"},
-                "properties": {"type": "object"},
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "object",
+                        "array",
+                        "string",
+                        "number",
+                        "integer",
+                        "boolean",
+                        "null",
+                    ],
+                },
+                "properties": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "object",
+                                    "array",
+                                    "string",
+                                    "number",
+                                    "integer",
+                                    "boolean",
+                                    "null",
+                                ],
+                            },
+                            "enum": {"type": "array", "items": {"type": "string"}},
+                            "items": {"type": "object", "additionalProperties": True},
+                            "properties": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "additionalProperties": True,
+                                },
+                            },
+                            "required": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "additionalProperties": {"type": "boolean"},
+                        },
+                        "additionalProperties": True,
+                    },
+                },
                 "required": {"type": "array", "items": {"type": "string"}},
-                "items": {"type": ["object", "boolean"]},
-                "additionalProperties": {"type": ["object", "boolean"]},
-                "oneOf": {"type": "array"},
-                "anyOf": {"type": "array"},
-                "allOf": {"type": "array"},
-                "enum": {"type": "array"},
+                "items": {"type": "object", "additionalProperties": True},
+                "additionalProperties": {"type": "boolean"},
+                "enum": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
             },
-            "required": ["type"],
             "additionalProperties": True,
         }
     },
@@ -62,6 +114,147 @@ SCHEMA_DERIVATION_RESPONSE_SCHEMA = {
 class DummyDataGenerator:
     def __init__(self, tgi_service: Any):
         self.tgi_service = tgi_service
+
+    @staticmethod
+    def _json_type_for_value(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        return "string"
+
+    @staticmethod
+    def _value_matches_type(value: Any, declared_type: str) -> bool:
+        actual_type = DummyDataGenerator._json_type_for_value(value)
+        if declared_type == "number" and actual_type in {"number", "integer"}:
+            return True
+        if declared_type == "integer" and actual_type == "integer":
+            return True
+        return actual_type == declared_type
+
+    @staticmethod
+    def _preferred_type_from_union(values: List[Any]) -> Optional[str]:
+        normalized = [value for value in values if isinstance(value, str)]
+        if not normalized:
+            return None
+        for preferred in (
+            "object",
+            "array",
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null",
+        ):
+            if preferred in normalized:
+                return preferred
+        return normalized[0]
+
+    @classmethod
+    def _sanitize_output_schema(cls, schema: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(schema, dict) or not schema:
+            return None
+
+        def walk(node: Any) -> Any:
+            if not isinstance(node, dict):
+                return node
+
+            current: Dict[str, Any] = copy.deepcopy(node)
+
+            properties = current.get("properties")
+            if isinstance(properties, dict):
+                current["properties"] = {
+                    str(key): walk(value) for key, value in properties.items()
+                }
+
+            if "items" in current and isinstance(current.get("items"), dict):
+                current["items"] = walk(current["items"])
+
+            if "additionalProperties" in current and isinstance(
+                current.get("additionalProperties"), dict
+            ):
+                current["additionalProperties"] = walk(current["additionalProperties"])
+
+            for keyword in ("anyOf", "oneOf", "allOf"):
+                branch = current.get(keyword)
+                if isinstance(branch, list):
+                    current[keyword] = [walk(item) for item in branch]
+
+            node_type = current.get("type")
+            if isinstance(node_type, list):
+                chosen = cls._preferred_type_from_union(node_type)
+                current["type"] = chosen or "string"
+            elif node_type is not None and not isinstance(node_type, str):
+                current["type"] = "string"
+
+            if "type" not in current:
+                if any(
+                    key in current for key in ("properties", "required", "additionalProperties")
+                ):
+                    current["type"] = "object"
+                elif "items" in current:
+                    current["type"] = "array"
+                elif isinstance(current.get("enum"), list):
+                    enum_types = {
+                        cls._json_type_for_value(enum_value)
+                        for enum_value in current.get("enum") or []
+                    }
+                    if len(enum_types) == 1:
+                        current["type"] = next(iter(enum_types))
+
+            declared_type = current.get("type")
+            enum_values = current.get("enum")
+            if isinstance(declared_type, str) and isinstance(enum_values, list):
+                filtered_enum = [
+                    enum_value
+                    for enum_value in enum_values
+                    if cls._value_matches_type(enum_value, declared_type)
+                ]
+                if filtered_enum:
+                    current["enum"] = filtered_enum
+                else:
+                    current.pop("enum", None)
+
+            declared_type = current.get("type")
+            if declared_type == "object":
+                object_properties = current.get("properties")
+                if not isinstance(object_properties, dict):
+                    object_properties = {}
+                    current["properties"] = object_properties
+                required_props = current.get("required")
+                if isinstance(required_props, list):
+                    current["required"] = [
+                        item
+                        for item in required_props
+                        if isinstance(item, str) and item in object_properties
+                    ]
+                current.pop("items", None)
+            elif declared_type == "array":
+                if not isinstance(current.get("items"), dict):
+                    current["items"] = {"type": "string"}
+                current.pop("properties", None)
+                current.pop("required", None)
+                current.pop("additionalProperties", None)
+            elif isinstance(declared_type, str):
+                current.pop("properties", None)
+                current.pop("required", None)
+                current.pop("additionalProperties", None)
+                current.pop("items", None)
+
+            return current
+
+        sanitized = walk(schema)
+        return sanitized if isinstance(sanitized, dict) and sanitized else None
 
     def _build_dummy_data_schema(
         self, tool_specs: List[Dict[str, Any]]
@@ -78,7 +271,7 @@ class DummyDataGenerator:
                 continue
 
             if isinstance(output_schema, dict) and output_schema:
-                properties[name] = output_schema
+                properties[name] = self._sanitize_output_schema(output_schema) or output_schema
             else:
                 properties[name] = copy.deepcopy(MISSING_OUTPUT_SCHEMA_FALLBACK)
 
@@ -104,78 +297,104 @@ class DummyDataGenerator:
             f"export const dummyDataSchemaHints = {hints_str};"
         )
 
-    async def _derive_schema_from_sample(
+    def _infer_schema_from_sample(
+        self,
+        *,
+        sample: Any,
+        tool_name: str = "unknown_tool",
+    ) -> Optional[Dict[str, Any]]:
+        """Infer JSON schema from a sample value using genson.
+        
+        This is much faster than asking an LLM to derive the schema,
+        since genson infers the schema instantly from the actual data.
+        """
+        try:
+            # Use genson to infer schema from the sample data
+            builder = SchemaBuilder()
+            builder.add_object(sample)
+            inferred = builder.to_schema()
+            
+            if isinstance(inferred, dict) and inferred:
+                # Genson doesn't infer required fields, so we explicitly mark all
+                # properties as required (since they're present in the sample).
+                # This prevents responses mode from doing its own normalization,
+                # which would cause a mismatch with what the LLM generates.
+                inferred = self._add_required_fields_to_schema(inferred)
+                
+                # Sanitize and validate the inferred schema
+                sanitized = self._sanitize_output_schema(inferred)
+                return sanitized or inferred
+        except Exception as exc:
+            logger.warning(
+                "Failed to infer schema from sample for tool '%s': %s",
+                tool_name,
+                exc,
+            )
+        return None
+
+    @classmethod
+    def _add_required_fields_to_schema(cls, schema: Any) -> Any:
+        """Recursively add required fields to all objects in the schema.
+        
+        Genson infers the structure but doesn't mark fields as required.
+        We explicitly mark all properties as required (since they exist in the sample)
+        to ensure responses mode doesn't alter the schema unexpectedly.
+        """
+        if not isinstance(schema, dict):
+            return schema
+        
+        result = copy.deepcopy(schema)
+        
+        # Add required array if this is an object with properties
+        if result.get("type") == "object" and "properties" in result:
+            properties = result.get("properties", {})
+            if isinstance(properties, dict) and properties:
+                result["required"] = list(properties.keys())
+            # Ensure strict mode
+            if "additionalProperties" not in result:
+                result["additionalProperties"] = False
+        
+        # Recursively process nested properties
+        if "properties" in result and isinstance(result["properties"], dict):
+            result["properties"] = {
+                key: cls._add_required_fields_to_schema(value)
+                for key, value in result["properties"].items()
+            }
+        
+        # Recursively process array items
+        if "items" in result and isinstance(result["items"], dict):
+            result["items"] = cls._add_required_fields_to_schema(result["items"])
+        
+        return result
+
+    def _derive_schema_from_sample(
         self,
         *,
         tool_spec: Dict[str, Any],
         sample: Any,
         ui_model_headers: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        if not getattr(self.tgi_service.llm_client, "client", None):
-            return None
-
+        """Derive schema from sample using fast genson inference instead of LLM.
+        
+        Previously this made an LLM call which was slow. Now we use automatic
+        schema inference from the actual sample data, which is instant.
+        """
         tool_name = str(tool_spec.get("name") or "unknown_tool")
-        tool_context = {
-            "name": tool_name,
-            "description": tool_spec.get("description"),
-            "inputSchema": tool_spec.get("inputSchema"),
-            "sampleResolvedValue": sample,
-        }
-        messages = [
-            Message(role=MessageRole.SYSTEM, content=SCHEMA_DERIVATION_SYSTEM_PROMPT),
-            Message(
-                role=MessageRole.USER,
-                content=(
-                    "Derive output schema for the resolved service value from this observed tool data:\n"
-                    + json.dumps(tool_context, ensure_ascii=False)
-                    + "\nReturn only JSON."
-                ),
-            ),
-        ]
-
-        chat_request = ChatCompletionRequest(
-            messages=messages,
-            tools=None,
-            stream=False,
-            response_format=generation_response_format(
-                schema=SCHEMA_DERIVATION_RESPONSE_SCHEMA,
-                name=f"{tool_name}_derived_output_schema",
-            ),
-            extra_headers=ui_model_headers,
+        
+        # Use fast schema inference instead of LLM
+        schema = self._infer_schema_from_sample(
+            sample=sample,
+            tool_name=tool_name,
         )
-
-        try:
-            response = await self.tgi_service.llm_client.client.chat.completions.create(
-                **self.tgi_service.llm_client._build_request_params(chat_request)
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to derive schema from observed sample for tool '%s': %s",
-                tool_name,
-                exc,
-            )
-            return None
-
-        try:
-            choices = getattr(response, "choices", None) or []
-            if not choices:
-                return None
-            choice = choices[0]
-            content = getattr(getattr(choice, "message", None), "content", None) or ""
-            if not content and getattr(
-                getattr(choice, "message", None), "tool_calls", None
-            ):
-                content = choice.message.tool_calls[0].function.arguments
-            parsed = json.loads(content) if content else {}
-            schema = parsed.get("schema") if isinstance(parsed, dict) else None
-            if isinstance(schema, dict) and schema:
-                return schema
-        except Exception as exc:
-            logger.warning(
-                "Failed to parse derived schema for tool '%s': %s",
-                tool_name,
-                exc,
-            )
+        
+        if schema:
+            return schema
+        
+        # Fallback: return None if inference fails, parent will use MISSING_OUTPUT_SCHEMA_FALLBACK
+        logger.warning(
+            "Could not infer schema from sample for tool '%s'",
+            tool_name,
+        )
         return None
 
     async def _enrich_tool_specs_with_derived_schemas(
@@ -187,12 +406,17 @@ class DummyDataGenerator:
         async def process_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
             spec_copy = copy.deepcopy(spec)
             output_schema = spec_copy.get("outputSchema")
+            if isinstance(output_schema, dict) and output_schema:
+                spec_copy["outputSchema"] = (
+                    self._sanitize_output_schema(output_schema) or output_schema
+                )
+                output_schema = spec_copy.get("outputSchema")
             observed = spec_copy.get("sampleResolvedValue")
             if observed is None:
                 observed = spec_copy.get("sampleStructuredContent")
             schema_status = "provided_output_schema"
             if not output_schema and observed is not None:
-                derived_schema = await self._derive_schema_from_sample(
+                derived_schema = self._derive_schema_from_sample(
                     tool_spec=spec_copy,
                     sample=observed,
                     ui_model_headers=ui_model_headers,
@@ -272,6 +496,45 @@ class DummyDataGenerator:
             }
         return hints
 
+    def _parse_dummy_data_response(
+        self, *, tool_name: str, content: str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            stripped = content.strip()
+            try:
+                parsed, end_idx = json.JSONDecoder().raw_decode(stripped)
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Failed to parse dummy data JSON for {tool_name}: {exc}. Content: {content}"
+                )
+                return None
+
+            trailing = stripped[end_idx:].strip()
+            if trailing and any(char != "}" for char in trailing):
+                logger.error(
+                    "Failed to parse dummy data JSON for %s: unrecoverable trailing content after JSON object. Content: %s",
+                    tool_name,
+                    content,
+                )
+                return None
+            if trailing:
+                logger.warning(
+                    "Recovered dummy data JSON for %s by trimming %d trailing brace character(s)",
+                    tool_name,
+                    len(trailing),
+                )
+
+        if not isinstance(parsed, dict):
+            logger.error(
+                "Dummy data response payload for %s must be an object. Content: %s",
+                tool_name,
+                content,
+            )
+            return None
+        return parsed
+
     async def generate_dummy_data(
         self,
         *,
@@ -290,7 +553,8 @@ class DummyDataGenerator:
             ui_model_headers=ui_model_headers,
         )
 
-        if not getattr(self.tgi_service.llm_client, "client", None):
+        non_stream = getattr(self.tgi_service.llm_client, "non_stream_completion", None)
+        if not callable(non_stream):
             raise HTTPException(
                 status_code=502,
                 detail="LLM client does not support dummy data generation",
@@ -332,13 +596,7 @@ class DummyDataGenerator:
             )
 
             try:
-                response = (
-                    await self.tgi_service.llm_client.client.chat.completions.create(
-                        **self.tgi_service.llm_client._build_request_params(
-                            chat_request
-                        )
-                    )
-                )
+                response = await non_stream(chat_request, "", None)
             except Exception as e:
                 logger.error(f"Failed to generate dummy data for {tool_name}: {e}")
                 return {}
@@ -357,21 +615,10 @@ class DummyDataGenerator:
                 logger.error(f"Dummy data response content was empty for {tool_name}")
                 return {}
 
-            try:
-                parsed = json.loads(content)
-                if not isinstance(parsed, dict):
-                    logger.error(
-                        "Dummy data response payload for %s must be an object. Content: %s",
-                        tool_name,
-                        content,
-                    )
-                    return {}
-                return parsed
-            except json.JSONDecodeError as exc:
-                logger.error(
-                    f"Failed to parse dummy data JSON for {tool_name}: {exc}. Content: {content}"
-                )
+            parsed = self._parse_dummy_data_response(tool_name=tool_name, content=content)
+            if parsed is None:
                 return {}
+            return parsed
 
         results = await asyncio.gather(
             *(generate_for_tool(spec) for spec in enriched_tool_specs)

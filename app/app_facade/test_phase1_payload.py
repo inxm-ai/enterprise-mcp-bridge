@@ -1046,3 +1046,76 @@ async def test_phase1_autofixes_schema_field_drift_in_test_script():
     assert result_payload["success"] is True
     assert run_tests_called is True
     assert iterative_fix_called is False
+
+
+@pytest.mark.asyncio
+async def test_phase1_ignores_describe_tool_args_without_required_scripts():
+    class MockChunk:
+        def __init__(self, content=None, is_done=False, accumulated_tool_calls=None):
+            self.content = content
+            self.is_done = is_done
+            self.tool_calls = [{"id": "call_1"}] if accumulated_tool_calls else None
+            self.accumulated_tool_calls = accumulated_tool_calls
+            self.finish_reason = "stop" if is_done else None
+
+    async def mock_stream(*_args, **_kwargs):
+        tool_calls = {
+            0: {
+                "name": "describe_tool",
+                "arguments": {
+                    "input": {"tool_name": "get_current_weather"},
+                },
+            }
+        }
+        yield MockChunk(content=None, is_done=False, accumulated_tool_calls=tool_calls)
+        yield MockChunk(content=None, is_done=True)
+
+    tgi_service = MagicMock()
+    tgi_service.llm_client = MagicMock()
+    tgi_service.llm_client.stream_completion = mock_stream
+
+    run_tests_called = False
+
+    def run_tests(_service_script, _components_script, _test_script, _dummy_data):
+        nonlocal run_tests_called
+        run_tests_called = True
+        return True, "ok"
+
+    async def iterative_test_fix(**_kwargs):
+        return False, "", "", "", None, []
+
+    @asynccontextmanager
+    async def mock_chunk_reader(stream_source):
+        class Reader:
+            def as_parsed(self):
+                return stream_source
+
+        yield Reader()
+
+    messages = [
+        Message(role=MessageRole.SYSTEM, content="sys"),
+        Message(role=MessageRole.USER, content="user"),
+    ]
+
+    result_payload = None
+    async for item in run_phase1_attempt(
+        attempt=1,
+        max_attempts=3,
+        messages=messages,
+        allowed_tools=[{"type": "function", "function": {"name": "describe_tool"}}],
+        dummy_data=None,
+        access_token=None,
+        tgi_service=tgi_service,
+        parse_json=lambda content: json.loads(content),
+        run_tests=run_tests,
+        iterative_test_fix=iterative_test_fix,
+        chunk_reader=mock_chunk_reader,
+        ui_model_headers={},
+    ):
+        if isinstance(item, dict) and item.get("type") == "result":
+            result_payload = item
+
+    assert result_payload is not None
+    assert result_payload["success"] is False
+    assert "no_content_generated" in (result_payload.get("reason") or "")
+    assert run_tests_called is False

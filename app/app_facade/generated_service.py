@@ -75,6 +75,23 @@ from app.tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 
 logger = logging.getLogger("uvicorn.error")
 
+# Error codes / substrings that identify non-retryable LLM API failures.
+# When one of these appears in a phase failure reason we should stop retrying
+# immediately – hammering the API will not help and only wastes quota.
+_FATAL_LLM_ERROR_SUBSTRINGS = (
+    "insufficient_quota",
+    "invalid_api_key",
+    "authentication_error",
+    "permission_denied",
+)
+
+
+def _is_fatal_llm_error(reason: str) -> bool:
+    """Return True when *reason* indicates a non-retryable LLM API error."""
+    lower = reason.lower()
+    return any(sub in lower for sub in _FATAL_LLM_ERROR_SUBSTRINGS)
+
+
 DEFAULT_DESIGN_PROMPT = (
     "Use lightweight, responsive layouts. Prefer utility-first styling via Tailwind "
     "CSS conventions when no explicit design system guidance is provided."
@@ -114,7 +131,9 @@ _DUMMY_DATA_TEST_USAGE_GUIDANCE = (
 _DUMMY_DATA_ERROR_RECOVERY_SYSTEM_PROMPT = (
     "You are diagnosing a failed tool call used only for generating dummy test data. "
     "Classify whether the failure is recoverable by changing only input arguments. "
+    "Always provide retry_arguments as a JSON object. "
     "If recoverable, provide retry_arguments that match the input schema exactly. "
+    "If not recoverable, set retry_arguments to an empty object. "
     "If not recoverable (auth, permissions, server outage, missing integration, etc.), "
     "set recoverable to false."
 )
@@ -123,14 +142,9 @@ _DUMMY_DATA_ERROR_RECOVERY_SCHEMA = {
     "properties": {
         "recoverable": {"type": "boolean"},
         "reason": {"type": "string"},
-        "retry_arguments": {
-            "anyOf": [
-                {"type": "object", "additionalProperties": True},
-                {"type": "null"},
-            ]
-        },
+        "retry_arguments": {"type": "object"},
     },
-    "required": ["recoverable"],
+    "required": ["recoverable", "reason", "retry_arguments"],
     "additionalProperties": False,
 }
 _TEST_FAILURE_EXPLANATION_SCHEMA = {
@@ -505,8 +519,8 @@ class GeneratedUIService:
         llm_client = getattr(self.tgi_service, "llm_client", None)
         if not llm_client:
             return None
-        has_non_stream = callable(getattr(llm_client, "non_stream_completion", None))
-        if not has_non_stream and not getattr(llm_client, "client", None):
+        non_stream = getattr(llm_client, "non_stream_completion", None)
+        if not callable(non_stream):
             return None
         if not isinstance(input_schema, dict) or not input_schema:
             return None
@@ -551,17 +565,11 @@ class GeneratedUIService:
         )
 
         try:
-            non_stream = getattr(llm_client, "non_stream_completion", None)
-            if callable(non_stream):
-                maybe_response = non_stream(request, "", None)
-                if asyncio.iscoroutine(maybe_response):
-                    response = await maybe_response
-                else:
-                    response = maybe_response
+            maybe_response = non_stream(request, "", None)
+            if asyncio.iscoroutine(maybe_response):
+                response = await maybe_response
             else:
-                response = await llm_client.client.chat.completions.create(
-                    **llm_client._build_request_params(request)
-                )
+                response = maybe_response
         except Exception as exc:
             logger.warning(
                 "[GeneratedUI] Failed to derive sample args via LLM for tool '%s': %s",
@@ -605,9 +613,22 @@ class GeneratedUIService:
         llm_client = getattr(self.tgi_service, "llm_client", None)
         if not llm_client:
             return {"recoverable": False, "retry_arguments": None, "reason": ""}
-        has_non_stream = callable(getattr(llm_client, "non_stream_completion", None))
-        if not has_non_stream and not getattr(llm_client, "client", None):
+        non_stream = getattr(llm_client, "non_stream_completion", None)
+        if not callable(non_stream):
             return {"recoverable": False, "retry_arguments": None, "reason": ""}
+
+        retry_arguments_schema: Dict[str, Any]
+        if isinstance(input_schema, dict) and input_schema:
+            retry_arguments_schema = copy.deepcopy(input_schema)
+        else:
+            retry_arguments_schema = {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            }
+        recovery_schema = copy.deepcopy(_DUMMY_DATA_ERROR_RECOVERY_SCHEMA)
+        recovery_schema["properties"]["retry_arguments"] = retry_arguments_schema
 
         request = ChatCompletionRequest(
             messages=[
@@ -635,24 +656,18 @@ class GeneratedUIService:
             tools=None,
             stream=False,
             response_format=_generation_response_format(
-                schema=_DUMMY_DATA_ERROR_RECOVERY_SCHEMA,
+                schema=recovery_schema,
                 name=f"{tool_name}_sample_error_recovery",
             ),
             extra_headers=UI_MODEL_HEADERS,
         )
 
         try:
-            non_stream = getattr(llm_client, "non_stream_completion", None)
-            if callable(non_stream):
-                maybe_response = non_stream(request, "", None)
-                if asyncio.iscoroutine(maybe_response):
-                    response = await maybe_response
-                else:
-                    response = maybe_response
+            maybe_response = non_stream(request, "", None)
+            if asyncio.iscoroutine(maybe_response):
+                response = await maybe_response
             else:
-                response = await llm_client.client.chat.completions.create(
-                    **llm_client._build_request_params(request)
-                )
+                response = maybe_response
         except Exception as exc:
             logger.warning(
                 "[GeneratedUI] Failed to analyze sampling error via LLM for tool '%s': %s",
@@ -1077,8 +1092,8 @@ class GeneratedUIService:
         llm_client = getattr(self.tgi_service, "llm_client", None)
         if not llm_client:
             return None
-        has_non_stream = callable(getattr(llm_client, "non_stream_completion", None))
-        if not has_non_stream and not getattr(llm_client, "client", None):
+        non_stream = getattr(llm_client, "non_stream_completion", None)
+        if not callable(non_stream):
             return None
 
         request = ChatCompletionRequest(
@@ -1114,12 +1129,7 @@ class GeneratedUIService:
         )
 
         try:
-            if has_non_stream:
-                response = await llm_client.non_stream_completion(request, None, None)
-            else:
-                response = await llm_client.client.chat.completions.create(
-                    **llm_client._build_request_params(request)
-                )
+            response = await non_stream(request, None, None)
         except Exception as exc:
             logger.warning(
                 "[GeneratedUI] Failed deriving output schema for '%s' from dummy data: %s",
@@ -1141,6 +1151,11 @@ class GeneratedUIService:
             parsed = json.loads(content) if content else {}
             schema = parsed.get("schema") if isinstance(parsed, dict) else None
             if isinstance(schema, dict) and schema:
+                sanitizer = getattr(self.dummy_data_generator, "_sanitize_output_schema", None)
+                if callable(sanitizer):
+                    sanitized = sanitizer(schema)
+                    if isinstance(sanitized, dict) and sanitized:
+                        return sanitized
                 return schema
         except Exception as exc:
             logger.warning(
@@ -1730,6 +1745,7 @@ class GeneratedUIService:
         logic_payload: Dict[str, Any] = {}
         dummy_data: Optional[str] = None
         phase1_failure_reasons: List[str] = []
+        phase1_fatal_error: bool = False
 
         try:
             system_prompt = await self._build_system_prompt(session)
@@ -1848,6 +1864,15 @@ class GeneratedUIService:
                             yield f"event: log\ndata: {json.dumps({'message': f'Phase 1 attempt {attempt} failed', 'reason': reason})}\n\n".encode(
                                 "utf-8"
                             )
+                            if _is_fatal_llm_error(reason):
+                                # Non-retryable error (quota exceeded, invalid auth, etc.).
+                                # Stop immediately – retrying will not help and only wastes quota.
+                                logger.error(
+                                    "[stream_generate_ui] Fatal LLM error on attempt %s, aborting retries: %s",
+                                    attempt,
+                                    reason,
+                                )
+                                phase1_fatal_error = True
                             # Should we update messages here?
                             # If we update messages here, we are keeping failed attempt history, which defeats "discarding".
                             # The user requested "cleanly discarded once an attempt completed".
@@ -1856,7 +1881,7 @@ class GeneratedUIService:
                             pass
                         break
 
-                if phase1_success:
+                if phase1_success or phase1_fatal_error:
                     break
 
             if not phase1_success:
@@ -2046,6 +2071,7 @@ class GeneratedUIService:
         logic_payload: Dict[str, Any] = {}
         dummy_data: Optional[str] = None
         phase1_failure_reasons: List[str] = []
+        phase1_fatal_error: bool = False
 
         try:
             system_prompt = await self._build_system_prompt(session)
@@ -2160,9 +2186,18 @@ class GeneratedUIService:
                             yield f"event: log\ndata: {json.dumps({'message': f'Phase 1 attempt {attempt} failed', 'reason': reason})}\n\n".encode(
                                 "utf-8"
                             )
+                            if _is_fatal_llm_error(reason):
+                                # Non-retryable error (quota exceeded, invalid auth, etc.).
+                                # Stop immediately – retrying will not help and only wastes quota.
+                                logger.error(
+                                    "[stream_update_ui] Fatal LLM error on attempt %s, aborting retries: %s",
+                                    attempt,
+                                    reason,
+                                )
+                                phase1_fatal_error = True
                         break
 
-                if phase1_success:
+                if phase1_success or phase1_fatal_error:
                     break
 
             if not phase1_success:
