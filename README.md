@@ -4,7 +4,7 @@ FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over 
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/inxm-ai/enterprise-mcp-bridge)
 
-Read more about deploying to Render [here →](#deploy-on-render-weather-mcp-example)
+Read more about deploying to Render [here first →](#deploy-on-render-weather-mcp-example)
 
 📖 **[Full Documentation](https://inxm-ai.github.io/enterprise-mcp-bridge)**
 
@@ -83,13 +83,13 @@ docker run -it -p 8000:8000 \
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/inxm-ai/enterprise-mcp-bridge)
 
-This deploys `ghcr.io/inxm-ai/enterprise-mcp-bridge:latest` with the weather MCP server.
+This deploys `ghcr.io/inxm-ai/enterprise-mcp-bridge:latest` with the weather MCP server into a free Render instance. After deployment, you can test the UI Generation by opening `/app/_generated/start` in your Render app URL, define an id and use a prompt like `Show me the air quality for Berlin, New York and Tokio.`
 
 Environment variables used by this setup:
 
 - `TGI_URL` - LLM API base URL (`https://api.openai.com/v1`)
 - `TGI_TOKEN` - API token for the LLM provider (**set this as a secret in Render**)
-- `DEFAULT_MODEL` - Default model name (for example `gpt-5.2-codex`)
+- `DEFAULT_MODEL` - Default model name, for example `gpt-5.2-codex` - will work best with a code-capable model (codex) for the UI generation features
 
 - `MCP_GIT_CLONE` - MCP repo cloned into the container at startup - the mcp that will be running
 - `MCP_SERVER_COMMAND` - Command used to start the MCP server (`python -m mcp_weather_server`) you cloned earlier
@@ -101,6 +101,8 @@ Environment variables used by this setup:
 - `ENV` - Runtime mode (`dev`)
 
 ⚠️ **Token usage warning:** When the service runs, calls to your configured model provider consume tokens and can incur costs. Keep `TGI_TOKEN` secret and monitor usage limits/billing.
+
+⚠️ **Free Render plan limitations:** The free plan has limited resources so it's slow not only because it uses LLMs, shuts down after a period of inactivity, has no permanent storage (so all your sites will be lost), and may have other restrictions. Also, this page is not authenticated, unless you plan to go big on sharing weather dashboards with everyone you may wanna remove it after the test again.
 
 ### OAuth Configuration
 

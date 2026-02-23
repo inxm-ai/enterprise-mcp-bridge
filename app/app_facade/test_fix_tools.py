@@ -49,6 +49,9 @@ TOOL_DESCRIPTIONS = {
     "update_service_script": lambda args: "updating service code",
     "update_components_script": lambda args: "updating component code",
     "update_dummy_data": lambda args: "updating test fixtures",
+    "apply_script_patch": lambda args: (
+        f"patching {_SCRIPT_TYPE_TO_FILENAME.get(args.get('script_type'), 'script')}"
+    ),
     "get_script_lines": lambda args: (
         f"reading source code from {_SCRIPT_TYPE_TO_FILENAME.get(args.get('script_type'), 'unknown')}"
         + (
@@ -58,6 +61,7 @@ TOOL_DESCRIPTIONS = {
         )
     ),
     "get_current_scripts": lambda args: "reading source code",
+    "get_last_test_output": lambda args: "reading full output from last test run",
     "search_files": lambda args: (
         f"searching for '{args.get('regex', '')}'"
         + (
@@ -517,6 +521,9 @@ class IterativeTestFixer:
         self.current_dummy_data: Optional[str] = None
         self.tmpdir: Optional[str] = None
         self.focus_test_name: Optional[str] = None
+        self.last_test_output_raw: Optional[str] = None
+        self.last_test_output_summarized: Optional[str] = None
+        self.last_test_metadata: Optional[Dict[str, Any]] = None
 
     def set_focus_test_name(self, test_name: Optional[str]) -> None:
         """Set or clear the focused failing test name used for targeted prechecks."""
@@ -577,17 +584,29 @@ class IterativeTestFixer:
         if not self.tmpdir:
             raise RuntimeError("Test environment not set up")
 
-        # Write combined service + components script to mirror production bundling.
-        mocked_components = (
-            (self.current_components_script or "")
-            .replace(
-                "https://matthiaskainer.github.io/pfusch/pfusch.min.js", "./pfusch.js"
+        def _normalize_pfusch_imports(source: Optional[str]) -> str:
+            text = source or ""
+            return (
+                text.replace(
+                    "https://matthiaskainer.github.io/pfusch/pfusch.min.js",
+                    "./pfusch.js",
+                )
+                .replace(
+                    "https://matthiaskainer.github.io/pfusch/pfusch.js",
+                    "./pfusch.js",
+                )
+                .replace(
+                    "https://matthiaskainer.github.io/pfusch/pfusch.min.mjs",
+                    "./pfusch.js",
+                )
             )
-            .replace("https://matthiaskainer.github.io/pfusch/pfusch.js", "./pfusch.js")
-        )
+
+        # Write combined service + components script to mirror production bundling.
+        mocked_service = _normalize_pfusch_imports(self.current_service_script)
+        mocked_components = _normalize_pfusch_imports(self.current_components_script)
         combined_script = (
             f"{MCP_SERVICE_TEST_HELPER_SCRIPT}\n\n"
-            + (self.current_service_script or "")
+            + mocked_service
             + "\n\n"
             + mocked_components
         )
@@ -602,7 +621,7 @@ class IterativeTestFixer:
         with open(
             os.path.join(self.tmpdir, "user_test.js"), "w", encoding="utf-8"
         ) as f:
-            f.write(self.current_test_script or "")
+            f.write(_normalize_pfusch_imports(self.current_test_script))
 
         # Write dummy data module if provided
         if self.current_dummy_data is not None:
@@ -674,9 +693,12 @@ class IterativeTestFixer:
                 success = result.returncode == 0
                 metadata = self._parse_tap_output(output)
                 metadata["test_name_pattern"] = pattern
+                self.last_test_output_raw = output
+                self.last_test_metadata = metadata
 
                 if not success:
                     output = _summarize_test_output(output)
+                self.last_test_output_summarized = output
 
                 return ToolResult(
                     success=success,
@@ -849,6 +871,126 @@ class IterativeTestFixer:
                 metadata["suites"] = value
 
         return metadata
+
+    def get_last_test_output(self, max_bytes: Optional[int] = None) -> ToolResult:
+        """
+        Return full output from the most recent run_tests invocation.
+
+        Args:
+            max_bytes: Optional byte cap for returned text
+
+        Returns:
+            ToolResult with the last captured output
+        """
+        if self.last_test_output_raw is None:
+            return ToolResult(
+                success=False,
+                content="No test output captured yet. Run run_tests first.",
+            )
+
+        content = self.last_test_output_raw
+        if max_bytes is not None:
+            try:
+                cap = int(max_bytes)
+            except (TypeError, ValueError):
+                return ToolResult(
+                    success=False,
+                    content=(
+                        f"Invalid max_bytes value: {max_bytes} "
+                        "(must be a positive integer)"
+                    ),
+                )
+            if cap <= 0:
+                return ToolResult(
+                    success=False,
+                    content="max_bytes must be a positive integer.",
+                )
+            content = _truncate_text_for_bytes(content, cap)
+
+        return ToolResult(
+            success=True,
+            content=content,
+            metadata=self.last_test_metadata or {},
+        )
+
+    def apply_script_patch(
+        self,
+        script_type: str,
+        search: str,
+        replace: str,
+        replace_all: bool = False,
+        use_regex: bool = False,
+    ) -> ToolResult:
+        """
+        Apply a targeted patch to a mutable script using literal or regex replacement.
+        """
+        script_type = self._normalize_script_type(script_type)
+        if script_type in {"domstubs", "pfusch"}:
+            return ToolResult(
+                success=False,
+                content=f"{script_type} is read-only and cannot be patched.",
+            )
+
+        script_map: Dict[str, Optional[str]] = {
+            "test": self.current_test_script,
+            "service": self.current_service_script,
+            "components": self.current_components_script,
+            "dummy_data": self.current_dummy_data,
+        }
+        current = script_map.get(script_type)
+        if current is None:
+            return ToolResult(
+                success=False,
+                content=f"Unknown or unavailable mutable script type: {script_type}",
+            )
+
+        if not isinstance(current, str):
+            current = str(current)
+
+        if use_regex:
+            try:
+                pattern = re.compile(search, re.MULTILINE)
+            except re.error as exc:
+                return ToolResult(
+                    success=False,
+                    content=f"Invalid regex pattern: {exc}",
+                )
+            if replace_all:
+                updated, count = pattern.subn(replace, current)
+            else:
+                updated, count = pattern.subn(replace, current, count=1)
+        else:
+            count = current.count(search)
+            if count == 0:
+                updated = current
+            elif replace_all:
+                updated = current.replace(search, replace)
+            else:
+                updated = current.replace(search, replace, 1)
+                count = 1
+
+        if count == 0:
+            return ToolResult(
+                success=False,
+                content="No matches found for patch search pattern.",
+            )
+
+        if script_type == "test":
+            self.current_test_script = updated
+        elif script_type == "service":
+            self.current_service_script = updated
+        elif script_type == "components":
+            self.current_components_script = updated
+        elif script_type == "dummy_data":
+            self.current_dummy_data = updated
+
+        return ToolResult(
+            success=True,
+            content=(
+                f"Patched {script_type} successfully. Replacements applied: {count}."
+            ),
+            metadata={"replacements": count, "script_type": script_type},
+        )
 
     def update_test_script(self, new_script: str) -> ToolResult:
         """
@@ -1049,6 +1191,71 @@ class IterativeTestFixer:
             List of tool definitions
         """
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_script_patch",
+                    "description": (
+                        "Apply a targeted edit to one mutable script using literal "
+                        "or regex replacement. Prefer this for small surgical changes "
+                        "instead of rewriting whole files."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "script_type": {
+                                "type": "string",
+                                "enum": [
+                                    "test",
+                                    "service",
+                                    "components",
+                                    "dummy_data",
+                                    "dummy-data",
+                                ],
+                                "description": "Which mutable script to patch",
+                            },
+                            "search": {
+                                "type": "string",
+                                "description": "Search pattern (literal by default)",
+                            },
+                            "replace": {
+                                "type": "string",
+                                "description": "Replacement text",
+                            },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "Whether to replace all matches (default false)",
+                            },
+                            "use_regex": {
+                                "type": "boolean",
+                                "description": "Interpret search as regex (default false)",
+                            },
+                        },
+                        "required": ["script_type", "search", "replace"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_last_test_output",
+                    "description": (
+                        "Return full output from the most recent run_tests call. "
+                        "Useful when summarized output hides important stack/context lines."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "max_bytes": {
+                                "type": "integer",
+                                "description": "Optional byte cap for returned output",
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
             {
                 "type": "function",
                 "function": {
@@ -1296,7 +1503,17 @@ class IterativeTestFixer:
             ToolResult from the tool execution
         """
         tool_map = {
+            "apply_script_patch": lambda: self.apply_script_patch(
+                arguments["script_type"],
+                arguments["search"],
+                arguments["replace"],
+                bool(arguments.get("replace_all", False)),
+                bool(arguments.get("use_regex", False)),
+            ),
             "run_tests": lambda: self.run_tests(arguments.get("test_name")),
+            "get_last_test_output": lambda: self.get_last_test_output(
+                arguments.get("max_bytes")
+            ),
             "run_debug_code": lambda: self.run_debug_code(
                 arguments.get("code"), arguments.get("timeout_seconds")
             ),
@@ -1489,7 +1706,9 @@ async def run_tool_driven_test_fix(
         if strategy_mode == "fix_code":
             strategy_allowed_tools = {
                 "run_tests",
+                "get_last_test_output",
                 "run_debug_code",
+                "apply_script_patch",
                 "update_service_script",
                 "update_components_script",
                 "get_script_lines",
@@ -1513,7 +1732,9 @@ async def run_tool_driven_test_fix(
         elif strategy_mode == "adjust_test":
             strategy_allowed_tools = {
                 "run_tests",
+                "get_last_test_output",
                 "run_debug_code",
+                "apply_script_patch",
                 "update_test_script",
                 "update_dummy_data",
                 "get_script_lines",
@@ -1613,6 +1834,8 @@ async def run_tool_driven_test_fix(
                     "Call run_tests to verify your changes. "
                     "Harness note: pfuschTest returns a PfuschNodeCollection wrapper around the host component; "
                     "component internals are on comp.host (for example comp.host.state / comp.host.shadowRoot). "
+                    "Mock-shape note: svc.test.addResolved(tool, payload) should generally provide the post-resultKey shape; "
+                    "for calls using resultKey='value', provide an array (not wrapped { value: [...] }) unless runtime explicitly expects wrappers. "
                     "Hyphenated custom element names (for example 'air-quality') are valid; do not rename tags just to avoid hyphens. "
                     "Slot note: avoid slot-only refactors unless tests explicitly provide slotted Light DOM content. "
                     "Do not use `html.slot() || fallback` patterns and do not depend on `slot.assignedNodes()` / `slot.assignedElements()`. "
