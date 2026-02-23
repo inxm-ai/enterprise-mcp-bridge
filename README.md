@@ -2,6 +2,10 @@
 
 FastAPI-based wrapper that exposes any Model Context Protocol (MCP) server over plain HTTP/JSON with enterprise-grade capabilities for production use.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/inxm-ai/enterprise-mcp-bridge)
+
+Read more about deploying to Render [here →](#deploy-on-render-weather-mcp-example)
+
 📖 **[Full Documentation](https://inxm-ai.github.io/enterprise-mcp-bridge)**
 
 ## Why Enterprise MCP Bridge?
@@ -79,7 +83,7 @@ docker run -it -p 8000:8000 \
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/inxm-ai/enterprise-mcp-bridge)
 
-This uses the same settings as `tmp/deploy_weather.sh` and deploys `ghcr.io/inxm-ai/enterprise-mcp-bridge:latest` with the weather MCP server.
+This deploys `ghcr.io/inxm-ai/enterprise-mcp-bridge:latest` with the weather MCP server.
 
 Environment variables used by this setup:
 
