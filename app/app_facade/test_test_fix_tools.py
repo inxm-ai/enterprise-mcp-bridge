@@ -147,6 +147,33 @@ def test_run_tests_injects_mcp_service_helper_for_components_fallback():
     toolkit.cleanup()
 
 
+def test_run_tests_addresolved_payload_respects_resultkey_value():
+    """Resolved mocks should be compatible with resultKey='value' calls in constrained runtime."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+
+    test_script = (
+        "import { describe, it } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('resolved mock resultKey compatibility', () => {\n"
+        "  it('unboxes resolved wrapper for resultKey value', async () => {\n"
+        "    const svc = globalThis.service || new globalThis.McpService();\n"
+        "    svc.test.reset();\n"
+        "    svc.test.addResolved('list_items', { value: [{ id: '1' }] });\n"
+        "    const result = await svc.call('list_items', {}, { resultKey: 'value' });\n"
+        "    assert.ok(Array.isArray(result));\n"
+        "    assert.equal(result[0].id, '1');\n"
+        "  });\n"
+        "});\n"
+    )
+
+    toolkit.setup_test_environment("", "", test_script)
+    result = toolkit.run_tests()
+    assert result.success, result.content
+    toolkit.cleanup()
+
+
 def test_tool_definitions():
     """Test that tool definitions are valid."""
     helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")

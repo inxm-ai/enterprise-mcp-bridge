@@ -767,11 +767,16 @@ pfusch('d3-chart',
 *   **Framework**: `node:test` (native).
 *   **Imports**: `import './app.js';` (REAL CODE side effects, runtime helper included).
 *   **Mocks**: Use service test mocks for final resolved results (`svc.test.addResponse` / `svc.test.addResolved`) and `globalThis.fetch.addRoute(...)` for raw transport/extraction paths. Mock queue behavior is sticky-last: one item repeats forever; multiple items are consumed in order until the final item, then that final item repeats.
+*   **ResultKey Contract**: For calls using `resultKey: 'value'`, resolved mocks should normally provide the post-pick shape (usually an array/object), not an extra wrapper like `{ value: ... }`, unless runtime code explicitly expects wrappers.
+*   **Collection Safety**: Before using `.map`, `.filter`, `.length`, or spread on fetched data, normalize first:
+  - `const list = Array.isArray(x) ? x : (Array.isArray(x?.value) ? x.value : []);`
+  - Apply this in component runtime code and in tests that derive expectations from fixture payloads.
 *   **Components**: Import `pfuschTest` from `./domstubs.js`.
 *   **Execution Budget**: Keep tests fast and deterministic. Avoid sleeps and polling; assert after one or two `await comp.flush()` calls.
 *   **Flush Semantics**: `comp.flush()` runs microtasks and a `setTimeout(0)` turn. Use it for settled/final UI assertions, not for pre-fetch snapshots.
 *   **Loading Assertions**: If you must verify initial loading UI, assert immediately after `pfuschTest(...)` (before `flush()`), then use `flush()` for post-fetch assertions.
 *   **Assertion Strength**: Validate concrete rendered values from schema keys (for example expected `temperature_c` value), not only labels/units/placeholders.
+*   **Assertion Robustness**: Prefer semantic assertions over rigid presentational checks. Allow equivalent display variants (for example initials `SO` vs `S&`), and when asserting metadata in domstubs, consider both property and attribute reads when relevant.
 
 Mock APIs:
 
@@ -780,6 +785,10 @@ const svc = globalThis.service || new globalThis.McpService();
 svc.test.addResponse('list_items', { structuredContent: { result: [] } }); // raw tool payload (sticky when single)
 svc.test.addResponse('list_items', []); // resolved final result (sticky when single)
 svc.test.addResolved('list_items', []); // explicit resolved mode (sticky when single)
+// If runtime call uses resultKey: 'value', prefer this resolved shape:
+svc.test.addResolved('list_items', [{ id: '1' }]);
+// Avoid unnecessary wrapper unless runtime explicitly expects it:
+// svc.test.addResolved('list_items', { value: [{ id: '1' }] });
 svc.test.addResolved('get_weather', { city: 'Berlin' });
 svc.test.addResolved('get_weather', { city: 'Paris' }); // sequence: Berlin once, then Paris for all remaining calls
 svc.test.getCalls(); // [{ name, body, options, mocked, timestamp }, ...]
@@ -790,6 +799,10 @@ globalThis.fetch.addRoute('/tools/list_items', { structuredContent: { result: []
 globalThis.fetch.getCalls();      // [{ url, init, timestamp }, ...]
 globalThis.fetch.resetCalls();
 globalThis.fetch.resetRoutes();
+
+// Runtime/component normalization pattern (recommended guard)
+const raw = await mcp.call('list_items', {}, { resultKey: 'value' });
+const items = Array.isArray(raw) ? raw : (Array.isArray(raw?.value) ? raw.value : []);
 ```
 
 ### PfuschNodeCollection API

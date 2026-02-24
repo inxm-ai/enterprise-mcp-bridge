@@ -1836,6 +1836,11 @@ async def run_tool_driven_test_fix(
                     "component internals are on comp.host (for example comp.host.state / comp.host.shadowRoot). "
                     "Mock-shape note: svc.test.addResolved(tool, payload) should generally provide the post-resultKey shape; "
                     "for calls using resultKey='value', provide an array (not wrapped { value: [...] }) unless runtime explicitly expects wrappers. "
+                    "If a failure says 'map is not a function' or 'is not iterable', fix payload/list normalization first "
+                    "(for example: const list = Array.isArray(x) ? x : (Array.isArray(x?.value) ? x.value : [])). "
+                    "When touching component logic around collections, add the same normalization guard before .map/.length/filter/spread usage. "
+                    "Assertion robustness note: prefer semantic assertions over presentationally rigid ones; "
+                    "allow equivalent display variants (for example SO vs S&) and for domstubs metadata consider both attribute and property reads. "
                     "Hyphenated custom element names (for example 'air-quality') are valid; do not rename tags just to avoid hyphens. "
                     "Slot note: avoid slot-only refactors unless tests explicitly provide slotted Light DOM content. "
                     "Do not use `html.slot() || fallback` patterns and do not depend on `slot.assignedNodes()` / `slot.assignedElements()`. "
@@ -2099,6 +2104,29 @@ async def run_tool_driven_test_fix(
                 or "failuretype: 'subtestsfailed'" in lowered
             )
             return has_assertion_signal and has_test_reference
+
+        def _looks_like_collection_shape_runtime_failure(output: str) -> bool:
+            lowered = (output or "").lower()
+            return any(
+                marker in lowered
+                for marker in (
+                    "map is not a function",
+                    "is not iterable",
+                    "cannot read properties of undefined (reading 'map')",
+                )
+            )
+
+        def _looks_like_brittle_assertion_failure(output: str) -> bool:
+            lowered = (output or "").lower()
+            return any(
+                marker in lowered
+                for marker in (
+                    ".title.includes",
+                    "reading 'includes'",
+                    "'so' !== 's&'",
+                    "assertionerror",
+                )
+            )
 
         def _reset_fix_code_bail_tracking() -> None:
             nonlocal fix_code_assertion_failures
@@ -2654,6 +2682,30 @@ async def run_tool_driven_test_fix(
                                 )
                     else:
                         if failed > 0:
+                            if _looks_like_collection_shape_runtime_failure(
+                                result.content
+                            ):
+                                fix_messages.append(
+                                    Message(
+                                        role=MessageRole.USER,
+                                        content=(
+                                            "Guard hint: runtime shape mismatch detected ('map/is not iterable'). "
+                                            "Normalize list payloads first and align mocks with resultKey extraction "
+                                            "(for resultKey='value', prefer array-shaped resolved payloads)."
+                                        ),
+                                    )
+                                )
+                            if _looks_like_brittle_assertion_failure(result.content):
+                                fix_messages.append(
+                                    Message(
+                                        role=MessageRole.USER,
+                                        content=(
+                                            "Guard hint: brittle assertion pattern detected. "
+                                            "Prefer semantic assertions, allow equivalent display variants (e.g. SO/S&), "
+                                            "and for domstubs metadata read both attribute and property values when relevant."
+                                        ),
+                                    )
+                                )
                             test_list = ", ".join(failed_tests[:3])
                             if len(failed_tests) > 3:
                                 test_list += f", ... ({len(failed_tests) - 3} more)"
@@ -2808,6 +2860,32 @@ async def run_tool_driven_test_fix(
                 )
                 if handoff_result is not None:
                     return handoff_result
+
+                if forced_failed > 0 and _looks_like_collection_shape_runtime_failure(
+                    forced_result.content
+                ):
+                    fix_messages.append(
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "Guard hint: runtime shape mismatch persists ('map/is not iterable'). "
+                                "Patch payload normalization first (Array.isArray checks with optional x?.value fallback) "
+                                "before broad refactors."
+                            ),
+                        )
+                    )
+                if forced_failed > 0 and _looks_like_brittle_assertion_failure(
+                    forced_result.content
+                ):
+                    fix_messages.append(
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "Guard hint: assertion brittleness persists. "
+                                "Relax strict presentational checks and assert semantic behavior instead."
+                            ),
+                        )
+                    )
 
             for tool_result in tool_results:
                 fix_messages.append(

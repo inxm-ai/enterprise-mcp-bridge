@@ -372,7 +372,7 @@ class __GeneratedMcpService {
   async _resolveMockedResponse(entry, options = {}) {
     if (entry && typeof entry === 'object' && entry.__testMockMode) {
       if (entry.__testMockMode === 'resolved') {
-        return entry.payload;
+        return this._pick(entry.payload, options?.resultKey);
       }
       return this._resolveToolPayload(entry.payload, options);
     }
