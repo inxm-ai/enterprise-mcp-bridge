@@ -225,7 +225,9 @@ class TestLLMClient:
             "Invalid schema for response_format 'demo': context=('properties', 'x'), "
             "enum value string does not validate against {'type': 'object'}."
         )
-        schema_name, context, detail = LLMClient._parse_invalid_schema_error_details(message)
+        schema_name, context, detail = LLMClient._parse_invalid_schema_error_details(
+            message
+        )
 
         assert schema_name == "demo"
         assert context == ("properties", "x")
@@ -270,7 +272,9 @@ class TestLLMClient:
 
         mock_response = MagicMock()
         mock_response.model_dump.return_value = mock_response_data
-        llm_client.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        llm_client.client.chat.completions.create = AsyncMock(
+            return_value=mock_response
+        )
 
         response = await llm_client.non_stream_completion(request, "test-token", None)
         call_kwargs = llm_client.client.chat.completions.create.call_args.kwargs
@@ -304,7 +308,10 @@ class TestLLMClient:
                 "type": "json_schema",
                 "json_schema": {
                     "name": "answer_schema",
-                    "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                    },
                     "strict": True,
                 },
             },
@@ -320,12 +327,14 @@ class TestLLMClient:
                     "id": "fc_1",
                     "call_id": "call_1",
                     "name": "search_docs",
-                    "arguments": "{\"query\":\"x\"}",
+                    "arguments": '{"query":"x"}',
                 }
             ],
             "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
         }
-        client.client.responses.create = AsyncMock(return_value=_Dumpable(response_payload))
+        client.client.responses.create = AsyncMock(
+            return_value=_Dumpable(response_payload)
+        )
 
         response = await client.non_stream_completion(request, "token", None)
         call_kwargs = client.client.responses.create.call_args.kwargs
@@ -340,7 +349,7 @@ class TestLLMClient:
         message = response.choices[0].message
         assert message.tool_calls is not None
         assert message.tool_calls[0].function.name == "search_docs"
-        assert message.tool_calls[0].function.arguments == "{\"query\":\"x\"}"
+        assert message.tool_calls[0].function.arguments == '{"query":"x"}'
         assert response.usage.prompt_tokens == 8
         assert response.usage.completion_tokens == 3
         assert response.usage.total_tokens == 11
@@ -390,7 +399,9 @@ class TestLLMClient:
             "output": [],
             "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
         }
-        client.client.responses.create = AsyncMock(return_value=_Dumpable(response_payload))
+        client.client.responses.create = AsyncMock(
+            return_value=_Dumpable(response_payload)
+        )
 
         response = await client.non_stream_completion(request, "token", None)
         call_kwargs = client.client.responses.create.call_args.kwargs
@@ -549,7 +560,9 @@ class TestLLMClient:
         async def mock_stream():
             yield chunk1
 
-        llm_client.client.chat.completions.create = AsyncMock(return_value=mock_stream())
+        llm_client.client.chat.completions.create = AsyncMock(
+            return_value=mock_stream()
+        )
 
         chunks = []
         async for chunk in llm_client.stream_completion(request, "test-token", None):
@@ -605,7 +618,7 @@ class TestLLMClient:
                     "type": "response.function_call_arguments.delta",
                     "output_index": 0,
                     "call_id": "call_1",
-                    "delta": "{\"query\":\"books\"}",
+                    "delta": '{"query":"books"}',
                 }
             )
             yield _Dumpable(
@@ -683,7 +696,9 @@ class TestLLMClient:
         )
 
         async def fallback_stream():
-            yield _Dumpable({"type": "response.output_text.delta", "delta": "{\"x\":\"ok\"}"})
+            yield _Dumpable(
+                {"type": "response.output_text.delta", "delta": '{"x":"ok"}'}
+            )
             yield _Dumpable(
                 {
                     "type": "response.completed",

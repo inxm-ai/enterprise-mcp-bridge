@@ -265,9 +265,9 @@ async def test_generate_dummy_data_derives_schema_and_uses_observed_sample(
     assert '"city": "Berlin"' in result
     assert '"temperature_c": 8.2' in result
 
-    generation_request = mock_tgi_service.llm_client.non_stream_completion.call_args_list[
-        0
-    ][0][0]
+    generation_request = (
+        mock_tgi_service.llm_client.non_stream_completion.call_args_list[0][0][0]
+    )
     schema = generation_request.response_format["json_schema"]["schema"]
     assert schema["properties"]["weather"]["properties"]["city"]["type"] == "string"
 

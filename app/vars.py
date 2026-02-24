@@ -98,7 +98,13 @@ TGI_MODEL_NAME = os.getenv("TGI_MODEL_NAME", os.environ.get("DEFAULT_MODEL", "")
 
 def normalize_tgi_conversation_mode(value: str | None) -> str:
     mode = (value or "").strip().lower()
-    if mode in ("", "chat/completions", "/chat/completions", "chat", "chat_completions"):
+    if mode in (
+        "",
+        "chat/completions",
+        "/chat/completions",
+        "chat",
+        "chat_completions",
+    ):
         return "chat/completions"
     if mode in ("responses", "/responses"):
         return "responses"

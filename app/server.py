@@ -32,7 +32,9 @@ class OTELFormatter(logging.Formatter):
 
         # Format the message with timestamp, trace ID, level, and logger name
         msg = record.getMessage()
-        return f"{timestamp} [trace_id={trace_id}] {record.levelname} {record.name}: {msg}"
+        return (
+            f"{timestamp} [trace_id={trace_id}] {record.levelname} {record.name}: {msg}"
+        )
 
 
 def configure_logging() -> None:
@@ -43,16 +45,16 @@ def configure_logging() -> None:
     for logger_name in ["uvicorn.error", "uvicorn.access"]:
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.INFO)
-        
+
         # Remove any existing handlers to avoid duplicates
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
-        
+
         # Add stream handler with custom formatter
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-    
+
     # Prevent propagation to root logger to avoid duplicate logs
     logging.getLogger("uvicorn.error").propagate = False
     logging.getLogger("uvicorn.access").propagate = False

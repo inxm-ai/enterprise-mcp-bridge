@@ -199,7 +199,8 @@ class DummyDataGenerator:
 
             if "type" not in current:
                 if any(
-                    key in current for key in ("properties", "required", "additionalProperties")
+                    key in current
+                    for key in ("properties", "required", "additionalProperties")
                 ):
                     current["type"] = "object"
                 elif "items" in current:
@@ -271,7 +272,9 @@ class DummyDataGenerator:
                 continue
 
             if isinstance(output_schema, dict) and output_schema:
-                properties[name] = self._sanitize_output_schema(output_schema) or output_schema
+                properties[name] = (
+                    self._sanitize_output_schema(output_schema) or output_schema
+                )
             else:
                 properties[name] = copy.deepcopy(MISSING_OUTPUT_SCHEMA_FALLBACK)
 
@@ -304,7 +307,7 @@ class DummyDataGenerator:
         tool_name: str = "unknown_tool",
     ) -> Optional[Dict[str, Any]]:
         """Infer JSON schema from a sample value using genson.
-        
+
         This is much faster than asking an LLM to derive the schema,
         since genson infers the schema instantly from the actual data.
         """
@@ -313,14 +316,14 @@ class DummyDataGenerator:
             builder = SchemaBuilder()
             builder.add_object(sample)
             inferred = builder.to_schema()
-            
+
             if isinstance(inferred, dict) and inferred:
                 # Genson doesn't infer required fields, so we explicitly mark all
                 # properties as required (since they're present in the sample).
                 # This prevents responses mode from doing its own normalization,
                 # which would cause a mismatch with what the LLM generates.
                 inferred = self._add_required_fields_to_schema(inferred)
-                
+
                 # Sanitize and validate the inferred schema
                 sanitized = self._sanitize_output_schema(inferred)
                 return sanitized or inferred
@@ -335,16 +338,16 @@ class DummyDataGenerator:
     @classmethod
     def _add_required_fields_to_schema(cls, schema: Any) -> Any:
         """Recursively add required fields to all objects in the schema.
-        
+
         Genson infers the structure but doesn't mark fields as required.
         We explicitly mark all properties as required (since they exist in the sample)
         to ensure responses mode doesn't alter the schema unexpectedly.
         """
         if not isinstance(schema, dict):
             return schema
-        
+
         result = copy.deepcopy(schema)
-        
+
         # Add required array if this is an object with properties
         if result.get("type") == "object" and "properties" in result:
             properties = result.get("properties", {})
@@ -353,18 +356,18 @@ class DummyDataGenerator:
             # Ensure strict mode
             if "additionalProperties" not in result:
                 result["additionalProperties"] = False
-        
+
         # Recursively process nested properties
         if "properties" in result and isinstance(result["properties"], dict):
             result["properties"] = {
                 key: cls._add_required_fields_to_schema(value)
                 for key, value in result["properties"].items()
             }
-        
+
         # Recursively process array items
         if "items" in result and isinstance(result["items"], dict):
             result["items"] = cls._add_required_fields_to_schema(result["items"])
-        
+
         return result
 
     def _derive_schema_from_sample(
@@ -375,21 +378,21 @@ class DummyDataGenerator:
         ui_model_headers: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Derive schema from sample using fast genson inference instead of LLM.
-        
+
         Previously this made an LLM call which was slow. Now we use automatic
         schema inference from the actual sample data, which is instant.
         """
         tool_name = str(tool_spec.get("name") or "unknown_tool")
-        
+
         # Use fast schema inference instead of LLM
         schema = self._infer_schema_from_sample(
             sample=sample,
             tool_name=tool_name,
         )
-        
+
         if schema:
             return schema
-        
+
         # Fallback: return None if inference fails, parent will use MISSING_OUTPUT_SCHEMA_FALLBACK
         logger.warning(
             "Could not infer schema from sample for tool '%s'",
@@ -615,7 +618,9 @@ class DummyDataGenerator:
                 logger.error(f"Dummy data response content was empty for {tool_name}")
                 return {}
 
-            parsed = self._parse_dummy_data_response(tool_name=tool_name, content=content)
+            parsed = self._parse_dummy_data_response(
+                tool_name=tool_name, content=content
+            )
             if parsed is None:
                 return {}
             return parsed

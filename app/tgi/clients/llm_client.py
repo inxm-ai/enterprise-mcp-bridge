@@ -83,9 +83,7 @@ class LLMClient:
             self.tgi_url = self.tgi_url[:-1]
 
         self.logger.info(f"[LLMClient] Initialized with URL: {self.tgi_url}")
-        self.logger.info(
-            "[LLMClient] Conversation mode: %s", self.conversation_mode
-        )
+        self.logger.info("[LLMClient] Conversation mode: %s", self.conversation_mode)
         if self.tgi_token:
             self.logger.info(
                 mask_token(
@@ -273,9 +271,7 @@ class LLMClient:
                             "call_id": call_id,
                             "name": str(name),
                             "arguments": (
-                                str(arguments)
-                                if arguments is not None
-                                else "{}"
+                                str(arguments) if arguments is not None else "{}"
                             ),
                         }
                     )
@@ -422,7 +418,10 @@ class LLMClient:
     def _parse_invalid_schema_error_details(
         message: str,
     ) -> Tuple[Optional[str], Optional[Tuple[str, ...]], Optional[str]]:
-        if not isinstance(message, str) or "Invalid schema for response_format" not in message:
+        if (
+            not isinstance(message, str)
+            or "Invalid schema for response_format" not in message
+        ):
             return None, None, None
 
         pattern = re.compile(
@@ -458,9 +457,11 @@ class LLMClient:
             message
         )
         if not schema_name:
-            schema_name = self._response_schema_name(request.response_format) or "response"
+            schema_name = (
+                self._response_schema_name(request.response_format) or "response"
+            )
 
-        fmt = ((params.get("text") or {}).get("format") or {})
+        fmt = (params.get("text") or {}).get("format") or {}
         schema = fmt.get("schema")
         path_text = None
         node_preview = None
@@ -608,7 +609,9 @@ class LLMClient:
 
             node_type = current.get("type")
             if isinstance(node_type, list):
-                chosen = LLMClient._preferred_type_from_union_for_node(node_type, current)
+                chosen = LLMClient._preferred_type_from_union_for_node(
+                    node_type, current
+                )
                 if chosen:
                     add_issue(
                         path,
@@ -683,7 +686,9 @@ class LLMClient:
                     )
                     current["enum"] = filtered_enum
 
-            is_object_schema = current.get("type") == "object" or "properties" in current
+            is_object_schema = (
+                current.get("type") == "object" or "properties" in current
+            )
             if is_object_schema:
                 if current.get("type") != "object":
                     add_issue(path, "object-like schema forced to type='object'")
@@ -692,7 +697,10 @@ class LLMClient:
                 properties = current.get("properties")
                 if not isinstance(properties, dict):
                     if properties is not None:
-                        add_issue(path + ("properties",), "invalid properties replaced with {}")
+                        add_issue(
+                            path + ("properties",),
+                            "invalid properties replaced with {}",
+                        )
                     properties = {}
                     current["properties"] = properties
 
@@ -720,7 +728,9 @@ class LLMClient:
                     add_issue(path, "properties removed from non-object schema")
                     current.pop("properties", None)
                 if "additionalProperties" in current:
-                    add_issue(path, "additionalProperties removed from non-object schema")
+                    add_issue(
+                        path, "additionalProperties removed from non-object schema"
+                    )
                     current.pop("additionalProperties", None)
 
             if current.get("type") == "array" and "items" not in current:
@@ -804,9 +814,8 @@ class LLMClient:
         if text:
             params["text"] = text
             fmt_type = (text.get("format") or {}).get("type")
-            if (
-                fmt_type == "json_object"
-                and not self._responses_input_mentions_json(params["input"])
+            if fmt_type == "json_object" and not self._responses_input_mentions_json(
+                params["input"]
             ):
                 params["input"].append(
                     {"role": "system", "content": "Return valid JSON only."}
@@ -881,9 +890,7 @@ class LLMClient:
                 f"Top-level keys: {', '.join(str(k) for k in prop_keys)}."
             )
         if req_keys:
-            guidance_parts.append(
-                f"Required top-level keys: {', '.join(req_keys)}."
-            )
+            guidance_parts.append(f"Required top-level keys: {', '.join(req_keys)}.")
         guidance_parts.append(
             "Schema:\n" + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         )
@@ -903,13 +910,14 @@ class LLMClient:
         message = str(exc).lower()
         if "invalid_json_schema" in message:
             return True
-        if "text.format.schema" in message and "invalid schema for response_format" in message:
+        if (
+            "text.format.schema" in message
+            and "invalid schema for response_format" in message
+        ):
             return True
         return False
 
-    def _mark_schema_for_json_object_mode(
-        self, request: ChatCompletionRequest
-    ) -> None:
+    def _mark_schema_for_json_object_mode(self, request: ChatCompletionRequest) -> None:
         schema_name = self._response_schema_name(request.response_format)
         if schema_name:
             _RESPONSES_JSON_OBJECT_ONLY_SCHEMAS.add(schema_name)
@@ -1224,9 +1232,7 @@ class LLMClient:
 
                 async for event in stream:
                     event_dict = self._to_dict(event)
-                    event_type = event_dict.get("type") or getattr(
-                        event, "type", None
-                    )
+                    event_type = event_dict.get("type") or getattr(event, "type", None)
                     if not event_type:
                         continue
 
@@ -1329,9 +1335,8 @@ class LLMClient:
                             state["id"] = str(call_id)
                             tool_index_by_id[str(call_id)] = output_index
                         done_arguments = event_dict.get("arguments")
-                        if (
-                            done_arguments is not None
-                            and not state.get("arguments_emitted")
+                        if done_arguments is not None and not state.get(
+                            "arguments_emitted"
                         ):
                             function_payload: Dict[str, Any] = {
                                 "arguments": str(done_arguments)

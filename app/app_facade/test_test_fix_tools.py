@@ -154,9 +154,11 @@ def test_tool_definitions():
 
     tools = toolkit.get_tool_definitions()
 
-    assert len(tools) == 9
+    assert len(tools) == 11
     tool_names = [t["function"]["name"] for t in tools]
 
+    assert "apply_script_patch" in tool_names
+    assert "get_last_test_output" in tool_names
     assert "run_tests" in tool_names
     assert "run_debug_code" in tool_names
     assert "update_test_script" in tool_names
@@ -190,6 +192,22 @@ def test_execute_tool():
     # Execute get_current_scripts
     result = toolkit.execute_tool("get_current_scripts", {})
     assert result.success
+
+    # Execute apply_script_patch
+    result = toolkit.execute_tool(
+        "apply_script_patch",
+        {
+            "script_type": "test",
+            "search": "updated",
+            "replace": "patched",
+        },
+    )
+    assert result.success
+    assert toolkit.current_test_script == "patched"
+
+    # get_last_test_output should fail before any run_tests invocation
+    result = toolkit.execute_tool("get_last_test_output", {})
+    assert not result.success
 
     # Execute unknown tool
     result = toolkit.execute_tool("unknown_tool", {})
@@ -262,6 +280,97 @@ describe('Test Suite', () => {
 
     assert not result.success
     assert "fail" in result.content.lower() or "not ok" in result.content.lower()
+
+    toolkit.cleanup()
+
+
+def test_apply_script_patch_literal_and_regex():
+    """apply_script_patch should support literal and regex replacements."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+
+    toolkit.setup_test_environment(
+        "service-v1",
+        "const version = 'comp-1';",
+        "line a\nline b\nline c",
+    )
+
+    literal_result = toolkit.apply_script_patch(
+        "test", "line b", "line B", replace_all=False, use_regex=False
+    )
+    assert literal_result.success
+    assert "line B" in toolkit.current_test_script
+
+    regex_result = toolkit.apply_script_patch(
+        "components",
+        r"comp-\d+",
+        "comp-2",
+        replace_all=False,
+        use_regex=True,
+    )
+    assert regex_result.success
+    assert "comp-2" in toolkit.current_components_script
+
+    not_found = toolkit.apply_script_patch("service", "does-not-exist", "replacement")
+    assert not not_found.success
+
+    toolkit.cleanup()
+
+
+def test_get_last_test_output_after_run_tests():
+    """get_last_test_output should expose full output and metadata after run_tests."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+
+    test = """
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+describe('Last output suite', () => {
+    it('passes', () => {
+        assert.ok(true);
+    });
+});
+"""
+
+    toolkit.setup_test_environment("export class McpService {}", "", test)
+    run_result = toolkit.run_tests()
+    assert run_result.success
+
+    output_result = toolkit.get_last_test_output()
+    assert output_result.success
+    assert output_result.metadata is not None
+    assert (
+        "ok" in output_result.content.lower() or "pass" in output_result.content.lower()
+    )
+
+    capped_result = toolkit.get_last_test_output(max_bytes=64)
+    assert capped_result.success
+    assert len(capped_result.content.encode("utf-8")) <= 64
+
+    toolkit.cleanup()
+
+
+def test_run_tests_normalizes_pfusch_import_in_user_test_script():
+    """run_tests should normalize remote pfusch imports inside user_test.js for offline execution."""
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+
+    test = """
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { pfusch } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';
+
+describe('Import normalization suite', () => {
+    it('loads pfusch from local helper alias', () => {
+        assert.equal(typeof pfusch, 'function');
+    });
+});
+"""
+
+    toolkit.setup_test_environment("export class McpService {}", "", test)
+    result = toolkit.run_tests()
+    assert result.success, result.content
 
     toolkit.cleanup()
 

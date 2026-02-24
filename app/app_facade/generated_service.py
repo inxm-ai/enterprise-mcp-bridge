@@ -1151,7 +1151,9 @@ class GeneratedUIService:
             parsed = json.loads(content) if content else {}
             schema = parsed.get("schema") if isinstance(parsed, dict) else None
             if isinstance(schema, dict) and schema:
-                sanitizer = getattr(self.dummy_data_generator, "_sanitize_output_schema", None)
+                sanitizer = getattr(
+                    self.dummy_data_generator, "_sanitize_output_schema", None
+                )
                 if callable(sanitizer):
                     sanitized = sanitizer(schema)
                     if isinstance(sanitized, dict) and sanitized:
