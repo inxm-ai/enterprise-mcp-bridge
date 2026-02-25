@@ -5161,15 +5161,22 @@ class GeneratedUIService:
                 f"{timestamp}_{_safe(scope.kind)}-{_safe(scope.identifier)}_"
                 f"{_safe(ui_id)}_{_safe(name)}.json"
             )
+            safe_file_name = Path(file_name).name
 
             if path.exists() and path.is_dir():
-                target_path = path / file_name
+                base_dir = path.resolve()
+                target_path = (base_dir / safe_file_name).resolve()
+                if target_path.parent != base_dir:
+                    raise ValueError("Invalid dump path")
             elif path.suffix:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                target_path = path
+                target_path = path.resolve()
             else:
                 path.mkdir(parents=True, exist_ok=True)
-                target_path = path / file_name
+                base_dir = path.resolve()
+                target_path = (base_dir / safe_file_name).resolve()
+                if target_path.parent != base_dir:
+                    raise ValueError("Invalid dump path")
 
             payload = {
                 "timestamp": timestamp,

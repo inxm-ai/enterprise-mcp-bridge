@@ -20,6 +20,7 @@ from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
 )
+from app.utils import token_fingerprint
 from app.vars import SESSION_FIELD_NAME
 from app.sse import stream_tool_call, create_sse_response
 from opentelemetry import trace
@@ -192,9 +193,13 @@ async def run_tool_with_progress(
 
                 yield SSEEvent.error_event(str(e)).to_sse_string()
 
+        arg_keys = sorted(args.keys()) if isinstance(args, dict) else []
         logger.info(
-            f"[SSE-Tool-Call] Starting streaming tool call: {tool_name}, "
-            f"Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}"
+            "[SSE-Tool-Call] Starting streaming tool call: %s, Session: %s, Group: %s, Arg keys: %s",
+            tool_name,
+            token_fingerprint(x_inxm_mcp_session),
+            group,
+            arg_keys,
         )
 
         return create_sse_response(generate_events())

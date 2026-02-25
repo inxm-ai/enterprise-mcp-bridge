@@ -1629,6 +1629,7 @@ def test_cap_message_payload_for_prompt_returns_compaction_diagnostics():
     assert diagnostics["steps"]
 
     # ensure_update_permissions
+    existing = {"metadata": {"scope": {"type": "group", "id": "g1"}}}
     actor = Actor(user_id="u2", groups=["g2"])
     with pytest.raises(Exception):
         service._ensure_update_permissions(

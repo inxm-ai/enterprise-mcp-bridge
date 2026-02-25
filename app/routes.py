@@ -41,7 +41,7 @@ from .oauth.user_info import get_data_access_manager
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .oauth.token_dependency import get_access_token
-from .utils import mask_token
+from .utils import mask_token, token_fingerprint
 from .utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -146,10 +146,8 @@ async def list_resources(
             ) as session:
                 result = await session.list_resources()
                 logger.debug(
-                    mask_token(
-                        f"[Resources] Resources listed. Session: {x_inxm_mcp_session}",
-                        x_inxm_mcp_session,
-                    )
+                    "[Resources] Resources listed. Session: %s",
+                    token_fingerprint(x_inxm_mcp_session),
                 )
                 return result
     except HTTPException as e:
@@ -199,10 +197,8 @@ async def get_resource_details(
                     (res for res in result.resources if res.name == resource_name), None
                 )
                 logger.debug(
-                    mask_token(
-                        f"[Resource-Details] Resource details retrieved. Session: {x_inxm_mcp_session}",
-                        x_inxm_mcp_session,
-                    )
+                    "[Resource-Details] Resource details retrieved. Session: %s",
+                    token_fingerprint(x_inxm_mcp_session),
                 )
                 if result is None:
                     raise HTTPException(status_code=404, detail="Resource not found")
@@ -326,10 +322,8 @@ async def list_tools(
                 # Map tools for client response (apply header mapping and pruning)
                 result = map_tools(tools)
                 logger.debug(
-                    mask_token(
-                        f"[Tools] Tools listed. Session: {x_inxm_mcp_session}",
-                        x_inxm_mcp_session,
-                    )
+                    "[Tools] Tools listed. Session: %s",
+                    token_fingerprint(x_inxm_mcp_session),
                 )
                 return result
     except HTTPException as e:
@@ -379,10 +373,8 @@ async def get_tool_details(
                     (tool for tool in result if tool.get("name") == tool_name), None
                 )
                 logger.debug(
-                    mask_token(
-                        f"[Tool-Details] Tool details retrieved. Session: {x_inxm_mcp_session}",
-                        x_inxm_mcp_session,
-                    )
+                    "[Tool-Details] Tool details retrieved. Session: %s",
+                    token_fingerprint(x_inxm_mcp_session),
                 )
                 if result is None:
                     raise HTTPException(status_code=404, detail="Tool not found")
@@ -662,10 +654,9 @@ async def start_session(
                 session_info["group"] = group
 
             logger.debug(
-                mask_token(
-                    f"[Session] New session started: {x_inxm_mcp_session} for group: {group}",
-                    x_inxm_mcp_session,
-                )
+                "[Session] New session started: %s for group: %s",
+                token_fingerprint(x_inxm_mcp_session),
+                group,
             )
             response = JSONResponse(content=session_info)
             response.set_cookie(

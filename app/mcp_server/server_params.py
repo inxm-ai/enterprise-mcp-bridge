@@ -5,9 +5,18 @@ from typing import Optional
 from mcp import StdioServerParameters
 from app.oauth.token_exchange import TokenRetrieverFactory
 from app.oauth.user_info import get_data_access_manager
-from app.utils import mask_token
+from app.utils import token_fingerprint
 
 logger = logging.getLogger("uvicorn.error")
+
+
+def _redacted_env_var_name(value: Optional[str]) -> str:
+    if not value:
+        return "<unset>"
+    upper = value.upper()
+    if any(marker in upper for marker in ("PASSWORD", "SECRET", "TOKEN", "KEY")):
+        return "<redacted-env-var>"
+    return value
 
 
 def defined_env(
@@ -42,15 +51,18 @@ def defined_env(
         # Let's check if that's the case.
 
         retriever = TokenRetrieverFactory().get()
-        logger.info(f"Retrieving token for {oauth_env_var} using TokenRetriever")
+        logger.info(
+            "Retrieving token for %s using TokenRetriever",
+            _redacted_env_var_name(oauth_env_var),
+        )
         try:
             token_result = retriever.retrieve_token(access_token)
-        except Exception as e:
+        except Exception:
             # If retrieval fails, and we are in cookie mode, maybe we should just pass the token as is?
             # This is a fallback for when the token is not a valid Keycloak token but just a cookie value
             # that the MCP needs.
             logger.warning(
-                f"Token retrieval failed: {e}. Falling back to using the raw token/cookie value."
+                "Token retrieval failed. Falling back to using the raw token/cookie value."
             )
             token_result = {"access_token": access_token}
 
@@ -59,10 +71,9 @@ def defined_env(
             token_result = {"access_token": access_token}
 
         logger.info(
-            mask_token(
-                f"Server-Params from OAUTH_ENV: {oauth_env_var}={token_result['access_token']}",
-                token_result["access_token"],
-            )
+            "Server-Params from OAUTH_ENV: %s token=%s",
+            _redacted_env_var_name(oauth_env_var),
+            token_fingerprint(token_result["access_token"]),
         )
         env[oauth_env_var] = token_result["access_token"]
     else:
@@ -96,7 +107,7 @@ def get_server_params(
             env_command, token_result["access_token"], requested_group
         )
         if processed_command != env_command:
-            logger.info(f"Processed command template: {processed_command}")
+            logger.info("Processed command template from MCP_SERVER_COMMAND")
             env_command = processed_command
     else:
         logger.info("No env_command or access_token set, using defaults")
@@ -108,7 +119,9 @@ def get_server_params(
         command = parts[0]
         cmd_args = parts[1:]
         logger.info(
-            f"Server-Params from MCP_SERVER_COMMAND: command={command}, args={cmd_args}"
+            "Server-Params from MCP_SERVER_COMMAND: command=%s, arg_count=%d",
+            command,
+            len(cmd_args),
         )
         return StdioServerParameters(command=command, args=cmd_args, env=env)
 

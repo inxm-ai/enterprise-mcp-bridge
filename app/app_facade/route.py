@@ -80,6 +80,12 @@ FORWARDED_HEADERS = {
 }
 
 
+def _public_error_message(status_code: Optional[int] = None) -> str:
+    if status_code is not None and status_code < 500:
+        return "Request failed"
+    return "Internal Server Error"
+
+
 def _ensure_tgi_enabled() -> None:
     if not os.environ.get("TGI_URL"):
         raise HTTPException(
@@ -327,7 +333,11 @@ async def create_generated_ui(
             if hasattr(eg, "exceptions"):
                 for exc in getattr(eg, "exceptions"):
                     if isinstance(exc, HTTPException):
-                        payload = {"error": exc.detail}
+                        payload = {
+                            "error": _public_error_message(
+                                getattr(exc, "status_code", None)
+                            )
+                        }
                         yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode(
                             "utf-8"
                         )
@@ -345,7 +355,9 @@ async def create_generated_ui(
                 f"[create_generated_ui] HTTPException in event_stream: {exc.detail}",
                 exc_info=exc,
             )
-            payload = {"error": exc.detail}
+            payload = {
+                "error": _public_error_message(getattr(exc, "status_code", None))
+            }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
             return
         except Exception as exc:
@@ -493,7 +505,11 @@ async def update_generated_ui(
             if hasattr(eg, "exceptions"):
                 for exc in getattr(eg, "exceptions"):
                     if isinstance(exc, HTTPException):
-                        payload = {"error": exc.detail}
+                        payload = {
+                            "error": _public_error_message(
+                                getattr(exc, "status_code", None)
+                            )
+                        }
                         yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode(
                             "utf-8"
                         )
@@ -511,7 +527,9 @@ async def update_generated_ui(
                 f"[update_generated_ui] HTTPException in event_stream: {exc.detail}",
                 exc_info=exc,
             )
-            payload = {"error": exc.detail}
+            payload = {
+                "error": _public_error_message(getattr(exc, "status_code", None))
+            }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
             return
         except Exception as exc:

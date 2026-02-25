@@ -24,10 +24,10 @@ SCRIPT_BLOCK_TEMPLATE = (
     "</script>"
 )
 SCRIPT_BLOCK_RE = re.compile(
-    r"<script[^>]*>.*?(?:include:service_script|include:components_script).*?</script>",
+    r"<script[^>]*>.*?(?:include:service_script|include:components_script).*?</script\s*>",
     re.IGNORECASE | re.DOTALL,
 )
-SCRIPT_TAG_RE = re.compile(r"<script[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+SCRIPT_TAG_RE = re.compile(r"<script[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTALL)
 RUNTIME_BRIDGE_MARKER = "generated-ui-runtime"
 RUNTIME_BRIDGE_PLACEHOLDER = "<!-- include:runtime_bridge -->"
 MCP_SERVICE_RUNTIME_MARKER = "generated-mcp-service-helper"
