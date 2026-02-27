@@ -11,6 +11,9 @@ from app.app_facade.generated_schemas import generation_response_format
 
 logger = logging.getLogger("uvicorn.error")
 
+MAX_DUMMY_ARRAY_ELEMENTS = 2
+MAX_DUMMY_STRING_LENGTH = 200
+
 DUMMY_DATA_SYSTEM_PROMPT = (
     "You are an expert software engineer generating realistic test data. "
     "Your task is to generate dummy data for the provided tools. "
@@ -288,17 +291,24 @@ class DummyDataGenerator:
         }
 
     def _convert_to_js_module(
-        self, data: Dict[str, Any], schema_hints: Optional[Dict[str, Any]] = None
+        self,
+        data: Dict[str, Any],
+        schema_hints: Optional[Dict[str, Any]] = None,
+        gateway_hints: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Converts the JSON data dictionary to a Javascript module string.
         """
         json_str = json.dumps(data, indent=2, ensure_ascii=False)
         hints_str = json.dumps(schema_hints or {}, indent=2, ensure_ascii=False)
-        return (
+        module = (
             f"export const dummyData = {json_str};\n"
             f"export const dummyDataSchemaHints = {hints_str};"
         )
+        if gateway_hints:
+            gateway_str = json.dumps(gateway_hints, indent=2, ensure_ascii=False)
+            module += f"\nexport const dummyDataGatewayHints = {gateway_str};"
+        return module
 
     def _infer_schema_from_sample(
         self,
@@ -499,6 +509,88 @@ class DummyDataGenerator:
             }
         return hints
 
+    def _build_gateway_hints(self, tool_specs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        hints: Dict[str, Any] = {}
+        for spec in tool_specs:
+            tool_name = str(spec.get("name") or "").strip()
+            if not tool_name:
+                continue
+            gateway = spec.get("gatewayHint")
+            if not isinstance(gateway, dict):
+                continue
+
+            mcp_server_id = str(gateway.get("mcp_server_id") or "").strip()
+            server_id = str(gateway.get("server_id") or "").strip()
+            gateway_tool_name = str(gateway.get("tool_name") or tool_name).strip()
+            via_tool = str(gateway.get("via_tool") or "call_tool").strip()
+            if not server_id:
+                continue
+            if not mcp_server_id:
+                mcp_server_id = (
+                    f"/api/{server_id}/tools/{gateway_tool_name or tool_name}"
+                )
+
+            hints[tool_name] = {
+                "mcp_server_id": mcp_server_id,
+                "server_id": server_id,
+                "tool_name": gateway_tool_name or tool_name,
+                "via_tool": via_tool or "call_tool",
+            }
+        return hints
+
+    def _apply_gateway_payload_aliases(
+        self,
+        payload: Dict[str, Any],
+        gateway_hints: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        if not isinstance(gateway_hints, dict) or not gateway_hints:
+            return payload
+
+        aliased = dict(payload)
+        for tool_name, hint in gateway_hints.items():
+            if tool_name not in payload:
+                continue
+            if not isinstance(hint, dict):
+                continue
+            mcp_server_id = str(hint.get("mcp_server_id") or "").strip()
+            if not mcp_server_id:
+                continue
+            if mcp_server_id in aliased:
+                continue
+            aliased[mcp_server_id] = payload[tool_name]
+        return aliased
+
+    def _compact_dummy_value_for_context(self, value: Any) -> Any:
+        if isinstance(value, str):
+            if len(value) <= MAX_DUMMY_STRING_LENGTH:
+                return value
+            return value[:MAX_DUMMY_STRING_LENGTH]
+
+        if isinstance(value, list):
+            # Truncate first, then recurse so we don't spend work on removed items.
+            truncated = value[:MAX_DUMMY_ARRAY_ELEMENTS]
+            return [self._compact_dummy_value_for_context(item) for item in truncated]
+
+        if isinstance(value, dict):
+            return {
+                key: self._compact_dummy_value_for_context(item)
+                for key, item in value.items()
+            }
+
+        return value
+
+    def _compact_dummy_payload_for_context(
+        self, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            key: self._compact_dummy_value_for_context(value)
+            for key, value in payload.items()
+        }
+
     def _parse_dummy_data_response(
         self, *, tool_name: str, content: str
     ) -> Optional[Dict[str, Any]]:
@@ -636,5 +728,8 @@ class DummyDataGenerator:
         payload = self._normalize_payload_for_tools(payload, enriched_tool_specs)
         payload = self._apply_observed_samples(payload, enriched_tool_specs)
         schema_hints = self._build_schema_hints(enriched_tool_specs)
+        gateway_hints = self._build_gateway_hints(enriched_tool_specs)
+        payload = self._apply_gateway_payload_aliases(payload, gateway_hints)
+        payload = self._compact_dummy_payload_for_context(payload)
 
-        return self._convert_to_js_module(payload, schema_hints)
+        return self._convert_to_js_module(payload, schema_hints, gateway_hints)

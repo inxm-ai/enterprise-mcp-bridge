@@ -519,6 +519,168 @@ Schema cache time-to-live in seconds.
 SCHEMA_CACHE_TTL=7200  # 2 hours
 ```
 
+### UI Generation
+
+#### GENERATED_UI_EXPLORE_TOOLS
+
+Enable automatic tool exploration before code generation. When enabled, the
+generator probes discovery/listing tools to find additional domain tools that
+are not exposed at the top level.
+
+- **Type:** Boolean (`true`/`false`)
+- **Default:** `false`
+- **Required:** No
+
+```bash
+GENERATED_UI_EXPLORE_TOOLS=true
+```
+
+#### GENERATED_UI_EXPLORE_TOOLS_MAX_CALLS
+
+Maximum number of MCP tool calls the exploration step may make. A higher
+budget allows deeper discovery across more servers.
+
+- **Type:** Integer
+- **Default:** `5`
+- **Required:** No
+
+```bash
+GENERATED_UI_EXPLORE_TOOLS_MAX_CALLS=10
+```
+
+#### GENERATED_UI_GATEWAY_LIST_SERVERS
+
+Tool name for the gateway role that lists available sub-servers.
+
+- **Type:** String
+- **Default:** `get_servers`
+- **Required:** No
+
+```bash
+GENERATED_UI_GATEWAY_LIST_SERVERS=list_servers
+```
+
+#### GENERATED_UI_GATEWAY_LIST_TOOLS
+
+Tool name for the gateway role that lists tools on a specific server.
+This is one of the two **required** roles for gateway detection.
+
+- **Type:** String
+- **Default:** `get_tools`
+- **Required:** No
+
+```bash
+GENERATED_UI_GATEWAY_LIST_TOOLS=list_all_tools
+```
+
+#### GENERATED_UI_GATEWAY_GET_TOOL
+
+Tool name for the gateway role that fetches a full tool definition
+(inputSchema, outputSchema). Optional — when absent, the generator uses
+whatever summary the list-tools call returns.
+
+- **Type:** String
+- **Default:** `get_tool`
+- **Required:** No
+
+```bash
+GENERATED_UI_GATEWAY_GET_TOOL=describe_tool
+```
+
+#### GENERATED_UI_GATEWAY_CALL_TOOL
+
+Tool name for the gateway role that invokes a tool on a sub-server.
+This is one of the two **required** roles for gateway detection.
+
+- **Type:** String
+- **Default:** `call_tool`
+- **Required:** No
+
+```bash
+GENERATED_UI_GATEWAY_CALL_TOOL=execute_tool
+```
+
+#### GENERATED_UI_GATEWAY_ROLE_ARGS
+
+Optional JSON mapping for gateway discovery call arguments. This lets you
+inject additional parameters (for example `prompt`) when calling gateway
+roles during tool exploration.
+
+- **Type:** JSON object
+- **Default:** `{}`
+- **Required:** No
+
+Supported roles:
+- `list_servers`
+- `list_tools`
+- `get_tool`
+
+Supported placeholders (exact-match values only):
+- `${prompt}`
+- `${server_id}`
+- `${tool_name}`
+
+Rules:
+- Default call args are built first, then template keys override them.
+- If a template value is exactly a placeholder and that value is missing in
+  context, the key is omitted from the final call args.
+- Unknown roles are ignored with a warning.
+
+```bash
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"list_tools":{"prompt":"${prompt}"}}'
+```
+
+```bash
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"get_tool":{"sid":"${server_id}","name":"${tool_name}"}}'
+```
+
+#### GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS
+
+Maximum length for `${prompt}` when substituted into
+`GENERATED_UI_GATEWAY_ROLE_ARGS`.
+
+- **Type:** Integer
+- **Default:** `800`
+- **Required:** No
+
+```bash
+GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS=1200
+```
+
+#### GENERATED_UI_GATEWAY_SERVER_ID_FIELDS
+
+Comma-separated field paths used to derive `server_id` from tool summaries
+returned by gateway `list_tools` calls when no explicit `server_id` is present.
+
+- **Type:** String (comma-separated paths)
+- **Default:** `server_id,server,meta.server_id,meta.server,mcp_server_id,meta.mcp_server_id,url,meta.url`
+- **Required:** No
+
+Paths may be nested via dot notation (for example `meta.mcp_server_id`).
+If a matched value looks like a URL/path, the server ID is extracted with
+`GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX`.
+
+```bash
+GENERATED_UI_GATEWAY_SERVER_ID_FIELDS=meta.mcp_server_id,url
+```
+
+#### GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX
+
+Regex used to extract `server_id` from URL-like values found via
+`GENERATED_UI_GATEWAY_SERVER_ID_FIELDS`.
+
+- **Type:** String (regular expression)
+- **Default:** `/api/(?P<server_id>[^/]+)/tools/[^/?#]+`
+- **Required:** No
+
+Use either:
+- named capture group `server_id`, or
+- first capture group.
+
+```bash
+GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX=/api/(?P<server_id>[^/]+)/tools/[^/?#]+
+```
+
 ## Configuration Files
 
 ### Loading from .env File

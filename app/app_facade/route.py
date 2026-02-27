@@ -21,6 +21,7 @@ from app.vars import (
 from app.session import session_id, try_get_session_id
 from app.session_manager import mcp_session_context, session_manager
 from app.oauth.user_info import get_data_access_manager
+from app.utils import token_fingerprint
 
 from .generated_service import (
     Actor,
@@ -174,6 +175,28 @@ def _extract_actor(access_token: Optional[str]) -> Actor:
     return Actor(user_id=str(user_id), groups=groups_list)
 
 
+def _resolve_mcp_access_token(
+    request: Request,
+    access_token: Optional[str],
+) -> Optional[str]:
+    oauth_env_var = (os.getenv("OAUTH_ENV") or "").strip()
+    if not oauth_env_var:
+        return access_token
+
+    cookie_token = request.cookies.get(oauth_env_var)
+    if not cookie_token:
+        return access_token
+
+    if access_token and access_token != cookie_token:
+        logger.info(
+            "[auth] Using OAUTH_ENV cookie token for MCP session (%s): dependency=%s cookie=%s",
+            oauth_env_var,
+            token_fingerprint(access_token),
+            token_fingerprint(cookie_token),
+        )
+    return cookie_token
+
+
 def _format_ui_response(record: Dict[str, Any]) -> Dict[str, Any]:
     metadata = record.get("metadata", {})
     current = record.get("current", {})
@@ -250,8 +273,8 @@ def _resolve_ui_name(
 @router.post("/_generated/{target}")
 async def create_generated_ui(
     target: str,
-    body: UiCreateRequest,
     request: Request,
+    body: UiCreateRequest,
     access_token: Optional[str] = Header(None, alias=TOKEN_NAME),
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
@@ -268,6 +291,7 @@ async def create_generated_ui(
         raise HTTPException(status_code=400, detail="prompt must not be empty")
 
     actor = _extract_actor(access_token)
+    mcp_access_token = _resolve_mcp_access_token(request, access_token)
     logger.info(
         f"[create_generated_ui] Actor: user_id={actor.user_id}, groups={len(actor.groups)}"
     )
@@ -285,7 +309,7 @@ async def create_generated_ui(
             x_inxm_mcp_session_header,
             x_inxm_mcp_session_cookie,
         ),
-        access_token,
+        mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
@@ -300,7 +324,7 @@ async def create_generated_ui(
                 async with mcp_session_context(
                     sessions,
                     session_key,
-                    access_token,
+                    mcp_access_token,
                     requested_group,
                     incoming_headers,
                 ) as session_obj:
@@ -309,7 +333,7 @@ async def create_generated_ui(
                     )
                     # Stream from the service; it's responsible for producing SSE-formatted bytes
                     chunk_count = 0
-                    async for chunk in service.stream_generate_ui(
+                    async for chunk in service.generation_pipeline.stream_generate_ui(
                         session=session_obj,
                         scope=scope,
                         actor=actor,
@@ -317,7 +341,7 @@ async def create_generated_ui(
                         name=name,
                         prompt=prompt,
                         tools=list(body.tools or []),
-                        access_token=access_token,
+                        access_token=mcp_access_token,
                     ):  # pragma: no cover - streaming path
                         chunk_count += 1
                         logger.debug(
@@ -453,6 +477,7 @@ async def update_generated_ui(
         raise HTTPException(status_code=400, detail="prompt must not be empty")
 
     actor = _extract_actor(access_token)
+    mcp_access_token = _resolve_mcp_access_token(request, access_token)
     service = _get_generated_service()
     incoming_headers = dict(request.headers)
     session_key = session_id(
@@ -460,7 +485,7 @@ async def update_generated_ui(
             x_inxm_mcp_session_header,
             x_inxm_mcp_session_cookie,
         ),
-        access_token,
+        mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
@@ -475,7 +500,7 @@ async def update_generated_ui(
                 async with mcp_session_context(
                     sessions,
                     session_key,
-                    access_token,
+                    mcp_access_token,
                     requested_group,
                     incoming_headers,
                 ) as session_obj:
@@ -483,7 +508,7 @@ async def update_generated_ui(
                         "[update_generated_ui] MCP session established, calling stream_update_ui"
                     )
                     chunk_count = 0
-                    async for chunk in service.stream_update_ui(
+                    async for chunk in service.generation_pipeline.stream_update_ui(
                         session=session_obj,
                         scope=scope,
                         actor=actor,
@@ -491,7 +516,7 @@ async def update_generated_ui(
                         name=name,
                         prompt=prompt,
                         tools=list(body.tools or []),
-                        access_token=access_token,
+                        access_token=mcp_access_token,
                     ):  # pragma: no cover - streaming path
                         chunk_count += 1
                         logger.debug(
@@ -635,6 +660,7 @@ async def chat_generated_ui(
     name = validate_identifier(name, "ui name")
     chat_session_id = validate_identifier(chat_session_id, "session id")
     actor = _extract_actor(access_token)
+    mcp_access_token = _resolve_mcp_access_token(request, access_token)
     service = _get_generated_service()
     incoming_headers = dict(request.headers)
     session_key = session_id(
@@ -642,7 +668,7 @@ async def chat_generated_ui(
             x_inxm_mcp_session_header,
             x_inxm_mcp_session_cookie,
         ),
-        access_token,
+        mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
 
@@ -651,11 +677,11 @@ async def chat_generated_ui(
             async with mcp_session_context(
                 sessions,
                 session_key,
-                access_token,
+                mcp_access_token,
                 requested_group,
                 incoming_headers,
             ) as session_obj:
-                async for chunk in service.stream_chat_update(
+                async for chunk in service.conversational_service.stream_chat_update(
                     session=session_obj,
                     scope=scope,
                     actor=actor,
@@ -666,7 +692,7 @@ async def chat_generated_ui(
                     tools=list(body.tools) if body.tools is not None else None,
                     tool_choice=body.tool_choice,
                     draft_action=body.draft_action,
-                    access_token=access_token,
+                    access_token=mcp_access_token,
                 ):
                     yield chunk
         except HTTPException as exc:
@@ -710,7 +736,7 @@ async def queue_generated_ui_tests_action(
     actor = _extract_actor(access_token)
     service = _get_generated_service()
 
-    result = await service.queue_test_action(
+    result = await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id=ui_id,
@@ -743,7 +769,7 @@ async def stream_generated_ui_tests(
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
-            async for chunk in service.stream_test_events(
+            async for chunk in service.test_runner.stream_test_events(
                 scope=scope,
                 actor=actor,
                 ui_id=ui_id,

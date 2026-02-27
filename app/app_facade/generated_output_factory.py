@@ -1,5 +1,6 @@
 import copy
 import html as _html_escape
+import json
 import logging
 import re
 from pathlib import Path
@@ -8,7 +9,17 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 
 from app.app_facade.generated_types import Scope
-from app.vars import MCP_BASE_PATH
+from app.vars import (
+    GENERATED_UI_GATEWAY_GET_TOOL,
+    GENERATED_UI_GATEWAY_LIST_SERVERS,
+    GENERATED_UI_GATEWAY_CALL_TOOL,
+    GENERATED_UI_GATEWAY_LIST_TOOLS,
+    GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS,
+    GENERATED_UI_GATEWAY_ROLE_ARGS,
+    GENERATED_UI_GATEWAY_SERVER_ID_FIELDS,
+    GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX,
+    MCP_BASE_PATH,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -58,7 +69,25 @@ RUNTIME_BRIDGE_SCRIPT = _load_script_template(
 )
 _MCP_SERVICE_CLASS_SOURCE = _load_script_template(
     "generated_mcp_service_class.js",
-    {"{{MCP_BASE_PATH}}": MCP_BASE_PATH},
+    {
+        "{{MCP_BASE_PATH}}": MCP_BASE_PATH,
+        "{{GENERATED_UI_GATEWAY_LIST_SERVERS}}": GENERATED_UI_GATEWAY_LIST_SERVERS,
+        "{{GENERATED_UI_GATEWAY_CALL_TOOL}}": GENERATED_UI_GATEWAY_CALL_TOOL,
+        "{{GENERATED_UI_GATEWAY_LIST_TOOLS}}": GENERATED_UI_GATEWAY_LIST_TOOLS,
+        "{{GENERATED_UI_GATEWAY_GET_TOOL}}": GENERATED_UI_GATEWAY_GET_TOOL,
+        "{{GENERATED_UI_GATEWAY_ROLE_ARGS_JSON}}": json.dumps(
+            GENERATED_UI_GATEWAY_ROLE_ARGS, ensure_ascii=False
+        ),
+        "{{GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS}}": str(
+            GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS
+        ),
+        "{{GENERATED_UI_GATEWAY_SERVER_ID_FIELDS_JSON}}": json.dumps(
+            GENERATED_UI_GATEWAY_SERVER_ID_FIELDS, ensure_ascii=False
+        ),
+        "{{GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX_JSON}}": json.dumps(
+            GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX, ensure_ascii=False
+        ),
+    },
 )
 MCP_SERVICE_HELPER_SCRIPT = (
     f"/* {MCP_SERVICE_RUNTIME_MARKER} */\n"

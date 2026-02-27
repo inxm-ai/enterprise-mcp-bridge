@@ -102,6 +102,49 @@ def test_convert_to_js_module(dummy_data_generator):
     assert '"missing_output_schema"' in js
 
 
+def test_convert_to_js_module_includes_gateway_hints_export(dummy_data_generator):
+    js = dummy_data_generator._convert_to_js_module(
+        {"search": {"items": []}},
+        {},
+        {
+            "search": {
+                "mcp_server_id": "/api/mcp-atlassian-server/tools/search",
+                "server_id": "mcp-atlassian-server",
+                "tool_name": "search",
+                "via_tool": "call_tool",
+            }
+        },
+    )
+
+    assert "export const dummyDataGatewayHints =" in js
+    assert '"mcp_server_id": "/api/mcp-atlassian-server/tools/search"' in js
+    assert '"tool_name": "search"' in js
+
+
+def test_apply_gateway_payload_aliases_duplicates_full_tool_path_key(
+    dummy_data_generator,
+):
+    payload = {"search": {"items": [1, 2]}}
+    hints = {
+        "search": {
+            "mcp_server_id": "/api/mcp-atlassian-server/tools/search",
+            "server_id": "mcp-atlassian-server",
+            "tool_name": "search",
+            "via_tool": "call_tool",
+        }
+    }
+    aliased = dummy_data_generator._apply_gateway_payload_aliases(payload, hints)
+    assert aliased["search"] == {"items": [1, 2]}
+    assert aliased["/api/mcp-atlassian-server/tools/search"] == {"items": [1, 2]}
+
+
+def test_convert_to_js_module_skips_gateway_hints_export_when_empty(
+    dummy_data_generator,
+):
+    js = dummy_data_generator._convert_to_js_module({"tool1": {"foo": "bar"}}, {})
+    assert "dummyDataGatewayHints" not in js
+
+
 def test_schema_derivation_response_schema_is_strict_subset():
     schema_node = SCHEMA_DERIVATION_RESPONSE_SCHEMA["properties"]["schema"]
     assert schema_node["type"] == "object"

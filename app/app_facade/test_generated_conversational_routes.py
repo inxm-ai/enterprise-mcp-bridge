@@ -12,6 +12,13 @@ from app.app_facade.generated_service import Actor
 class StubConversationalService:
     def __init__(self):
         self.last_chat_kwargs = None
+        self.test_runner = self  # route.py accesses service.test_runner.*
+        self.conversational_service = (
+            self  # route.py accesses service.conversational_service.*
+        )
+        self.generation_pipeline = (
+            self  # route.py accesses service.generation_pipeline.*
+        )
 
     def create_draft_session(self, **_kwargs):
         return {

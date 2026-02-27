@@ -93,6 +93,124 @@ User Prompt → LLM (GPT-4/etc) → Generated HTML/JS → pfusch Components → 
 6. **Testing** - Generated tests validate functionality
 7. **Deployment** - App stored and made available
 
+### Gateway Tool Exploration
+
+Some MCP servers act as **gateways** — they don't expose domain tools directly
+but provide meta-tools (e.g. `get_servers`, `get_tools`, `call_tool`) through
+which the actual tools are discovered and invoked at runtime.
+
+When tool exploration is enabled, the generator automatically detects this
+gateway pattern and performs a multi-step discovery before code generation:
+
+```
+get_servers() → server IDs
+   ↓  for each server
+get_tools(server_id) → tool summaries
+   ↓  optionally
+get_tool(server_id, tool_name) → full schema
+```
+
+Discovered tools are then available for dummy-data generation and are included
+in the code-generator prompt together with **invocation guidance** that tells
+the LLM to call them through the gateway's `call_tool` rather than directly.
+
+#### Enabling exploration
+
+```bash
+GENERATED_UI_EXPLORE_TOOLS=true          # default: false
+GENERATED_UI_EXPLORE_TOOLS_MAX_CALLS=5   # budget for discovery API calls
+```
+
+#### Custom gateway tool names
+
+By default the bridge looks for tools named `get_servers`, `get_tools`,
+`get_tool`, and `call_tool`. If your MCP gateway uses different names, map
+them with environment variables:
+
+| Env var | Role | Default | Required for detection? |
+|---------|------|---------|------------------------|
+| `GENERATED_UI_GATEWAY_LIST_SERVERS` | Enumerate available servers | `get_servers` | No (optional) |
+| `GENERATED_UI_GATEWAY_LIST_TOOLS` | List tools on a server | `get_tools` | **Yes** |
+| `GENERATED_UI_GATEWAY_GET_TOOL` | Fetch full tool definition | `get_tool` | No (optional) |
+| `GENERATED_UI_GATEWAY_CALL_TOOL` | Invoke a tool on a server | `call_tool` | **Yes** |
+
+The minimum viable gateway requires **list_tools** + **call_tool**. The other
+two roles are optional — if present they enhance discovery.
+
+Example for a gateway that uses `list_servers`, `list_all_tools`,
+`describe_tool`, and `execute_tool`:
+
+```bash
+GENERATED_UI_EXPLORE_TOOLS=true
+GENERATED_UI_GATEWAY_LIST_SERVERS=list_servers
+GENERATED_UI_GATEWAY_LIST_TOOLS=list_all_tools
+GENERATED_UI_GATEWAY_GET_TOOL=describe_tool
+GENERATED_UI_GATEWAY_CALL_TOOL=execute_tool
+```
+
+#### Custom gateway discovery arguments
+
+Some gateways require extra arguments during discovery (for example
+`get_tools(prompt=...)`). Configure these with:
+
+- `GENERATED_UI_GATEWAY_ROLE_ARGS` (JSON object)
+- `GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS` (default `800`)
+
+Supported roles in `GENERATED_UI_GATEWAY_ROLE_ARGS`:
+- `list_servers`
+- `list_tools`
+- `get_tool`
+
+Supported placeholders (exact value only):
+- `${prompt}`
+- `${server_id}`
+- `${tool_name}`
+
+Server-id derivation for tool summaries (when no `server_id` field is present):
+- `GENERATED_UI_GATEWAY_SERVER_ID_FIELDS` (comma-separated field paths)
+- `GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX` (regex to extract server id from URL-like values)
+
+Example: pass prompt to `list_tools`:
+
+```bash
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"list_tools":{"prompt":"${prompt}"}}'
+```
+
+Example: pass both server and prompt (using custom key names):
+
+```bash
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"list_tools":{"sid":"${server_id}","query":"${prompt}"}}'
+```
+
+Example: custom `get_tool` arguments:
+
+```bash
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"get_tool":{"sid":"${server_id}","name":"${tool_name}"}}'
+```
+
+Example: use only `select_tools(user_query: str)` for discovery:
+
+```bash
+GENERATED_UI_EXPLORE_TOOLS=true
+GENERATED_UI_GATEWAY_LIST_TOOLS=select_tools
+GENERATED_UI_GATEWAY_CALL_TOOL=call_tool
+GENERATED_UI_GATEWAY_LIST_SERVERS=__unused__
+GENERATED_UI_GATEWAY_GET_TOOL=__unused__
+GENERATED_UI_GATEWAY_ROLE_ARGS='{"list_tools":{"user_query":"${prompt}"}}'
+GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS=800
+GENERATED_UI_GATEWAY_SERVER_ID_FIELDS=meta.mcp_server_id,url
+GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX=/api/(?P<server_id>[^/]+)/tools/[^/?#]+
+```
+
+Notes:
+- Gateway detection still requires `list_tools` + `call_tool`.
+- Set `LIST_SERVERS` / `GET_TOOL` to non-existent names when your MCP does not expose those tools.
+
+When the gateway pattern is not detected (i.e. neither the default nor the
+custom tool names are found), the generator falls back to an LLM-planned
+generic exploration that calls any tool whose name looks like a discovery
+endpoint.
+
 ### Conversational Container Editing (Bridge-Hosted)
 
 The bridge can now host a conversational editing container for generated apps (feature-flagged).

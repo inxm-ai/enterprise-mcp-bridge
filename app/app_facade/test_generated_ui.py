@@ -9,7 +9,16 @@ from app.server import app
 from app.app_facade.generated_service import Actor
 
 
-class StubGeneratedService:
+class _SubServiceDelegator:
+    """Mixin that routes sub-service attribute access back to self."""
+
+    def __getattr__(self, name):
+        if name in ("generation_pipeline", "conversational_service", "test_runner"):
+            return self
+        raise AttributeError(name)
+
+
+class StubGeneratedService(_SubServiceDelegator):
     def __init__(self):
         self.last_create: Optional[Dict[str, Any]] = None
         self.last_update: Optional[Dict[str, Any]] = None
@@ -295,7 +304,7 @@ async def test_update_generated_ui(generated_setup):
 
 @pytest.mark.asyncio
 async def test_create_generated_ui_streaming_already_exists(monkeypatch):
-    class StreamStub:
+    class StreamStub(_SubServiceDelegator):
         storage = type(
             "StorageStub",
             (),
@@ -320,7 +329,7 @@ async def test_create_generated_ui_streaming_already_exists(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_generated_ui_streaming_non_owner_user(monkeypatch):
-    class StreamStub:
+    class StreamStub(_SubServiceDelegator):
         storage = type(
             "StorageStub",
             (),
@@ -346,7 +355,7 @@ async def test_create_generated_ui_streaming_non_owner_user(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_generated_ui_streaming_group_non_member(monkeypatch):
-    class StreamStub:
+    class StreamStub(_SubServiceDelegator):
         storage = type(
             "StorageStub",
             (),
@@ -372,7 +381,7 @@ async def test_create_generated_ui_streaming_group_non_member(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_generated_ui_streaming_success(monkeypatch):
-    class StreamStub:
+    class StreamStub(_SubServiceDelegator):
         storage = type(
             "StorageStub",
             (),
@@ -412,3 +421,53 @@ async def test_create_generated_ui_streaming_success(monkeypatch):
     assert ":\\n\\n" in response.text
     assert '"chunk": "part1"' in response.text
     assert '"status": "created"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_generated_ui_prefers_oauth_env_cookie_token(monkeypatch):
+    seen_context_token = {"value": None}
+
+    class StreamStub(_SubServiceDelegator):
+        storage = type(
+            "StorageStub",
+            (),
+            {"exists": lambda _self, _scope, _ui_id, _name: False},
+        )()
+
+        def __init__(self):
+            self.last_access_token = None
+
+        async def stream_generate_ui(self, **kwargs):
+            self.last_access_token = kwargs.get("access_token")
+            yield b'data: {"ok": true}\\n\\n'
+
+    stream_stub = StreamStub()
+    _setup_streaming_client(monkeypatch, stream_stub)
+    monkeypatch.setenv("OAUTH_ENV", "_oauth2_proxy")
+
+    @asynccontextmanager
+    async def capturing_session_context(
+        _sessions,
+        _session_key,
+        access_token,
+        _group,
+        _incoming_headers,
+    ):
+        seen_context_token["value"] = access_token
+        yield object()
+
+    monkeypatch.setattr(
+        "app.app_facade.route.mcp_session_context", capturing_session_context
+    )
+
+    async with _client() as client:
+        client.cookies.set("_oauth2_proxy", "cookie-token")
+        response = await client.post(
+            "/app/_generated/user=user123",
+            json={"id": "dash1", "name": "overview", "prompt": "Build a ui"},
+            headers={"X-Auth-Request-Access-Token": "header-token"},
+        )
+
+    assert response.status_code == 200
+    assert seen_context_token["value"] == "cookie-token"
+    assert stream_stub.last_access_token == "cookie-token"

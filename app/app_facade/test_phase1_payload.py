@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.app_facade.generated_phase1 import run_phase1_attempt
+from app.app_facade.generated_phase1 import _detect_quality_risks, run_phase1_attempt
 from app.tgi.models import Message, MessageRole
 
 
@@ -85,6 +85,29 @@ async def test_phase1_recovers_components_script_from_template_parts():
     )
     assert len(run_tests_calls) == 1
     assert run_tests_calls[0]["components_script"] == "console.log('from-template');"
+
+
+def test_detect_quality_risks_flags_gateway_direct_tool_name_calls():
+    risks = _detect_quality_risks(
+        test_script="import { it } from 'node:test'; it('ok', () => {});",
+        components_script="const result = mcp.call('search_pull_requests', { query: 'me' });",
+        service_script="",
+        gateway_tool_names={"search_pull_requests"},
+    )
+    assert "runtime_script:gateway_direct_tool_name_call" in risks
+
+
+def test_detect_quality_risks_allows_gateway_full_route_calls():
+    risks = _detect_quality_risks(
+        test_script="import { it } from 'node:test'; it('ok', () => {});",
+        components_script=(
+            "const result = mcp.call('/api/mcp-github-server/tools/search_pull_requests', "
+            "{ query: 'me' });"
+        ),
+        service_script="",
+        gateway_tool_names={"search_pull_requests"},
+    )
+    assert "runtime_script:gateway_direct_tool_name_call" not in risks
 
 
 @pytest.mark.asyncio

@@ -182,6 +182,63 @@ MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
     os.getenv("MCP_MAP_HEADER_TO_INPUT", "")
 )
 
+
+def _load_generated_ui_gateway_role_args() -> dict:
+    """Load role->args template mapping for gateway discovery calls."""
+    raw = os.getenv("GENERATED_UI_GATEWAY_ROLE_ARGS", "")
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        print(f"Error parsing GENERATED_UI_GATEWAY_ROLE_ARGS: {e}")
+        return {}
+
+    if not isinstance(parsed, dict):
+        print("Error parsing GENERATED_UI_GATEWAY_ROLE_ARGS: expected a JSON object")
+        return {}
+
+    allowed_roles = {"list_servers", "list_tools", "get_tool", "call_tool"}
+    role_args: dict = {}
+    for role, args_template in parsed.items():
+        role_name = str(role)
+        if role_name not in allowed_roles:
+            print(
+                "Ignoring unknown role in GENERATED_UI_GATEWAY_ROLE_ARGS: "
+                f"{role_name}"
+            )
+            continue
+        if not isinstance(args_template, dict):
+            print(
+                "Ignoring non-object args template in GENERATED_UI_GATEWAY_ROLE_ARGS "
+                f"for role {role_name}"
+            )
+            continue
+        role_args[role_name] = args_template
+
+    return role_args
+
+
+def _parse_generated_ui_gateway_server_id_fields(raw: str) -> list[str]:
+    """Parse comma-separated field paths used to derive gateway server IDs."""
+    default_fields = [
+        "server_id",
+        "server",
+        "meta.server_id",
+        "meta.server",
+        "mcp_server_id",
+        "meta.mcp_server_id",
+        "url",
+        "meta.url",
+    ]
+    if not raw:
+        return default_fields
+
+    parsed: list[str] = [item.strip() for item in raw.split(",") if item.strip()]
+    return parsed or default_fields
+
+
 GENERATED_UI_PROMPT_DUMP = os.getenv("GENERATED_UI_PROMPT_DUMP", "")
 
 APP_CONVERSATIONAL_UI_ENABLED = (
@@ -200,6 +257,35 @@ GENERATED_UI_READ_ONLY_STREAK_LIMIT = int(
 )
 GENERATED_UI_INCLUDE_OUTPUT_SCHEMA = (
     os.getenv("GENERATED_UI_INCLUDE_OUTPUT_SCHEMA", "false").lower() == "true"
+)
+GENERATED_UI_EXPLORE_TOOLS = (
+    os.getenv("GENERATED_UI_EXPLORE_TOOLS", "false").lower() == "true"
+)
+GENERATED_UI_EXPLORE_TOOLS_MAX_CALLS = int(
+    os.getenv("GENERATED_UI_EXPLORE_TOOLS_MAX_CALLS", "5")
+)
+# Gateway tool-name mapping – override when the MCP gateway uses different
+# names for the four canonical gateway roles.
+GENERATED_UI_GATEWAY_LIST_SERVERS = os.getenv(
+    "GENERATED_UI_GATEWAY_LIST_SERVERS", "get_servers"
+)
+GENERATED_UI_GATEWAY_LIST_TOOLS = os.getenv(
+    "GENERATED_UI_GATEWAY_LIST_TOOLS", "get_tools"
+)
+GENERATED_UI_GATEWAY_GET_TOOL = os.getenv("GENERATED_UI_GATEWAY_GET_TOOL", "get_tool")
+GENERATED_UI_GATEWAY_CALL_TOOL = os.getenv(
+    "GENERATED_UI_GATEWAY_CALL_TOOL", "call_tool"
+)
+GENERATED_UI_GATEWAY_ROLE_ARGS = _load_generated_ui_gateway_role_args()
+GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS = int(
+    os.getenv("GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS", "800")
+)
+GENERATED_UI_GATEWAY_SERVER_ID_FIELDS = _parse_generated_ui_gateway_server_id_fields(
+    os.getenv("GENERATED_UI_GATEWAY_SERVER_ID_FIELDS", "")
+)
+GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX = os.getenv(
+    "GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX",
+    r"/api/(?P<server_id>[^/]+)/tools/[^/?#]+",
 )
 GENERATED_UI_MAX_HISTORY_ENTRIES = int(
     os.getenv("GENERATED_UI_MAX_HISTORY_ENTRIES", "6")

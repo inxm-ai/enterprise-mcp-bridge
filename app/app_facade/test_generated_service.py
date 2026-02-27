@@ -17,6 +17,15 @@ from app.app_facade.generated_service import (
     validate_identifier,
     _PATCH_UPDATE_SCHEMA,
 )
+from app.app_facade.prompt_helpers import (
+    extract_json_block,
+    parse_json,
+    extract_content,
+    cap_message_payload_for_prompt,
+    history_entry,
+    history_for_prompt,
+    context_state_for_prompt,
+)
 from app.app_facade.generated_output_factory import RUNTIME_BRIDGE_SCRIPT
 from app.tgi.models import Message, MessageRole
 
@@ -71,7 +80,7 @@ async def test_generate_dummy_data_samples_unstructured_tool_payload():
         }
     ]
 
-    await service._generate_dummy_data(
+    await service.tool_sampler._generate_dummy_data(
         session=session,
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
@@ -98,7 +107,7 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "app.app_facade.generated_service.EFFECT_TOOLS",
+        "app.app_facade.tool_sampling.EFFECT_TOOLS",
         ["create_ticket"],
     )
     dry_run_calls = []
@@ -112,7 +121,7 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "app.app_facade.generated_service.get_tool_dry_run_response",
+        "app.app_facade.tool_sampling.get_tool_dry_run_response",
         fake_get_tool_dry_run_response,
     )
 
@@ -134,7 +143,7 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
         }
     ]
 
-    await service._generate_dummy_data(
+    await service.tool_sampler._generate_dummy_data(
         session=Session(),
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
@@ -147,6 +156,95 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
     assert dry_run_calls == [True]
     kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
     assert kwargs["tool_specs"][0]["sampleStructuredContent"] == {"id": "dry-1"}
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_propagates_gateway_hints_to_tool_specs():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\nexport const dummyDataSchemaHints = {};"
+    )
+
+    class Session:
+        async def call_tool(self, name, args, access_token):
+            assert name == "call_tool"
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={"items": []},
+                content=[],
+            )
+
+    allowed_tools = [
+        {
+            "function": {
+                "name": "search",
+                "description": "Search items",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+            "_gateway": {
+                "server_id": "mcp-atlassian-server",
+                "via_tool": "call_tool",
+            },
+        }
+    ]
+
+    await service.tool_sampler._generate_dummy_data(
+        session=Session(),
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Work dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    tool_spec = kwargs["tool_specs"][0]
+    assert tool_spec["gatewayHint"] == {
+        "mcp_server_id": "/api/mcp-atlassian-server/tools/search",
+        "server_id": "mcp-atlassian-server",
+        "tool_name": "search",
+        "via_tool": "call_tool",
+    }
+
+
+def test_rewrite_gateway_calls_rewrites_literal_tool_names():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    gateway_routes = {
+        "search_pull_requests": "/api/mcp-github-server/tools/search_pull_requests",
+        "get_me": "/api/mcp-github-server/tools/get_me",
+    }
+    service_script = (
+        "const first = svc.call('search_pull_requests', { query: 'me' });\n"
+        "const second = mcp.call('get_me', {});\n"
+        "const third = svc.call(toolName, {});\n"
+    )
+    rewritten, replacements = service._rewrite_gateway_tool_calls_in_script(
+        service_script,
+        gateway_routes=gateway_routes,
+    )
+    assert replacements == 2
+    assert "/api/mcp-github-server/tools/search_pull_requests" in rewritten
+    assert "/api/mcp-github-server/tools/get_me" in rewritten
+    assert "svc.call(toolName, {})" in rewritten
+
+
+def test_rewrite_gateway_calls_keeps_non_gateway_calls_unchanged():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    script = "const result = svc.call('list_items', {});"
+    rewritten, replacements = service._rewrite_gateway_tool_calls_in_script(
+        script,
+        gateway_routes={"search": "/api/mcp-atlassian-server/tools/search"},
+    )
+    assert replacements == 0
+    assert rewritten == script
 
 
 @pytest.mark.asyncio
@@ -168,7 +266,7 @@ async def test_attempt_patch_update_uses_structured_response_format():
         non_stream_completion=fake_non_stream_completion
     )
 
-    result = await service._attempt_patch_update(
+    result = await service.conversational_service._attempt_patch_update(
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
         name="dashboard",
@@ -209,7 +307,7 @@ async def test_attempt_patch_update_records_failure_reason_for_missing_patch_obj
         non_stream_completion=fake_non_stream_completion
     )
 
-    result = await service._attempt_patch_update(
+    result = await service.conversational_service._attempt_patch_update(
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
         name="dashboard",
@@ -266,7 +364,7 @@ async def test_attempt_patch_update_runs_fix_loop_when_patch_tests_fail(monkeypa
 
     monkeypatch.setattr(service, "_iterative_test_fix", fake_fix_loop)
 
-    result = await service._attempt_patch_update(
+    result = await service.conversational_service._attempt_patch_update(
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
         name="dashboard",
@@ -355,7 +453,7 @@ async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
         }
     ]
 
-    await service._generate_dummy_data(
+    await service.tool_sampler._generate_dummy_data(
         session=session,
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
@@ -428,7 +526,7 @@ async def test_generate_dummy_data_ignores_error_payload_when_unrecoverable():
         }
     ]
 
-    await service._generate_dummy_data(
+    await service.tool_sampler._generate_dummy_data(
         session=session,
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
@@ -512,7 +610,7 @@ async def test_augment_tools_with_derived_output_schemas_from_dummy_data_module(
     )
 
     enriched_tools, derived_count = (
-        await service._augment_tools_with_derived_output_schemas(
+        await service.tool_sampler._augment_tools_with_derived_output_schemas(
             allowed_tools=allowed_tools,
             dummy_data_module=dummy_data,
         )
@@ -560,7 +658,7 @@ async def test_augment_tools_with_derived_output_schemas_skips_error_samples():
     )
 
     enriched_tools, derived_count = (
-        await service._augment_tools_with_derived_output_schemas(
+        await service.tool_sampler._augment_tools_with_derived_output_schemas(
             allowed_tools=allowed_tools,
             dummy_data_module=dummy_data,
         )
@@ -585,7 +683,7 @@ def test_build_sample_args_for_time_fields_fallback_is_schema_driven():
         "required": ["start_date", "end_date", "timezone_name", "datetime_str"],
     }
 
-    args = service._build_sample_args_for_tool(schema)
+    args = service.tool_sampler._build_sample_args_for_tool(schema)
 
     assert set(args.keys()) == {
         "start_date",
@@ -617,7 +715,7 @@ async def test_derive_sample_args_prefers_existing_non_stream_client():
             )
 
     service.tgi_service.llm_client = FakeLLM()
-    result = await service._derive_sample_args_with_llm(
+    result = await service.tool_sampler._derive_sample_args_with_llm(
         tool_name="get_current_datetime",
         tool_description="Get datetime by timezone",
         input_schema={
@@ -677,7 +775,7 @@ async def test_generate_dummy_data_skips_meta_tools_during_sampling():
         },
     ]
 
-    await service._generate_dummy_data(
+    await service.tool_sampler._generate_dummy_data(
         session=session,
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
@@ -748,9 +846,9 @@ def test_extract_json_block_and_parse(text, expected):
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
     # Access private method _extract_json_block
-    candidate = service._extract_json_block(text)
+    candidate = extract_json_block(text)
     assert candidate == expected
-    parsed = service._parse_json(text)
+    parsed = parse_json(text)
     assert isinstance(parsed, dict)
 
 
@@ -758,7 +856,7 @@ def test_parse_json_with_invalid_json_and_no_block():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     with pytest.raises(Exception):
-        service._parse_json("not json or {broken")
+        parse_json("not json or {broken")
 
 
 def test_normalise_payload_html_variants(tmp_path):
@@ -1314,6 +1412,330 @@ def test_run_tests_runtime_bridge_action_collect_and_clear():
     assert success, output
 
 
+def test_run_tests_service_call_tool_alias_invokes_call():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('service.callTool alias', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('routes through service.call', async () => {\n"
+        "    globalThis.fetch.addRoute('/tools/list_items', {\n"
+        "      structuredContent: { result: [{ id: 'x' }] },\n"
+        "    });\n"
+        "    const result = await svc.callTool('list_items', {}, { resultKey: 'result' });\n"
+        "    assert.equal(Array.isArray(result), true);\n"
+        "    assert.equal(result.length, 1);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    assert.equal(calls[0].url.includes('/tools/list_items'), true);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_routes_via_gateway_when_mcp_server_id_is_provided():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway route from metadata', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  const gatewayTool = svc.gatewayCallTool || 'call_tool';\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('calls gateway tool with server/tool args', async () => {\n"
+        "    globalThis.fetch.addRoute(`/tools/${gatewayTool}`, {\n"
+        "      structuredContent: { result: { ok: true } },\n"
+        "    });\n"
+        "    const result = await svc.call('search', {\n"
+        "      query: 'my work',\n"
+        "      mcp_server_id: '/api/mcp-atlassian-server/tools/search',\n"
+        "    }, { resultKey: 'result' });\n"
+        "    assert.equal(result.ok, true);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    assert.equal(calls[0].url.includes(`/tools/${gatewayTool}`), true);\n"
+        "    const requestBody = JSON.parse(calls[0].init.body);\n"
+        "    assert.equal(requestBody.server_id, 'mcp-atlassian-server');\n"
+        "    assert.equal(requestBody.tool_name, 'search');\n"
+        "    assert.equal(requestBody.input_data.query, 'my work');\n"
+        "    assert.equal(Object.prototype.hasOwnProperty.call(requestBody.input_data, 'mcp_server_id'), false);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_routes_via_gateway_when_name_is_full_server_url():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway route from full tool url name', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  const gatewayTool = svc.gatewayCallTool || 'call_tool';\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('parses /api/<server>/tools/<name> route', async () => {\n"
+        "    globalThis.fetch.addRoute(`/tools/${gatewayTool}`, {\n"
+        "      structuredContent: { result: { routed: true } },\n"
+        "    });\n"
+        "    const result = await svc.call('/api/mcp-linear-server/tools/search', {\n"
+        "      query: 'in progress',\n"
+        "    }, { resultKey: 'result' });\n"
+        "    assert.equal(result.routed, true);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    const requestBody = JSON.parse(calls[0].init.body);\n"
+        "    assert.equal(requestBody.server_id, 'mcp-linear-server');\n"
+        "    assert.equal(requestBody.tool_name, 'search');\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_retries_unknown_tool_with_gateway_discovery():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway auto-discovery retry', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  const gatewayTool = svc.gatewayCallTool || 'call_tool';\n"
+        "  const listTool = svc.gatewayListTools || 'get_tools';\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('discovers route and retries through gateway call_tool', async () => {\n"
+        "    globalThis.fetch.addRoute(`/tools/${gatewayTool}`, {\n"
+        "      structuredContent: { result: { items: [{ id: '1' }] } },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute(`/tools/${listTool}`, {\n"
+        "      structuredContent: {\n"
+        "        tools: [\n"
+        "          {\n"
+        "            name: 'search',\n"
+        "            meta: { mcp_server_id: '/api/mcp-atlassian-server/tools/search' },\n"
+        "          },\n"
+        "        ],\n"
+        "      },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/search', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Unknown tool: search' }],\n"
+        "    });\n"
+        "    const result = await svc.call('search', { query: 'my open work' }, { resultKey: 'result' });\n"
+        "    assert.equal(Array.isArray(result.items), true);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls[0].url.includes('/tools/search'), true);\n"
+        "    assert.equal(calls.some(call => call.url.includes(`/tools/${listTool}`)), true);\n"
+        "    const gatewayCall = calls.find(call => call.url.includes(`/tools/${gatewayTool}`));\n"
+        "    assert.equal(Boolean(gatewayCall), true);\n"
+        "    const gatewayBody = JSON.parse(gatewayCall.init.body);\n"
+        "    assert.equal(gatewayBody.server_id, 'mcp-atlassian-server');\n"
+        "    assert.equal(gatewayBody.tool_name, 'search');\n"
+        "    assert.equal(gatewayBody.input_data.query, 'my open work');\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_discovery_uses_user_query_when_select_tools_requires_it():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway discovery user_query retry', () => {\n"
+        "  const svc = new globalThis.McpService({ gatewayListTools: 'select_tools' });\n"
+        "  const gatewayTool = svc.gatewayCallTool || 'call_tool';\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('retries select_tools with user_query and then routes via call_tool', async () => {\n"
+        "    globalThis.fetch.addRoute(`/tools/${gatewayTool}`, {\n"
+        "      structuredContent: { result: { ok: true } },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/select_tools', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Error executing tool select_tools: 1 validation error for select_toolsArguments\\nuser_query\\n  Field required [type=missing]' }],\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_tools', {\n"
+        "      structuredContent: {\n"
+        "        tools: [{ name: 'get_me', meta: { mcp_server_id: '/api/mcp-github-server/tools/get_me' } }],\n"
+        "      },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_me', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Unknown tool: get_me' }],\n"
+        "    });\n"
+        "    const result = await svc.call('get_me', {}, { resultKey: 'result' });\n"
+        "    assert.equal(result.ok, true);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    const selectCalls = calls.filter(call => call.url.includes('/tools/select_tools'));\n"
+        "    assert.equal(selectCalls.length >= 2, true);\n"
+        "    const retryCall = selectCalls.find(call => {\n"
+        "      const body = JSON.parse(call.init.body);\n"
+        "      return body.user_query === 'get_me';\n"
+        "    });\n"
+        "    assert.equal(Boolean(retryCall), true);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_discovery_uses_get_servers_when_get_tools_requires_server_id():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway discovery server_id retry', () => {\n"
+        "  const svc = new globalThis.McpService({ gatewayListTools: 'get_tools', gatewayListServers: 'get_servers', gatewayGetTool: 'describe_tool' });\n"
+        "  const gatewayTool = svc.gatewayCallTool || 'call_tool';\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('discovers servers, retries get_tools with server_id, and falls back to get_tool', async () => {\n"
+        "    globalThis.fetch.addRoute(`/tools/${gatewayTool}`, {\n"
+        "      structuredContent: { result: { ok: true } },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_tools', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Error executing tool get_tools: 1 validation error for get_toolsArguments\\nserver_id\\n  Field required [type=missing]' }],\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_servers', {\n"
+        "      structuredContent: { servers: [{ server_id: 'mcp-github-server' }] },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/describe_tool', {\n"
+        "      structuredContent: { name: 'get_me', meta: { mcp_server_id: '/api/mcp-github-server/tools/get_me' } },\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_me', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Unknown tool: get_me' }],\n"
+        "    });\n"
+        "    const result = await svc.call('get_me', {}, { resultKey: 'result' });\n"
+        "    assert.equal(result.ok, true);\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    const withServerId = calls.filter(call => call.url.includes('/tools/get_tools')).find(call => {\n"
+        "      const body = JSON.parse(call.init.body);\n"
+        "      return body.server_id === 'mcp-github-server';\n"
+        "    });\n"
+        "    assert.equal(Boolean(withServerId), true);\n"
+        "    const getToolCall = calls.find(call => call.url.includes('/tools/describe_tool'));\n"
+        "    assert.equal(Boolean(getToolCall), true);\n"
+        "    const getToolBody = JSON.parse(getToolCall.init.body);\n"
+        "    assert.equal(getToolBody.server_id, 'mcp-github-server');\n"
+        "    assert.equal(getToolBody.tool_name, 'get_me');\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_gateway_discovery_failure_surfaces_original_unknown_tool():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('gateway discovery failure', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('returns the original unknown tool error when discovery cannot resolve route', async () => {\n"
+        "    globalThis.fetch.addRoute('/tools/search', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Unknown tool: search' }],\n"
+        "    });\n"
+        "    globalThis.fetch.addRoute('/tools/get_tools', {\n"
+        "      isError: true,\n"
+        "      content: [{ text: 'Error executing tool get_tools: no route data available' }],\n"
+        "    });\n"
+        "    await assert.rejects(\n"
+        "      () => svc.call('search', { query: 'my work' }),\n"
+        "      /Unknown tool: search/\n"
+        "    );\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
+def test_run_tests_service_non_gateway_direct_calls_still_work():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    test_code = (
+        "import { describe, it, beforeEach } from 'node:test';\n"
+        "import assert from 'node:assert/strict';\n"
+        "import './app.js';\n"
+        "describe('non-gateway direct path', () => {\n"
+        "  const svc = globalThis.service || new globalThis.McpService();\n"
+        "  beforeEach(() => {\n"
+        "    svc.test.reset();\n"
+        "    globalThis.fetch.resetCalls();\n"
+        "    globalThis.fetch.resetRoutes();\n"
+        "  });\n"
+        "  it('keeps direct /tools/<name> behavior', async () => {\n"
+        "    globalThis.fetch.addRoute('/tools/list_items', {\n"
+        "      structuredContent: { result: [{ id: 'item-1' }] },\n"
+        "    });\n"
+        "    const result = await svc.call('list_items', {}, { resultKey: 'result' });\n"
+        "    assert.equal(Array.isArray(result), true);\n"
+        "    assert.equal(result[0].id, 'item-1');\n"
+        "    const calls = globalThis.fetch.getCalls();\n"
+        "    assert.equal(calls.length, 1);\n"
+        "    assert.equal(calls[0].url.includes('/tools/list_items'), true);\n"
+        "  });\n"
+        "});\n"
+    )
+    success, output = service._run_tests("", "", test_code)
+    assert success, output
+
+
 def test_run_tests_service_extract_uses_llm_on_schema_mismatch():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
@@ -1473,7 +1895,7 @@ async def test_stream_generate_ui_prechecks(tmp_path):
     # replace service storage to point to our tmp path
     service.storage = GeneratedUIStorage(str(tmp_path))
 
-    gen = service.stream_generate_ui(
+    gen = service.generation_pipeline.stream_generate_ui(
         session=None,
         scope=Scope(kind="user", identifier="u1"),
         actor=actor,
@@ -1540,7 +1962,7 @@ def test_extract_content_variants_and_failure():
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
     # dict with content
-    assert service._extract_content({"content": "x"}) == "x"
+    assert extract_content({"content": "x"}) == "x"
 
     # object with choices/message/content
     class Msg:
@@ -1557,15 +1979,15 @@ def test_extract_content_variants_and_failure():
             self.choices = choices
 
     obj = Obj([Choice(Msg("hello"))])
-    assert service._extract_content(obj) == "hello"
+    assert extract_content(obj) == "hello"
 
     # delta content
     obj2 = Obj([Choice(None, Msg("d"))])
-    assert service._extract_content(obj2) == "d"
+    assert extract_content(obj2) == "d"
 
     # failure
     with pytest.raises(Exception):
-        service._extract_content(object())
+        extract_content(object())
 
 
 def test_storage_read_file_not_found_and_invalid_json(tmp_path):
@@ -1614,7 +2036,7 @@ def test_cap_message_payload_for_prompt_returns_compaction_diagnostics():
         },
     }
 
-    capped, diagnostics = service._cap_message_payload_for_prompt(
+    capped, diagnostics = cap_message_payload_for_prompt(
         message_payload,
         max_bytes=2200,
     )
@@ -1640,7 +2062,7 @@ def test_cap_message_payload_for_prompt_returns_compaction_diagnostics():
 def test_history_entry_and_now_format():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
-    entry = service._history_entry(
+    entry = history_entry(
         action="create",
         prompt="p",
         tools=["t"],
@@ -1666,7 +2088,7 @@ def test_history_for_prompt_strips_payload_html_without_mutating():
         },
         "not-a-dict",
     ]
-    sanitized = service._history_for_prompt(history)
+    sanitized = history_for_prompt(history)
     assert len(sanitized) == 1
     assert "payload_html" not in sanitized[0]
     assert "payload_scripts" not in sanitized[0]
@@ -1685,7 +2107,7 @@ def test_context_state_for_prompt_truncates_large_fields():
         "metadata": {"title": "demo"},
     }
 
-    sanitized = service._context_state_for_prompt(state)
+    sanitized = context_state_for_prompt(state)
 
     assert isinstance(sanitized, dict)
     assert sanitized.get("metadata", {}).get("title") == "demo"
@@ -1733,7 +2155,9 @@ def test_load_pfusch_prompt_and_fallback_presence():
 def test_dummy_data_test_usage_guidance_prefers_resolved_mocking():
     guidance = _DUMMY_DATA_TEST_USAGE_GUIDANCE
     assert "dummyDataSchemaHints" in guidance
+    assert "dummyDataGatewayHints" in guidance
     assert "svc.test.addResolved(toolName, dummyData[toolName])" in guidance
+    assert "mcp_server_id" in guidance
     assert "ask for schema and regenerate dummy data" in guidance
     assert "derive expectations from a normalized shape" in guidance
     assert "Do NOT hardcode dynamic time/value literals" in guidance
@@ -1744,7 +2168,7 @@ def test_compose_regeneration_prompt_includes_component_scoped_constraints():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
-    prompt = service._compose_regeneration_prompt(
+    prompt = service.conversational_service._compose_regeneration_prompt(
         user_message="Add quick filters",
         assistant_message="Will split rendering into sections",
         history=[{"role": "user", "content": "initial"}],
@@ -1769,7 +2193,7 @@ def test_run_assistant_message_system_prompt_includes_component_loading_policy()
     service.tgi_service._non_stream_chat_with_tools = fake_non_stream_chat_with_tools
 
     result = asyncio.run(
-        service._run_assistant_message(
+        service.conversational_service._run_assistant_message(
             session=None,
             draft_payload={"html": {}, "metadata": {}},
             history=[],
@@ -1814,7 +2238,7 @@ def test_attempt_patch_update_prompt_includes_no_global_blocking_loader_guidance
     service.tgi_service.llm_client = FakeLLM()
 
     result = asyncio.run(
-        service._attempt_patch_update(
+        service.conversational_service._attempt_patch_update(
             scope=Scope(kind="user", identifier="u1"),
             ui_id="ui1",
             name="overview",
@@ -1907,12 +2331,12 @@ def test_generate_ui_payload_empty_stream_raises(monkeypatch):
         return FakeReader([FakeParsed(content=None, is_done=True)])
 
     monkeypatch.setattr(
-        "app.app_facade.generated_service.chunk_reader", fake_chunk_reader
+        "app.app_facade.generation_pipeline.chunk_reader", fake_chunk_reader
     )
 
     with pytest.raises(Exception):
         asyncio.run(
-            service._generate_ui_payload(
+            service.generation_pipeline._generate_ui_payload(
                 session=None,
                 scope=Scope(kind="user", identifier="u1"),
                 ui_id="x",
@@ -1964,7 +2388,7 @@ def test_extract_json_block_with_escaped_string():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     text = 'prefix {"a": "value with } bracket"} suffix'
-    candidate = service._extract_json_block(text)
+    candidate = extract_json_block(text)
     assert candidate is not None and '"a"' in candidate
 
 
@@ -1979,11 +2403,13 @@ async def test_create_ui_and_duplicate_and_permissions(tmp_path, monkeypatch):
     ):
         return {"html": {"page": "<p>ok</p>"}, "metadata": {}}
 
-    monkeypatch.setattr(service, "_generate_ui_payload", fake_generate)
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fake_generate
+    )
 
     # successful create
     actor = Actor(user_id="u1", groups=["g1"])
-    rec = await service.create_ui(
+    rec = await service.generation_pipeline.create_ui(
         session=None,
         scope=Scope(kind="user", identifier="u1"),
         actor=actor,
@@ -1996,7 +2422,7 @@ async def test_create_ui_and_duplicate_and_permissions(tmp_path, monkeypatch):
     assert rec["metadata"]["id"] == "ui_new"
     # duplicate create raises
     with pytest.raises(Exception):
-        await service.create_ui(
+        await service.generation_pipeline.create_ui(
             session=None,
             scope=Scope(kind="user", identifier="u1"),
             actor=actor,
@@ -2009,7 +2435,7 @@ async def test_create_ui_and_duplicate_and_permissions(tmp_path, monkeypatch):
 
     # permission: user mismatch
     with pytest.raises(Exception):
-        await service.create_ui(
+        await service.generation_pipeline.create_ui(
             session=None,
             scope=Scope(kind="user", identifier="other"),
             actor=actor,
@@ -2045,9 +2471,11 @@ async def test_update_and_get_ui_paths(tmp_path, monkeypatch):
     ):
         return {"html": {"page": "<p>new</p>"}, "metadata": {}}
 
-    monkeypatch.setattr(service, "_generate_ui_payload", fake_generate)
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fake_generate
+    )
 
-    updated = await service.update_ui(
+    updated = await service.generation_pipeline.update_ui(
         session=None,
         scope=scope,
         actor=actor,
@@ -2114,7 +2542,7 @@ async def test_stream_generate_ui_success_and_failure_cases(tmp_path, monkeypatc
         return FakeReader(fake_chunk_reader.items)
 
     monkeypatch.setattr(
-        "app.app_facade.generated_service.chunk_reader", fake_chunk_reader
+        "app.app_facade.generation_pipeline.chunk_reader", fake_chunk_reader
     )
 
     # set llm_client.stream_completion to a dummy
@@ -2151,7 +2579,7 @@ async def test_stream_generate_ui_success_and_failure_cases(tmp_path, monkeypatc
     # mock _run_tests
     service._run_tests = lambda s, c, t, d=None: (True, "Tests passed")
 
-    gen = service.stream_generate_ui(
+    gen = service.generation_pipeline.stream_generate_ui(
         session=None,
         scope=Scope(kind="user", identifier="u1"),
         actor=Actor(user_id="u1", groups=[]),
@@ -2173,7 +2601,7 @@ async def test_stream_generate_ui_success_and_failure_cases(tmp_path, monkeypatc
 
     # failure parsing JSON -> produce error event
     fake_chunk_reader.items = [FakeParsed(content="not json"), FakeParsed(is_done=True)]
-    gen2 = service.stream_generate_ui(
+    gen2 = service.generation_pipeline.stream_generate_ui(
         session=None,
         scope=Scope(kind="user", identifier="u2"),
         actor=Actor(user_id="u2", groups=[]),
@@ -2196,7 +2624,7 @@ async def test_stream_generate_ui_success_and_failure_cases(tmp_path, monkeypatc
     monkeypatch.setattr(storage, "write", bad_write)
     # produce a valid json again
     fake_chunk_reader.items = [FakeParsed(content=json_str), FakeParsed(is_done=True)]
-    gen3 = service.stream_generate_ui(
+    gen3 = service.generation_pipeline.stream_generate_ui(
         session=None,
         scope=Scope(kind="user", identifier="u3"),
         actor=Actor(user_id="u3", groups=[]),
@@ -2255,7 +2683,7 @@ async def test_stream_update_ui_success_and_not_found_cases(tmp_path, monkeypatc
         return FakeReader(fake_chunk_reader.items)
 
     monkeypatch.setattr(
-        "app.app_facade.generated_service.chunk_reader", fake_chunk_reader
+        "app.app_facade.generation_pipeline.chunk_reader", fake_chunk_reader
     )
 
     class LLM:
@@ -2300,7 +2728,7 @@ async def test_stream_update_ui_success_and_not_found_cases(tmp_path, monkeypatc
     }
     storage.write(scope, "s1", "n", existing)
 
-    gen = service.stream_update_ui(
+    gen = service.generation_pipeline.stream_update_ui(
         session=None,
         scope=scope,
         actor=Actor(user_id="u1", groups=[]),
@@ -2321,7 +2749,7 @@ async def test_stream_update_ui_success_and_not_found_cases(tmp_path, monkeypatc
     assert len(updated["metadata"]["history"]) == 2
     assert updated["metadata"]["updated_by"] == "u1"
 
-    gen2 = service.stream_update_ui(
+    gen2 = service.generation_pipeline.stream_update_ui(
         session=None,
         scope=scope,
         actor=Actor(user_id="u1", groups=[]),

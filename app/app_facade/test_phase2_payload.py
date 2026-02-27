@@ -70,11 +70,11 @@ async def test_phase_2_attempt_payload_size():
     }
 
     with patch(
-        "app.app_facade.generated_service.chunk_reader",
+        "app.app_facade.generation_pipeline.chunk_reader",
         side_effect=mock_chunk_reader_fn,
     ):
         # Run _phase_2_attempt with new signature
-        generator = service._phase_2_attempt(
+        generator = service.generation_pipeline._phase_2_attempt(
             system_prompt=system_prompt,
             prompt=user_prompt,
             logic_payload=logic_payload,

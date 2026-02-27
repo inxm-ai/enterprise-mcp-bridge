@@ -70,6 +70,7 @@ def _detect_quality_risks(
     test_script: Optional[str],
     components_script: Optional[str],
     service_script: Optional[str] = None,
+    gateway_tool_names: Optional[Set[str]] = None,
 ) -> List[str]:
     risks: List[str] = []
     test_text = test_script or ""
@@ -125,6 +126,18 @@ def _detect_quality_risks(
         risks.append("runtime_script:dummy_data_reference")
     if re.search(r"\.test\.addResponse\s*\(", runtime_text, re.IGNORECASE):
         risks.append("runtime_script:test_mock_api_usage")
+
+    gateway_names = {str(name or "").strip() for name in (gateway_tool_names or set())}
+    gateway_names = {name for name in gateway_names if name}
+    if gateway_names:
+        plain_gateway_call = re.compile(
+            r"\b[\w$.]+\s*\.\s*(?:call|callTool)\s*\(\s*(['\"])([A-Za-z_][A-Za-z0-9_-]*)\1"
+        )
+        for match in plain_gateway_call.finditer(runtime_text):
+            called_name = str(match.group(2) or "").strip()
+            if called_name in gateway_names:
+                risks.append("runtime_script:gateway_direct_tool_name_call")
+                break
 
     return risks
 
@@ -443,6 +456,8 @@ async def run_phase1_attempt(
     ],
     chunk_reader: Callable[..., Any],
     ui_model_headers: Optional[Dict[str, str]],
+    gateway_tool_names: Optional[Set[str]] = None,
+    rewrite_runtime_scripts: Optional[Callable[[str, str], Tuple[str, str]]] = None,
 ) -> AsyncIterator[Union[bytes, Dict[str, Any]]]:
     """
     Executes a single attempt of Phase 1 logic generation.
@@ -637,6 +652,16 @@ async def run_phase1_attempt(
                 detail=f"missing_required_scripts: {', '.join(missing_parts)}",
             )
 
+        if callable(rewrite_runtime_scripts):
+            rewritten_service, rewritten_components = rewrite_runtime_scripts(
+                service_script or "",
+                components_script or "",
+            )
+            service_script = rewritten_service
+            components_script = rewritten_components
+            current_payload["service_script"] = service_script
+            current_payload["components_script"] = components_script
+
         # TODO: remove after testing
         logger.info(
             "[stream_generate_ui] Phase 1 initial generation (attempt %s):\n"
@@ -676,7 +701,10 @@ async def run_phase1_attempt(
             return
 
         quality_risks = _detect_quality_risks(
-            test_script, components_script, service_script
+            test_script,
+            components_script,
+            service_script,
+            gateway_tool_names=gateway_tool_names,
         )
         if quality_risks:
             reason = f"quality_risk_patterns_detected: {', '.join(quality_risks)}"
@@ -689,12 +717,25 @@ async def run_phase1_attempt(
                     role=MessageRole.USER,
                     content=(
                         "Your generated scripts include quality-risk patterns that cause "
-                        "non-deterministic tests or runtime state errors. Regenerate with "
-                        "deterministic mocked tests (service-level and/or fetch-route mocking), "
-                        "no direct state seeding for fetched data, and safe component callback signatures."
+                        "non-deterministic tests or runtime state errors. "
+                        "Regenerate with deterministic mocked tests (service-level and/or "
+                        "fetch-route mocking), no direct state seeding for fetched data, "
+                        "and safe component callback signatures."
                     ),
                 )
             )
+            if "runtime_script:gateway_direct_tool_name_call" in quality_risks:
+                messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            "Gateway routing violation: discovered domain tools must not be "
+                            "called by plain name (e.g. svc.call('search')). Use full MCP "
+                            "tool route keys (svc.call('/api/<server>/tools/<tool>', ...)) "
+                            "or gateway metadata so runtime routing resolves through call_tool."
+                        ),
+                    )
+                )
             yield {
                 "type": "result",
                 "success": False,

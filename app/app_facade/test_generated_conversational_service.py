@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 import app.app_facade.generated_service as generated_service_module
+import app.app_facade.conversational_service as conversational_service_module
 from app.app_facade.generated_service import Actor, GeneratedUIService, Scope
 from app.app_facade.generated_storage import GeneratedUIStorage
 
@@ -102,13 +103,19 @@ async def test_stream_chat_update_prefers_patch_when_available(tmp_path, monkeyp
         return {"status": "queued", "run_id": "run-1", "trigger": "post_update"}
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", fake_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fail_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", fake_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fail_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
 
     chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -177,16 +184,22 @@ async def test_stream_chat_update_falls_back_to_regenerate(tmp_path, monkeypatch
         return {"status": "queued", "run_id": "run-2", "trigger": "post_update"}
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fake_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", no_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fake_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
 
     chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -230,13 +243,19 @@ async def test_stream_chat_update_patch_only_blocks_regenerate(tmp_path, monkeyp
         raise AssertionError("Regenerate should not run when patch-only is enabled")
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fail_regenerate)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", True)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", no_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fail_regenerate
+    )
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", True)
 
     chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -295,15 +314,21 @@ async def test_stream_chat_update_patch_retry_succeeds_before_regenerate(
         return {"status": "queued", "run_id": "run-retry", "trigger": "post_update"}
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", flaky_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fail_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_RETRIES", 2)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", flaky_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fail_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_RETRIES", 2)
 
     chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -351,12 +376,16 @@ async def test_stream_chat_update_emits_progress_status_updates(tmp_path, monkey
         return {"status": "queued", "run_id": "run-status", "trigger": "post_update"}
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", fake_patch)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", fake_patch
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
 
     chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -412,11 +441,17 @@ async def test_stream_chat_update_runtime_context_is_single_use(tmp_path, monkey
         return {"status": "queued", "run_id": "run-runtime", "trigger": "post_update"}
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fake_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", no_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fake_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
 
     runtime_action = {
         "type": "runtime_service_exchanges",
@@ -437,7 +472,7 @@ async def test_stream_chat_update_runtime_context_is_single_use(tmp_path, monkey
         ],
     }
 
-    async for _chunk in service.stream_chat_update(
+    async for _chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -452,7 +487,7 @@ async def test_stream_chat_update_runtime_context_is_single_use(tmp_path, monkey
     ):
         pass
 
-    async for _chunk in service.stream_chat_update(
+    async for _chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -529,14 +564,20 @@ async def test_stream_chat_update_runtime_context_not_reused_after_error(
         }
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", flaky_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
-    monkeypatch.setattr(generated_service_module, "APP_UI_PATCH_ONLY", False)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", no_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", flaky_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(conversational_service_module, "APP_UI_PATCH_ONLY", False)
 
     first_chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -555,7 +596,7 @@ async def test_stream_chat_update_runtime_context_not_reused_after_error(
         first_chunks.append(chunk.decode("utf-8"))
 
     second_chunks = []
-    async for chunk in service.stream_chat_update(
+    async for chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -623,12 +664,18 @@ async def test_stream_chat_update_accepts_console_only_runtime_context(
         }
 
     monkeypatch.setattr(service, "_select_tools", fake_select_tools)
-    monkeypatch.setattr(service, "_run_assistant_message", fake_assistant)
-    monkeypatch.setattr(service, "_attempt_patch_update", no_patch)
-    monkeypatch.setattr(service, "_generate_ui_payload", fake_regenerate)
-    monkeypatch.setattr(service, "_queue_test_run", fake_queue_tests)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(
+        service.conversational_service, "_attempt_patch_update", no_patch
+    )
+    monkeypatch.setattr(
+        service.generation_pipeline, "_generate_ui_payload", fake_regenerate
+    )
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
 
-    async for _chunk in service.stream_chat_update(
+    async for _chunk in service.conversational_service.stream_chat_update(
         session=object(),
         scope=scope,
         actor=actor,
@@ -696,7 +743,7 @@ async def test_queue_test_action_run_updates_state(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: (True, "TAP version 13\n# pass 2\n# fail 0\n"),
     )
 
-    queued = await service.queue_test_action(
+    queued = await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id="dash1",
@@ -734,7 +781,7 @@ async def test_queue_test_action_run_allows_missing_service_script(
         lambda *_args, **_kwargs: (True, "TAP version 13\n# pass 1\n# fail 0\n"),
     )
 
-    queued = await service.queue_test_action(
+    queued = await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id="dash1",
@@ -768,7 +815,7 @@ async def test_queue_test_action_cancels_previous_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service, "_run_tests", slow_tests)
 
-    first = await service.queue_test_action(
+    first = await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id="dash1",
@@ -778,7 +825,7 @@ async def test_queue_test_action_cancels_previous_run(tmp_path, monkeypatch):
         test_name=None,
         access_token=None,
     )
-    second = await service.queue_test_action(
+    second = await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id="dash1",
@@ -816,7 +863,7 @@ async def test_add_test_action_updates_test_script(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: (True, "TAP version 13\n# pass 3\n# fail 0\n"),
     )
 
-    await service.queue_test_action(
+    await service.test_runner.queue_test_action(
         scope=scope,
         actor=actor,
         ui_id="dash1",
@@ -874,10 +921,12 @@ async def test_queue_test_action_failed_run_includes_analysis_payload(
             "next_step_text": "Recommended next action: adjust_test. Alternative: fix_code.",
         }
 
-    monkeypatch.setattr(service, "_explain_test_failure_for_user", fake_explain)
+    monkeypatch.setattr(
+        service.test_runner, "_explain_test_failure_for_user", fake_explain
+    )
 
     run_id = "run-99999999"
-    stream_key = service._test_stream_key(
+    stream_key = service.test_runner._test_stream_key(
         scope=scope, ui_id="dash1", name="overview", session_id=session_id
     )
     session_payload = storage.read_session(scope, "dash1", "overview", session_id)
@@ -885,7 +934,7 @@ async def test_queue_test_action_failed_run_includes_analysis_payload(
     session_payload["test_state"] = "queued"
     storage.write_session(scope, "dash1", "overview", session_id, session_payload)
 
-    await service._execute_test_run(
+    await service.test_runner._execute_test_run(
         scope=scope,
         ui_id="dash1",
         name="overview",
@@ -920,7 +969,7 @@ async def test_queue_test_action_failed_run_includes_analysis_payload(
 async def test_explain_test_failure_for_user_uses_fallback_without_llm(tmp_path):
     service, _storage = _new_service(tmp_path)
 
-    analysis = await service._explain_test_failure_for_user(
+    analysis = await service.test_runner._explain_test_failure_for_user(
         action="fix_code",
         passed=1,
         failed=2,
@@ -974,7 +1023,7 @@ async def test_explain_test_failure_for_user_parses_llm_structured_response(tmp_
 
     service.tgi_service.llm_client = StubLLMClient()
 
-    analysis = await service._explain_test_failure_for_user(
+    analysis = await service.test_runner._explain_test_failure_for_user(
         action="fix_code",
         passed=2,
         failed=2,
