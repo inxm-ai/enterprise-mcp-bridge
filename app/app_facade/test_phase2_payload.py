@@ -1,7 +1,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from contextlib import asynccontextmanager
-from app.app_facade.generated_service import GeneratedUIService, MessageRole
+from app.app_facade.generated_service import GeneratedUIService
+from app.tgi.models.models import MessageRole
 
 
 @pytest.mark.asyncio

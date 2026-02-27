@@ -12,16 +12,10 @@ import contextlib
 import copy
 import json
 import logging
-import os
 import re
-import subprocess
-import tempfile
-import uuid
-from datetime import datetime, timezone
 from typing import (
     Any,
     AsyncIterator,
-    Callable,
     Dict,
     List,
     Literal,
@@ -31,51 +25,18 @@ from typing import (
 )
 
 from fastapi import HTTPException
-from starlette.responses import StreamingResponse
 
-from app.session import MCPSessionBase
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
-from app.tgi.protocols.chunk_reader import chunk_reader
-from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.app_facade.generated_schemas import generation_response_format
-from app.app_facade.generated_output_factory import (
-    GeneratedUIOutputFactory,
-    MCP_SERVICE_TEST_HELPER_SCRIPT,
-)
 from app.app_facade.generated_types import (
     Actor,
     Scope,
-    validate_identifier,
 )
 from app.app_facade.test_fix_tools import _parse_tap_output, run_tool_driven_test_fix
 from app.app_facade.prompt_helpers import (
-    extract_content,
-    extract_json_block,
     parse_json,
-    to_json_value,
     trim_runtime_text,
-    prompt_with_runtime_context,
     to_chat_history_messages,
-    history_entry,
-    changed_scripts,
-    scripts_from_history,
-    cap_tools_for_prompt,
-    cap_message_payload_for_prompt,
-    context_state_for_prompt,
-    history_for_prompt,
-)
-from app.vars import (
-    APP_UI_SESSION_TTL_MINUTES,
-    GENERATED_UI_FIX_CODE_FIRST,
-    GENERATED_UI_MAX_HISTORY_ENTRIES,
-    GENERATED_UI_MAX_HISTORY_BYTES,
-    GENERATED_UI_MAX_RUNTIME_EXCHANGES,
-    GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
-    GENERATED_UI_MAX_RUNTIME_BYTES,
-    GENERATED_UI_MAX_TOOLS,
-    GENERATED_UI_MAX_TOOLS_BYTES,
-    GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES,
-    MCP_BASE_PATH,
 )
 
 logger = logging.getLogger("uvicorn.error")

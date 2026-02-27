@@ -843,7 +843,7 @@ def test_storage_write_read_exists(tmp_path):
 def test_extract_json_block_and_parse(text, expected):
     # Use an instance to access the helper methods
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
     # Access private method _extract_json_block
     candidate = extract_json_block(text)
@@ -854,7 +854,7 @@ def test_extract_json_block_and_parse(text, expected):
 
 def test_parse_json_with_invalid_json_and_no_block():
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     with pytest.raises(Exception):
         parse_json("not json or {broken")
 
@@ -1959,7 +1959,7 @@ def test_select_tools_requested_tools_with_mixed_shapes():
 
 def test_extract_content_variants_and_failure():
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
     # dict with content
     assert extract_content({"content": "x"}) == "x"
@@ -2078,7 +2078,7 @@ def test_history_entry_and_now_format():
 
 def test_history_for_prompt_strips_payload_html_without_mutating():
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     history = [
         {
             "action": "create",
@@ -2098,7 +2098,7 @@ def test_history_for_prompt_strips_payload_html_without_mutating():
 
 def test_context_state_for_prompt_truncates_large_fields():
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
     large_script = "x" * 10000
     state = {
@@ -2386,7 +2386,7 @@ def test_select_tools_requested_no_match(monkeypatch):
 
 def test_extract_json_block_with_escaped_string():
     storage = GeneratedUIStorage(os.getcwd())
-    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     text = 'prefix {"a": "value with } bracket"} suffix'
     candidate = extract_json_block(text)
     assert candidate is not None and '"a"' in candidate

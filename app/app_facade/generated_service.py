@@ -29,12 +29,10 @@ from app.vars import (
     APP_UI_SESSION_TTL_MINUTES,
     GENERATED_UI_FIX_CODE_FIRST,
     GENERATED_UI_INCLUDE_OUTPUT_SCHEMA,
-    GENERATED_UI_MAX_TOOLS,
 )
 from app.tgi.models import (
     ChatCompletionRequest,
     Message,
-    MessageRole,
 )  # noqa: F401 – MessageRole re-exported
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.app_facade.generated_output_factory import (
@@ -953,10 +951,10 @@ class GeneratedUIService:
 
         def _replace(m: re.Match) -> str:
             nonlocal replacements
-            prefix = m.group(1)   # e.g. "svc.call(" or "mcp.call("
-            quote = m.group(2)    # the quote character (' or ")
-            tool = m.group(3)     # the tool name
-            suffix = m.group(4)   # rest after closing quote
+            prefix = m.group(1)  # e.g. "svc.call(" or "mcp.call("
+            quote = m.group(2)  # the quote character (' or ")
+            tool = m.group(3)  # the tool name
+            suffix = m.group(4)  # rest after closing quote
             route = gateway_routes.get(tool)
             if route is None:
                 return m.group(0)

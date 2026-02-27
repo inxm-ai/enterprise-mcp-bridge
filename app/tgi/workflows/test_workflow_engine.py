@@ -3466,49 +3466,40 @@ async def test_arg_mapping_works_when_context_disabled(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_tool_error_detection_various_formats(tmp_path, monkeypatch):
     """Test that _tool_result_has_error detects various error formats."""
-    from app.tgi.workflows.engine import WorkflowEngine
-    from app.tgi.workflows.repository import WorkflowRepository
-    from app.tgi.workflows.state import WorkflowStateStore
-
-    engine = WorkflowEngine(
-        WorkflowRepository(workflows_path=str(tmp_path)),
-        WorkflowStateStore(db_path=tmp_path / "state.db"),
-        StubLLMClient({}),
-    )
+    from app.tgi.workflows.error_analysis import tool_result_has_error
 
     # JSON with error key
-    assert engine._tool_result_has_error('{"error": "something went wrong"}') is True
+    assert tool_result_has_error('{"error": "something went wrong"}') is True
 
     # JSON with isError flag
-    assert engine._tool_result_has_error('{"isError": true}') is True
+    assert tool_result_has_error('{"isError": true}') is True
 
     # JSON with success false
-    assert engine._tool_result_has_error('{"success": false}') is True
+    assert tool_result_has_error('{"success": false}') is True
 
     # List with error item
-    assert engine._tool_result_has_error('[{"error": "fail"}]') is True
+    assert tool_result_has_error('[{"error": "fail"}]') is True
     # MCP-style content[] text wrapping JSON error
     assert (
-        engine._tool_result_has_error('[{"text":"{\\"error\\":\\"wrapped fail\\"}"}]')
-        is True
+        tool_result_has_error('[{"text":"{\\"error\\":\\"wrapped fail\\"}"}]') is True
     )
 
     # Plain text with HTTP error
-    assert engine._tool_result_has_error("Client error '400 Bad Request'") is True
-    assert engine._tool_result_has_error("500 Internal Server Error") is True
-    assert engine._tool_result_has_error("401 unauthorized access") is True
+    assert tool_result_has_error("Client error '400 Bad Request'") is True
+    assert tool_result_has_error("500 Internal Server Error") is True
+    assert tool_result_has_error("401 unauthorized access") is True
 
     # Normal successful responses
-    assert engine._tool_result_has_error('{"result": "success"}') is False
+    assert tool_result_has_error('{"result": "success"}') is False
     assert (
-        engine._tool_result_has_error(
+        tool_result_has_error(
             '[{"text":"{\\"payload\\":{\\"result\\":{\\"id\\":\\"p1\\"}}"}]'
         )
         is False
     )
-    assert engine._tool_result_has_error("Plan saved successfully") is False
-    assert engine._tool_result_has_error('{"data": [1, 2, 3]}') is False
-    assert engine._tool_result_has_error("") is False
+    assert tool_result_has_error("Plan saved successfully") is False
+    assert tool_result_has_error('{"data": [1, 2, 3]}') is False
+    assert tool_result_has_error("") is False
 
 
 @pytest.mark.asyncio
@@ -5750,3 +5741,304 @@ async def test_run_agents_keeps_unsafe_agents_serial(tmp_path, monkeypatch):
     _ = [chunk async for chunk in stream]
 
     assert engine.max_running == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-choice input field tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_feedback_payload_includes_per_choice_input_fields(tmp_path, monkeypatch):
+    """
+    When a reroute ask config defines per-choice `input` fields, the generated
+    requestedSchema should include those fields as optional properties, and
+    meta.input_fields should map each field to its owning selection id.
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "input_field_flow",
+        "root_intent": "INPUT_FIELD_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    },
+                                    "adjust": {
+                                        "to": "select_tools",
+                                        "value": "Adjust the integration selection",
+                                        "input": {
+                                            "feedback": {
+                                                "type": "string",
+                                                "description": "What would you like to adjust?",
+                                            }
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create the plan.",
+                "depends_on": ["select_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "input_field_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {"select_tools": "<reroute>ASK_USER</reroute>"},
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-input-field"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="input_field_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    
+    [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    elic_spec = state.context["agents"]["select_tools"].get("elicitation_spec") or {}
+    schema = elic_spec.get("requestedSchema") or {}
+
+    # selection enum should contain both choices
+    props = schema.get("properties", {})
+    assert "selection" in props
+    assert set(props["selection"].get("enum", [])) == {"proceed", "adjust"}
+
+    # per-choice input field should be present in schema
+    assert "feedback" in props
+    assert props["feedback"]["type"] == "string"
+    assert props["feedback"]["description"] == "What would you like to adjust?"
+
+    # feedback should NOT be in required (only selection is required)
+    assert schema.get("required") == ["selection"]
+
+    # meta.input_fields should map the field to its owning choice
+    meta = elic_spec.get("meta", {})
+    assert "input_fields" in meta
+    assert meta["input_fields"]["feedback"]["for_selection"] == "adjust"
+
+
+@pytest.mark.asyncio
+async def test_feedback_input_field_value_appended_as_user_message(
+    tmp_path, monkeypatch
+):
+    """
+    When a user submits feedback with a per-choice input field value, that value
+    should be appended as a user message so the target agent's LLM sees it.
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "input_resume_flow",
+        "root_intent": "INPUT_RESUME_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    },
+                                    "adjust": {
+                                        "to": "select_tools",
+                                        "value": "Adjust",
+                                        "input": {
+                                            "feedback": {
+                                                "type": "string",
+                                                "description": "What to adjust?",
+                                            }
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create the plan.",
+                "depends_on": ["select_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "input_resume_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    # First call: agent reroutes to ASK_USER, pauses for feedback
+    # Second call (after feedback): agent runs again with the user's input
+    llm = StubLLMClient(
+        {
+            "select_tools": [
+                "<reroute>ASK_USER</reroute>",
+                "Adjusted the selection.",
+            ],
+            "create_plan": "Plan created.",
+        },
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-input-resume"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="input_resume_flow",
+        workflow_execution_id=exec_id,
+    )
+
+    # First pass — pauses at feedback
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    # Resume with structured feedback selecting "adjust" + input field
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content='<user_feedback>{"action":"accept","content":{"selection":"adjust","feedback":"Remove the Jira integration"}}</user_feedback>',
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="input_resume_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    # The input text should have been appended to user_messages
+    user_messages = state.context.get("user_messages", [])
+    assert any(
+        "Remove the Jira integration" in msg for msg in user_messages
+    ), f"Expected input text in user_messages, got: {user_messages}"
+
+    # The select_tools agent should have been rerouted back to itself
+    # and its feedback value stored in the agent context
+    agent_ctx = state.context["agents"]["select_tools"]
+    assert agent_ctx.get("feedback") == "Remove the Jira integration"
+
+
+@pytest.mark.asyncio
+async def test_feedback_without_input_field_unchanged(tmp_path, monkeypatch):
+    """
+    When no per-choice input fields are defined, the requestedSchema should
+    remain the same as before (backward compatibility).
+    """
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "no_input_flow",
+        "root_intent": "NO_INPUT_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    },
+                                    "adjust": {
+                                        "to": "select_tools",
+                                        "value": "Adjust",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create the plan.",
+                "depends_on": ["select_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "no_input_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {"select_tools": "<reroute>ASK_USER</reroute>"},
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-no-input"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="no_input_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    elic_spec = state.context["agents"]["select_tools"].get("elicitation_spec") or {}
+    schema = elic_spec.get("requestedSchema") or {}
+    props = schema.get("properties", {})
+
+    # Should only have selection and value — no extra input fields
+    assert set(props.keys()) == {"selection", "value"}
+    assert schema.get("required") == ["selection"]
+
+    # meta should NOT have input_fields
+    meta = elic_spec.get("meta", {})
+    assert "input_fields" not in meta

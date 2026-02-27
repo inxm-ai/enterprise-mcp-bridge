@@ -15,7 +15,6 @@ from typing import (
     Dict,
     List,
     Optional,
-    Sequence,
     Tuple,
 )
 
@@ -23,7 +22,6 @@ from app.session import MCPSessionBase
 from app.utils import token_fingerprint
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
-from app.tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 from app.app_facade.generated_schemas import generation_response_format
 from app.vars import (
     GENERATED_UI_EXPLORE_TOOLS,

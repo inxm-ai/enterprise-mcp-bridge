@@ -340,3 +340,39 @@ class ToolResultCapture:
             )
 
         return context
+
+
+def build_arg_injector_fn(
+    agent_def,
+    state_context: Dict[str, Any],
+    needs_workflow_description: bool,
+    original_prompt: str,
+    *,
+    workflow_description_tool_names: set[str],
+    workflow_description_context_key: str,
+    ensure_workflow_description_arg_fn=None,
+):
+    """
+    Return an ``arg_injector`` callback (or ``None``) for tool-chat streaming.
+
+    Pure factory — returned closure captures only the given parameters.
+    """
+    injector = ArgInjector.from_agent_def(agent_def)
+    if not injector and not needs_workflow_description:
+        return None
+
+    def _inject(name, args):
+        merged = args or {}
+        if injector:
+            merged = injector.inject(name, merged, state_context, fail_on_missing=True)
+        if needs_workflow_description and ensure_workflow_description_arg_fn:
+            merged = ensure_workflow_description_arg_fn(name, merged, original_prompt)
+            if name in workflow_description_tool_names:
+                description = (
+                    merged.get("description") if isinstance(merged, dict) else None
+                )
+                if description:
+                    state_context[workflow_description_context_key] = str(description)
+        return merged
+
+    return _inject

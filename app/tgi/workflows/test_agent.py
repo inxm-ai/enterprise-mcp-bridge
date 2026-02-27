@@ -575,9 +575,6 @@ class TestPassthroughTagExtraction:
 
     def test_extract_single_passthrough_block(self, tmp_path, monkeypatch):
         """Extract content from a single passthrough block."""
-        from app.tgi.workflows.engine import WorkflowEngine
-        from app.tgi.workflows.repository import WorkflowRepository
-        from app.tgi.workflows.state import WorkflowStateStore
 
         workflows_dir = tmp_path / "flows"
         workflows_dir.mkdir()
@@ -586,111 +583,47 @@ class TestPassthroughTagExtraction:
         )
         monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
 
-        engine = WorkflowEngine(
-            WorkflowRepository(),
-            WorkflowStateStore(db_path=":memory:"),
-            StubLLMClient(),
-        )
-
         text = "Some preamble <passthrough>visible content</passthrough> more text"
-        result = engine._extract_passthrough_content(text)
+        from app.tgi.workflows.tag_parser import extract_passthrough_content
+
+        result = extract_passthrough_content(text)
         # Extracted content ends with \n\n for proper separation when streaming
         assert result == "visible content\n\n"
 
     def test_extract_multiple_passthrough_blocks(self, tmp_path, monkeypatch):
         """Extract content from multiple passthrough blocks."""
-        from app.tgi.workflows.engine import WorkflowEngine
-        from app.tgi.workflows.repository import WorkflowRepository
-        from app.tgi.workflows.state import WorkflowStateStore
-
-        workflows_dir = tmp_path / "flows"
-        workflows_dir.mkdir()
-        (workflows_dir / "empty.json").write_text(
-            '{"flow_id": "x", "root_intent": "X", "agents": []}', encoding="utf-8"
-        )
-        monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
-
-        engine = WorkflowEngine(
-            WorkflowRepository(),
-            WorkflowStateStore(db_path=":memory:"),
-            StubLLMClient(),
-        )
+        from app.tgi.workflows.tag_parser import extract_passthrough_content
 
         text = (
             "<passthrough>first</passthrough> middle <passthrough>second</passthrough>"
         )
-        result = engine._extract_passthrough_content(text)
+        result = extract_passthrough_content(text)
         # Multiple blocks are joined with \n\n and result ends with \n\n
         assert result == "first\n\nsecond\n\n"
 
     def test_extract_empty_when_no_complete_block(self, tmp_path, monkeypatch):
         """Return empty when there's no complete passthrough block."""
-        from app.tgi.workflows.engine import WorkflowEngine
-        from app.tgi.workflows.repository import WorkflowRepository
-        from app.tgi.workflows.state import WorkflowStateStore
-
-        workflows_dir = tmp_path / "flows"
-        workflows_dir.mkdir()
-        (workflows_dir / "empty.json").write_text(
-            '{"flow_id": "x", "root_intent": "X", "agents": []}', encoding="utf-8"
-        )
-        monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
-
-        engine = WorkflowEngine(
-            WorkflowRepository(),
-            WorkflowStateStore(db_path=":memory:"),
-            StubLLMClient(),
-        )
+        from app.tgi.workflows.tag_parser import extract_passthrough_content
 
         text = "<passthrough>incomplete content without closing"
-        result = engine._extract_passthrough_content(text)
+        result = extract_passthrough_content(text)
         assert result == ""
 
     def test_extract_multiline_passthrough(self, tmp_path, monkeypatch):
         """Extract multiline content from passthrough block."""
-        from app.tgi.workflows.engine import WorkflowEngine
-        from app.tgi.workflows.repository import WorkflowRepository
-        from app.tgi.workflows.state import WorkflowStateStore
-
-        workflows_dir = tmp_path / "flows"
-        workflows_dir.mkdir()
-        (workflows_dir / "empty.json").write_text(
-            '{"flow_id": "x", "root_intent": "X", "agents": []}', encoding="utf-8"
-        )
-        monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
-
-        engine = WorkflowEngine(
-            WorkflowRepository(),
-            WorkflowStateStore(db_path=":memory:"),
-            StubLLMClient(),
-        )
+        from app.tgi.workflows.tag_parser import extract_passthrough_content
 
         text = "<passthrough>line 1\nline 2\nline 3</passthrough>"
-        result = engine._extract_passthrough_content(text)
+        result = extract_passthrough_content(text)
         # Extracted content ends with \n\n for proper separation when streaming
         assert result == "line 1\nline 2\nline 3\n\n"
 
     def test_strip_tags_includes_passthrough(self, tmp_path, monkeypatch):
-        """_strip_tags removes passthrough tags along with other tags."""
-        from app.tgi.workflows.engine import WorkflowEngine
-        from app.tgi.workflows.repository import WorkflowRepository
-        from app.tgi.workflows.state import WorkflowStateStore
-
-        workflows_dir = tmp_path / "flows"
-        workflows_dir.mkdir()
-        (workflows_dir / "empty.json").write_text(
-            '{"flow_id": "x", "root_intent": "X", "agents": []}', encoding="utf-8"
-        )
-        monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
-
-        engine = WorkflowEngine(
-            WorkflowRepository(),
-            WorkflowStateStore(db_path=":memory:"),
-            StubLLMClient(),
-        )
+        """strip_tags removes passthrough tags along with other tags."""
+        from app.tgi.workflows.tag_parser import strip_tags
 
         text = "<passthrough>content</passthrough> <reroute>reason</reroute>"
-        result = engine._strip_tags(text)
+        result = strip_tags(text)
         assert "<passthrough>" not in result
         assert "</passthrough>" not in result
         assert "<reroute>" not in result
@@ -1402,11 +1335,10 @@ async def test_progress_updates_cancel_previous(tmp_path):
 
 @pytest.mark.asyncio
 async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monkeypatch):
-    """Direct test that _handle_tool_progress includes passthrough history in prompts."""
-    from app.tgi.workflows.engine import WorkflowEngine
+    """Direct test that handle_tool_progress includes passthrough history in prompts."""
+    from app.tgi.workflows import stream_processor
     from app.tgi.workflows.models import WorkflowAgentDef, WorkflowExecutionState
-    from app.tgi.workflows.repository import WorkflowRepository
-    from app.tgi.workflows.state import WorkflowStateStore
+    from app.tgi.protocols.chunk_reader import chunk_reader
 
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()
@@ -1435,11 +1367,6 @@ async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monke
             return _gen()
 
     llm = TrackingLLM({})
-    engine = WorkflowEngine(
-        WorkflowRepository(),
-        WorkflowStateStore(db_path=tmp_path / "state.db"),
-        llm,
-    )
 
     # Create an agent def with pass_through as a string (guideline)
     agent_def = WorkflowAgentDef(
@@ -1451,13 +1378,6 @@ async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monke
     # Create a state
     state = WorkflowExecutionState.new("exec-1", "test_flow")
 
-    # Create a request
-    request = ChatCompletionRequest(
-        messages=[Message(role=MessageRole.USER, content="Do something")],
-        model="test-model",
-        stream=True,
-    )
-
     # Create progress payload
     progress_payload = {
         "type": "progress",
@@ -1467,10 +1387,25 @@ async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monke
         "tool": "slow_tool",
     }
 
+    def _record_event(st, text, status="in_progress", **kw):
+        return f"data: {text}\n\n"
+
+    def _format_chunk(state, content, status, **kw):
+        return f"data: {content}\n\n"
+
     # Test WITHOUT history
     user_messages_received.clear()
-    async for _ in engine._handle_tool_progress(
-        state, agent_def, request, progress_payload, None, None, passthrough_history=[]
+    async for _ in stream_processor.handle_tool_progress(
+        state=state,
+        agent_def=agent_def,
+        progress_payload=progress_payload,
+        user_message="Do something",
+        model_name="test-model",
+        passthrough_history=[],
+        llm_stream_fn=lambda req: llm.stream_completion(req, "", None),
+        chunk_reader_fn=chunk_reader,
+        record_event_fn=_record_event,
+        format_chunk_fn=_format_chunk,
     ):
         pass
 
@@ -1481,14 +1416,17 @@ async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monke
     # Test WITH history
     user_messages_received.clear()
     passthrough_history = ["First message to user", "Second update about progress"]
-    async for _ in engine._handle_tool_progress(
-        state,
-        agent_def,
-        request,
-        progress_payload,
-        None,
-        None,
+    async for _ in stream_processor.handle_tool_progress(
+        state=state,
+        agent_def=agent_def,
+        progress_payload=progress_payload,
+        user_message="Do something",
+        model_name="test-model",
         passthrough_history=passthrough_history,
+        llm_stream_fn=lambda req: llm.stream_completion(req, "", None),
+        chunk_reader_fn=chunk_reader,
+        record_event_fn=_record_event,
+        format_chunk_fn=_format_chunk,
     ):
         pass
 

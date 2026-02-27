@@ -12,13 +12,9 @@ import pytest
 from app.app_facade.generated_service import (
     GeneratedUIService,
     GeneratedUIStorage,
-    Scope,
 )
 from app.app_facade.gateway_explorer import (
     _TOOL_EXPLORE_NAME_PATTERNS,
-    _TOOL_EXPLORE_EXCLUDED,
-    _TOOL_EXPLORE_PLAN_SCHEMA,
-    _TOOL_EXPLORE_PARSE_SCHEMA,
 )
 
 

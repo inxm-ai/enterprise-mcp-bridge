@@ -5,11 +5,9 @@ lifecycle, including phased attempts, dummy-data augmentation, and
 test orchestration during generation.
 """
 
-import asyncio
 import copy
 import json
 import logging
-import os
 from typing import (
     Any,
     AsyncIterator,
@@ -17,8 +15,6 @@ from typing import (
     Iterable,
     List,
     Optional,
-    Sequence,
-    Tuple,
     Union,
 )
 
@@ -27,41 +23,25 @@ from fastapi import HTTPException
 from app.session import MCPSessionBase
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.protocols.chunk_reader import chunk_reader
-from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.app_facade.generated_schemas import generation_response_format
-from app.app_facade.generated_output_factory import GeneratedUIOutputFactory
 from app.app_facade.generated_phase1 import run_phase1_attempt
 from app.app_facade.generated_phase2 import run_phase2_attempt
 from app.app_facade.generated_types import (
     Actor,
     Scope,
-    validate_identifier,
 )
 from app.app_facade.prompt_helpers import (
-    SCRIPT_KEYS,
-    extract_content,
-    extract_json_block,
     parse_json,
-    to_json_value,
-    trim_runtime_text,
-    sanitize_runtime_value,
-    sanitize_runtime_action,
     runtime_context_for_prompt,
     context_state_for_prompt,
-    payload_bytes,
     prompt_with_runtime_context,
-    to_chat_history_messages,
     history_entry,
     history_for_prompt,
     changed_scripts,
-    scripts_from_history,
     cap_tools_for_prompt,
     cap_message_payload_for_prompt,
 )
 from app.vars import (
-    MCP_BASE_PATH,
-    GENERATED_UI_PROMPT_DUMP,
-    GENERATED_UI_INCLUDE_OUTPUT_SCHEMA,
     GENERATED_UI_MAX_HISTORY_ENTRIES,
     GENERATED_UI_MAX_HISTORY_BYTES,
     GENERATED_UI_MAX_RUNTIME_EXCHANGES,
@@ -70,9 +50,6 @@ from app.vars import (
     GENERATED_UI_MAX_TOOLS,
     GENERATED_UI_MAX_TOOLS_BYTES,
     GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES,
-    APP_UI_PATCH_ONLY,
-    APP_UI_PATCH_RETRIES,
-    GENERATED_UI_FIX_CODE_FIRST,
 )
 
 logger = logging.getLogger("uvicorn.error")

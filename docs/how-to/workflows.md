@@ -125,24 +125,38 @@ curl -N http://localhost:8000/workflows/executions/{execution_id}/stream
   "depends_on": ["previous-agent"],
   "when": "condition expression",
   "tools": ["tool1", "tool2"],
-  "reroute": {
-    "on": {
-      "tool:tool1:success": "next-agent",
-      "tool:tool1:error": "error-handler"
+  "returns": ["extracted_field"],
+  "context": true,
+  "on_tool_error": "error-handler-agent",
+  "stop_point": false,
+  "reroute": [
+    {
+      "on": ["tool:tool1:success"],
+      "ask": { "question": "...", "expected_responses": [...] }
+    },
+    {
+      "on": ["tool:tool1:error"],
+      "target": "error-handler"
     }
-  }
+  ]
 }
 ```
 
-**Parameters:**
+**Field reference:**
 
-- `agent` - Unique identifier for this agent
-- `description` - What the agent should do (sent to LLM)
-- `pass_through` - Whether to show agent output (boolean or guideline string)
-- `depends_on` - List of agents that must complete first
-- `when` - Condition for whether agent should run
-- `tools` - Which MCP tools this agent can use
-- `reroute` - Conditional routing based on tool results
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `agent` | string | required | Unique identifier for this agent within the workflow |
+| `description` | string | required | What the agent should do — sent as the system prompt to the LLM |
+| `pass_through` | `false` / `true` / string | `false` | `false`: hide intermediate output. `true`: stream output to the user. String: stream output with this specific guideline/instruction appended to the system prompt |
+| `depends_on` | string[] | `[]` | Agents that must complete before this one runs. Agents with no dependencies (or whose dependencies are all met) run in parallel |
+| `when` | string | — | A condition expression evaluated against the workflow context. If it evaluates to falsy the agent is skipped |
+| `tools` | `null` / `[]` / string[] / object[] | `null` | `null`: all available tools. `[]`: no tools. Array of names: only those tools. Array of objects: advanced config with `args`, `settings` (see [Advanced Tool Configuration](#advanced-tool-configuration)) |
+| `returns` | string[] | — | Field names to extract from tool results and store in the agent's context for downstream use |
+| `context` | `true` / `false` / `"user_prompt"` / string[] | `true` | Controls how much workflow context is injected. `true`: full context. `false`: none. `"user_prompt"`: only the original user message. Array of dot-path references (e.g. `["other_agent.result"]`): only those fields |
+| `on_tool_error` | string | — | Agent to automatically reroute to when any tool call fails, even if the LLM doesn't emit a `<reroute>` tag |
+| `stop_point` | boolean | `false` | If `true`, no further agents run after this one completes |
+| `reroute` | object / object[] | — | Conditional routing rules triggered by tool outcomes or LLM-emitted tags. See [Reroute Configuration](#reroute-configuration) |
 
 ### Advanced Tool Configuration
 
@@ -578,50 +592,193 @@ curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
   }'
 ```
 
+### Reroute Configuration
+
+`reroute` defines rules for how an agent hands off control after completing. It can be a single rule object or a list of rule objects. Each rule has an `on` trigger list and either an `ask` (pause for user input) or an automatic target.
+
+```json
+"reroute": [
+  {
+    "on": ["tool:select_tools:success"],
+    "ask": {
+      "question": "Instruction for the LLM to generate a user-facing question",
+      "expected_responses": [ { "<id>": { "to": "...", "with": [...] } } ]
+    }
+  },
+  {
+    "on": ["tool:select_tools:error"],
+    "target": "error_handler"
+  }
+]
+```
+
+**Trigger formats for `on`:**
+
+| Trigger | When it fires |
+|---|---|
+| `"tool:<name>:success"` | The named tool completed without an error |
+| `"tool:<name>:error"` | The named tool returned an error |
+| `"ASK_USER"` | The LLM emitted `<reroute>ASK_USER</reroute>` |
+| Any string | Matched against whatever is inside `<reroute>...</reroute>` in the LLM's output |
+
+**Rule fields:**
+
+| Field | Description |
+|---|---|
+| `on` | List of trigger strings. Rule fires when any of them match |
+| `ask` | Pause for user input. See [ask config](#ask-config) |
+| `target` | Automatically route to this agent name without pausing |
+
 ### Conditional Routing Based on Feedback
 
-The Enterprise MCP Bridge supports conditional routing where workflows pause to ask the user a question, then route to different agents based on their choice. This uses the `reroute` configuration with `on` (trigger) and `ask` (user prompt) fields.
+The Enterprise MCP Bridge supports conditional routing where workflows pause to ask the user a question, then route to different agents based on their choice.
 
 #### How It Works
 
-When an agent's reroute configuration includes both `on` and `ask`:
+1. **Agent emits trigger** — The agent completes its work and emits `<reroute>TRIGGER_NAME</reroute>`
+2. **Trigger matches** — The engine checks if any `on` entry in the agent's `reroute` list matches
+3. **Workflow pauses** — If the matched entry has an `ask` field, the workflow pauses (`awaiting_feedback: true`) and an MCP-compliant elicitation payload is sent to the client
+4. **User responds** — The user selects a choice (and optionally fills in input fields)
+5. **Workflow routes** — The engine routes to the agent in the selected choice's `to` field
+6. **Context copied** — Fields listed in `with` are copied from agent context into the shared workflow context
 
-1. **Agent emits trigger**: The agent completes its work and emits `<reroute>TRIGGER_NAME</reroute>`
-2. **Trigger matches**: The workflow checks if any `on` entry matches the trigger
-3. **Workflow pauses**: If the entry has an `ask` field, the workflow pauses (`awaiting_feedback: true`)
-4. **User sees question**: The question from `ask.question` is presented to the user
-5. **User responds**: The user selects one of the keys from `expected_responses` (e.g., "choose_plan")
-6. **Workflow routes**: The workflow routes to the agent specified in that response's `to` field
-7. **Context copied**: Any fields listed in `with` are copied from the agent context to the workflow context
+#### ask Config
 
-#### Example Configuration
+The `ask` config specifies what question to present to the user and which choices are available.
+
+```json
+"ask": {
+  "question": "Instruction for the LLM to generate a user-facing question (not shown directly)",
+  "expected_responses": [
+    {
+      "<choice_id>": {
+        "to": "target_agent",
+        "with": ["context_field"],
+        "value": "Human-readable label for this choice",
+        "input": {
+          "field_name": { "type": "string", "description": "Label/placeholder" }
+        }
+      }
+    }
+  ]
+}
+```
+
+**`ask` fields:**
+
+| Field | Description |
+|---|---|
+| `question` | Instruction passed to the LLM to generate the user-facing question text. This is rendered by the LLM — write it as a directive, not as the question itself |
+| `expected_responses` | List of choice group objects. Each object maps choice IDs to their routing config |
+
+**Choice entry fields** (values inside `expected_responses`):
+
+| Field | Type | Description |
+|---|---|---|
+| `to` | string | Target agent name, `"workflows[flow_id]"` to hand off to another workflow, or `"external[name]"` to trigger an external system |
+| `with` | string[] | Context field names to copy into the shared workflow context when this choice is selected. For `external[...]` targets, these are resolved to their actual values at elicitation time |
+| `value` | string | Human-readable label for this choice, forwarded to the client in the elicitation payload |
+| `each` | string | A context key pointing to a dynamic list — the engine expands one choice entry per item at runtime |
+| `input` | object | **Per-choice input field definitions.** A map of `field_name → JSON Schema` object. When present, the UI should show an input form for this field only when the user selects this choice. See [Per-Choice Input Fields](#per-choice-input-fields) |
+
+#### Example
 
 ```json
 {
   "agent": "find_plan",
-  "description": "Search for existing deployment plans matching the user's requirements",
+  "description": "Search for existing deployment plans",
   "reroute": [
     {
       "on": ["PLAN_FOUND"],
       "ask": {
-        "question": "I found a deployment plan that matches your requirements. Would you like to proceed with this plan, continue searching for alternatives, or abort the workflow?",
+        "question": "Present the found plan and ask whether to proceed, keep searching, or abort.",
         "expected_responses": [
           {
-            "choose_plan": {
-              "to": "execute_deployment",
-              "with": ["plan_id"]
-            }
-          },
+            "choose_plan": { "to": "execute_deployment", "with": ["plan_id"], "value": "Use this plan" },
+            "continue_searching": { "to": "find_alternative_plans", "value": "Keep searching" },
+            "abort": { "to": "cancel_workflow", "value": "Abort" }
+          }
+        ]
+      }
+    },
+    {
+      "on": ["NO_PLANS_FOUND"],
+      "ask": {
+        "question": "No plan found. Ask whether to create a new one.",
+        "expected_responses": [
           {
-            "continue_searching": {
-              "to": "find_alternative_plans",
-              "with": ["current_plan_id"]
-            }
-          },
+            "create": { "to": "create_plan", "value": "Create a new plan" },
+            "abort": { "to": "cancel_workflow", "value": "Abort" }
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+The agent emits the trigger after completing its tool call:
+
+```xml
+<return name="plan_id">deploy-123</return>
+<reroute>PLAN_FOUND</reroute>
+```
+
+#### Submitting User Feedback
+
+Feedback is submitted as part of the next chat message. The client wraps the selection in a `<user_feedback>` tag:
+
+```bash
+curl -X POST http://localhost:8000/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "<user_feedback>{\"action\":\"accept\",\"content\":{\"selection\":\"choose_plan\"}}</user_feedback>"}],
+    "use_workflow": true,
+    "workflow_execution_id": "exec-12345",
+    "stream": true
+  }'
+```
+
+For decline/cancel:
+
+```bash
+# content is just the keyword — no JSON wrapper needed
+"content": "<user_feedback>cancel</user_feedback>"
+```
+
+### Per-Choice Input Fields
+
+Some choices require the user to provide additional text alongside their selection — for example, sending back adjustment instructions when they choose to modify a previous step. The `input` key on a choice entry defines one or more typed input fields that the UI should display conditionally for that choice.
+
+#### Workflow Config
+
+```json
+{
+  "agent": "select_tools",
+  "description": "Select the appropriate integrations.",
+  "tools": ["select_tools"],
+  "returns": ["selected_tools"],
+  "reroute": [
+    {
+      "on": ["tool:select_tools:success"],
+      "ask": {
+        "question": "Present the selected integrations and ask whether to proceed or adjust.",
+        "expected_responses": [
           {
-            "abort": {
-              "to": "cancel_workflow",
-              "with": []
+            "proceed": {
+              "to": "create_plan",
+              "with": ["selected_tools"],
+              "value": "Proceed with these integrations"
+            },
+            "adjust": {
+              "to": "select_tools",
+              "value": "Adjust the selection",
+              "input": {
+                "feedback": {
+                  "type": "string",
+                  "description": "What would you like to adjust?"
+                }
+              }
             }
           }
         ]
@@ -631,87 +788,90 @@ When an agent's reroute configuration includes both `on` and `ask`:
 }
 ```
 
-> **Note**: The agent should emit `<reroute>PLAN_FOUND</reroute>` when it successfully finds a matching plan. This triggers the conditional routing behavior defined above.
+#### Elicitation Payload (SSE)
 
-#### Agent Response
-
-When the agent finds a plan, it emits the trigger defined in the `on` field:
-
-```xml
-<return name="plan_id">deploy-123</return>
-<return name="plan_details">Blue-green deployment with health checks</return>
-<reroute>PLAN_FOUND</reroute>
-```
-
-The `<reroute>PLAN_FOUND</reroute>` tag is what triggers the conditional routing.
-
-#### User Feedback
-
-The workflow pauses and the user submits feedback with the action they want:
-
-```bash
-# User chooses to use the plan
-curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
-  -d '{
-    "action": "choose_plan"
-  }'
-
-# User wants to continue searching
-curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
-  -d '{
-    "action": "continue_searching"
-  }'
-
-# User wants to abort
-curl -X POST http://localhost:8000/workflows/executions/{id}/feedback \
-  -d '{
-    "action": "abort"
-  }'
-```
-
-**Multiple Routing Options:**
-
-You can define multiple routing paths for different scenarios:
+The client receives the following inside the `<user_feedback_needed>` tag:
 
 ```json
 {
-  "reroute": [
-    {
-      "on": ["PLAN_FOUND"],
-      "ask": {
-        "question": "I found a deployment plan. Choose this plan, continue searching, or abort?",
-        "expected_responses": [
-          {"choose_plan": {"to": "select_run_mode", "with": ["plan_id"]}},
-          {"continue_searching": {"to": "find_alternative_plans", "with": ["current_plan_id"]}},
-          {"abort": {"to": "cancel_workflow"}}
-        ]
+  "message": "I found 5 integrations. Proceed or adjust?",
+  "requestedSchema": {
+    "type": "object",
+    "properties": {
+      "selection": {
+        "type": "string",
+        "enum": ["proceed", "adjust"],
+        "description": "Selected response id."
+      },
+      "value": {
+        "oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}]
+      },
+      "feedback": {
+        "type": "string",
+        "description": "What would you like to adjust?"
       }
     },
-    {
-      "on": ["MULTIPLE_PLANS_FOUND"],
-      "ask": {
-        "question": "I found 3 deployment plans. Which one should I use, or should I create a new one?",
-        "expected_responses": [
-          {"plan_1": {"to": "use_plan", "with": ["plan_id_1"]}},
-          {"plan_2": {"to": "use_plan", "with": ["plan_id_2"]}},
-          {"plan_3": {"to": "use_plan", "with": ["plan_id_3"]}},
-          {"create_new": {"to": "create_plan"}}
-        ]
-      }
-    },
-    {
-      "on": ["NO_PLANS_FOUND"],
-      "ask": {
-        "question": "No existing plans found. Should I create a new deployment plan?",
-        "expected_responses": [
-          {"yes": {"to": "create_plan"}},
-          {"no": {"to": "cancel_workflow"}}
-        ]
-      }
+    "required": ["selection"],
+    "additionalProperties": false
+  },
+  "meta": {
+    "expected_responses": [
+      {"id": "proceed", "to": "create_plan", "with": ["selected_tools"], "value": "Proceed with these integrations"},
+      {"id": "adjust", "to": "select_tools", "value": "Adjust the selection",
+       "input": {"feedback": {"type": "string", "description": "What would you like to adjust?"}}}
+    ],
+    "input_fields": {
+      "feedback": {"for_selection": "adjust"}
     }
-  ]
+  }
 }
 ```
+
+Key points for client rendering:
+
+- `requestedSchema.properties` contains all fields — both the `selection` enum and any per-choice input fields.
+- `meta.input_fields` maps each input field name to `{"for_selection": "<choice_id>"}`. Use this to show the field **only when that choice is selected**.
+- Input field definitions (type, description) come from `requestedSchema.properties["<field_name>"]`.
+- `required` only ever contains `"selection"` — input fields are always optional in the schema.
+
+#### Submitting Feedback With Input
+
+When the user selects `"adjust"` and fills in the input field:
+
+```
+<user_feedback>{"action":"accept","content":{"selection":"adjust","feedback":"Remove the Jira integration"}}</user_feedback>
+```
+
+When the user selects a choice that has no input fields (`"proceed"`):
+
+```
+<user_feedback>{"action":"accept","content":{"selection":"proceed"}}</user_feedback>
+```
+
+#### What the Engine Does With Input Values
+
+1. The input field value (`"Remove the Jira integration"`) is stored in the agent's context under its field name (`feedback`).
+2. It is also appended as a user message so the target agent's LLM sees it as natural language — allowing the agent to act on the user's instructions without special prompt engineering.
+3. The choice's `to` target (`select_tools`) is set as the next agent to run.
+
+#### Multiple Input Fields
+
+A single choice can define multiple input fields:
+
+```json
+"refine": {
+  "to": "search_agent",
+  "value": "Refine the search",
+  "input": {
+    "keywords": { "type": "string", "description": "New keywords to add" },
+    "exclude": { "type": "string", "description": "Terms to exclude" }
+  }
+}
+```
+
+Both `keywords` and `exclude` will appear in `requestedSchema.properties` and in `meta.input_fields` with `"for_selection": "refine"`. Their values are concatenated into a single user message.
+
+> **Note**: Field names must not collide with the reserved names `selection` or `value`. The engine will log a warning and skip any that do.
 
 ## Monitoring and Debugging
 

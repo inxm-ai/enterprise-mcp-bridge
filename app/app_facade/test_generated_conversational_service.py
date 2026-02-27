@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-import app.app_facade.generated_service as generated_service_module
 import app.app_facade.conversational_service as conversational_service_module
 from app.app_facade.generated_service import Actor, GeneratedUIService, Scope
 from app.app_facade.generated_storage import GeneratedUIStorage
