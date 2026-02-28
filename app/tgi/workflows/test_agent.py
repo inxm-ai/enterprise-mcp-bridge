@@ -1054,6 +1054,79 @@ async def test_passthrough_streams_before_completion(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_passthrough_content_starts_with_newline(tmp_path, monkeypatch):
+    """Each passthrough block should start with a newline character."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+
+    flow = {
+        "flow_id": "newline_flow",
+        "root_intent": "NEWLINE_TEST",
+        "agents": [
+            {
+                "agent": "reporter",
+                "description": "Report results",
+                "pass_through": "Show output to the user",
+                "tools": [],
+            }
+        ],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        responses={
+            "reporter": (
+                "Thinking... <passthrough>Hello world</passthrough> "
+                "more thinking <passthrough>Second block</passthrough>"
+            )
+        }
+    )
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        llm,
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Report")],
+        model="test-model",
+        stream=True,
+        use_workflow="newline_flow",
+        workflow_execution_id="exec-newline-passthrough",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+
+    contents = _extract_delta_contents(chunks)
+
+    # Find the chunks that contain passthrough content
+    hello_chunks = [c for c in contents if "Hello world" in c]
+    second_chunks = [c for c in contents if "Second block" in c]
+    assert hello_chunks, "Expected 'Hello world' passthrough content"
+    assert second_chunks, "Expected 'Second block' passthrough content"
+
+    # Each passthrough block starts with a newline, so the first emitted
+    # content for each block must begin with '\n'.
+    first_hello = hello_chunks[0]
+    first_second = second_chunks[0]
+    assert first_hello.startswith(
+        "\n"
+    ), f"Passthrough block should start with newline, got: {first_hello!r}"
+    assert first_second.startswith(
+        "\n"
+    ), f"Passthrough block should start with newline, got: {first_second!r}"
+
+
+@pytest.mark.asyncio
 async def test_passthrough_history_provided_to_progress_agent(tmp_path, monkeypatch):
     """Agent receives history of past passthroughs during tool progress updates."""
     from app.tgi.workflows.engine import WorkflowEngine
@@ -1330,7 +1403,7 @@ async def test_progress_updates_cancel_previous(tmp_path):
 
     progress_contents = _extract_progress_contents(state.events)
     # Only the latest progress message should be surfaced
-    assert progress_contents == ["second progress"]
+    assert progress_contents == ["second progress\n"]
 
 
 @pytest.mark.asyncio

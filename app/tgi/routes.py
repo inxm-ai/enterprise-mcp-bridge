@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -529,6 +530,9 @@ async def _handle_chat_completion(
                 yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
             else:
                 raise permission_exc
+        except* asyncio.CancelledError:
+            logger.info("[TGI] Stream cancelled (client disconnect or timeout)")
+            done_sent = True
         except* ElicitationRequiredError as exc_group:
             elicitation_exc = _select_group_exception(
                 exc_group, ElicitationRequiredError

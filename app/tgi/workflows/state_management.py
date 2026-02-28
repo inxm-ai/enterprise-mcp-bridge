@@ -60,14 +60,19 @@ def set_awaiting_feedback(state: WorkflowExecutionState) -> None:
     reset_feedback_pause_notice(state)
 
 
-def append_user_message(state: WorkflowExecutionState, message: Optional[str]) -> None:
+def append_user_message(
+    state: WorkflowExecutionState,
+    message: Optional[str],
+    *,
+    update_user_query: bool = True,
+) -> None:
     """Persist user messages so resumed runs have full history."""
     if not message:
         return
     history = state.context.setdefault("user_messages", [])
     if not history or history[-1] != message:
         history.append(message)
-    if not state.awaiting_feedback:
+    if update_user_query and not state.awaiting_feedback:
         state.context["user_query"] = message
 
 

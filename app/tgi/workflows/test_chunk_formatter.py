@@ -65,3 +65,20 @@ def test_error_metadata_preserved():
     payload = json.loads(_strip_prefix(chunk))
     assert payload["agentic"]["status"] == "error"
     assert payload["agentic"]["error"]["code"] == "agent_failed"
+
+
+def test_formatter_replaces_invalid_surrogates_for_utf8_sse():
+    state = WorkflowExecutionState.new("exec-surrogate", "flow-surrogate")
+    formatter = WorkflowChunkFormatter()
+
+    chunk = formatter.format_chunk(
+        state=state,
+        content="broken-\ud800-char",
+        status="in_progress",
+    )
+
+    # Streaming responses encode SSE chunks to UTF-8. This should never fail.
+    chunk.encode("utf-8")
+
+    payload = json.loads(_strip_prefix(chunk))
+    assert payload["choices"][0]["delta"]["content"] == "broken-?-char"

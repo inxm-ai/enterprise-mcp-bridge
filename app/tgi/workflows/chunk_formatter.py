@@ -115,7 +115,11 @@ class WorkflowChunkFormatter:
         if fmt == ChunkFormat.A2A:
             return self._to_a2a(payload, request_id or task_id, parts=parts)
 
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        serialized = json.dumps(payload, ensure_ascii=False)
+        # Guard SSE transport from malformed surrogate code points coming
+        # from model output. Without this, UTF-8 encoding can fail mid-stream.
+        safe_serialized = serialized.encode("utf-8", errors="replace").decode("utf-8")
+        return f"data: {safe_serialized}\n\n"
 
     def _to_a2a(
         self,

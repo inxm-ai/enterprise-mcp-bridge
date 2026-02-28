@@ -580,11 +580,15 @@ class ToolChatRunner:
                             )
 
                     # Emit tool result events for workflow engines to capture
-                    # Use raw_results to get unsummarized content for structured data extraction
+                    # Use raw_results to get unsummarized content for structured data extraction.
+                    # Prefer _raw_content (untruncated) over content so that
+                    # ToolResultCapture can resolve nested fields correctly.
                     if emit_tool_events:
                         for raw_result in raw_results:
                             tool_name = raw_result.get("name", "unknown")
-                            raw_content = raw_result.get("content", "")
+                            raw_content = raw_result.get(
+                                "_raw_content"
+                            ) or raw_result.get("content", "")
                             # Ensure content is a string for the event
                             if not isinstance(raw_content, str):
                                 try:

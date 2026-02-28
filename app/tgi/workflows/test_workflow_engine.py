@@ -5819,7 +5819,7 @@ async def test_feedback_payload_includes_per_choice_input_fields(tmp_path, monke
     stream = await engine.start_or_resume_workflow(
         StubSession(), request, None, None, None
     )
-    
+
     [chunk async for chunk in stream]
 
     state = store.load_execution(exec_id)
@@ -5917,8 +5917,13 @@ async def test_feedback_input_field_value_appended_as_user_message(
     engine = WorkflowEngine(WorkflowRepository(), store, llm)
 
     exec_id = "exec-input-resume"
+    original_query = "Generate a plan that every morning summarizes my commits from github in the inxm-ai org, and gives some hints what to do today"
+    adjustment = (
+        "Can you also add github issues, and microsoft teams so we can post the result?"
+    )
+
     request = ChatCompletionRequest(
-        messages=[Message(role=MessageRole.USER, content="Run")],
+        messages=[Message(role=MessageRole.USER, content=original_query)],
         model="test-model",
         stream=True,
         use_workflow="input_resume_flow",
@@ -5938,7 +5943,7 @@ async def test_feedback_input_field_value_appended_as_user_message(
         messages=[
             Message(
                 role=MessageRole.USER,
-                content='<user_feedback>{"action":"accept","content":{"selection":"adjust","feedback":"Remove the Jira integration"}}</user_feedback>',
+                content=f'<user_feedback>{{"action":"accept","content":{{"selection":"adjust","feedback":"{adjustment}"}}}}</user_feedback>',
             )
         ],
         model="test-model",
@@ -5949,19 +5954,348 @@ async def test_feedback_input_field_value_appended_as_user_message(
     stream = await engine.start_or_resume_workflow(
         StubSession(), resume_request, None, None, None
     )
-    _ = [chunk async for chunk in stream]
+    resume_chunks = [chunk async for chunk in stream]
+    resume_payload = "\n".join(resume_chunks)
 
     state = store.load_execution(exec_id)
+    assert "Reroute target 'select_tools' was already completed" not in resume_payload
+    assert state.completed is True
+    assert state.awaiting_feedback is False
+    assert "create_plan" in llm.calls
+    assert llm.calls.count("select_tools") == 2
     # The input text should have been appended to user_messages
     user_messages = state.context.get("user_messages", [])
     assert any(
-        "Remove the Jira integration" in msg for msg in user_messages
+        adjustment in msg for msg in user_messages
     ), f"Expected input text in user_messages, got: {user_messages}"
+    # user_query should preserve original intent and include adjustment details
+    user_query = state.context.get("user_query", "")
+    assert original_query in user_query
+    assert f"Adjustment: {adjustment}" in user_query
+    assert user_query != adjustment
 
     # The select_tools agent should have been rerouted back to itself
     # and its feedback value stored in the agent context
     agent_ctx = state.context["agents"]["select_tools"]
-    assert agent_ctx.get("feedback") == "Remove the Jira integration"
+    assert agent_ctx.get("feedback") == adjustment
+
+    select_calls = [idx for idx, call in enumerate(llm.calls) if call == "select_tools"]
+    assert len(select_calls) == 2
+    rerun_prompt = llm.user_messages[select_calls[1]]
+    assert original_query in rerun_prompt
+    assert f"Adjustment: {adjustment}" in rerun_prompt
+
+
+@pytest.mark.asyncio
+async def test_feedback_adjust_self_reroute_preserves_original_intent(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "adjust_self_flow",
+        "root_intent": "ADJUST_SELF_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    },
+                                    "adjust": {
+                                        "to": "select_tools",
+                                        "value": "Adjust",
+                                        "input": {
+                                            "feedback": {
+                                                "type": "string",
+                                                "description": "What to adjust?",
+                                            }
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create plan.",
+                "depends_on": ["select_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "adjust_self_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_tools": ["<reroute>ASK_USER</reroute>", "Adjusted selection."],
+            "create_plan": "Plan created.",
+        },
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    original_query = "Generate a plan that every morning summarizes my commits from github in the inxm-ai org, and gives some hints what to do today"
+    adjustment = (
+        "Can you also add github issues, and microsoft teams so we can post the result?"
+    )
+
+    exec_id = "exec-adjust-self"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content=original_query)],
+        model="test-model",
+        stream=True,
+        use_workflow="adjust_self_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content=f'<user_feedback>{{"action":"accept","content":{{"selection":"adjust","feedback":"{adjustment}"}}}}</user_feedback>',
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="adjust_self_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    state = store.load_execution(exec_id)
+    assert state.completed is True
+    user_query = state.context.get("user_query", "")
+    assert original_query in user_query
+    assert f"Adjustment: {adjustment}" in user_query
+    assert llm.calls.count("select_tools") == 2
+
+    select_calls = [idx for idx, call in enumerate(llm.calls) if call == "select_tools"]
+    rerun_prompt = llm.user_messages[select_calls[1]]
+    assert original_query in rerun_prompt
+    assert f"Adjustment: {adjustment}" in rerun_prompt
+
+
+@pytest.mark.asyncio
+async def test_feedback_input_field_non_self_reroute_keeps_original_user_query(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "adjust_other_flow",
+        "root_intent": "ADJUST_OTHER_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {"to": "finalize"},
+                                    "adjust": {
+                                        "to": "review_tools",
+                                        "value": "Adjust",
+                                        "input": {
+                                            "feedback": {
+                                                "type": "string",
+                                                "description": "What to adjust?",
+                                            }
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "review_tools",
+                "description": "Review selected tools.",
+                "depends_on": ["select_tools"],
+            },
+            {
+                "agent": "finalize",
+                "description": "Finalize the plan.",
+                "depends_on": ["review_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "adjust_other_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_tools": "<reroute>ASK_USER</reroute>",
+            "review_tools": "Reviewed.",
+            "finalize": "Done.",
+        },
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    original_query = "Generate a plan that every morning summarizes my commits."
+    adjustment = "Also include github issues and microsoft teams posting."
+
+    exec_id = "exec-adjust-other"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content=original_query)],
+        model="test-model",
+        stream=True,
+        use_workflow="adjust_other_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content=f'<user_feedback>{{"action":"accept","content":{{"selection":"adjust","feedback":"{adjustment}"}}}}</user_feedback>',
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="adjust_other_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    _ = [chunk async for chunk in resume_stream]
+
+    state = store.load_execution(exec_id)
+    assert state.completed is True
+    assert llm.calls.count("select_tools") == 1
+    assert original_query == state.context.get("user_query")
+
+    user_messages = state.context.get("user_messages", [])
+    assert any(adjustment in msg for msg in user_messages)
+
+
+@pytest.mark.asyncio
+async def test_feedback_self_reroute_function_syntax_reruns_agent(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "self_reroute_feedback_flow",
+        "root_intent": "SELF_REROUTE_FEEDBACK_TEST",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    },
+                                    "adjust": {
+                                        "to": "select_tools",
+                                        "value": "Adjust",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "create_plan",
+                "description": "Create the plan.",
+                "depends_on": ["select_tools"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "self_reroute_feedback_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "select_tools": [
+                "<reroute>ASK_USER</reroute>",
+                "Adjusted the selection.",
+            ],
+            "create_plan": "Plan created.",
+        },
+        ask_responses={"feedback_question": "Proceed or adjust?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-self-reroute-fn"
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Run")],
+        model="test-model",
+        stream=True,
+        use_workflow="self_reroute_feedback_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    state = store.load_execution(exec_id)
+    assert state.awaiting_feedback is True
+
+    resume_request = ChatCompletionRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content="<user_feedback>select_tools()</user_feedback>",
+            )
+        ],
+        model="test-model",
+        stream=True,
+        use_workflow="self_reroute_feedback_flow",
+        workflow_execution_id=exec_id,
+    )
+    resume_stream = await engine.start_or_resume_workflow(
+        StubSession(), resume_request, None, None, None
+    )
+    resume_chunks = [chunk async for chunk in resume_stream]
+    resume_payload = "\n".join(resume_chunks)
+
+    final_state = store.load_execution(exec_id)
+    assert "Reroute target 'select_tools' was already completed" not in resume_payload
+    assert final_state.completed is True
+    assert final_state.awaiting_feedback is False
+    assert llm.calls.count("select_tools") == 2
+    assert "create_plan" in llm.calls
 
 
 @pytest.mark.asyncio

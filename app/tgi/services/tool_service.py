@@ -597,6 +597,11 @@ class ToolService:
                         separators=(",", ":"),
                     )
 
+                # Preserve the original content before any truncation so
+                # that workflow engines can capture structured data from the
+                # full result (e.g. ToolResultCapture / ArgInjector).
+                raw_content = content
+
                 if (
                     isinstance(content, str)
                     and len(content) > GENERATED_UI_TOOL_TEXT_CAP
@@ -637,12 +642,16 @@ class ToolService:
                 if span:
                     span.set_attribute("tool.success", True)
 
-                return {
+                result_dict = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": tool_call.function.name,
                     "content": content,
                 }
+                # Attach the untruncated content only when truncation happened
+                if raw_content is not content:
+                    result_dict["_raw_content"] = raw_content
+                return result_dict
 
             except Exception as e:
                 error_msg = f"Error executing tool: {type(e).__name__}"

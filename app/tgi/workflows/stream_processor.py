@@ -208,7 +208,7 @@ async def process_agent_stream(
                                     start_idx + len(START_TAG) :
                                 ]
                                 inside_passthrough = True
-                                passthrough_pending = ""
+                                passthrough_pending = "\n"
                                 passthrough_emitted_len = 0
                         else:
                             yield record_event_fn(state, parsed.content)
@@ -237,6 +237,8 @@ async def process_agent_stream(
     except Exception:
         # Re-raise; the caller handles ArgResolutionError etc.
         raise
+    finally:
+        await _cancel_progress()
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +405,8 @@ async def handle_tool_progress(
                 visible = tag_parser.strip_tags(visible).strip()
 
             if visible:
+                if not visible.endswith("\n"):
+                    visible += "\n"
                 yield record_event_fn(
                     state,
                     visible,

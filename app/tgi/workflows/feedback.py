@@ -920,6 +920,38 @@ class FeedbackService:
                     agent_entry.pop("awaiting_feedback", None)
                     agent_entry["completed"] = False
                     agent_entry["had_feedback"] = True
+                    # For structured self-reroutes with input fields (e.g. "adjust"),
+                    # preserve the original intent and append the adjustment text.
+                    reroute_target = feedback_action.get("target")
+                    input_fields = feedback_action.get("input_fields")
+                    assignments = feedback_action.get("assignments")
+                    if (
+                        reroute_target == state.current_agent
+                        and isinstance(input_fields, dict)
+                        and isinstance(assignments, dict)
+                    ):
+                        input_parts = [
+                            str(assignments[field_name])
+                            for field_name in input_fields
+                            if assignments.get(field_name) is not None
+                        ]
+                        if input_parts:
+                            base_query = state.context.get("user_query")
+                            if not base_query:
+                                messages = state.context.get("user_messages") or []
+                                if isinstance(messages, list) and len(messages) >= 2:
+                                    base_query = str(messages[-2])
+                                elif messages:
+                                    base_query = str(messages[-1])
+                            adjustment = " ".join(input_parts).strip()
+                            if base_query:
+                                state.context["user_query"] = (
+                                    f"{base_query}\nAdjustment: {adjustment}"
+                                )
+                            else:
+                                state.context["user_query"] = (
+                                    f"Adjustment: {adjustment}"
+                                )
                     # Ensure the feedback-processing path runs before other agents
                     state.context["_resume_agent"] = state.current_agent
                     logger.info(

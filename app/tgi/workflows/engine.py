@@ -839,12 +839,25 @@ class WorkflowEngine:
                 agent_context,
                 state.context,
                 append_user_message_fn=lambda msg: state_management.append_user_message(
-                    state, msg
+                    state, msg, update_user_query=False
                 ),
             )
-            self.state_store.save_state(state)
-            yield result
-            return
+            is_self_reroute = (
+                isinstance(result, dict)
+                and result.get("status") == "reroute"
+                and result.get("target") == agent_def.agent
+            )
+            if is_self_reroute:
+                logger.info(
+                    "[_execute_agent] Agent '%s' received feedback self-reroute; continuing execution in-place.",
+                    agent_def.agent,
+                )
+                agent_context["completed"] = False
+                self.state_store.save_state(state)
+            else:
+                self.state_store.save_state(state)
+                yield result
+                return
 
         system_prompt = await self._resolve_prompt(session, agent_def)
 
