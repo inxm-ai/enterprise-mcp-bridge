@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.tgi.workflows.dict_utils import get_path_value, set_nested_value
@@ -17,6 +18,19 @@ from app.tgi.workflows.lazy_context import LazyContextProvider
 from app.tgi.workflows.tag_parser import extract_passthrough_content, strip_tags
 
 logger = logging.getLogger("uvicorn.error")
+
+NESTED_PLACEHOLDER = "<nested too deep>"
+
+
+@dataclass
+class ContextCompressionReport:
+    """Report for deciding whether helper calls should use lazy context loading."""
+
+    serialized_size: int
+    placeholder_count: int
+    compaction_marker_count: int
+    lossy: bool
+    should_use_lazy_context: bool
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +215,45 @@ def compact_large_structure(
     Recursively compact large data structures while preserving type/schema.
     """
     if current_depth >= max_depth:
-        return "<nested too deep>"
+        if isinstance(obj, str):
+            if len(obj) > 200:
+                return obj[:200] + f"... ({len(obj)} chars total)"
+            return obj
+        if isinstance(obj, (int, float, bool)) or obj is None:
+            return obj
+        if isinstance(obj, dict):
+            scalar_keys = [
+                key
+                for key, value in obj.items()
+                if isinstance(value, (str, int, float, bool)) or value is None
+            ]
+            sampled = scalar_keys[:max_items]
+            scalar_sample = {
+                key: compact_large_structure(
+                    obj[key], max_items, max_depth, current_depth + 1
+                )
+                for key in sampled
+            }
+            payload: dict[str, Any] = {
+                "_summary": f"Dict with {len(obj)} keys (depth-limited)"
+            }
+            if scalar_sample:
+                payload["_scalar_sample"] = scalar_sample
+            omitted = len(obj) - len(sampled)
+            if omitted > 0:
+                payload["_omitted_keys"] = omitted
+            return payload
+        if isinstance(obj, list):
+            scalar_sample = [
+                compact_large_structure(item, max_items, max_depth, current_depth + 1)
+                for item in obj
+                if isinstance(item, (str, int, float, bool)) or item is None
+            ][:max_items]
+            payload = {"_summary": f"Array with {len(obj)} items (depth-limited)"}
+            if scalar_sample:
+                payload["_scalar_sample"] = scalar_sample
+            return payload
+        return NESTED_PLACEHOLDER
 
     if isinstance(obj, dict):
         if len(obj) <= max_items:
@@ -241,6 +293,63 @@ def compact_large_structure(
         return obj
 
     return obj
+
+
+def _count_placeholders(obj: Any) -> int:
+    if isinstance(obj, str):
+        return 1 if obj == NESTED_PLACEHOLDER else 0
+    if isinstance(obj, list):
+        return sum(_count_placeholders(item) for item in obj)
+    if isinstance(obj, dict):
+        return sum(_count_placeholders(value) for value in obj.values())
+    return 0
+
+
+def _count_compaction_markers(obj: Any) -> int:
+    if isinstance(obj, list):
+        return sum(_count_compaction_markers(item) for item in obj)
+    if isinstance(obj, dict):
+        local = 0
+        if "_summary" in obj:
+            local += 1
+        if obj.get("_compacted") is True:
+            local += 1
+        return local + sum(_count_compaction_markers(value) for value in obj.values())
+    return 0
+
+
+def analyze_context_compression(
+    original_context: Any,
+    compacted_context: Any,
+    *,
+    size_threshold: int = 12000,
+    placeholder_threshold: int = 6,
+    marker_threshold: int = 4,
+) -> ContextCompressionReport:
+    """Compute size/loss metrics for deciding lazy-context helper usage."""
+    try:
+        serialized_size = len(
+            json.dumps(original_context, ensure_ascii=False, default=str).encode(
+                "utf-8"
+            )
+        )
+    except Exception:
+        serialized_size = 0
+    placeholder_count = _count_placeholders(compacted_context)
+    marker_count = _count_compaction_markers(compacted_context)
+    lossy = placeholder_count > 0 or marker_count > 0
+    should_use_lazy = (
+        serialized_size > size_threshold
+        or placeholder_count >= placeholder_threshold
+        or marker_count >= marker_threshold
+    )
+    return ContextCompressionReport(
+        serialized_size=serialized_size,
+        placeholder_count=placeholder_count,
+        compaction_marker_count=marker_count,
+        lossy=lossy,
+        should_use_lazy_context=should_use_lazy,
+    )
 
 
 def summarize_tool_result(result_json: str, max_size: int = 500) -> str:

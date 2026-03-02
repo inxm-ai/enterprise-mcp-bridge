@@ -12,18 +12,13 @@ import logging
 import re
 from typing import Any, Optional
 
-from app.tgi.workflows.context_builder import (
-    create_lazy_context_tool,
-    handle_lazy_context_tool,
-    summarize_tool_result,
-)
+from app.tgi.workflows.contextual_llm_helper import run_context_aware_llm_helper
 from app.tgi.workflows.dict_utils import (
     get_path_value,
     path_exists,
     set_path_value,
 )
 from app.tgi.workflows.error_analysis import tool_result_has_error
-from app.tgi.workflows.lazy_context import LazyContextProvider
 from app.tgi.workflows.tag_parser import (
     extract_next_agent,
     extract_run_tag,
@@ -586,150 +581,25 @@ class RoutingService:
         routing_tools: Optional[list] = None,
         execution_id: Optional[str] = None,
     ) -> str:
-        # Avoid circular imports – these models are lightweight dataclasses
-        from app.tgi.models import ChatCompletionRequest, Message, MessageRole
-        from app.tgi.protocols.chunk_reader import chunk_reader
-        from app.vars import TGI_MODEL_NAME
-
         routing_prompt = await self.resolve_routing_prompt(session, workflow_def)
-
-        tools_for_routing = list(routing_tools or [])
-        lazy_context_tool = create_lazy_context_tool()
-        tools_for_routing.append(lazy_context_tool)
-
-        context_provider = (
-            LazyContextProvider(self.state_store, execution_id, logger)
-            if execution_id
-            else None
+        helper_result = await run_context_aware_llm_helper(
+            llm_client=self.llm_client,
+            base_request=request,
+            access_token=access_token,
+            span=span,
+            system_prompt=routing_prompt,
+            user_payload=payload,
+            state_store=self.state_store,
+            execution_id=execution_id,
+            additional_tools=routing_tools,
+            max_turns=2,
         )
-
-        routing_request = ChatCompletionRequest(
-            messages=[
-                Message(role=MessageRole.SYSTEM, content=routing_prompt),
-                Message(role=MessageRole.USER, content=payload),
-            ],
-            model=request.model or TGI_MODEL_NAME,
-            stream=True,
-            tools=tools_for_routing,
-        )
-        text = ""
-        stream = self.llm_client.stream_completion(
-            routing_request, access_token or "", span
-        )
-
-        messages_to_append: list[dict[str, Any]] = []
-        tool_call_id_overrides: dict[int, str] = {}
-        tool_call_chunks: dict[int, dict] = {}
-
-        async with chunk_reader(stream, enable_tracing=False) as reader:
-            async for parsed in reader.as_parsed():
-                if parsed.is_done:
-                    break
-                if parsed.content:
-                    text += parsed.content
-
-                if context_provider and parsed.tool_calls:
-                    for tool_call in parsed.tool_calls:
-                        if (
-                            tool_call.get("function", {}).get("name")
-                            == "get_workflow_context"
-                        ):
-                            try:
-                                tool_call_index = tool_call.get("index")
-                                if tool_call_index is not None:
-                                    try:
-                                        tool_call_index = int(tool_call_index)
-                                    except (TypeError, ValueError):
-                                        tool_call_index = None
-                                tool_call_id = tool_call.get("id")
-                                if not tool_call_id:
-                                    tool_call_id = f"call_{len(messages_to_append)}"
-                                    if isinstance(tool_call_index, int):
-                                        tool_call_id_overrides[tool_call_index] = (
-                                            tool_call_id
-                                        )
-                                tool_input = json.loads(
-                                    tool_call.get("function", {}).get("arguments", "{}")
-                                )
-                                result = await handle_lazy_context_tool(
-                                    context_provider, tool_input
-                                )
-                                logger.debug(
-                                    "[RoutingService] Routing agent used lazy context tool: "
-                                    "%s",
-                                    tool_input.get("operation"),
-                                )
-                                summary = summarize_tool_result(result)
-                                messages_to_append.append(
-                                    {
-                                        "tool_call_id": tool_call_id,
-                                        "tool_name": "get_workflow_context",
-                                        "result": summary,
-                                        "full_result": result,
-                                    }
-                                )
-                            except Exception as exc:
-                                logger.debug(
-                                    "[RoutingService] Error processing tool call: %s",
-                                    exc,
-                                )
-            tool_call_chunks = reader.get_accumulated_tool_calls()
-
-        if messages_to_append and text.strip():
-            tool_calls_for_message = []
-            for index in sorted(tool_call_chunks):
-                chunk_data = tool_call_chunks.get(index) or {}
-                name = chunk_data.get("name")
-                if not name:
-                    continue
-                args = chunk_data.get("arguments")
-                if not isinstance(args, str):
-                    try:
-                        args = json.dumps(
-                            args, ensure_ascii=False, separators=(",", ":")
-                        )
-                    except Exception:
-                        args = "" if args is None else str(args)
-                tool_call_id = chunk_data.get("id") or tool_call_id_overrides.get(index)
-                if not tool_call_id:
-                    tool_call_id = f"call_{index}"
-                tool_calls_for_message.append(
-                    {
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": args or ""},
-                    }
-                )
-            routing_request.messages.append(
-                Message(
-                    role=MessageRole.ASSISTANT,
-                    content=text,
-                    tool_calls=tool_calls_for_message or None,
-                )
+        if helper_result.stopped_by_max_turns:
+            logger.debug(
+                "[RoutingService] Context-aware routing helper reached max turns (%s).",
+                helper_result.turns,
             )
-
-            for tool_result in messages_to_append:
-                routing_request.messages.append(
-                    Message(
-                        role=MessageRole.TOOL,
-                        content=tool_result["result"],
-                        name=tool_result["tool_name"],
-                        tool_call_id=tool_result.get("tool_call_id"),
-                    )
-                )
-
-            text = ""
-            stream = self.llm_client.stream_completion(
-                routing_request, access_token or "", span
-            )
-            async with chunk_reader(stream, enable_tracing=False) as reader:
-                async for parsed in reader.as_parsed():
-                    if parsed.is_done:
-                        break
-                    if parsed.content:
-                        text += parsed.content
-
-        return text.strip()
+        return helper_result.text.strip()
 
 
 async def evaluate_condition(

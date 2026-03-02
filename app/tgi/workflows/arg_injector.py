@@ -300,9 +300,6 @@ class ToolResultCapture:
         except (json.JSONDecodeError, TypeError):
             return context
 
-        if not isinstance(data, dict):
-            return context
-
         # Ensure agent entry exists
         if "agents" not in context:
             context["agents"] = {}
@@ -310,6 +307,29 @@ class ToolResultCapture:
             context["agents"][self.agent_name] = {}
 
         agent_data = context["agents"][self.agent_name]
+
+        matching_specs = [
+            spec
+            for spec in self.return_specs
+            if not (spec.from_tool and tool_name and spec.from_tool != tool_name)
+        ]
+
+        if not isinstance(data, dict):
+            # Support non-object payloads (e.g. top-level arrays) when exactly
+            # one return spec applies. Multi-spec payloads remain ambiguous.
+            if len(matching_specs) != 1:
+                return context
+            only_spec = matching_specs[0]
+            store_path = only_spec.as_name or only_spec.field
+            if "." in store_path:
+                self._set_nested_value(agent_data, store_path, data)
+            else:
+                agent_data[store_path] = data
+            logger.debug(
+                f"ToolResultCapture: Stored {self.agent_name}.{store_path}={data!r} "
+                f"(from tool={tool_name or 'any'}, non-object payload)"
+            )
+            return context
 
         for spec in self.return_specs:
             # Skip if this spec is for a different tool

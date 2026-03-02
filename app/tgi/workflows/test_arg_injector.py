@@ -189,14 +189,23 @@ class TestToolResultCapture:
 
         assert result == {"agents": {"agent": {"existing": "value"}}}
 
-    def test_capture_handles_non_dict_json(self):
-        """Return context unchanged when JSON is not an object."""
+    def test_capture_handles_non_dict_json_single_spec(self):
+        """Capture non-object payloads when exactly one return spec applies."""
         capture = ToolResultCapture("agent", ["field"])
         context = {"agents": {}}
 
         result = capture.capture("[1, 2, 3]", context)
 
-        assert result == {"agents": {}}
+        assert result["agents"]["agent"]["field"] == [1, 2, 3]
+
+    def test_capture_handles_non_dict_json_multi_spec_noop(self):
+        """Do not capture non-object payloads when multiple return specs match."""
+        capture = ToolResultCapture("agent", ["field_a", "field_b"])
+        context = {"agents": {}}
+
+        result = capture.capture("[1, 2, 3]", context)
+
+        assert result == {"agents": {"agent": {}}}
 
     def test_capture_ignores_missing_fields(self):
         """Only capture fields that exist in the result."""
@@ -403,6 +412,17 @@ class TestToolResultCaptureWithToolFilter:
         capture.capture(tool_result, context, tool_name="any_tool")
 
         assert context["agents"]["agent"]["result"] == "captured"
+
+    def test_capture_non_object_with_filter_single_spec(self):
+        """Capture top-level non-object payloads when one filtered spec matches."""
+        capture = ToolResultCapture(
+            "agent", [{"field": "selected_tools", "from": "select_tools"}]
+        )
+        context = {"agents": {}}
+
+        capture.capture('["tool_a","tool_b"]', context, tool_name="select_tools")
+
+        assert context["agents"]["agent"]["selected_tools"] == ["tool_a", "tool_b"]
 
     def test_capture_with_alias(self):
         """Store captured value under an alias using 'as'."""

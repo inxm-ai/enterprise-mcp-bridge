@@ -5848,6 +5848,237 @@ async def test_feedback_payload_includes_per_choice_input_fields(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_feedback_question_uses_context_helper_for_large_lossy_context(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "feedback_helper_flow",
+        "root_intent": "FEEDBACK_HELPER",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Present selected integrations and ask whether to proceed.",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "feedback_helper_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class HelperFeedbackLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({"select_tools": "<reroute>ASK_USER</reroute>"})
+            self.helper_calls = 0
+
+        def stream_completion(self, request, access_token, span):
+            system_prompt = (
+                request.messages[0].content
+                if request.messages and request.messages[0].content
+                else ""
+            )
+            if "USER_FEEDBACK_QUESTION" in system_prompt:
+                self.helper_calls += 1
+                has_tool_message = any(
+                    msg.role == MessageRole.TOOL for msg in request.messages
+                )
+                if not has_tool_message:
+
+                    async def _gen_tool():
+                        payload = {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "content": "Need exact integration details.",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_feedback_1",
+                                                "function": {
+                                                    "name": "get_workflow_context",
+                                                    "arguments": json.dumps(
+                                                        {
+                                                            "operation": "get_value",
+                                                            "path": "agents.select_tools.selected_tools",
+                                                        }
+                                                    ),
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    "index": 0,
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    return _gen_tool()
+
+                tool_payload = ""
+                for message in request.messages:
+                    if message.role == MessageRole.TOOL:
+                        tool_payload = message.content or ""
+                        break
+                integration_name = "integration"
+                try:
+                    parsed = json.loads(tool_payload)
+                    data = parsed.get("data")
+                    if isinstance(data, list) and data and isinstance(data[0], dict):
+                        integration_name = (
+                            data[0].get("tool_name")
+                            or data[0].get("name")
+                            or integration_name
+                        )
+                except Exception:
+                    pass
+
+                async def _gen_final():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": (
+                                        f"I found these integrations, including {integration_name}. "
+                                        "Proceed with them?"
+                                    )
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_final()
+
+            return super().stream_completion(request, access_token, span)
+
+    llm = HelperFeedbackLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-feedback-helper"
+    seeded_state = store.get_or_create(exec_id, "feedback_helper_flow")
+    seeded_state.context["large_blob"] = "x" * 13000
+    seeded_state.context["agents"]["select_tools"] = {
+        "selected_tools": [
+            {
+                "tool_name": "list_commits",
+                "description": "Get repository commits.",
+            },
+            {
+                "tool_name": "search_repositories",
+                "description": "Find repositories.",
+            },
+        ],
+        "content": "",
+        "completed": False,
+    }
+    store.save_state(seeded_state)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Create workflow")],
+        model="test-model",
+        stream=True,
+        use_workflow="feedback_helper_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+    _ = "".join(chunks)
+
+    final_state = store.load_execution(exec_id)
+    feedback_message = (
+        final_state.context["agents"]["select_tools"]
+        .get("elicitation_spec", {})
+        .get("message", "")
+    )
+    assert "I found these integrations" in feedback_message
+    assert llm.helper_calls >= 2
+    assert not any(
+        "USER_FEEDBACK_QUESTION" in (call.get("base_prompt") or "")
+        for call in llm.ask_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_feedback_question_uses_fast_ask_for_small_context(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "feedback_small_flow",
+        "root_intent": "FEEDBACK_SMALL",
+        "agents": [
+            {
+                "agent": "select_tools",
+                "description": "Select tools.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Proceed or adjust?",
+                            "expected_responses": [
+                                {
+                                    "proceed": {
+                                        "to": "create_plan",
+                                        "with": ["selected_tools"],
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "feedback_small_flow", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {"select_tools": "<reroute>ASK_USER</reroute>"},
+        ask_responses={"feedback_question": "Proceed with these integrations?"},
+    )
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Create workflow")],
+        model="test-model",
+        stream=True,
+        use_workflow="feedback_small_flow",
+        workflow_execution_id="exec-feedback-small",
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    assert any(
+        "USER_FEEDBACK_QUESTION" in (call.get("base_prompt") or "")
+        for call in llm.ask_calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_feedback_input_field_value_appended_as_user_message(
     tmp_path, monkeypatch
 ):

@@ -93,7 +93,10 @@ class WorkflowEngine:
             message_summarization_service=None,
         )
         self.max_parallel_agents = max(1, int(WORKFLOW_MAX_PARALLEL_AGENTS))
-        self.feedback_service = FeedbackService(llm_client=self.llm_client)
+        self.feedback_service = FeedbackService(
+            llm_client=self.llm_client,
+            state_store=self.state_store,
+        )
         self.routing_service = RoutingService(
             llm_client=self.llm_client,
             prompt_service=self.prompt_service,

@@ -128,6 +128,23 @@ async def finalize_agent_result(
             )
             feedback_needed = False
 
+    # Fallback: routing-only agents with an ASK_USER reroute entry should
+    # always trigger it, even when the LLM emitted neither <reroute> nor
+    # <user_feedback_needed> tags.
+    if (
+        not reroute_reason
+        and not feedback_needed
+        and state_management.is_routing_only_agent(agent_def)
+        and reroute.match_reroute_entry(agent_def.reroute, "ASK_USER")
+    ):
+        reroute_reason = "ASK_USER"
+        reroute_source = "engine"
+        logger.info(
+            "[WorkflowEngine] Routing-only agent '%s' did not emit reroute or "
+            "feedback tags; auto-triggering ASK_USER.",
+            agent_def.agent,
+        )
+
     if reroute_reason:
         agent_context["reroute_reason"] = reroute_reason
 
@@ -349,6 +366,7 @@ async def _handle_reroute(
             request,
             access_token,
             span,
+            execution_id=state.execution_id,
         )
         choices = feedback_mod.build_feedback_choices(
             ask_cfg, agent_context, state.context

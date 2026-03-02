@@ -14,9 +14,12 @@ from typing import Any, Callable, Optional
 
 from app.elicitation import canonicalize_elicitation_payload, parse_user_feedback_tag
 from app.tgi.workflows.context_builder import (
+    ContextCompressionReport,
+    analyze_context_compression,
     compact_large_structure,
     create_context_summary,
 )
+from app.tgi.workflows.contextual_llm_helper import run_context_aware_llm_helper
 from app.tgi.workflows.dict_utils import get_path_value
 from app.tgi.workflows.models import WorkflowExecutionState
 from app.tgi.workflows.reroute import (
@@ -680,8 +683,82 @@ class FeedbackService:
     receiving feedback.
     """
 
-    def __init__(self, llm_client: Any):
+    SIZE_THRESHOLD = 12000
+    PLACEHOLDER_THRESHOLD = 6
+    MARKER_THRESHOLD = 4
+
+    def __init__(self, llm_client: Any, state_store: Any = None):
         self.llm_client = llm_client
+        self.state_store = state_store
+
+    def _compression_report(
+        self, *, original: Any, compacted: Any
+    ) -> ContextCompressionReport:
+        return analyze_context_compression(
+            original,
+            compacted,
+            size_threshold=self.SIZE_THRESHOLD,
+            placeholder_threshold=self.PLACEHOLDER_THRESHOLD,
+            marker_threshold=self.MARKER_THRESHOLD,
+        )
+
+    async def _ask_with_context_budget(
+        self,
+        *,
+        base_prompt: str,
+        base_request: Any,
+        question: str,
+        access_token: Optional[str],
+        span: Any,
+        context_payload: Any,
+        execution_id: Optional[str],
+    ) -> str:
+        compacted = compact_large_structure(context_payload, max_items=4, max_depth=4)
+        report = self._compression_report(original=context_payload, compacted=compacted)
+
+        use_subagent = bool(
+            execution_id
+            and self.state_store is not None
+            and report.should_use_lazy_context
+        )
+        if use_subagent:
+            helper_prompt = (
+                f"{base_prompt}\n"
+                "If context summaries are insufficient, use get_workflow_context to fetch exact data.\n"
+                "Never invent details that are not present in context."
+            )
+            helper_result = await run_context_aware_llm_helper(
+                llm_client=self.llm_client,
+                base_request=base_request,
+                access_token=access_token,
+                span=span,
+                system_prompt=helper_prompt,
+                user_payload=question,
+                state_store=self.state_store,
+                execution_id=execution_id,
+                max_turns=2,
+            )
+            response = (helper_result.text or "").strip()
+            if response:
+                logger.info(
+                    "[FeedbackService] Used context-aware helper for prompt. "
+                    "size=%d placeholders=%d markers=%d turns=%d tools=%s",
+                    report.serialized_size,
+                    report.placeholder_count,
+                    report.compaction_marker_count,
+                    helper_result.turns,
+                    helper_result.used_tools,
+                )
+                return response
+
+        response = await self.llm_client.ask(
+            base_prompt=base_prompt,
+            base_request=base_request,
+            question=question,
+            access_token=access_token or "",
+            outer_span=span,
+        )
+        return (response or "").strip()
 
     async def render_feedback_question(
         self,
@@ -691,6 +768,7 @@ class FeedbackService:
         request: Any,
         access_token: Optional[str],
         span,
+        execution_id: Optional[str] = None,
     ) -> str:
         instruction = (ask_config.get("question") or "").strip()
         if not instruction:
@@ -705,7 +783,20 @@ class FeedbackService:
         )
         context_summary_str = create_context_summary(shared_context, scoped=True)
         agent_snapshot = compact_large_structure(
-            agent_context, max_items=4, max_depth=3
+            agent_context, max_items=4, max_depth=4
+        )
+        render_context = {
+            "shared_context": shared_context,
+            "agent_context": agent_context,
+        }
+        render_snapshot = compact_large_structure(
+            render_context,
+            max_items=4,
+            max_depth=4,
+        )
+        compression = self._compression_report(
+            original=render_context,
+            compacted=render_snapshot,
         )
         plan_keys = [
             key
@@ -724,6 +815,10 @@ class FeedbackService:
             f"Instruction: {instruction}",
             f"Context summary: {context_summary_str}",
             f"Agent context: {json.dumps(agent_snapshot, ensure_ascii=False, default=str)}",
+            (
+                "Compression report: "
+                f"{json.dumps({'serialized_size': compression.serialized_size, 'placeholder_count': compression.placeholder_count, 'compaction_marker_count': compression.compaction_marker_count, 'lossy': compression.lossy}, ensure_ascii=False)}"
+            ),
         ]
         if option_context:
             question_parts.append(
@@ -736,12 +831,14 @@ class FeedbackService:
             len(question_payload),
             bool(option_context),
         )
-        response = await self.llm_client.ask(
+        response = await self._ask_with_context_budget(
             base_prompt=prompt,
             base_request=request,
             question=question_payload,
-            access_token=access_token or "",
-            outer_span=span,
+            access_token=access_token,
+            span=span,
+            context_payload=render_context,
+            execution_id=execution_id,
         )
         cleaned = (response or "").strip()
         if not cleaned:
@@ -765,6 +862,7 @@ class FeedbackService:
         request: Any,
         access_token: Optional[str],
         span,
+        execution_id: Optional[str] = None,
     ) -> Optional[str]:
         base_query = (base_query or "").strip()
         feedback = (feedback or "").strip()
@@ -788,12 +886,19 @@ class FeedbackService:
             question_parts.append(f"User response: {feedback}")
         question_parts.append("Rewritten request:")
         question = "\n".join(question_parts)
-        summary = await self.llm_client.ask(
+        summary_context = {
+            "base_query": base_query,
+            "feedback_prompt": feedback_prompt,
+            "feedback": feedback,
+        }
+        summary = await self._ask_with_context_budget(
             base_prompt=prompt,
             base_request=request,
             question=question,
-            access_token=access_token or "",
-            outer_span=span,
+            access_token=access_token,
+            span=span,
+            context_payload=summary_context,
+            execution_id=execution_id,
         )
         return normalize_user_query_summary(summary)
 
@@ -807,6 +912,7 @@ class FeedbackService:
         request: Any,
         access_token: Optional[str],
         span,
+        execution_id: Optional[str] = None,
     ) -> bool:
         prompt = (
             "FEEDBACK_RERUN_DECISION\n"
@@ -843,12 +949,21 @@ class FeedbackService:
                 "Decision:",
             ]
         )
-        response = await self.llm_client.ask(
+        rerun_context = {
+            "base_query": base_query or "",
+            "feedback": feedback,
+            "feedback_prompt": feedback_prompt or "",
+            "agent_name": agent_name,
+            "agent_context": agent_context,
+        }
+        response = await self._ask_with_context_budget(
             base_prompt=prompt,
             base_request=request,
             question=question,
-            access_token=access_token or "",
-            outer_span=span,
+            access_token=access_token,
+            span=span,
+            context_payload=rerun_context,
+            execution_id=execution_id,
         )
         decision = normalize_feedback_rerun_decision(response)
         return decision != "USE_PREVIOUS"
@@ -990,6 +1105,7 @@ class FeedbackService:
                     request=request,
                     access_token=access_token,
                     span=span,
+                    execution_id=state.execution_id,
                 )
                 if combined_query:
                     state.context["user_query"] = combined_query
@@ -1003,6 +1119,7 @@ class FeedbackService:
                     request=request,
                     access_token=access_token,
                     span=span,
+                    execution_id=state.execution_id,
                 )
                 if should_rerun:
                     # Remember which agent should resume first after feedback
