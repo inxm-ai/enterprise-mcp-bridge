@@ -68,13 +68,15 @@ async def process_agent_status(
 ) -> dict[str, Any]:
     """Interpret a single agent status result.
 
-    *handle_workflow_handoff_fn* is an ``async (result) -> (events, should_return)``
-    callback that the caller provides (typically a closure capturing the
-    session / request context).
+    *handle_workflow_handoff_fn* is an
+    ``async (result) -> (events, should_return, handoff_stream)`` callback
+    that the caller provides (typically a closure capturing the session /
+    request context).
 
     Returns a dict with control signals:
 
     - ``events``: SSE chunks to yield
+    - ``handoff_stream``: optional child workflow stream to relay live
     - ``should_return``, ``should_break``: control flow signals
     - ``last_visible``: update ``last_visible_output`` when present
     - ``forced_next``: new forced agent (key present → update)
@@ -103,8 +105,12 @@ async def process_agent_status(
                 record_event_fn(state, f"\nRerouting to {target}\n", status="reroute")
             )
     elif status == "workflow_reroute":
-        handoff_events, should_return = await handle_workflow_handoff_fn(result)
+        handoff_events, should_return, handoff_stream = (
+            await handle_workflow_handoff_fn(result)
+        )
         action["events"].extend(handoff_events)
+        if handoff_stream is not None:
+            action["handoff_stream"] = handoff_stream
         if should_return:
             action["should_return"] = True
     elif status == "retry":

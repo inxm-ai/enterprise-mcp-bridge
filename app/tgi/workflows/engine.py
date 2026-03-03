@@ -413,12 +413,13 @@ class WorkflowEngine:
         workflow_chain: list[str],
         handoff_state: dict[str, bool],
         session: Any,
-    ) -> tuple[list[str], bool]:
+    ) -> tuple[list[str], bool, Optional[AsyncGenerator[str, None]]]:
         """Handle a workflow_reroute status result.
 
-        Returns ``(events, should_return)`` where *events* is a list of
-        SSE chunks to yield and *should_return* indicates whether the
-        caller should stop iterating (``return`` from ``_run_agents``).
+        Returns ``(events, should_return, handoff_stream)`` where *events* is
+        a list of SSE chunks to yield immediately, *should_return* indicates
+        whether the caller should stop iterating, and *handoff_stream* is the
+        child workflow stream to relay live when available.
         """
         target_workflow = result.get("target_workflow")
         start_with_payload = result.get("start_with")
@@ -444,7 +445,7 @@ class WorkflowEngine:
             )
             handoff_state["workflow_handoff"] = True
             events.append("data: [DONE]\n\n")
-            return events, True
+            return events, True, None
 
         events.append(
             self._record_event(
@@ -474,7 +475,7 @@ class WorkflowEngine:
             )
             handoff_state["workflow_handoff"] = True
             events.append("data: [DONE]\n\n")
-            return events, True
+            return events, True, None
 
         state.completed = True
         self.state_store.save_state(state)
@@ -506,12 +507,10 @@ class WorkflowEngine:
             )
             handoff_state["workflow_handoff"] = True
             events.append("data: [DONE]\n\n")
-            return events, True
+            return events, True, None
 
         handoff_state["workflow_handoff"] = True
-        async for new_event in new_stream:
-            events.append(new_event)
-        return events, True
+        return events, True, new_stream
 
     async def _run_agents(
         self,
@@ -665,6 +664,10 @@ class WorkflowEngine:
                                         last_visible_output,
                                     )
                                 )
+                                handoff_stream = action.get("handoff_stream")
+                                if handoff_stream is not None:
+                                    async for handoff_event in handoff_stream:
+                                        yield handoff_event
                                 if action.get("should_return"):
                                     return
                                 if retry:
@@ -750,6 +753,10 @@ class WorkflowEngine:
                             last_visible_output,
                         )
                     )
+                    handoff_stream = action.get("handoff_stream")
+                    if handoff_stream is not None:
+                        async for handoff_event in handoff_stream:
+                            yield handoff_event
                     if action.get("should_return"):
                         return
                     if retry:

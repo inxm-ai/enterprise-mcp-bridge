@@ -246,6 +246,7 @@ def reset_state_for_handoff(
         WORKFLOW_OWNER_KEY,
         "user_query",
         "user_messages",
+        "task_id",
         "_persist_inner_thinking",
     ):
         if key in state.context:

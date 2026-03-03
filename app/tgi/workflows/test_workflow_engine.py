@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator
@@ -904,7 +905,13 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     second_flow = {
         "flow_id": "second_flow",
         "root_intent": "SECOND",
-        "agents": [{"agent": "second_agent", "description": "Second"}],
+        "agents": [
+            {
+                "agent": "second_agent",
+                "description": "Second",
+                "pass_through": "Show user-visible handoff progress only.",
+            }
+        ],
     }
     _write_workflow(workflows_dir, "first", first_flow)
     _write_workflow(workflows_dir, "second", second_flow)
@@ -913,7 +920,7 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     llm = StubLLMClient(
         {
             "first_agent": '<reroute start_with=\'{"args":{"prefill":"set"}}\'>workflows[second_flow]</reroute>',
-            "second_agent": "Second workflow complete",
+            "second_agent": "<passthrough>Second workflow pass-through</passthrough>",
         }
     )
     engine = WorkflowEngine(
@@ -935,7 +942,7 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     payload = "\n".join(chunks)
 
     assert "Rerouting to workflow 'second_flow'" in payload
-    assert "Second workflow complete" in payload
+    assert "Second workflow pass-through" in payload
     assert "first_agent" in llm.calls
     assert "second_agent" in llm.calls
     assert llm.calls.index("first_agent") < llm.calls.index("second_agent")
@@ -947,6 +954,180 @@ async def test_workflow_reroute_to_new_flow_with_start_with(tmp_path, monkeypatc
     with engine.state_store._connect() as conn:
         rows = conn.execute("SELECT execution_id FROM workflow_executions").fetchall()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_handoff_keeps_single_task_id(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "first_flow",
+        "root_intent": "FIRST",
+        "agents": [{"agent": "first_agent", "description": "First"}],
+    }
+    second_flow = {
+        "flow_id": "second_flow",
+        "root_intent": "SECOND",
+        "agents": [
+            {
+                "agent": "second_agent",
+                "description": "Second",
+                "pass_through": "Show user-visible handoff progress only.",
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    llm = StubLLMClient(
+        {
+            "first_agent": "<reroute>workflows[second_flow]</reroute>",
+            "second_agent": "<passthrough>handoff update</passthrough>",
+        }
+    )
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start handoff")],
+        model="test-model",
+        stream=True,
+        use_workflow="first_flow",
+        workflow_execution_id="exec-single-task-id",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    chunks = [chunk async for chunk in stream]
+
+    task_ids: set[str] = set()
+    workflow_ids: set[str] = set()
+    for chunk in chunks:
+        if not chunk.startswith("data: "):
+            continue
+        body = chunk[len("data: ") :].strip()
+        if body == "[DONE]":
+            continue
+        try:
+            payload = json.loads(body)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        agentic = payload.get("agentic")
+        if not isinstance(agentic, dict):
+            continue
+        task_id = agentic.get("task_id") or payload.get("id")
+        if isinstance(task_id, str) and task_id:
+            task_ids.add(task_id)
+        workflow_id = agentic.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id:
+            workflow_ids.add(workflow_id)
+
+    assert {"first_flow", "second_flow"}.issubset(workflow_ids)
+    assert len(task_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_handoff_passthrough_is_live_not_buffered(tmp_path, monkeypatch):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    first_flow = {
+        "flow_id": "first_flow",
+        "root_intent": "FIRST",
+        "agents": [{"agent": "first_agent", "description": "First"}],
+    }
+    second_flow = {
+        "flow_id": "second_flow",
+        "root_intent": "SECOND",
+        "agents": [
+            {
+                "agent": "second_agent",
+                "description": "Second",
+                "pass_through": "Show user-visible handoff progress only.",
+            }
+        ],
+    }
+    _write_workflow(workflows_dir, "first", first_flow)
+    _write_workflow(workflows_dir, "second", second_flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class SlowHandoffLLM(StubLLMClient):
+        def stream_completion(self, request, access_token, span):
+            last_message = request.messages[-1].content or ""
+            agent_marker = ""
+            if "<agent:" in last_message:
+                agent_marker = last_message.split("<agent:", 1)[1].split(">", 1)[0]
+            elif "ROUTING_INTENT_CHECK" in last_message:
+                agent_marker = "routing_intent"
+
+            if agent_marker == "second_agent":
+                self.calls.append(agent_marker)
+                self.request_tools.append([])
+
+                async def _gen():
+                    payload_one = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "<passthrough>handoff step 1</passthrough>"
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    payload_two = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "<passthrough>handoff step 2</passthrough>"
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload_one)}\n\n"
+                    await asyncio.sleep(0.25)
+                    yield f"data: {json.dumps(payload_two)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen()
+
+            return super().stream_completion(request, access_token, span)
+
+    llm = SlowHandoffLLM({"first_agent": "<reroute>workflows[second_flow]</reroute>"})
+    engine = WorkflowEngine(
+        WorkflowRepository(), WorkflowStateStore(db_path=tmp_path / "state.db"), llm
+    )
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="start handoff")],
+        model="test-model",
+        stream=True,
+        use_workflow="first_flow",
+        workflow_execution_id="exec-live-handoff",
+    )
+
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    assert stream is not None
+
+    step_times: dict[str, float] = {}
+    start_time = time.monotonic()
+    async for chunk in stream:
+        elapsed = time.monotonic() - start_time
+        if "handoff step 1" in chunk and "step1" not in step_times:
+            step_times["step1"] = elapsed
+        if "handoff step 2" in chunk and "step2" not in step_times:
+            step_times["step2"] = elapsed
+
+    assert "step1" in step_times
+    assert "step2" in step_times
+    assert step_times["step2"] - step_times["step1"] >= 0.15
 
 
 @pytest.mark.asyncio

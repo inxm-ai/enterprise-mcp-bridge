@@ -315,3 +315,124 @@ async def test_sessionful_progress_and_logs_forwarded(monkeypatch):
     )
     assert progress_calls == [(0.5, None, "halfway")]
     assert log_calls == [("info", "log data", "test_logger")]
+
+
+@pytest.mark.asyncio
+async def test_sessionless_call_tool_streaming_emits_progress_log_result(monkeypatch):
+    class _AsyncMCPContext:
+        async def __aenter__(self):
+            class _Session:
+                async def list_tools(self):
+                    return types.SimpleNamespace(tools=[])
+
+                async def call_tool_with_progress(
+                    self,
+                    name: str,
+                    args,
+                    progress_callback=None,
+                    log_callback=None,
+                ):
+                    if progress_callback:
+                        await progress_callback(25.0, 100.0, "starting")
+                    if log_callback:
+                        await log_callback("info", "phase detected", "plan")
+                    return types.SimpleNamespace(
+                        content=[types.SimpleNamespace(text="ok")],
+                        structuredContent={"payload": {"result": {"id": "plan-1"}}},
+                    )
+
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sc, "mcp_session", lambda *a, **k: _AsyncMCPContext())
+    monkeypatch.setattr(
+        sc,
+        "decorate_args_with_oauth_token",
+        AsyncMock(side_effect=lambda *a, **k: a[2]),
+    )
+    monkeypatch.setattr(
+        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+    )
+
+    async with sc.mcp_session_context(
+        sessions=None,
+        x_inxm_mcp_session=None,
+        access_token=None,
+        group=None,
+        incoming_headers=None,
+    ) as delegate:
+        stream = await delegate.call_tool_streaming("plan", {"x": 1}, None)
+        events = [event async for event in stream]
+
+    assert events[0]["type"] == "progress"
+    assert events[1]["type"] == "log"
+    assert events[2]["type"] == "result"
+    assert events[2]["data"]["payload"]["result"]["id"] == "plan-1"
+
+
+@pytest.mark.asyncio
+async def test_sessionful_call_tool_streaming_emits_progress_log_result(monkeypatch):
+    class _FakeTask:
+        def __init__(self):
+            self.requests = []
+
+        async def request(self, req):
+            self.requests.append(req)
+            if req == "list_tools":
+                return []
+            if isinstance(req, dict) and req.get("action") == "run_tool_with_progress":
+                if req.get("progress_callback"):
+                    await req["progress_callback"](10.0, 100.0, "warming up")
+                if req.get("log_callback"):
+                    await req["log_callback"]("info", "phase one", "plan")
+                return types.SimpleNamespace(
+                    content=[types.SimpleNamespace(text="ok")],
+                    structuredContent={"payload": {"result": {"id": "plan-2"}}},
+                )
+            raise AssertionError(f"Unexpected request: {req}")
+
+    class _FakeManager:
+        def __init__(self, task):
+            self._task = task
+
+        def get(self, session_id):
+            return self._task
+
+        def set(self, session_id, session):
+            self._task = session
+
+        def pop(self, session_id, default=None):
+            return default
+
+    mcp_task = _FakeTask()
+    sessions = _FakeManager(mcp_task)
+
+    monkeypatch.setattr(
+        sc,
+        "decorate_args_with_oauth_token",
+        AsyncMock(side_effect=lambda *a, **k: a[2]),
+    )
+    monkeypatch.setattr(
+        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+    )
+
+    async with sc.mcp_session_context(
+        sessions=sessions,
+        x_inxm_mcp_session="session-1",
+        access_token=None,
+        group=None,
+        incoming_headers=None,
+    ) as delegate:
+        stream = await delegate.call_tool_streaming("plan", {"x": 1}, None)
+        events = [event async for event in stream]
+
+    assert events[0]["type"] == "progress"
+    assert events[1]["type"] == "log"
+    assert events[2]["type"] == "result"
+    assert events[2]["data"]["payload"]["result"]["id"] == "plan-2"
+    assert any(
+        isinstance(req, dict) and req.get("action") == "run_tool_with_progress"
+        for req in mcp_task.requests
+    )

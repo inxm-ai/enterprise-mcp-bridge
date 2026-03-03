@@ -2,6 +2,7 @@ import fcntl
 import inspect
 import json
 import logging
+import asyncio
 from fastapi import HTTPException
 from typing import Optional, Dict, Awaitable, Callable, Any
 import os
@@ -489,6 +490,110 @@ async def mcp_session_context(
                         result = await call_fn(tool_name, decorated_args, **call_kwargs)
                         return RunToolsResult(result)
 
+                    async def call_tool_streaming(
+                        self,
+                        tool_name: str,
+                        args: Optional[Dict],
+                        access_token_inner: Optional[str],
+                    ):
+                        """
+                        Stream tool execution events in normalized dict form:
+                        progress/log/result.
+                        """
+                        event_queue: asyncio.Queue[Optional[dict[str, Any]]] = (
+                            asyncio.Queue()
+                        )
+
+                        async def _progress_cb(
+                            progress: float,
+                            total: Optional[float] = None,
+                            message: Optional[str] = None,
+                        ) -> None:
+                            await event_queue.put(
+                                {
+                                    "type": "progress",
+                                    "progress": progress,
+                                    "total": total,
+                                    "message": message,
+                                    "tool": tool_name,
+                                }
+                            )
+
+                        async def _log_cb(
+                            level: str,
+                            data: Any,
+                            logger_name: Optional[str] = None,
+                        ) -> None:
+                            await event_queue.put(
+                                {
+                                    "type": "log",
+                                    "level": level,
+                                    "data": data,
+                                    "logger_name": logger_name,
+                                    "tool": tool_name,
+                                }
+                            )
+
+                        def _coerce_result_payload(result_obj: Any) -> Any:
+                            if hasattr(result_obj, "structuredContent"):
+                                structured = getattr(result_obj, "structuredContent")
+                                if structured is not None:
+                                    return structured
+                            if hasattr(result_obj, "model_dump"):
+                                try:
+                                    return result_obj.model_dump(exclude_none=True)
+                                except Exception:
+                                    pass
+                            if isinstance(result_obj, dict):
+                                return result_obj
+                            return str(result_obj)
+
+                        async def _run_tool() -> None:
+                            try:
+                                result_obj = await self.call_tool_with_progress(
+                                    tool_name,
+                                    args,
+                                    access_token_inner,
+                                    progress_callback=_progress_cb,
+                                    log_callback=_log_cb,
+                                )
+                                await event_queue.put(
+                                    {
+                                        "type": "result",
+                                        "data": _coerce_result_payload(result_obj),
+                                    }
+                                )
+                            except Exception as exc:
+                                await event_queue.put(
+                                    {
+                                        "type": "result",
+                                        "data": {
+                                            "error": f"Streaming tool execution failed: {exc}"
+                                        },
+                                    }
+                                )
+                            finally:
+                                await event_queue.put(None)
+
+                        task = asyncio.create_task(_run_tool())
+
+                        async def _stream():
+                            try:
+                                while True:
+                                    event = await event_queue.get()
+                                    if event is None:
+                                        break
+                                    yield event
+                            finally:
+                                if not task.done():
+                                    task.cancel()
+                                    try:
+                                        await task
+                                    except asyncio.CancelledError:
+                                        pass
+
+                        return _stream()
+
                     async def call_prompt(
                         self,
                         prompt_name: str,
@@ -607,6 +712,108 @@ async def mcp_session_context(
                         payload=result.get("elicitation") or {},
                     )
             return RunToolsResult(result)
+
+        async def call_tool_streaming(
+            self,
+            tool_name: str,
+            args: Optional[Dict],
+            access_token_inner: Optional[str],
+        ):
+            """
+            Stream tool execution events in normalized dict form:
+            progress/log/result.
+            """
+            event_queue: asyncio.Queue[Optional[dict[str, Any]]] = asyncio.Queue()
+
+            async def _progress_cb(
+                progress: float,
+                total: Optional[float] = None,
+                message: Optional[str] = None,
+            ) -> None:
+                await event_queue.put(
+                    {
+                        "type": "progress",
+                        "progress": progress,
+                        "total": total,
+                        "message": message,
+                        "tool": tool_name,
+                    }
+                )
+
+            async def _log_cb(
+                level: str,
+                data: Any,
+                logger_name: Optional[str] = None,
+            ) -> None:
+                await event_queue.put(
+                    {
+                        "type": "log",
+                        "level": level,
+                        "data": data,
+                        "logger_name": logger_name,
+                        "tool": tool_name,
+                    }
+                )
+
+            def _coerce_result_payload(result_obj: Any) -> Any:
+                if hasattr(result_obj, "structuredContent"):
+                    structured = getattr(result_obj, "structuredContent")
+                    if structured is not None:
+                        return structured
+                if hasattr(result_obj, "model_dump"):
+                    try:
+                        return result_obj.model_dump(exclude_none=True)
+                    except Exception:
+                        pass
+                if isinstance(result_obj, dict):
+                    return result_obj
+                return str(result_obj)
+
+            async def _run_tool() -> None:
+                try:
+                    result_obj = await self.call_tool_with_progress(
+                        tool_name,
+                        args,
+                        access_token_inner,
+                        progress_callback=_progress_cb,
+                        log_callback=_log_cb,
+                    )
+                    await event_queue.put(
+                        {
+                            "type": "result",
+                            "data": _coerce_result_payload(result_obj),
+                        }
+                    )
+                except Exception as exc:
+                    await event_queue.put(
+                        {
+                            "type": "result",
+                            "data": {
+                                "error": f"Streaming tool execution failed: {exc}"
+                            },
+                        }
+                    )
+                finally:
+                    await event_queue.put(None)
+
+            task = asyncio.create_task(_run_tool())
+
+            async def _stream():
+                try:
+                    while True:
+                        event = await event_queue.get()
+                        if event is None:
+                            break
+                        yield event
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+            return _stream()
 
         async def list_prompts(self):
             async def request():

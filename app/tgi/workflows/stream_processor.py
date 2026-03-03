@@ -118,14 +118,44 @@ async def process_agent_stream(
                 )
 
                 # --- progress events ---
-                if parsed_payload and parsed_payload.get("type") == "progress":
+                event_type = (
+                    parsed_payload.get("type")
+                    if isinstance(parsed_payload, dict)
+                    else None
+                )
+                if event_type in {"progress", "log"}:
+                    normalized_payload = parsed_payload
+                    if event_type == "log":
+                        log_data = parsed_payload.get("data")
+                        if isinstance(log_data, str):
+                            log_message = log_data.strip()
+                        elif log_data is None:
+                            log_message = ""
+                        else:
+                            try:
+                                log_message = json.dumps(log_data, ensure_ascii=False)
+                            except Exception:
+                                log_message = str(log_data)
+
+                        if not log_message:
+                            continue
+
+                        normalized_payload = {
+                            "type": "progress",
+                            "progress": None,
+                            "total": None,
+                            "message": log_message,
+                            "tool": parsed_payload.get("tool")
+                            or parsed_payload.get("logger_name"),
+                        }
+
                     if progress_task:
                         if not progress_task.done():
                             await _cancel_progress()
                         progress_task = None
                     progress_task = asyncio.create_task(
                         run_progress_handler_fn(
-                            parsed_payload,
+                            normalized_payload,
                             passthrough_history=list(result.passthrough_history),
                         )
                     )

@@ -1407,6 +1407,117 @@ async def test_progress_updates_cancel_previous(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_log_updates_are_surfaced_as_progress(tmp_path):
+    """Tool log events should be surfaced as user-visible progress updates."""
+    from app.tgi.workflows.engine import WorkflowEngine
+    from app.tgi.workflows.models import (
+        WorkflowAgentDef,
+        WorkflowDefinition,
+        WorkflowExecutionState,
+    )
+    from app.tgi.workflows.repository import WorkflowRepository
+    from app.tgi.workflows.state import WorkflowStateStore
+
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "log_progress_flow",
+        "root_intent": "LOG_PROGRESS",
+        "agents": [{"agent": "worker", "description": "Worker", "pass_through": True}],
+    }
+    (workflows_dir / "flow.json").write_text(json.dumps(flow), encoding="utf-8")
+    os.environ["WORKFLOWS_PATH"] = str(workflows_dir)
+
+    class LogProgressLLM:
+        def stream_completion(self, request, access_token, span):
+            async def _gen():
+                yield (
+                    'data: {"choices":[{"delta":{"content":"<passthrough>derived log update</passthrough>"},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    class LogRunner:
+        def stream_chat_with_tools(
+            self,
+            session,
+            messages,
+            available_tools,
+            chat_request,
+            access_token,
+            parent_span,
+            emit_think_messages=True,
+            arg_injector=None,
+            tools_for_validation=None,
+            streaming_tools=None,
+            stop_after_tool_results=None,
+        ):
+            async def _gen():
+                yield 'data: {"type":"log","level":"info","data":"I identified the plan phases: discovery, execution","logger_name":"plan"}\n\n'
+                yield (
+                    'data: {"choices":[{"delta":{"content":"<passthrough>Done</passthrough>"},"index":0}]}\n\n'
+                )
+                yield "data: [DONE]\n\n"
+
+            return _gen()
+
+    class Session:
+        async def list_tools(self):
+            return []
+
+    engine = WorkflowEngine(
+        WorkflowRepository(),
+        WorkflowStateStore(db_path=tmp_path / "state.db"),
+        LogProgressLLM(),
+        tool_chat_runner=LogRunner(),
+    )
+
+    agent_def = WorkflowAgentDef(
+        agent="worker",
+        description="Worker",
+        pass_through="Summarize progress updates",
+        tools=[],
+    )
+    workflow_def = WorkflowDefinition(
+        flow_id="log_progress_flow",
+        root_intent="LOG_PROGRESS",
+        agents=[agent_def],
+    )
+    state = WorkflowExecutionState.new("exec-log-progress", "log_progress_flow")
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Do work")],
+        model="test-model",
+        stream=True,
+    )
+
+    _ = [
+        chunk
+        async for chunk in engine._execute_agent(
+            workflow_def,
+            agent_def,
+            state,
+            Session(),
+            request,
+            None,
+            None,
+            no_reroute=False,
+        )
+    ]
+
+    progress_contents: list[str] = []
+    for ev in state.events:
+        if not ev.startswith("data: "):
+            continue
+        payload = json.loads(ev[len("data: ") :])
+        metadata = payload.get("agentic", {}).get("metadata", {})
+        if metadata.get("type") == "tool_progress":
+            progress_contents.append(payload["choices"][0]["delta"]["content"] or "")
+
+    assert any("derived log update" in content for content in progress_contents)
+
+
+@pytest.mark.asyncio
 async def test_handle_tool_progress_includes_passthrough_history(tmp_path, monkeypatch):
     """Direct test that handle_tool_progress includes passthrough history in prompts."""
     from app.tgi.workflows import stream_processor
