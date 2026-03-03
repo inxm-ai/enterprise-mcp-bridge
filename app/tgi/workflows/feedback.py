@@ -403,6 +403,170 @@ def build_feedback_choices(
     return choices
 
 
+def _infer_primitive_schema(value: Any) -> dict[str, Any]:
+    """Infer a primitive JSON Schema type dict from a Python value.
+
+    Returns a schema dict with a ``type`` key appropriate for *value*.
+    Lists, dicts and other non-primitive types fall back to ``string`` so
+    the caller may override the schema before using it.
+    """
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, int):
+        return {"type": "integer"}
+    if isinstance(value, float):
+        return {"type": "number"}
+    if value is None:
+        return {"type": "null"}
+    return {"type": "string"}
+
+
+def flatten_object_to_input_fields(
+    obj: Any,
+    prefix: str = "",
+) -> dict[str, dict[str, Any]]:
+    """Flatten a nested Python object into primitive input field schema definitions.
+
+    Recursively traverses *obj*:
+    * Nested ``dict`` values are expanded using dotted-key notation.
+    * Leaf values (non-dict) are assigned a primitive JSON Schema type inferred
+      from their Python type.
+
+    Each returned schema dict also carries a ``_nested_path`` list that records
+    the original nesting as a list of key segments.  Callers must strip
+    ``_nested_path`` before inserting the schema into a ``requestedSchema``
+    because it is not a valid JSON Schema keyword.
+
+    Example::
+
+        flatten_object_to_input_fields({"db": {"host": "localhost", "port": 5432}})
+        # → {
+        #     "db.host": {"type": "string", "_nested_path": ["db", "host"]},
+        #     "db.port": {"type": "integer", "_nested_path": ["db", "port"]},
+        #   }
+
+    Args:
+        obj: The object to flatten.  If *obj* is not a dict a single entry is
+            emitted at *prefix* (or ``"value"`` when *prefix* is empty).
+        prefix: Dotted key prefix accumulated during recursion.
+
+    Returns:
+        A flat ``{dotted_key: schema_dict}`` mapping.
+    """
+    if not isinstance(obj, dict):
+        name = prefix or "value"
+        schema = _infer_primitive_schema(obj)
+        schema["_nested_path"] = name.split(".")
+        return {name: schema}
+
+    fields: dict[str, dict[str, Any]] = {}
+    for key, value in obj.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            fields.update(flatten_object_to_input_fields(value, prefix=full_key))
+        else:
+            schema = _infer_primitive_schema(value)
+            schema["_nested_path"] = full_key.split(".")
+            fields[full_key] = schema
+    return fields
+
+
+def resolve_choice_input_fields(
+    choice: dict[str, Any],
+    agent_context: dict[str, Any],
+    shared_context: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Resolve input field schemas for a single choice.
+
+    Handles three sources in priority order:
+
+    1. **``input_from``** – a context path string (e.g. ``"planner.config"``)
+       that is resolved from *agent_context* then *shared_context*.  The
+       resolved value is passed through :func:`flatten_object_to_input_fields`
+       to derive a flat schema with inferred types.
+    2. **``input``** – a static dict of ``field_name → field_def`` (existing
+       behaviour).  Nested object field defs (``type: object`` with
+       ``properties``) are flattened automatically.
+    3. No input – returns empty dicts.
+
+    Returns:
+        A ``(field_schemas, nested_paths)`` pair where:
+
+        * *field_schemas* maps flat dotted field names to their JSON Schema
+          dicts (without the ``_nested_path`` internal key).
+        * *nested_paths* maps each flat field name to its ``list[str]`` path
+          for reconstruction of the original nested structure.
+    """
+    field_schemas: dict[str, dict[str, Any]] = {}
+    nested_paths: dict[str, list[str]] = {}
+
+    input_from: Any = choice.get("input_from")
+    if input_from and isinstance(input_from, str):
+        resolved = get_path_value(agent_context, input_from)
+        if resolved is None:
+            resolved = get_path_value(shared_context, input_from)
+        if resolved is not None:
+            flat = flatten_object_to_input_fields(resolved)
+            for fname, fdef in flat.items():
+                path = fdef.pop("_nested_path", fname.split("."))
+                field_schemas[fname] = fdef
+                nested_paths[fname] = path
+            return field_schemas, nested_paths
+
+    static_input: Any = choice.get("input")
+    if not isinstance(static_input, dict):
+        return field_schemas, nested_paths
+
+    for field_name, field_def in static_input.items():
+        if not isinstance(field_def, dict):
+            field_def = {"type": "string"}
+        if "type" not in field_def:
+            field_def = dict(field_def, type="string")
+
+        if field_def.get("type") == "object" and isinstance(
+            field_def.get("properties"), dict
+        ):
+            sub = _flatten_schema_properties(field_def["properties"], prefix=field_name)
+            for fname, fdef in sub.items():
+                path = fdef.pop("_nested_path", fname.split("."))
+                field_schemas[fname] = fdef
+                nested_paths[fname] = path
+        else:
+            path = field_name.split(".")
+            field_schemas[field_name] = dict(field_def)
+            if len(path) > 1:
+                nested_paths[field_name] = path
+
+    return field_schemas, nested_paths
+
+
+def _flatten_schema_properties(
+    properties: dict[str, Any],
+    prefix: str = "",
+) -> dict[str, dict[str, Any]]:
+    """Recursively flatten a JSON Schema ``properties`` dict to dotted keys.
+
+    This is the schema-level counterpart of :func:`flatten_object_to_input_fields`.
+    Each resulting schema entry carries ``_nested_path`` for round-trip mapping.
+    """
+    fields: dict[str, dict[str, Any]] = {}
+    for key, prop in properties.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if not isinstance(prop, dict):
+            prop = {"type": "string"}
+        if prop.get("type") == "object" and isinstance(prop.get("properties"), dict):
+            fields.update(
+                _flatten_schema_properties(prop["properties"], prefix=full_key)
+            )
+        else:
+            schema = dict(prop)
+            if "type" not in schema:
+                schema["type"] = "string"
+            schema["_nested_path"] = full_key.split(".")
+            fields[full_key] = schema
+    return fields
+
+
 def build_feedback_payload(
     question: str,
     choices: list[dict[str, Any]],
@@ -462,11 +626,11 @@ def build_feedback_payload(
         }
         requested_schema["required"] = ["selection"]
         for choice in choices:
-            choice_input = choice.get("input")
-            if not isinstance(choice_input, dict):
-                continue
             choice_id = str(choice.get("id") or "")
-            for field_name, field_def in choice_input.items():
+            field_schemas, nested_paths = resolve_choice_input_fields(
+                choice, agent_context, shared_context
+            )
+            for field_name, field_def in field_schemas.items():
                 if field_name in {"selection", "value"}:
                     logger.warning(
                         "[feedback] Input field name '%s' for choice '%s' "
@@ -475,14 +639,11 @@ def build_feedback_payload(
                         choice_id,
                     )
                     continue
-                if not isinstance(field_def, dict):
-                    field_def = {"type": "string"}
-                if "type" not in field_def:
-                    field_def["type"] = "string"
                 requested_schema["properties"][field_name] = field_def
-                input_fields_meta[field_name] = {
-                    "for_selection": choice_id,
-                }
+                meta_entry: dict[str, Any] = {"for_selection": choice_id}
+                if field_name in nested_paths:
+                    meta_entry["nested_path"] = nested_paths[field_name]
+                input_fields_meta[field_name] = meta_entry
     else:
         requested_schema["properties"] = {
             "response": {"type": "string"},
