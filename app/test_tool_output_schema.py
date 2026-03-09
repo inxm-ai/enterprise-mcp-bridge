@@ -131,6 +131,71 @@ def test_tool_output_schema_singular_env_alias_is_supported():
             importlib.reload(app.vars)
 
 
+def test_auto_detects_json_structured_content_without_schema(
+    client, mock_session_context
+):
+    """JSON text in content is parsed into structuredContent even without a schema."""
+    tool_response_content = MockContent(text=json.dumps([{"org": "ponderaforme", "teams": []}]))
+    tool_result = MockResult(content=[tool_response_content])
+    mock_session_context.call_tool.return_value = tool_result
+
+    with patch.dict(app.vars.TOOL_OUTPUT_SCHEMAS, {}, clear=True):
+        response = client.post(
+            "/tools/unknown_tool",
+            headers={"x-inxm-mcp-session": "test-session"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["structuredContent"] == [{"org": "ponderaforme", "teams": []}]
+
+
+def test_auto_detects_xml_structured_content_without_schema(
+    client, mock_session_context
+):
+    """XML text in content is parsed into structuredContent even without a schema."""
+    xml_text = (
+        '<meetings_data from="Feb 23, 2026" to="Mar 9, 2026" count="38">'
+        '<meeting id="abc" title="New note" date="Mar 9, 2026 2:04 PM"/>'
+        "</meetings_data>"
+    )
+    tool_response_content = MockContent(text=xml_text)
+    tool_result = MockResult(content=[tool_response_content])
+    mock_session_context.call_tool.return_value = tool_result
+
+    with patch.dict(app.vars.TOOL_OUTPUT_SCHEMAS, {}, clear=True):
+        response = client.post(
+            "/tools/get_meetings",
+            headers={"x-inxm-mcp-session": "test-session"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["structuredContent"] is not None
+    assert "meetings_data" in data["structuredContent"]
+
+
+def test_plain_text_leaves_structured_content_null(client, mock_session_context):
+    """Plain text that is not structured keeps structuredContent as null."""
+    tool_response_content = MockContent(text="Hello, this is plain text.")
+    tool_result = MockResult(content=[tool_response_content])
+    mock_session_context.call_tool.return_value = tool_result
+
+    with patch.dict(app.vars.TOOL_OUTPUT_SCHEMAS, {}, clear=True):
+        response = client.post(
+            "/tools/some_tool",
+            headers={"x-inxm-mcp-session": "test-session"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["structuredContent"] is None
+    assert data["content"][0]["text"] == "Hello, this is plain text."
+
+
 @pytest.mark.asyncio
 async def test_tool_output_schema_parsing_pluralized_name_alias():
     test_schema = {

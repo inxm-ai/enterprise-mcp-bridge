@@ -8,7 +8,6 @@ from app.vars import (
     SESSION_FIELD_NAME,
     TGI_ENABLED,
     APP_CONVERSATIONAL_UI_ENABLED,
-    get_tool_output_schema,
 )
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
@@ -23,6 +22,7 @@ import os
 import asyncio
 
 from app.utils.traced_requests import traced_request
+from app.utils.structured_text_parser import try_parse_structured_text
 from app.session import (
     MCPLocalSessionTask,
     try_get_session_id,
@@ -468,8 +468,7 @@ async def run_tool(
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
-        output_schema = get_tool_output_schema(tool_name)
-        if not result.isError and output_schema is not None:
+        if not result.isError:
             if result.structuredContent:
                 logger.info(
                     f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
@@ -477,15 +476,10 @@ async def run_tool(
             else:
                 for content in result.content:
                     if hasattr(content, "text") and content.text:
-                        try:
-                            parsed = json.loads(content.text)
+                        parsed = try_parse_structured_text(content.text)
+                        if parsed is not None:
                             result.structuredContent = parsed
                             break
-                        except json.JSONDecodeError:
-                            logger.warning(
-                                f"[Tool-Call] Failed to parse structured content for tool {tool_name}"
-                            )
-                            pass
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
         if result.isError:
