@@ -70,9 +70,15 @@ def extract_return_values(text: str) -> list[tuple[str, str]]:
 def strip_tags(text: str) -> str:
     """Remove workflow control tags from text."""
     stripped = re.sub(
-        r"<(/?)(reroute|user_feedback_needed|user_feedback|passthrough)([^>]*)>",
+        r"<navigate>[\s\S]*?</navigate>",
         "",
         text or "",
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<(/?)(reroute|user_feedback_needed|user_feedback|passthrough|navigate)([^>]*)>",
+        "",
+        stripped,
     )
     stripped = re.sub(
         r"<return\b[^>]*>(.*?)</return>",

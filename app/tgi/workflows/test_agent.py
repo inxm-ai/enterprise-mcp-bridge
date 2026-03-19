@@ -630,6 +630,17 @@ class TestPassthroughTagExtraction:
         assert "content" in result
         assert "reason" in result
 
+    def test_strip_tags_removes_navigate_block(self):
+        """strip_tags removes the entire <navigate> block including URL content."""
+        from app.tgi.workflows.tag_parser import strip_tags
+
+        text = "Some text <navigate>#/plan/abc-123</navigate> more text"
+        result = strip_tags(text)
+        assert result == "Some text  more text"
+        assert "#/plan/abc-123" not in result
+        assert "<navigate>" not in result
+        assert "</navigate>" not in result
+
 
 # ============================================================================
 # Integration tests with WorkflowEngine
