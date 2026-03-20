@@ -1,0 +1,95 @@
+{
+  "flow_id": "plan_create",
+  "root_intent": "CREATE_PLAN",
+  "agents": [
+    {
+      "agent": "select_tools",
+      "description": "Help the user select which MCP tools to include in the plan. Ask for a plan title and any context needed. Summarize the chosen tools and confirm. Emit <reroute>CANCEL</reroute> if the user wants to abort.",
+      "tools": ["select_tools"],
+      "returns": ["selected_tools"],
+      "reroute": [
+        { "on": "CANCEL", "to": "cancel_creation" }
+      ],
+      "pass_through": true
+    },
+    {
+      "agent": "create_plan",
+      "description": "Create the plan using the selected tools. Confirm the plan title and tools, then call the plan tool. After the plan is saved, ask the user whether to run a test execution or skip testing. Emit <reroute>RUN_TEST</reroute> if the user wants to test, or <reroute>SKIP_TEST</reroute> if the user wants to skip testing.",
+      "tools": [
+        {
+          "plan": {
+            "settings": { "streaming": true },
+            "args": { "selected_tools": "select_tools.selected_tools" }
+          }
+        }
+      ],
+      "returns": [{ "field": "payload.result", "from": "plan", "as": "plan" }],
+      "depends_on": ["select_tools"],
+      "on_tool_error": "summarize_creation_failure",
+      "reroute": [
+        { "on": "RUN_TEST", "to": "run_test" },
+        { "on": "SKIP_TEST", "to": "summarize_plan_without_test" }
+      ],
+      "pass_through": true
+    },
+    {
+      "agent": "run_test",
+      "description": "Run a test execution of the newly created plan to validate it works correctly. Use the test_plan tool with the plan ID. Emit <reroute>TEST_PASSED</reroute> if the test succeeds, or <reroute>TEST_FAILED</reroute> if it fails.",
+      "tools": ["test_plan"],
+      "depends_on": ["create_plan"],
+      "on_tool_error": "summarize_creation_failure",
+      "reroute": [
+        { "on": "TEST_PASSED", "to": "summarize_plan" },
+        { "on": "TEST_FAILED", "to": "heal_test" }
+      ],
+      "pass_through": true
+    },
+    {
+      "agent": "heal_test",
+      "description": "The test execution failed. Analyse the failure and attempt to fix the plan so that it passes. Use the heal_plan tool. Emit <reroute>HEALED</reroute> if the fix was successful, or <reroute>HEAL_FAILED</reroute> if the plan cannot be repaired.",
+      "tools": ["heal_plan"],
+      "depends_on": ["run_test"],
+      "on_tool_error": "summarize_creation_failure",
+      "reroute": [
+        { "on": "HEALED", "to": "summarize_plan_after_heal" },
+        { "on": "HEAL_FAILED", "to": "summarize_creation_failure" }
+      ],
+      "pass_through": true
+    },
+    {
+      "agent": "summarize_plan_without_test",
+      "description": "Confirm the plan has been saved successfully. Tell the user they can now test it by filling in the parameters on the plan page. End your response with exactly this tag, replacing {plan_id} with the actual plan ID from create_plan.plan.plan_id: <navigate>#/plan/{plan_id}</navigate>",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    },
+    {
+      "agent": "summarize_plan",
+      "description": "Confirm the plan has been saved and the test execution passed successfully. Tell the user their plan is ready to use. End your response with exactly this tag, replacing {plan_id} with the actual plan ID from create_plan.plan.plan_id: <navigate>#/plan/{plan_id}</navigate>",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    },
+    {
+      "agent": "summarize_plan_after_heal",
+      "description": "Confirm the plan has been saved. Explain that the initial test failed but the plan was healed successfully and is now ready to use. End your response with exactly this tag, replacing {plan_id} with the actual plan ID from create_plan.plan.plan_id: <navigate>#/plan/{plan_id}</navigate>",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    },
+    {
+      "agent": "summarize_creation_failure",
+      "description": "Explain what failed during plan creation or testing. Include any error details and suggest steps the user can take to fix the issue or try again.",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    },
+    {
+      "agent": "cancel_creation",
+      "description": "Acknowledge that the plan creation was cancelled. No plan has been saved.",
+      "tools": [],
+      "pass_through": true,
+      "stop_point": true
+    }
+  ]
+}
