@@ -6202,6 +6202,178 @@ async def test_feedback_question_uses_context_helper_for_large_lossy_context(
 
 
 @pytest.mark.asyncio
+async def test_feedback_question_helper_can_fetch_deep_plan_tree_path(
+    tmp_path, monkeypatch
+):
+    workflows_dir = tmp_path / "flows"
+    workflows_dir.mkdir()
+    flow = {
+        "flow_id": "feedback_helper_plan_tree_flow",
+        "root_intent": "FEEDBACK_HELPER_PLAN_TREE",
+        "agents": [
+            {
+                "agent": "create_plan",
+                "description": "Create the plan.",
+                "reroute": [
+                    {
+                        "on": ["ASK_USER"],
+                        "ask": {
+                            "question": "Present a concise summary of the generated plan and ask the user what to do next.",
+                            "expected_responses": [
+                                {
+                                    "save_plan": {"to": "save_plan"},
+                                    "adjust_plan": {"to": "create_plan"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "agent": "save_plan",
+                "description": "Save the plan.",
+                "depends_on": ["create_plan"],
+            },
+        ],
+    }
+    _write_workflow(workflows_dir, "feedback_helper_plan_tree", flow)
+    monkeypatch.setenv("WORKFLOWS_PATH", str(workflows_dir))
+
+    class DeepPlanTreeHelperLLM(StubLLMClient):
+        def __init__(self):
+            super().__init__({"create_plan": "<reroute>ASK_USER</reroute>"})
+            self.helper_calls = 0
+
+        def stream_completion(self, request, access_token, span):
+            system_prompt = (
+                request.messages[0].content
+                if request.messages and request.messages[0].content
+                else ""
+            )
+            if "USER_FEEDBACK_QUESTION" in system_prompt:
+                self.helper_calls += 1
+                has_tool_message = any(
+                    msg.role == MessageRole.TOOL for msg in request.messages
+                )
+                if not has_tool_message:
+
+                    async def _gen_tool():
+                        payload = {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "content": "Need the first plan step title.",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_feedback_plan_tree",
+                                                "function": {
+                                                    "name": "get_workflow_context",
+                                                    "arguments": json.dumps(
+                                                        {
+                                                            "operation": "get_value",
+                                                            "path": (
+                                                                "agents.create_plan.plan.plan_tree."
+                                                                "phases.0.steps.0.title"
+                                                            ),
+                                                        }
+                                                    ),
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    "index": 0,
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    return _gen_tool()
+
+                step_title = "the first step"
+                for message in request.messages:
+                    if message.role != MessageRole.TOOL:
+                        continue
+                    try:
+                        parsed = json.loads(message.content or "")
+                    except Exception:
+                        continue
+                    if parsed.get("success") and isinstance(parsed.get("data"), str):
+                        step_title = parsed["data"]
+                        break
+
+                async def _gen_final():
+                    payload = {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": (
+                                        f"The plan starts with {step_title}. "
+                                        "What would you like to do next?"
+                                    )
+                                },
+                                "index": 0,
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return _gen_final()
+
+            return super().stream_completion(request, access_token, span)
+
+    llm = DeepPlanTreeHelperLLM()
+    store = WorkflowStateStore(db_path=tmp_path / "state.db")
+    engine = WorkflowEngine(WorkflowRepository(), store, llm)
+
+    exec_id = "exec-feedback-helper-plan-tree"
+    seeded_state = store.get_or_create(exec_id, "feedback_helper_plan_tree_flow")
+    seeded_state.context["large_blob"] = "x" * 13000
+    seeded_state.context["agents"]["create_plan"] = {
+        "plan": {
+            "plan_id": "plan-123",
+            "plan_tree": {
+                "phases": [
+                    {
+                        "title": "Phase 1",
+                        "steps": [
+                            {"title": "Gather PRs"},
+                            {"title": "Summarize findings"},
+                        ],
+                    }
+                ]
+            },
+        },
+        "content": "",
+        "completed": False,
+    }
+    store.save_state(seeded_state)
+
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Create workflow")],
+        model="test-model",
+        stream=True,
+        use_workflow="feedback_helper_plan_tree_flow",
+        workflow_execution_id=exec_id,
+    )
+    stream = await engine.start_or_resume_workflow(
+        StubSession(), request, None, None, None
+    )
+    _ = [chunk async for chunk in stream]
+
+    final_state = store.load_execution(exec_id)
+    feedback_message = (
+        final_state.context["agents"]["create_plan"]
+        .get("elicitation_spec", {})
+        .get("message", "")
+    )
+    assert "The plan starts with Gather PRs." in feedback_message
+    assert llm.helper_calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_feedback_question_uses_fast_ask_for_small_context(tmp_path, monkeypatch):
     workflows_dir = tmp_path / "flows"
     workflows_dir.mkdir()

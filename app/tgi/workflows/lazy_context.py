@@ -316,6 +316,14 @@ class LazyContextProvider:
                                 "Examples: 'agents.prior_agent.content', 'user_messages'"
                             ),
                         },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": (
+                                "Optional traversal depth limit for 'get_value'. "
+                                "Increase this for deeply nested paths such as deep object trees. "
+                                "Defaults to 10 when omitted."
+                            ),
+                        },
                         "agent_name": {
                             "type": "string",
                             "description": "Agent name for 'get_agent' operation",

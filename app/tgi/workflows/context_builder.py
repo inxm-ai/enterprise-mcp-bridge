@@ -455,11 +455,12 @@ async def handle_lazy_context_tool(
             result = context_provider.get_context_summary()
         elif operation == "get_value":
             path = tool_input.get("path", "")
-            max_depth = tool_input.get("max_depth", 2)
+            max_depth = tool_input.get("max_depth")
             max_size = tool_input.get("max_size_bytes")
-            query_result = context_provider.get_context_value(
-                path, max_depth=max_depth, max_size_bytes=max_size
-            )
+            query_kwargs = {"max_size_bytes": max_size}
+            if max_depth is not None:
+                query_kwargs["max_depth"] = max_depth
+            query_result = context_provider.get_context_value(path, **query_kwargs)
             result = query_result.to_dict()
         elif operation == "get_agent":
             agent_name = tool_input.get("agent_name", "")
