@@ -9,6 +9,7 @@ import json
 import pytest
 from typing import Optional
 
+from app.tgi.workflows.context_builder import handle_lazy_context_tool
 from app.tgi.workflows.lazy_context import LazyContextProvider, ContextQueryResult
 from app.tgi.workflows.state import WorkflowExecutionState
 
@@ -224,6 +225,9 @@ def test_lazy_context_tool_definition():
         "get_agent",
         "get_messages",
     }
+    max_depth_prop = params["properties"]["max_depth"]
+    assert max_depth_prop["type"] == "integer"
+    assert "Defaults to 10" in max_depth_prop["description"]
 
 
 def test_context_query_result_to_dict():
@@ -251,6 +255,36 @@ def test_lazy_context_error_handling():
 
     result = provider.get_context_summary()
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_handle_lazy_context_tool_uses_provider_default_depth():
+    """Omitted max_depth should use LazyContextProvider.get_context_value defaults."""
+    state = WorkflowExecutionState(
+        execution_id="test-9",
+        flow_id="test-flow",
+        context={"a": {"b": {"c": {"d": "deep value"}}}},
+    )
+    store = StubStateStore(state)
+    provider = LazyContextProvider(store, "test-9")
+
+    default_result = json.loads(
+        await handle_lazy_context_tool(
+            provider,
+            {"operation": "get_value", "path": "a.b.c.d"},
+        )
+    )
+    explicit_result = json.loads(
+        await handle_lazy_context_tool(
+            provider,
+            {"operation": "get_value", "path": "a.b.c.d", "max_depth": 2},
+        )
+    )
+
+    assert default_result["success"] is True
+    assert default_result["data"] == "deep value"
+    assert explicit_result["success"] is True
+    assert explicit_result["data"] == {"c": {"d": "deep value"}}
 
 
 if __name__ == "__main__":
