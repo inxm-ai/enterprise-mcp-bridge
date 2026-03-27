@@ -54,6 +54,19 @@ Workflow execution state is persisted, allowing:
 - Audit trail of decisions
 - Debugging and monitoring
 
+By default, workflow state is stored in SQLite under the workflows base path.
+You can switch to Postgres with environment variables:
+
+```bash
+# Default SQLite backend
+WORKFLOW_DB_BACKEND=sqlite
+WORKFLOW_DB_PATH=/data/workflows/workflow_state.db
+
+# Optional Postgres backend
+WORKFLOW_DB_BACKEND=postgres
+WORKFLOW_DATABASE_URL=postgresql://workflow_user:secret@postgres:5432/workflows
+```
+
 ## Quick Start
 
 ### 1. Define a Simple Workflow

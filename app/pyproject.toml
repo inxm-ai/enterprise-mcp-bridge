@@ -20,7 +20,8 @@ dependencies = [
     "opentelemetry-exporter-otlp",
     "opentelemetry-instrumentation-fastapi",
     "openai",
-    "genson"
+    "genson",
+    "psycopg[binary]"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

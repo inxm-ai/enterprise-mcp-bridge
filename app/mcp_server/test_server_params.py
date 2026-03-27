@@ -93,7 +93,7 @@ def test_sys_argv_missing_args(monkeypatch):
     argv = ["main.py", "--"]
     patch_module(monkeypatch, env=env, argv=argv)
     params = server_params.get_server_params()
-    assert params.command == "python"
+    assert params.command == sys.executable
     assert "server.py" in params.args[0]
 
 
@@ -102,7 +102,7 @@ def test_default(monkeypatch):
     argv = ["main.py"]
     patch_module(monkeypatch, env=env, argv=argv)
     params = server_params.get_server_params()
-    assert params.command == "python"
+    assert params.command == sys.executable
     assert "server.py" in params.args[0]
 
 
@@ -110,7 +110,7 @@ def test_env_command_empty(monkeypatch):
     env = {"MCP_SERVER_COMMAND": ""}
     patch_module(monkeypatch, env=env)
     params = server_params.get_server_params()
-    assert params.command == "python"
+    assert params.command == sys.executable
     assert "server.py" in params.args[0]
 
 

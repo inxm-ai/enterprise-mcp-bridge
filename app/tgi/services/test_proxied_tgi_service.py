@@ -2,6 +2,7 @@ import pytest
 import os
 from unittest.mock import Mock, patch, AsyncMock
 
+import app.tgi.workflows.state as state_module
 from app.tgi.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -13,6 +14,43 @@ from app.tgi.models import (
     Usage,
 )
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
+
+
+class _FakePsycopgConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def cursor(self):
+        return _FakePsycopgCursor()
+
+
+class _FakePsycopgCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self._query = " ".join(query.split())
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
+
+class _FakePsycopgModule:
+    def __init__(self):
+        self.connect_calls = []
+
+    def connect(self, dsn):
+        self.connect_calls.append(dsn)
+        return _FakePsycopgConnection()
 
 
 class MockMCPSession:
@@ -154,6 +192,35 @@ class TestProxiedTGIService:
             str(proxied_tgi_service_no_token.llm_client.client.base_url)
             == "https://api.test-llm.com/v1/"
         )
+
+    def test_init_uses_postgres_workflow_store_when_configured(
+        self, monkeypatch, tmp_path
+    ):
+        fake_psycopg = _FakePsycopgModule()
+        monkeypatch.setattr(state_module, "_load_psycopg", lambda: fake_psycopg)
+        workflows_dir = tmp_path / "flows"
+        workflows_dir.mkdir()
+        (workflows_dir / "workflow.json").write_text(
+            '{"flow_id":"test_flow","root_intent":"TEST","agents":[{"agent":"a","description":"A"}]}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TGI_URL": "https://api.test-llm.com/v1",
+                "TGI_TOKEN": "test-token-123",
+                "WORKFLOW_DB_BACKEND": "postgres",
+                "WORKFLOW_DATABASE_URL": "postgresql://workflow:test@db/workflows",
+                "WORKFLOWS_PATH": str(workflows_dir),
+            },
+            clear=False,
+        ):
+            service = ProxiedTGIService()
+
+        assert service.workflow_engine is not None
+        assert service.workflow_engine.state_store.backend_name == "postgres"
+        assert fake_psycopg.connect_calls == ["postgresql://workflow:test@db/workflows"] * 2
 
     @pytest.mark.asyncio
     async def test_find_prompt_by_name_success(self, proxied_tgi_service, mock_prompts):
