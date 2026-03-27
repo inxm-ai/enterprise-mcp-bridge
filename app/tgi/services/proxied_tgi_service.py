@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 from typing import List, Optional, Union, AsyncGenerator
 from opentelemetry import trace
@@ -78,19 +77,20 @@ class ProxiedTGIService:
         )
         try:
             repo = WorkflowRepository()
-            db_path = os.environ.get("WORKFLOW_DB_PATH") or repo.base_path.joinpath(
-                "workflow_state.db"
-            )
             self.workflow_engine = WorkflowEngine(
                 repository=repo,
-                state_store=WorkflowStateStore(db_path),
+                state_store=WorkflowStateStore.from_env(
+                    repo.base_path.joinpath("workflow_state.db")
+                ),
                 llm_client=self.llm_client,
                 prompt_service=self.prompt_service,
                 tool_service=self.tool_service,
             )
             self.workflow_background = WorkflowBackgroundManager(logger=self.logger)
         except Exception as exc:
-            self.logger.debug(f"[ProxiedTGI] Workflow engine not initialized: {exc}")
+            self.logger.error(
+                "[ProxiedTGI] Workflow engine not initialized: %s", exc
+            )
 
     async def one_off_chat_completion(
         self,

@@ -1,4 +1,7 @@
 import importlib
+from pathlib import Path
+
+import pytest
 
 
 def test_mcp_map_header_to_input_parsing(monkeypatch):
@@ -86,3 +89,58 @@ def test_generated_ui_gateway_server_id_fields_defaults(monkeypatch):
     assert isinstance(fields, list)
     assert "url" in fields
     assert "meta.mcp_server_id" in fields
+
+
+def test_workflow_db_backend_defaults_to_sqlite(monkeypatch):
+    monkeypatch.delenv("WORKFLOW_DB_BACKEND", raising=False)
+    monkeypatch.delenv("WORKFLOW_DB_PATH", raising=False)
+    monkeypatch.delenv("WORKFLOW_DATABASE_URL", raising=False)
+    import app.vars as vars_module
+
+    importlib.reload(vars_module)
+
+    settings = vars_module.resolve_workflow_db_settings("/tmp/workflow_state.db")
+    assert settings.backend == "sqlite"
+    assert settings.db_path == Path("/tmp/workflow_state.db")
+    assert settings.database_url is None
+
+
+def test_workflow_db_sqlite_uses_explicit_path(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("WORKFLOW_DB_PATH", "/tmp/custom-workflow.db")
+    monkeypatch.delenv("WORKFLOW_DATABASE_URL", raising=False)
+    import app.vars as vars_module
+
+    importlib.reload(vars_module)
+
+    settings = vars_module.resolve_workflow_db_settings("/tmp/workflow_state.db")
+    assert settings.backend == "sqlite"
+    assert settings.db_path == Path("/tmp/custom-workflow.db")
+
+
+def test_workflow_db_postgres_requires_database_url(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_DB_BACKEND", "postgres")
+    monkeypatch.delenv("WORKFLOW_DATABASE_URL", raising=False)
+    import app.vars as vars_module
+
+    importlib.reload(vars_module)
+
+    with pytest.raises(
+        ValueError,
+        match="WORKFLOW_DATABASE_URL is required when WORKFLOW_DB_BACKEND=postgres",
+    ):
+        vars_module.resolve_workflow_db_settings("/tmp/workflow_state.db")
+
+
+def test_workflow_db_invalid_backend_raises(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_DB_BACKEND", "mysql")
+    monkeypatch.delenv("WORKFLOW_DATABASE_URL", raising=False)
+    import app.vars as vars_module
+
+    importlib.reload(vars_module)
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid WORKFLOW_DB_BACKEND 'mysql'. Expected 'sqlite' or 'postgres'.",
+    ):
+        vars_module.resolve_workflow_db_settings("/tmp/workflow_state.db")

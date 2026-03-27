@@ -1,6 +1,8 @@
 import os
 import json
 import re
+from dataclasses import dataclass
+from pathlib import Path
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
@@ -239,6 +241,38 @@ def _parse_generated_ui_gateway_server_id_fields(raw: str) -> list[str]:
     return parsed or default_fields
 
 
+def normalize_workflow_db_backend(value: str | None) -> str:
+    backend = (value or "").strip().lower()
+    if backend in ("", "sqlite"):
+        return "sqlite"
+    if backend == "postgres":
+        return "postgres"
+    raise ValueError(
+        f"Invalid WORKFLOW_DB_BACKEND '{value}'. Expected 'sqlite' or 'postgres'."
+    )
+
+
+@dataclass(frozen=True)
+class WorkflowDBSettings:
+    backend: str
+    db_path: Path | None = None
+    database_url: str | None = None
+
+
+def resolve_workflow_db_settings(default_sqlite_path: str | Path) -> WorkflowDBSettings:
+    backend = normalize_workflow_db_backend(os.getenv("WORKFLOW_DB_BACKEND", "sqlite"))
+    if backend == "postgres":
+        database_url = os.getenv("WORKFLOW_DATABASE_URL", "").strip()
+        if not database_url:
+            raise ValueError(
+                "WORKFLOW_DATABASE_URL is required when WORKFLOW_DB_BACKEND=postgres."
+            )
+        return WorkflowDBSettings(backend=backend, database_url=database_url)
+
+    db_path = os.getenv("WORKFLOW_DB_PATH", "").strip() or str(default_sqlite_path)
+    return WorkflowDBSettings(backend=backend, db_path=Path(db_path))
+
+
 GENERATED_UI_PROMPT_DUMP = os.getenv("GENERATED_UI_PROMPT_DUMP", "")
 
 APP_CONVERSATIONAL_UI_ENABLED = (
@@ -308,4 +342,7 @@ GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES = int(
     os.getenv("GENERATED_UI_MAX_MESSAGE_PAYLOAD_BYTES", "32000")
 )
 
+WORKFLOW_DB_BACKEND = os.getenv("WORKFLOW_DB_BACKEND", "sqlite")
+WORKFLOW_DB_PATH = os.getenv("WORKFLOW_DB_PATH", "")
+WORKFLOW_DATABASE_URL = os.getenv("WORKFLOW_DATABASE_URL", "")
 WORKFLOW_MAX_PARALLEL_AGENTS = int(os.getenv("WORKFLOW_MAX_PARALLEL_AGENTS", "4"))

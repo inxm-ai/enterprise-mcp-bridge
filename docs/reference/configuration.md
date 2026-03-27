@@ -681,6 +681,48 @@ Use either:
 GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX=/api/(?P<server_id>[^/]+)/tools/[^/?#]+
 ```
 
+## Workflow Storage
+
+#### WORKFLOW_DB_BACKEND
+
+Select the storage backend for persisted workflow execution state.
+
+- **Type:** String
+- **Values:** `sqlite`, `postgres`
+- **Default:** `sqlite`
+- **Required:** No
+
+```bash
+WORKFLOW_DB_BACKEND=sqlite
+```
+
+#### WORKFLOW_DB_PATH
+
+SQLite database path for workflow execution state. This is used only when
+`WORKFLOW_DB_BACKEND=sqlite`.
+
+- **Type:** String
+- **Default:** `<workflows base path>/workflow_state.db`
+- **Required:** No
+
+```bash
+WORKFLOW_DB_PATH=/data/workflows/workflow_state.db
+```
+
+#### WORKFLOW_DATABASE_URL
+
+Postgres DSN for workflow execution state. This is required when
+`WORKFLOW_DB_BACKEND=postgres`.
+
+- **Type:** String
+- **Default:** None
+- **Required:** Only with `WORKFLOW_DB_BACKEND=postgres`
+
+```bash
+WORKFLOW_DB_BACKEND=postgres
+WORKFLOW_DATABASE_URL=postgresql://workflow_user:secret@postgres:5432/workflows
+```
+
 ## Configuration Files
 
 ### Loading from .env File

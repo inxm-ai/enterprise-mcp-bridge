@@ -20,7 +20,8 @@ dependencies = [
     "opentelemetry-exporter-otlp",
     "opentelemetry-instrumentation-fastapi",
     "openai",
-    "genson"
+    "genson",
+    "psycopg[binary]"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -33,7 +34,13 @@ classifiers = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "httpx"
+    "httpx",
+    "testcontainers[postgres]"
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require Docker and an external service (e.g. Postgres)",
 ]
 
 [build-system]

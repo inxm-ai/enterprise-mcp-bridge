@@ -10,6 +10,10 @@ from app.utils import token_fingerprint
 logger = logging.getLogger("uvicorn.error")
 
 
+def _default_python_command() -> str:
+    return sys.executable or "python3"
+
+
 def _redacted_env_var_name(value: Optional[str]) -> str:
     if not value:
         return "<unset>"
@@ -131,7 +135,7 @@ def get_server_params(
         idx = sys.argv.index("--")
         args["command"] = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else None
         args["args"] = sys.argv[idx + 2 :] if len(sys.argv) > idx + 2 else []
-        command = args["command"] or "python"
+        command = args["command"] or _default_python_command()
         cmd_args = args["args"] or [
             os.path.join(os.path.dirname(__file__), "../..", "mcp", "server.py")
         ]
@@ -139,7 +143,7 @@ def get_server_params(
         return StdioServerParameters(command=command, args=cmd_args, env=env)
 
     # Default
-    command = "python"
+    command = _default_python_command()
     cmd_args = [os.path.join(os.path.dirname(__file__), "../..", "mcp", "server.py")]
     logger.info(f"Server-Params default: command={command}, args={cmd_args}")
     return StdioServerParameters(command=command, args=cmd_args, env=env)
