@@ -186,6 +186,22 @@ async def test_get_agent_card_empty_tools(
 
 
 @pytest.mark.asyncio
+async def test_get_agent_card_running_flag_reset_on_llm_failure(
+    mock_llm_client, mock_mcp_session, ensure_default_model
+):
+    """_running must be False after llm.ask throws so the next probe can retry."""
+    mock_mcp_session.set_tools(
+        [{"id": "tool1", "name": "Tool 1", "description": "Tool 1 description"}]
+    )
+    mock_llm_client.return_value.ask = AsyncMock(side_effect=RuntimeError("TGI 502"))
+
+    with pytest.raises(RuntimeError, match="TGI 502"):
+        await get_agent_card()
+
+    assert agent_module._running is False
+
+
+@pytest.mark.asyncio
 async def test_get_agent_card_tool_with_schemas(
     mock_llm_client, mock_mcp_session, ensure_default_model
 ):
