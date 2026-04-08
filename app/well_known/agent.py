@@ -220,10 +220,7 @@ async def get_agent_card():
 
                 _agent_card_cache = agent_card
 
-                try:
-                    _save_agent_card_to_file(agent_card)
-                except Exception:
-                    pass
+                _save_agent_card_to_file(agent_card)
                 return JSONResponse(content=agent_card)
         finally:
             _running = False
