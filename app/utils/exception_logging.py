@@ -6,10 +6,9 @@ import logging
 import re
 from typing import Any
 
-RATE_LIMIT_STATUS_CODE = 429
-RATE_LIMIT_STATUS_CODE_PATTERN = re.compile(rf"\b{RATE_LIMIT_STATUS_CODE}\b")
-# Lowercase patterns: message is normalized with .lower() before matching.
-RATE_LIMIT_HINTS_LOWERCASE = ("too many requests", "rate limit", "rate-limit")
+CLIENT_ERROR_STATUS_CODE_PATTERN = re.compile(r"\b(4\d{2})\b")
+CLIENT_ERROR_STATUS_MIN = 400
+CLIENT_ERROR_STATUS_MAX = 499
 
 
 def _safe_str(obj) -> str:
@@ -72,11 +71,11 @@ def find_exception_in_exception_groups(exception: Exception, target_type: Any):
         if converted_http_exception is not None:
             return converted_http_exception
 
-        converted_rate_limit_exception = _convert_rate_limit_error(
+        converted_client_error_exception = _convert_wrapped_client_error(
             exception, target_type
         )
-        if converted_rate_limit_exception is not None:
-            return converted_rate_limit_exception
+        if converted_client_error_exception is not None:
+            return converted_client_error_exception
 
         # Check for sub-exceptions if this is an exception group
         if hasattr(exception, "exceptions"):
@@ -118,13 +117,13 @@ def _convert_http_status_error(exception: Exception, target_type: Any):
     return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
 
 
-def _convert_rate_limit_error(exception: Exception, target_type: Any):
+def _convert_wrapped_client_error(exception: Exception, target_type: Any):
     """
-    Convert non-httpx upstream rate-limit errors into FastAPI HTTPException.
+    Convert non-httpx wrapped upstream client errors into HTTPException.
 
-    Some async transport layers wrap 429 responses into generic exceptions
-    (often with "future: ..." prefixes), so retain the upstream 429 semantics
-    by pattern matching the error message.
+    Some async transport layers wrap remote 4xx responses into generic
+    exceptions (often with "future: ..." prefixes). Keep the upstream
+    client error status code visible to callers instead of returning 500.
     """
     try:
         from fastapi import HTTPException as FastAPIHTTPException
@@ -134,15 +133,17 @@ def _convert_rate_limit_error(exception: Exception, target_type: Any):
     if target_type is not FastAPIHTTPException:
         return None
 
-    message = _safe_str(exception).lower()
-    if RATE_LIMIT_STATUS_CODE_PATTERN.search(message) is None:
+    message = _safe_str(exception)
+    status_match = CLIENT_ERROR_STATUS_CODE_PATTERN.search(message)
+    if status_match is None:
         return None
-    if not any(hint in message for hint in RATE_LIMIT_HINTS_LOWERCASE):
+    status_code = int(status_match.group(1))
+    if status_code < CLIENT_ERROR_STATUS_MIN or status_code > CLIENT_ERROR_STATUS_MAX:
         return None
 
     return FastAPIHTTPException(
-        status_code=RATE_LIMIT_STATUS_CODE,
-        detail=_safe_str(exception),
+        status_code=status_code,
+        detail=message,
     )
 
 
