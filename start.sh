@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if [ -n "$MCP_RUN_ON_START" ] && [ -n "$MCP_RUN_ON_START_INHERIT_ENVIRONMENT" ]; then
+  echo "MCP_RUN_ON_START and MCP_RUN_ON_START_INHERIT_ENVIRONMENT cannot both be set"
+  exit 1
+fi
+
 if [ "$#" -gt 0 ]; then
   export MCP_SERVER_COMMAND="$*"
 fi
@@ -42,6 +47,17 @@ if [ -n "$MCP_RUN_ON_START" ]; then
   rc=$?
   if [ $rc -ne 0 ]; then
     echo "MCP_RUN_ON_START command failed with exit code $rc"
+  fi
+fi
+
+# If MCP_RUN_ON_START_INHERIT_ENVIRONMENT is set, run its command before starting the server
+if [ -n "$MCP_RUN_ON_START_INHERIT_ENVIRONMENT" ]; then
+  echo "Running MCP_RUN_ON_START_INHERIT_ENVIRONMENT: $MCP_RUN_ON_START_INHERIT_ENVIRONMENT"
+  # run in the current environment and set HOME to a tmp dir so npm uses a separate cache
+  env HOME=/tmp PATH="$PATH" bash -lc "$MCP_RUN_ON_START_INHERIT_ENVIRONMENT"
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    echo "MCP_RUN_ON_START_INHERIT_ENVIRONMENT command failed with exit code $rc"
   fi
 fi
 
