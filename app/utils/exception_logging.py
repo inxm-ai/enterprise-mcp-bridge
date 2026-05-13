@@ -4,6 +4,9 @@ Utility functions for enhanced exception logging, particularly for TaskGroup exc
 
 import logging
 
+RATE_LIMIT_STATUS_CODE = 429
+RATE_LIMIT_HINTS = ("too many requests", "rate limit", "rate-limit")
+
 
 def _safe_str(obj) -> str:
     """
@@ -65,6 +68,12 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
         if converted_http_exception is not None:
             return converted_http_exception
 
+        converted_rate_limit_exception = _convert_rate_limit_error(
+            exception, target_type
+        )
+        if converted_rate_limit_exception is not None:
+            return converted_rate_limit_exception
+
         # Check for sub-exceptions if this is an exception group
         if hasattr(exception, "exceptions"):
             sub_exceptions = _safe_get_exceptions(exception)
@@ -103,6 +112,34 @@ def _convert_http_status_error(exception: Exception, target_type: any):
         return None
 
     return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
+
+
+def _convert_rate_limit_error(exception: Exception, target_type: any):
+    """
+    Convert non-httpx upstream rate-limit errors into FastAPI HTTPException.
+
+    Some async transport layers wrap 429 responses into generic exceptions
+    (often with "future: ..." prefixes), so retain the upstream 429 semantics
+    by pattern matching the error message.
+    """
+    try:
+        from fastapi import HTTPException as FastAPIHTTPException
+    except Exception:
+        return None
+
+    if target_type is not FastAPIHTTPException:
+        return None
+
+    message = _safe_str(exception).lower()
+    if str(RATE_LIMIT_STATUS_CODE) not in message:
+        return None
+    if not any(hint in message for hint in RATE_LIMIT_HINTS):
+        return None
+
+    return FastAPIHTTPException(
+        status_code=RATE_LIMIT_STATUS_CODE,
+        detail=_safe_str(exception),
+    )
 
 
 def log_exception_with_details(

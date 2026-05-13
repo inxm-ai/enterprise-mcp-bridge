@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.routes import list_resources, list_tools
+from app.routes import list_resources, list_tools, run_tool
 
 
 def _upstream_401_error() -> httpx.HTTPStatusError:
@@ -26,6 +26,16 @@ class _FailingMCPContext:
         return False
 
 
+class _RateLimitedMCPContext:
+    async def __aenter__(self):
+        raise RuntimeError(
+            "future: <Task finished exception=Exception('429 Too Many Requests: rate limit exceeded')>"
+        )
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_list_resources_passes_through_upstream_http_status_code():
     with patch("app.routes.mcp_session_context", return_value=_FailingMCPContext()):
@@ -40,6 +50,25 @@ async def test_list_resources_passes_through_upstream_http_status_code():
 
     assert exc_info.value.status_code == 401
     assert "401 Unauthorized" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_run_tool_passes_through_wrapped_upstream_rate_limit_status_code():
+    with patch("app.routes.mcp_session_context", return_value=_RateLimitedMCPContext()):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_tool(
+                tool_name="search",
+                request=SimpleNamespace(headers={}),
+                x_inxm_mcp_session_header=None,
+                x_inxm_mcp_session_cookie=None,
+                x_inxm_dry_run=None,
+                access_token="token",
+                args={},
+                group=None,
+            )
+
+    assert exc_info.value.status_code == 429
+    assert "429 Too Many Requests" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio

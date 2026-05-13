@@ -627,6 +627,19 @@ class TestEdgeCasesAndStressTests:
             assert isinstance(found, HTTPException)
             assert found.status_code == 401
 
+        def test_maps_wrapped_rate_limit_exception_to_http_exception(self):
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            exc = RuntimeError(
+                "future: <Task finished exception=Exception('429 Too Many Requests: rate limit exceeded')>"
+            )
+
+            found = find_exception_in_exception_groups(exc, HTTPException)
+
+            assert isinstance(found, HTTPException)
+            assert found.status_code == 429
+            assert "429 Too Many Requests" in str(found.detail)
+
 
 if __name__ == "__main__":
     # Run the tests
