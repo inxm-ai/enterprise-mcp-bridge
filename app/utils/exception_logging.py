@@ -3,9 +3,13 @@ Utility functions for enhanced exception logging, particularly for TaskGroup exc
 """
 
 import logging
+import re
+from typing import Any
 
 RATE_LIMIT_STATUS_CODE = 429
-RATE_LIMIT_HINTS = ("too many requests", "rate limit", "rate-limit")
+RATE_LIMIT_STATUS_CODE_PATTERN = re.compile(rf"\b{RATE_LIMIT_STATUS_CODE}\b")
+# Lowercase patterns: message is normalized with .lower() before matching.
+RATE_LIMIT_HINTS_LOWERCASE = ("too many requests", "rate limit", "rate-limit")
 
 
 def _safe_str(obj) -> str:
@@ -46,7 +50,7 @@ def _safe_get_exceptions(exception_group) -> list:
         return []
 
 
-def find_exception_in_exception_groups(exception: Exception, target_type: any):
+def find_exception_in_exception_groups(exception: Exception, target_type: Any):
     """
     Recursively search through an exception and its sub-exceptions to find
     if any exception is of the target type.
@@ -88,7 +92,7 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
         return None
 
 
-def _convert_http_status_error(exception: Exception, target_type: any):
+def _convert_http_status_error(exception: Exception, target_type: Any):
     """
     Convert httpx.HTTPStatusError into FastAPI HTTPException when requested.
 
@@ -114,7 +118,7 @@ def _convert_http_status_error(exception: Exception, target_type: any):
     return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
 
 
-def _convert_rate_limit_error(exception: Exception, target_type: any):
+def _convert_rate_limit_error(exception: Exception, target_type: Any):
     """
     Convert non-httpx upstream rate-limit errors into FastAPI HTTPException.
 
@@ -131,9 +135,9 @@ def _convert_rate_limit_error(exception: Exception, target_type: any):
         return None
 
     message = _safe_str(exception).lower()
-    if str(RATE_LIMIT_STATUS_CODE) not in message:
+    if RATE_LIMIT_STATUS_CODE_PATTERN.search(message) is None:
         return None
-    if not any(hint in message for hint in RATE_LIMIT_HINTS):
+    if not any(hint in message for hint in RATE_LIMIT_HINTS_LOWERCASE):
         return None
 
     return FastAPIHTTPException(

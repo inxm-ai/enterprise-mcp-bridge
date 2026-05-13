@@ -631,7 +631,7 @@ class TestEdgeCasesAndStressTests:
             from app.utils.exception_logging import find_exception_in_exception_groups
 
             exc = RuntimeError(
-                "future: <Task finished exception=Exception('429 Too Many Requests: rate limit exceeded')>"
+                "future wrapper: 429 Too Many Requests due to rate limit exceeded"
             )
 
             found = find_exception_in_exception_groups(exc, HTTPException)
