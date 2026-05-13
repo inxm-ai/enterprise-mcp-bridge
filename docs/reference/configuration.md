@@ -24,6 +24,45 @@ Supports placeholders:
 MCP_SERVER_COMMAND="python server.py --data {data_path}/{user_id}"
 ```
 
+#### MCP_RUN_ON_START
+
+Command to run before the bridge starts serving traffic.
+
+- **Type:** String
+- **Default:** Not set
+- **Required:** No
+- **Example:** `npm install -g @modelcontextprotocol/server-memory`
+
+By default, this command runs in a clean environment with only `HOME` and `PATH`
+set. Use it for startup work that should not inherit runtime secrets or
+deployment-specific environment variables.
+
+```bash
+MCP_RUN_ON_START="npm install -g @modelcontextprotocol/server-memory"
+```
+
+#### MCP_RUN_ON_START_INHERIT_ENVIRONMENT
+
+Command to run before the bridge starts serving traffic while inheriting the
+current process environment.
+
+- **Type:** String
+- **Default:** Not set
+- **Required:** No
+- **Example:** `alembic upgrade head`
+
+Use this instead of `MCP_RUN_ON_START` when the startup command needs access to
+environment variables provided by the runtime. This can be useful for database
+migrations on MCP startup, where the migration command needs variables such as
+`POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`.
+
+`MCP_RUN_ON_START` and `MCP_RUN_ON_START_INHERIT_ENVIRONMENT` are mutually
+exclusive. Set only one startup hook.
+
+```bash
+MCP_RUN_ON_START_INHERIT_ENVIRONMENT="alembic upgrade head"
+```
+
 #### MCP_BASE_PATH
 
 Base path for all API endpoints.
