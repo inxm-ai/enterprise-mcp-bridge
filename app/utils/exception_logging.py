@@ -3,6 +3,12 @@ Utility functions for enhanced exception logging, particularly for TaskGroup exc
 """
 
 import logging
+import re
+from typing import Any
+
+CLIENT_ERROR_STATUS_CODE_PATTERN = re.compile(r"\b(4\d{2})\b")
+CLIENT_ERROR_STATUS_MIN = 400
+CLIENT_ERROR_STATUS_MAX = 499
 
 
 def _safe_str(obj) -> str:
@@ -43,7 +49,7 @@ def _safe_get_exceptions(exception_group) -> list:
         return []
 
 
-def find_exception_in_exception_groups(exception: Exception, target_type: any):
+def find_exception_in_exception_groups(exception: Exception, target_type: Any):
     """
     Recursively search through an exception and its sub-exceptions to find
     if any exception is of the target type.
@@ -65,6 +71,12 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
         if converted_http_exception is not None:
             return converted_http_exception
 
+        converted_client_error_exception = _convert_wrapped_client_error(
+            exception, target_type
+        )
+        if converted_client_error_exception is not None:
+            return converted_client_error_exception
+
         # Check for sub-exceptions if this is an exception group
         if hasattr(exception, "exceptions"):
             sub_exceptions = _safe_get_exceptions(exception)
@@ -79,7 +91,7 @@ def find_exception_in_exception_groups(exception: Exception, target_type: any):
         return None
 
 
-def _convert_http_status_error(exception: Exception, target_type: any):
+def _convert_http_status_error(exception: Exception, target_type: Any):
     """
     Convert httpx.HTTPStatusError into FastAPI HTTPException when requested.
 
@@ -103,6 +115,36 @@ def _convert_http_status_error(exception: Exception, target_type: any):
         return None
 
     return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
+
+
+def _convert_wrapped_client_error(exception: Exception, target_type: Any):
+    """
+    Convert non-httpx wrapped upstream client errors into HTTPException.
+
+    Some async transport layers wrap remote 4xx responses into generic
+    exceptions (often with "future: ..." prefixes). Keep the upstream
+    client error status code visible to callers instead of returning 500.
+    """
+    try:
+        from fastapi import HTTPException as FastAPIHTTPException
+    except Exception:
+        return None
+
+    if target_type is not FastAPIHTTPException:
+        return None
+
+    message = _safe_str(exception)
+    status_match = CLIENT_ERROR_STATUS_CODE_PATTERN.search(message)
+    if status_match is None:
+        return None
+    status_code = int(status_match.group(1))
+    if status_code < CLIENT_ERROR_STATUS_MIN or status_code > CLIENT_ERROR_STATUS_MAX:
+        return None
+
+    return FastAPIHTTPException(
+        status_code=status_code,
+        detail=message,
+    )
 
 
 def log_exception_with_details(
