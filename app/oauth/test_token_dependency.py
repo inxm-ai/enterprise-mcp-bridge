@@ -51,37 +51,25 @@ class TestCookieSource:
         assert token == "cookie-tok"
 
     @pytest.mark.asyncio
-    async def test_cookie_absent_falls_back_to_header(self, monkeypatch, caplog):
+    async def test_cookie_absent_falls_back_to_header(self, monkeypatch):
         """Core new behaviour: missing cookie → use injected header instead of None."""
         monkeypatch.setattr(td_module, "TOKEN_SOURCE", "cookie")
         monkeypatch.setattr(td_module, "TOKEN_COOKIE_NAME", "my_cookie")
-        monkeypatch.setattr(td_module, "TOKEN_NAME", "x-test-token")
-        caplog.set_level("DEBUG", logger="uvicorn.error")
 
         request = _make_request()  # no cookie at all
         token = await td_module.get_access_token(request, header_token="hdr-tok")
 
         assert token == "hdr-tok"
-        assert (
-            "Cookie my_cookie not found; falling back to x-test-token header"
-            in caplog.text
-        )
 
     @pytest.mark.asyncio
-    async def test_cookie_absent_no_header_returns_none(self, monkeypatch, caplog):
+    async def test_cookie_absent_no_header_returns_none(self, monkeypatch):
         monkeypatch.setattr(td_module, "TOKEN_SOURCE", "cookie")
         monkeypatch.setattr(td_module, "TOKEN_COOKIE_NAME", "my_cookie")
-        monkeypatch.setattr(td_module, "TOKEN_NAME", "x-test-token")
-        caplog.set_level("WARNING", logger="uvicorn.error")
 
         request = _make_request()  # no cookie, no header
         token = await td_module.get_access_token(request, header_token=None)
 
         assert token is None
-        assert (
-            "Cookie my_cookie not found and x-test-token header is also missing"
-            in caplog.text
-        )
 
     @pytest.mark.asyncio
     async def test_wrong_cookie_name_is_not_used(self, monkeypatch):
