@@ -1,7 +1,9 @@
-from fastapi import Header, Request
-from typing import Optional
 import logging
-from app.vars import TOKEN_NAME, TOKEN_COOKIE_NAME, TOKEN_SOURCE
+from typing import Optional
+
+from fastapi import Header, Request
+
+from app.vars import TOKEN_COOKIE_NAME, TOKEN_NAME, TOKEN_SOURCE
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -15,10 +17,10 @@ async def get_access_token(
     """
     if TOKEN_SOURCE == "cookie":
         cookie_value = request.cookies.get(TOKEN_COOKIE_NAME)
-        if not cookie_value:
-            logger.warning(
-                f"Cookie {TOKEN_COOKIE_NAME} not found in request cookies: {request.cookies.keys()}"
-            )
-        return cookie_value
-    # Default to header
+        if cookie_value:
+            return cookie_value
+        logger.debug(
+            f"Cookie {TOKEN_COOKIE_NAME} not found; falling back to {TOKEN_NAME} header"
+        )
+    # Default to header (also fallback when TOKEN_SOURCE=cookie but cookie is absent)
     return header_token
