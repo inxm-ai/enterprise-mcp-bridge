@@ -19,8 +19,13 @@ async def get_access_token(
         cookie_value = request.cookies.get(TOKEN_COOKIE_NAME)
         if cookie_value:
             return cookie_value
-        logger.debug(
-            f"Cookie {TOKEN_COOKIE_NAME} not found; falling back to {TOKEN_NAME} header"
-        )
+        if header_token:
+            logger.debug(
+                f"Cookie {TOKEN_COOKIE_NAME} not found; falling back to {TOKEN_NAME} header"
+            )
+        else:
+            logger.warning(
+                f"Cookie {TOKEN_COOKIE_NAME} not found and {TOKEN_NAME} header is also missing"
+            )
     # Default to header (also fallback when TOKEN_SOURCE=cookie but cookie is absent)
     return header_token
