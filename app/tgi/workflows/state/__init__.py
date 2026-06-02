@@ -39,7 +39,9 @@ class WorkflowStateStore:
             self.db_path: Path | None = None
             self.database_url = database_url
         else:
-            resolved_db_path = Path(db_path) if db_path is not None else Path(":memory:")
+            resolved_db_path = (
+                Path(db_path) if db_path is not None else Path(":memory:")
+            )
             self._backend = SQLiteWorkflowStateBackend(resolved_db_path)
             self.db_path = resolved_db_path
             self.database_url = None

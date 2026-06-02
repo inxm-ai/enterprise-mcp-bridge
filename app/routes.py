@@ -1,6 +1,5 @@
 import logging
 import io
-import json
 import re
 from app.vars import (
     EFFECT_TOOLS,

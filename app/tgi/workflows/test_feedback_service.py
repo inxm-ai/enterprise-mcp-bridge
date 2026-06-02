@@ -3,7 +3,7 @@ from typing import Any, AsyncGenerator
 
 import pytest
 
-from app.tgi.models import ChatCompletionRequest, Message, MessageRole
+from app.tgi.models import ChatCompletionRequest, MessageRole
 from app.tgi.workflows.feedback import (
     FeedbackService,
     _infer_primitive_schema,

@@ -88,9 +88,7 @@ class ProxiedTGIService:
             )
             self.workflow_background = WorkflowBackgroundManager(logger=self.logger)
         except Exception as exc:
-            self.logger.error(
-                "[ProxiedTGI] Workflow engine not initialized: %s", exc
-            )
+            self.logger.error("[ProxiedTGI] Workflow engine not initialized: %s", exc)
 
     async def one_off_chat_completion(
         self,

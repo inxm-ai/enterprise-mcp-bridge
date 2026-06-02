@@ -220,7 +220,10 @@ class TestProxiedTGIService:
 
         assert service.workflow_engine is not None
         assert service.workflow_engine.state_store.backend_name == "postgres"
-        assert fake_psycopg.connect_calls == ["postgresql://workflow:test@db/workflows"] * 2
+        assert (
+            fake_psycopg.connect_calls
+            == ["postgresql://workflow:test@db/workflows"] * 2
+        )
 
     @pytest.mark.asyncio
     async def test_find_prompt_by_name_success(self, proxied_tgi_service, mock_prompts):

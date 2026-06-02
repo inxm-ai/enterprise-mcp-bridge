@@ -8,6 +8,7 @@ correctly against a live database — not just against a fake in-memory cursor.
 Requires Docker to be running.  Tests are automatically skipped when the
 `testcontainers` package is not installed or when Docker is unavailable.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -28,7 +29,9 @@ pytestmark = pytest.mark.integration
 POSTGRES_IMAGE = "postgres:16"
 
 
-def _owned_state(exec_id: str, flow_id: str, owner: str, created_at: str) -> WorkflowExecutionState:
+def _owned_state(
+    exec_id: str, flow_id: str, owner: str, created_at: str
+) -> WorkflowExecutionState:
     state = WorkflowExecutionState.new(exec_id, flow_id)
     state.owner_id = owner
     state.context["_workflow_owner_id"] = owner
@@ -206,7 +209,9 @@ def test_list_workflows_orders_by_timestamp_desc(store: WorkflowStateStore) -> N
     state_a = _owned_state("lo-1", "flow-a", owner, "2024-01-15T10:30:00.000000Z")
     state_b = _owned_state("lo-2", "flow-b", owner, "2024-01-15T10:30:00.000000Z")
     state_c = _owned_state("lo-3", "flow-c", owner, "2024-01-14T10:30:00.000000Z")
-    state_other = _owned_state("lo-9", "flow-x", "other-user", "2024-01-16T09:00:00.000000Z")
+    state_other = _owned_state(
+        "lo-9", "flow-x", "other-user", "2024-01-16T09:00:00.000000Z"
+    )
 
     for s in (state_a, state_b, state_c, state_other):
         store.save_state(s)
@@ -250,7 +255,9 @@ def test_list_workflows_after_cursor_pagination(store: WorkflowStateStore) -> No
     assert [s.execution_id for s in newer] == ["la-2", "la-1"]
 
 
-def test_list_workflows_after_cursor_with_id_tiebreak(store: WorkflowStateStore) -> None:
+def test_list_workflows_after_cursor_with_id_tiebreak(
+    store: WorkflowStateStore,
+) -> None:
     owner = "list-user-after-id"
     state_a = _owned_state("lai-1", "flow-a", owner, "2024-01-15T10:30:00.000000Z")
     state_b = _owned_state("lai-2", "flow-b", owner, "2024-01-15T10:30:00.000000Z")
@@ -270,8 +277,12 @@ def test_list_workflows_after_cursor_with_id_tiebreak(store: WorkflowStateStore)
 def test_list_workflows_excludes_other_owners(store: WorkflowStateStore) -> None:
     owner_a = "iso-user-a"
     owner_b = "iso-user-b"
-    store.save_state(_owned_state("iso-1", "flow", owner_a, "2024-06-01T12:00:00.000000Z"))
-    store.save_state(_owned_state("iso-2", "flow", owner_b, "2024-06-01T12:00:00.000000Z"))
+    store.save_state(
+        _owned_state("iso-1", "flow", owner_a, "2024-06-01T12:00:00.000000Z")
+    )
+    store.save_state(
+        _owned_state("iso-2", "flow", owner_b, "2024-06-01T12:00:00.000000Z")
+    )
 
     results = store.list_workflows(owner_id=owner_a, limit=10)
     assert all(s.owner_id == owner_a for s in results)

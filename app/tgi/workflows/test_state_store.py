@@ -72,9 +72,7 @@ class _FakePostgresCursor:
             self._results = [
                 (row[0], row[1], row[2], row[7], row[8], row[9])
                 for row in self.module.rows.values()
-                if row[7] in (None, "")
-                or row[8] in (None, "")
-                or row[9] in (None, "")
+                if row[7] in (None, "") or row[8] in (None, "") or row[9] in (None, "")
             ]
             self._result = None
             return
@@ -117,11 +115,10 @@ class _FakePostgresCursor:
             self._results = []
             return
 
-        if (
-            normalized.startswith(
-                "SELECT execution_id, flow_id, context_json, events_json, current_agent, completed, awaiting_feedback, owner_id, created_at, last_change FROM workflow_executions WHERE owner_id = %s"
-            )
-            and normalized.endswith("ORDER BY created_at DESC, execution_id DESC LIMIT %s")
+        if normalized.startswith(
+            "SELECT execution_id, flow_id, context_json, events_json, current_agent, completed, awaiting_feedback, owner_id, created_at, last_change FROM workflow_executions WHERE owner_id = %s"
+        ) and normalized.endswith(
+            "ORDER BY created_at DESC, execution_id DESC LIMIT %s"
         ):
             self._results = self._filter_list_rows(normalized, params)
             self._result = None
@@ -280,7 +277,9 @@ def test_postgres_store_initializes_schema(monkeypatch):
         for query in fake_psycopg.queries
     )
     assert any(
-        query.startswith("ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS owner_id")
+        query.startswith(
+            "ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS owner_id"
+        )
         for query in fake_psycopg.queries
     )
 

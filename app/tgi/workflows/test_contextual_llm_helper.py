@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 from typing import Any, AsyncGenerator
 
 import pytest
