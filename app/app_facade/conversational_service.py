@@ -20,28 +20,29 @@ from typing import (
 
 from fastapi import HTTPException
 
-from app.session import MCPSessionBase
-from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.app_facade.generated_schemas import generation_response_format
 from app.app_facade.generated_types import (
     Actor,
     Scope,
 )
 from app.app_facade.prompt_helpers import (
-    parse_json,
-    sanitize_runtime_action,
-    runtime_context_for_prompt,
-    prompt_with_runtime_context,
+    changed_scripts,
     history_for_prompt,
+    parse_json,
+    prompt_with_runtime_context,
+    runtime_context_for_prompt,
+    sanitize_runtime_action,
 )
+from app.session import MCPSessionBase
+from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.vars import (
-    GENERATED_UI_MAX_HISTORY_ENTRIES,
-    GENERATED_UI_MAX_HISTORY_BYTES,
-    GENERATED_UI_MAX_RUNTIME_EXCHANGES,
-    GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
-    GENERATED_UI_MAX_RUNTIME_BYTES,
     APP_UI_PATCH_ONLY,
     APP_UI_PATCH_RETRIES,
+    GENERATED_UI_MAX_HISTORY_BYTES,
+    GENERATED_UI_MAX_HISTORY_ENTRIES,
+    GENERATED_UI_MAX_RUNTIME_BYTES,
+    GENERATED_UI_MAX_RUNTIME_CONSOLE_EVENTS,
+    GENERATED_UI_MAX_RUNTIME_EXCHANGES,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -197,7 +198,27 @@ class ConversationalService:
                         previous_metadata=session_payload.get("metadata_snapshot", {}),
                     )
                     if patch_attempt:
-                        updated_payload = patch_attempt.get("payload")
+                        candidate = patch_attempt.get("payload")
+                        scripts_changed = bool(
+                            changed_scripts(candidate, draft_payload)
+                        )
+                        html_changed = (candidate or {}).get("html") != (
+                            draft_payload or {}
+                        ).get("html")
+                        if not scripts_changed and not html_changed:
+                            # Patch was a complete no-op — didn't change scripts or HTML.
+                            # Treat as failure so we fall through to full regeneration.
+                            patch_reason = "patch_no_changes"
+                            patch_failure_reasons.append(
+                                f"attempt={attempt_index + 1}/{max_attempts}:{patch_reason}"
+                            )
+                            logger.warning(
+                                "[GeneratedUI] Patch attempt %s/%s produced no changes, treating as failure",
+                                attempt_index + 1,
+                                max_attempts,
+                            )
+                            continue
+                        updated_payload = candidate
                         update_mode = "patch_applied"
                         if attempt_index > 0:
                             logger.info(
@@ -507,8 +528,9 @@ class ConversationalService:
         try:
             system_prompt = (
                 "You are a UI patch planner. Return valid JSON only in this shape: "
-                '{"patch":{"html":{"page":"...","snippet":"..."},"service_script":"...","components_script":"...","metadata":{...}}}. '
+                '{"patch":{"html":{"page":"...","snippet":"..."},"service_script":"...","components_script":"...","test_script":"...","dummy_data":"...","metadata":{...}}}. '
                 "Only include fields that need changes. Do not include markdown fences. "
+                "When the user request involves adding, changing, or fixing tests, you MUST include test_script in the patch. "
                 "Preserve component-owned data loading and partial rendering. Do not rewrite to "
                 "one root-level Promise.all() fan-out or a single full-screen blocking loader "
                 "for independent components. Keep targeted event-driven refetch behavior. "
@@ -522,6 +544,8 @@ class ConversationalService:
                     "html": draft_payload.get("html"),
                     "service_script": draft_payload.get("service_script"),
                     "components_script": draft_payload.get("components_script"),
+                    "test_script": draft_payload.get("test_script"),
+                    "dummy_data": draft_payload.get("dummy_data"),
                     "metadata": draft_payload.get("metadata"),
                 },
             }

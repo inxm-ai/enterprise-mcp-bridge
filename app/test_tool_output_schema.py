@@ -135,7 +135,9 @@ def test_auto_detects_json_structured_content_without_schema(
     client, mock_session_context
 ):
     """JSON text in content is parsed into structuredContent even without a schema."""
-    tool_response_content = MockContent(text=json.dumps([{"org": "ponderaforme", "teams": []}]))
+    tool_response_content = MockContent(
+        text=json.dumps([{"org": "ponderaforme", "teams": []}])
+    )
     tool_result = MockResult(content=[tool_response_content])
     mock_session_context.call_tool.return_value = tool_result
 
