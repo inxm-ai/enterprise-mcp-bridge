@@ -45,6 +45,7 @@ from app.app_facade.generated_dummy_data import (
 from app.app_facade.generated_schemas import (
     generation_response_format,
 )
+from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_storage import GeneratedUIStorage
 from app.app_facade.generated_types import (
     Actor,
@@ -142,15 +143,7 @@ _PATCH_UPDATE_SCHEMA = {
 }
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    try:
-        parsed = int(os.environ.get(name, str(default)))
-        return parsed if parsed > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
-NODE_TEST_TIMEOUT_MS = _positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
+NODE_TEST_TIMEOUT_MS = positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
 
 
 def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:

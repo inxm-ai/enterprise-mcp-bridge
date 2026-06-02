@@ -20,6 +20,7 @@ from typing import (
 
 from fastapi import HTTPException
 
+from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_schemas import generation_response_format
 from app.app_facade.generated_types import (
     Actor,
@@ -79,7 +80,9 @@ _PATCH_UPDATE_SCHEMA = {
 
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
-_COMPONENTS_SCRIPT_CONTEXT_CHARS = 6000
+_COMPONENTS_SCRIPT_CONTEXT_CHARS = positive_int_env(
+    "CONVERSATIONAL_COMPONENTS_SCRIPT_CONTEXT_CHARS", 6000
+)
 
 
 def _generation_response_format(schema=None, name: str = "generated_ui"):
