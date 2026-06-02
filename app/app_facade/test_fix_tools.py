@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_output_factory import MCP_SERVICE_TEST_HELPER_SCRIPT
 from app.vars import GENERATED_UI_READ_ONLY_STREAK_LIMIT, LLM_MAX_PAYLOAD_BYTES
 from app.tgi.models import (
@@ -73,27 +74,19 @@ TOOL_DESCRIPTIONS = {
 }
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    try:
-        parsed = int(os.environ.get(name, str(default)))
-        return parsed if parsed > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
-NODE_TEST_TIMEOUT_MS = _positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
+NODE_TEST_TIMEOUT_MS = positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
 READ_ONLY_STREAK_LIMIT = max(1, int(GENERATED_UI_READ_ONLY_STREAK_LIMIT))
-FIX_CODE_ASSERTION_BAILOUT_LIMIT = _positive_int_env(
+FIX_CODE_ASSERTION_BAILOUT_LIMIT = positive_int_env(
     "GENERATED_UI_FIX_CODE_ASSERTION_BAILOUT_LIMIT", 3
 )
-ITERATIVE_FIX_MAX_MESSAGES = _positive_int_env("GENERATED_UI_FIX_MAX_MESSAGES", 80)
-ITERATIVE_FIX_MAX_MESSAGE_BYTES = _positive_int_env(
+ITERATIVE_FIX_MAX_MESSAGES = positive_int_env("GENERATED_UI_FIX_MAX_MESSAGES", 80)
+ITERATIVE_FIX_MAX_MESSAGE_BYTES = positive_int_env(
     "GENERATED_UI_FIX_MAX_MESSAGE_BYTES", 12000
 )
-ITERATIVE_FIX_MAX_TOOL_MESSAGE_BYTES = _positive_int_env(
+ITERATIVE_FIX_MAX_TOOL_MESSAGE_BYTES = positive_int_env(
     "GENERATED_UI_FIX_MAX_TOOL_MESSAGE_BYTES", 6000
 )
-ITERATIVE_FIX_MAX_PAYLOAD_BYTES = _positive_int_env(
+ITERATIVE_FIX_MAX_PAYLOAD_BYTES = positive_int_env(
     "GENERATED_UI_FIX_MAX_PAYLOAD_BYTES",
     max(10000, int(LLM_MAX_PAYLOAD_BYTES * 0.9)),
 )
