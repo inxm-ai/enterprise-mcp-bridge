@@ -2217,6 +2217,79 @@ def test_run_assistant_message_system_prompt_includes_component_loading_policy()
     assert "starts with 'I will ...'" in system_prompt
 
 
+def test_run_assistant_message_draft_context_includes_components_script():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    captured = {}
+
+    async def fake_non_stream_chat_with_tools(
+        _session, _messages, _selected_tools, request, _access_token, _unused
+    ):
+        captured["messages"] = request.messages
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    service.tgi_service._non_stream_chat_with_tools = fake_non_stream_chat_with_tools
+
+    asyncio.run(
+        service.conversational_service._run_assistant_message(
+            session=None,
+            draft_payload={
+                "html": {"page": "<html/>", "snippet": "<div/>"},
+                "components_script": "import { pfusch } from 'pfusch'; const MyComp = pfusch('my-comp', () => {});",
+                "metadata": {"requirements": "test"},
+            },
+            history=[],
+            user_message="Change button colour",
+            selected_tools=[],
+            tool_choice="auto",
+            runtime_context=None,
+            access_token=None,
+        )
+    )
+
+    draft_context_message = captured["messages"][1]
+    draft_context = json.loads(draft_context_message.content.split("Current draft context:\n", 1)[1])
+    assert "pfusch" in draft_context["components_script"]
+    assert "MyComp" in draft_context["components_script"]
+
+
+def test_run_assistant_message_draft_context_trims_components_script_to_limit():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    captured = {}
+
+    async def fake_non_stream_chat_with_tools(
+        _session, _messages, _selected_tools, request, _access_token, _unused
+    ):
+        captured["messages"] = request.messages
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    service.tgi_service._non_stream_chat_with_tools = fake_non_stream_chat_with_tools
+
+    long_script = "x" * 8000
+
+    asyncio.run(
+        service.conversational_service._run_assistant_message(
+            session=None,
+            draft_payload={
+                "html": {},
+                "components_script": long_script,
+                "metadata": {},
+            },
+            history=[],
+            user_message="Refactor",
+            selected_tools=[],
+            tool_choice="auto",
+            runtime_context=None,
+            access_token=None,
+        )
+    )
+
+    draft_context_message = captured["messages"][1]
+    draft_context = json.loads(draft_context_message.content.split("Current draft context:\n", 1)[1])
+    assert len(draft_context["components_script"]) == 6000
+
+
 def test_attempt_patch_update_prompt_includes_no_global_blocking_loader_guidance():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())

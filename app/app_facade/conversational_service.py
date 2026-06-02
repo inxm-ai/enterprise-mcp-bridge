@@ -79,6 +79,8 @@ _PATCH_UPDATE_SCHEMA = {
 
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
+_COMPONENTS_SCRIPT_CONTEXT_CHARS = 6000
+
 
 def _generation_response_format(schema=None, name: str = "generated_ui"):
     return generation_response_format(schema=schema, name=name)
@@ -432,6 +434,7 @@ class ConversationalService:
         messages: List[Message] = [
             Message(role=MessageRole.SYSTEM, content=system_prompt)
         ]
+        components_script_raw = draft_payload.get("components_script") or ""
         messages.append(
             Message(
                 role=MessageRole.USER,
@@ -440,6 +443,7 @@ class ConversationalService:
                     + json.dumps(
                         {
                             "html": (draft_payload.get("html") or {}),
+                            "components_script": components_script_raw[:_COMPONENTS_SCRIPT_CONTEXT_CHARS],
                             "metadata": (draft_payload.get("metadata") or {}),
                         },
                         ensure_ascii=False,
