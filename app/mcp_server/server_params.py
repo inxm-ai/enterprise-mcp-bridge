@@ -80,6 +80,7 @@ def defined_env(
             token_fingerprint(token_result["access_token"]),
         )
         env[oauth_env_var] = token_result["access_token"]
+        env["MCP_BEARER_TOKEN"] = token_result["access_token"]
     else:
         logger.info("No OAUTH_ENV set, using default environment variables")
 
