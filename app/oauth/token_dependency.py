@@ -28,4 +28,11 @@ async def get_access_token(
                 f"Cookie {TOKEN_COOKIE_NAME} not found and {TOKEN_NAME} header is also missing"
             )
     # Default to header (also fallback when TOKEN_SOURCE=cookie but cookie is absent)
-    return header_token
+    if header_token:
+        return header_token
+    # Accept standard Authorization: Bearer <token> as a fallback (desktop clients
+    # bypass oauth2-proxy and send this instead of X-Auth-Request-Access-Token).
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:]
+    return None
