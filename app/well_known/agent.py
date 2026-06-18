@@ -13,10 +13,13 @@ from app.vars import (
     AGENT_CARD_CACHE_FILE,
 )
 import json
+import logging
 import os
 import tempfile
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
 tracer = trace.get_tracer(__name__)
@@ -222,6 +225,9 @@ async def get_agent_card():
 
                 _save_agent_card_to_file(agent_card)
                 return JSONResponse(content=agent_card)
+        except Exception:
+            logger.exception("Agent card generation failed")
+            raise
         finally:
             _running = False
 

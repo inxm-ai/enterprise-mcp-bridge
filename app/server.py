@@ -32,9 +32,12 @@ class OTELFormatter(logging.Formatter):
 
         # Format the message with timestamp, trace ID, level, and logger name
         msg = record.getMessage()
-        return (
+        formatted = (
             f"{timestamp} [trace_id={trace_id}] {record.levelname} {record.name}: {msg}"
         )
+        if record.exc_info:
+            formatted += "\n" + self.formatException(record.exc_info)
+        return formatted
 
 
 def configure_logging() -> None:
@@ -64,8 +67,16 @@ def configure_logging() -> None:
 configure_logging()
 
 app = FastAPI()
-instrumentator = Instrumentator()
 
+# prometheus_fastapi_instrumentator 8.0.0 crashes on _IncludedRouter objects
+# (FastAPI 0.137+ includes them in the route tree). Skip routes with no 'path'.
+import prometheus_fastapi_instrumentator.routing as _pfi_routing
+_orig_get_route_name = _pfi_routing._get_route_name
+def _safe_get_route_name(scope, routes, route_name=None):
+    return _orig_get_route_name(scope, [r for r in routes if hasattr(r, "path")], route_name)
+_pfi_routing._get_route_name = _safe_get_route_name
+
+instrumentator = Instrumentator()
 instrumentator.instrument(app).expose(app)
 
 
