@@ -22,6 +22,12 @@ from fastapi import HTTPException
 
 from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_schemas import generation_response_format
+from app.app_facade.patch_ops import (
+    PATCH_UPDATE_SCHEMA,
+    apply_patch_operations,
+    enforce_runtime_script_integrity,
+    legacy_patch_to_operations,
+)
 from app.app_facade.generated_types import (
     Actor,
     Scope,
@@ -34,6 +40,7 @@ from app.app_facade.prompt_helpers import (
     runtime_context_for_prompt,
     sanitize_runtime_action,
 )
+from app.app_facade.sse import assistant_status_event, sse_event
 from app.session import MCPSessionBase
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.vars import (
@@ -48,35 +55,7 @@ from app.vars import (
 
 logger = logging.getLogger("uvicorn.error")
 
-_PATCH_UPDATE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "patch": {
-            "type": "object",
-            "properties": {
-                "html": {
-                    "type": "object",
-                    "properties": {
-                        "page": {"type": "string"},
-                        "snippet": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-                "service_script": {"type": "string"},
-                "components_script": {"type": "string"},
-                "test_script": {"type": "string"},
-                "dummy_data": {"type": "string"},
-                "metadata": {
-                    "type": "object",
-                    "additionalProperties": True,
-                },
-            },
-            "additionalProperties": False,
-        }
-    },
-    "required": ["patch"],
-    "additionalProperties": False,
-}
+_PATCH_UPDATE_SCHEMA = PATCH_UPDATE_SCHEMA
 
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
@@ -89,22 +68,8 @@ def _generation_response_format(schema=None, name: str = "generated_ui"):
     return generation_response_format(schema=schema, name=name)
 
 
-def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:
-    return (
-        f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
-            "utf-8"
-        )
-    )
-
-
-def _assistant_status_event(status: str) -> bytes:
-    return _sse_event(
-        "assistant",
-        {
-            "delta": status,
-            "is_status": True,
-        },
-    )
+_sse_event = sse_event
+_assistant_status_event = assistant_status_event
 
 
 class ConversationalService:
@@ -187,6 +152,7 @@ class ConversationalService:
             ).strip().lower() in {"1", "true", "yes", "on"}
             if patch_enabled:
                 max_attempts = max(1, int(APP_UI_PATCH_RETRIES))
+                last_patch_failure: Optional[str] = None
                 for attempt_index in range(max_attempts):
                     yield _assistant_status_event(
                         f"I will try a targeted patch first (attempt {attempt_index + 1}/{max_attempts})."
@@ -201,6 +167,7 @@ class ConversationalService:
                         selected_tools=selected_tools,
                         access_token=access_token,
                         previous_metadata=session_payload.get("metadata_snapshot", {}),
+                        failure_feedback=last_patch_failure,
                     )
                     if patch_attempt:
                         candidate = patch_attempt.get("payload")
@@ -214,6 +181,9 @@ class ConversationalService:
                             # Patch was a complete no-op — didn't change scripts or HTML.
                             # Treat as failure so we fall through to full regeneration.
                             patch_reason = "patch_no_changes"
+                            last_patch_failure = (
+                                "previous patch produced no effective changes"
+                            )
                             patch_failure_reasons.append(
                                 f"attempt={attempt_index + 1}/{max_attempts}:{patch_reason}"
                             )
@@ -237,6 +207,7 @@ class ConversationalService:
                         self.service._last_patch_failure_reason
                         or "unknown_patch_failure"
                     )
+                    last_patch_failure = patch_reason
                     patch_failure_reasons.append(
                         f"attempt={attempt_index + 1}/{max_attempts}:{patch_reason}"
                     )
@@ -514,6 +485,7 @@ class ConversationalService:
         access_token: Optional[str],
         previous_metadata: Dict[str, Any],
         selected_tools: Optional[List[Dict[str, Any]]] = None,
+        failure_feedback: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         self.service._last_patch_failure_reason = None
 
@@ -535,9 +507,18 @@ class ConversationalService:
         try:
             system_prompt = (
                 "You are a UI patch planner. Return valid JSON only in this shape: "
-                '{"patch":{"html":{"page":"...","snippet":"..."},"service_script":"...","components_script":"...","test_script":"...","dummy_data":"...","metadata":{...}}}. '
-                "Only include fields that need changes. Do not include markdown fences. "
-                "When the user request involves adding, changing, or fixing tests, you MUST include test_script in the patch. "
+                '{"patch":{"operations":[{"target":"components_script","op":"replace","search":"<exact current text>","content":"<replacement>"}],"metadata":{...}}}. '
+                "Targets: service_script, components_script, test_script, dummy_data, html_page, html_snippet. "
+                "Ops: 'replace' swaps an exact 'search' string (copied VERBATIM from the current file, "
+                "unique enough to match once) with 'content'; 'append' adds 'content' at the end of the target; "
+                "'set' replaces the whole target and must only be used to create a missing file or when "
+                "nearly all of it changes. Prefer several small 'replace' operations over one big 'set'; "
+                "never re-emit unchanged code. Do not include markdown fences. "
+                "service_script and components_script are bundled into ONE module at runtime: "
+                "never add an import for an identifier that either file already imports, and never "
+                "register a pfusch component name that already exists — change existing components "
+                "with 'replace' on their current code. "
+                "When the user request involves adding, changing, or fixing tests, you MUST include operations on test_script. "
                 "Preserve component-owned data loading and partial rendering. Do not rewrite to "
                 "one root-level Promise.all() fan-out or a single full-screen blocking loader "
                 "for independent components. Keep targeted event-driven refetch behavior. "
@@ -556,6 +537,11 @@ class ConversationalService:
                     "metadata": draft_payload.get("metadata"),
                 },
             }
+            if failure_feedback:
+                payload["previous_attempt_failure"] = (
+                    f"{failure_feedback}. Fix the described problem; when a search "
+                    "string was not found, copy the exact text from the current file."
+                )
             request = ChatCompletionRequest(
                 messages=[
                     Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -587,26 +573,40 @@ class ConversationalService:
             if not isinstance(patch, dict):
                 return _fail("missing_patch_object")
 
-            candidate = copy.deepcopy(draft_payload)
-            html_patch = patch.get("html")
-            if isinstance(html_patch, dict):
-                html_target = candidate.setdefault("html", {})
-                for key in ("page", "snippet"):
-                    value = html_patch.get(key)
-                    if isinstance(value, str) and value.strip():
-                        html_target[key] = value
-
-            for key in (
-                "service_script",
-                "components_script",
-                "test_script",
-                "dummy_data",
-            ):
-                value = patch.get(key)
-                if isinstance(value, str):
-                    candidate[key] = value
+            operations = patch.get("operations")
+            if not isinstance(operations, list):
+                # Leniency: accept legacy whole-file patch objects from models
+                # that ignore the operations schema.
+                operations = legacy_patch_to_operations(patch)
 
             metadata_patch = patch.get("metadata")
+            if operations:
+                candidate, apply_errors = apply_patch_operations(
+                    draft_payload, operations
+                )
+                if candidate is None:
+                    return _fail("patch_apply_failed", "; ".join(apply_errors))
+                # service_script + components_script are bundled into one ES
+                # module, so duplicate imports / component registrations that
+                # a patch introduces are fatal at runtime. Auto-fix imports,
+                # reject duplicate registrations with actionable feedback.
+                integrity_notes, integrity_errors = enforce_runtime_script_integrity(
+                    candidate
+                )
+                if integrity_notes:
+                    logger.info(
+                        "[GeneratedUI] Patch import auto-dedup applied: %s",
+                        "; ".join(integrity_notes),
+                    )
+                if integrity_errors:
+                    return _fail(
+                        "patch_integrity_failed", "; ".join(integrity_errors)
+                    )
+            elif isinstance(metadata_patch, dict) and metadata_patch:
+                # Metadata-only patch: nothing to apply to scripts/html.
+                candidate = copy.deepcopy(draft_payload)
+            else:
+                return _fail("patch_no_operations")
             if isinstance(metadata_patch, dict):
                 current_metadata = candidate.get("metadata")
                 if not isinstance(current_metadata, dict):

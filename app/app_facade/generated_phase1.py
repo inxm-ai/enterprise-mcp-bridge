@@ -25,6 +25,10 @@ from app.app_facade.generated_schemas import (
     generation_logic_schema,
     generation_response_format,
 )
+from app.app_facade.patch_ops import (
+    detect_duplicate_component_registrations,
+    sanitize_runtime_imports,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -662,19 +666,53 @@ async def run_phase1_attempt(
             current_payload["service_script"] = service_script
             current_payload["components_script"] = components_script
 
-        # TODO: remove after testing
-        logger.info(
-            "[stream_generate_ui] Phase 1 initial generation (attempt %s):\n"
-            "--- Dummy Data ---\n%s\n"
-            "--- Service Script ---\n%s\n"
-            "--- Components Script ---\n%s\n"
-            "--- Test Script ---\n%s\n",
-            attempt,
-            dummy_data or "",
-            service_script or "",
-            components_script or "",
-            test_script or "",
+        # service_script + components_script are bundled into one module;
+        # duplicate imports are a load-time SyntaxError. Auto-dedupe them,
+        # and reject duplicate component registrations.
+        sanitized_service, sanitized_components, import_notes = (
+            sanitize_runtime_imports(service_script or "", components_script or "")
         )
+        if import_notes:
+            logger.info(
+                "[stream_generate_ui] Phase 1 attempt %s deduplicated runtime imports: %s",
+                attempt,
+                "; ".join(import_notes),
+            )
+            if isinstance(service_script, str) and service_script:
+                service_script = sanitized_service
+                current_payload["service_script"] = service_script
+            components_script = sanitized_components
+            current_payload["components_script"] = components_script
+
+        duplicate_components = detect_duplicate_component_registrations(
+            f"{service_script or ''}\n{components_script or ''}"
+        )
+        if duplicate_components:
+            reason = (
+                "duplicate_component_registrations: "
+                f"{', '.join(duplicate_components)}"
+            )
+            logger.warning(
+                "[stream_generate_ui] Phase 1 attempt %s failed: %s", attempt, reason
+            )
+            messages.append(Message(role=MessageRole.ASSISTANT, content=content))
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Your generated scripts register the same pfusch component "
+                        f"more than once ({', '.join(duplicate_components)}). "
+                        "Define each component exactly once and regenerate."
+                    ),
+                )
+            )
+            yield {
+                "type": "result",
+                "success": False,
+                "messages": messages,
+                "reason": reason,
+            }
+            return
 
         timeout_risks = _detect_timeout_risks(test_script, components_script)
         if timeout_risks:
