@@ -32,6 +32,7 @@ from app.app_facade.generated_types import (
     Actor,
     Scope,
 )
+from app.app_facade.sse import assistant_status_event, sse_event
 from app.app_facade.test_fix_tools import _parse_tap_output, run_tool_driven_test_fix
 from app.app_facade.prompt_helpers import (
     parse_json,
@@ -72,22 +73,8 @@ def _generation_response_format(schema=None, name: str = "generated_ui"):
     return generation_response_format(schema=schema, name=name)
 
 
-def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:
-    return (
-        f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
-            "utf-8"
-        )
-    )
-
-
-def _assistant_status_event(status: str) -> bytes:
-    return _sse_event(
-        "assistant",
-        {
-            "delta": status,
-            "is_status": True,
-        },
-    )
+_sse_event = sse_event
+_assistant_status_event = assistant_status_event
 
 
 class TestRunnerService:

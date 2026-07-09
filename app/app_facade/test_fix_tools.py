@@ -21,6 +21,10 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_output_factory import MCP_SERVICE_TEST_HELPER_SCRIPT
+from app.app_facade.patch_ops import (
+    detect_duplicate_component_registrations,
+    sanitize_runtime_imports,
+)
 from app.vars import GENERATED_UI_READ_ONLY_STREAK_LIMIT, LLM_MAX_PAYLOAD_BYTES
 from app.tgi.models import (
     ChatCompletionRequest,
@@ -41,6 +45,7 @@ _SCRIPT_TYPE_TO_FILENAME = {
     "dummy-data": "dummy_data.js",
     "domstubs": "domstubs.js",
     "pfusch": "pfusch.js",
+    "app": "app.js (combined)",
 }
 
 TOOL_DESCRIPTIONS = {
@@ -572,37 +577,77 @@ class IterativeTestFixer:
             script = str(script)
         return len(script.split("\n"))
 
+    @staticmethod
+    def _normalize_pfusch_imports(source: Optional[str]) -> str:
+        text = source or ""
+        return (
+            text.replace(
+                "https://matthiaskainer.github.io/pfusch/pfusch.min.js",
+                "./pfusch.js",
+            )
+            .replace(
+                "https://matthiaskainer.github.io/pfusch/pfusch.js",
+                "./pfusch.js",
+            )
+            .replace(
+                "https://matthiaskainer.github.io/pfusch/pfusch.min.mjs",
+                "./pfusch.js",
+            )
+        )
+
+    def _combined_app_script(self) -> str:
+        """The combined runtime module exactly as run_tests writes app.js.
+
+        Test stack traces reference line numbers in THIS file, not in the
+        individual service/components scripts."""
+        return (
+            f"{MCP_SERVICE_TEST_HELPER_SCRIPT}\n\n"
+            + self._normalize_pfusch_imports(self.current_service_script)
+            + "\n\n"
+            + self._normalize_pfusch_imports(self.current_components_script)
+        )
+
+    def _runtime_integrity_warning(self) -> Optional[str]:
+        """Warn about duplicate imports / component registrations across the
+        concatenated service+components module right after a mutation, so the
+        model sees the problem immediately instead of via a load-time
+        SyntaxError on the next test run."""
+        problems: List[str] = []
+        _service, _components, import_notes = sanitize_runtime_imports(
+            self.current_service_script or "",
+            self.current_components_script or "",
+        )
+        if import_notes:
+            problems.append(
+                "duplicate import declarations across service+components "
+                f"(bundled into one module): {'; '.join(import_notes)}"
+            )
+        duplicates = detect_duplicate_component_registrations(
+            f"{self.current_service_script or ''}\n{self.current_components_script or ''}"
+        )
+        if duplicates:
+            problems.append(
+                "components registered more than once via pfusch(...): "
+                + ", ".join(duplicates)
+            )
+        if not problems:
+            return None
+        return (
+            "WARNING - runtime integrity: "
+            + " | ".join(problems)
+            + ". Remove the duplicates before running tests; service and "
+            "components scripts are concatenated into a single ES module."
+        )
+
     def _write_current_files(self) -> None:
         """Write current scripts to temporary directory."""
         if not self.tmpdir:
             raise RuntimeError("Test environment not set up")
 
-        def _normalize_pfusch_imports(source: Optional[str]) -> str:
-            text = source or ""
-            return (
-                text.replace(
-                    "https://matthiaskainer.github.io/pfusch/pfusch.min.js",
-                    "./pfusch.js",
-                )
-                .replace(
-                    "https://matthiaskainer.github.io/pfusch/pfusch.js",
-                    "./pfusch.js",
-                )
-                .replace(
-                    "https://matthiaskainer.github.io/pfusch/pfusch.min.mjs",
-                    "./pfusch.js",
-                )
-            )
+        _normalize_pfusch_imports = self._normalize_pfusch_imports
 
         # Write combined service + components script to mirror production bundling.
-        mocked_service = _normalize_pfusch_imports(self.current_service_script)
-        mocked_components = _normalize_pfusch_imports(self.current_components_script)
-        combined_script = (
-            f"{MCP_SERVICE_TEST_HELPER_SCRIPT}\n\n"
-            + mocked_service
-            + "\n\n"
-            + mocked_components
-        )
+        combined_script = self._combined_app_script()
         with open(os.path.join(self.tmpdir, "app.js"), "w", encoding="utf-8") as f:
             f.write(combined_script)
         with open(
@@ -923,6 +968,14 @@ class IterativeTestFixer:
                 success=False,
                 content=f"{script_type} is read-only and cannot be patched.",
             )
+        if script_type == "app":
+            return ToolResult(
+                success=False,
+                content=(
+                    "'app' is the read-only combined view; patch 'service' or "
+                    "'components' instead."
+                ),
+            )
 
         script_map: Dict[str, Optional[str]] = {
             "test": self.current_test_script,
@@ -977,11 +1030,15 @@ class IterativeTestFixer:
         elif script_type == "dummy_data":
             self.current_dummy_data = updated
 
+        content = f"Patched {script_type} successfully. Replacements applied: {count}."
+        if script_type in {"service", "components"}:
+            warning = self._runtime_integrity_warning()
+            if warning:
+                content = f"{content}\n{warning}"
+
         return ToolResult(
             success=True,
-            content=(
-                f"Patched {script_type} successfully. Replacements applied: {count}."
-            ),
+            content=content,
             metadata={"replacements": count, "script_type": script_type},
         )
 
@@ -1017,9 +1074,13 @@ class IterativeTestFixer:
         """
         try:
             self.current_service_script = new_script
+            content = "Service script updated successfully."
+            warning = self._runtime_integrity_warning()
+            if warning:
+                content = f"{content}\n{warning}"
             return ToolResult(
                 success=True,
-                content="Service script updated successfully.",
+                content=content,
                 metadata={"length": len(new_script)},
             )
         except Exception as e:
@@ -1039,9 +1100,13 @@ class IterativeTestFixer:
         """
         try:
             self.current_components_script = new_script
+            content = "Components script updated successfully."
+            warning = self._runtime_integrity_warning()
+            if warning:
+                content = f"{content}\n{warning}"
             return ToolResult(
                 success=True,
-                content="Components script updated successfully.",
+                content=content,
                 metadata={"length": len(new_script)},
             )
         except Exception as e:
@@ -1083,6 +1148,7 @@ class IterativeTestFixer:
                 "dummy_data": self.current_dummy_data,
                 "domstubs": self._get_helper_content("domstubs.js"),
                 "pfusch": self._get_helper_content("pfusch.js"),
+                "app": self._combined_app_script(),
             }
 
             script = script_map.get(script_type)
@@ -1129,6 +1195,7 @@ class IterativeTestFixer:
                 "dummy_data": "dummy_data.js",
                 "domstubs": os.path.join(self.helpers_dir, "domstubs.js"),
                 "pfusch": os.path.join(self.helpers_dir, "pfusch.js"),
+                "app": "app.js",
             }
             filename = filename_map.get(script_type, f"{script_type}.js")
 
@@ -1400,7 +1467,9 @@ class IterativeTestFixer:
                     "description": (
                         "Read specific lines from a script file for inspection. "
                         "Useful for examining code before making changes. "
-                        "Can also read read-only helper scripts 'domstubs' and 'pfusch'. "
+                        "Can also read read-only helper scripts 'domstubs' and 'pfusch', "
+                        "and 'app' — the combined helper+service+components module that "
+                        "test stack-trace line numbers (app.js:NNN) refer to. "
                         "If line numbers are omitted, returns the entire file."
                     ),
                     "parameters": {
@@ -1416,8 +1485,13 @@ class IterativeTestFixer:
                                     "dummy-data",
                                     "domstubs",
                                     "pfusch",
+                                    "app",
                                 ],
-                                "description": "Which script to read from",
+                                "description": (
+                                    "Which script to read from. Use 'app' to resolve "
+                                    "app.js:NNN stack-trace locations; edit via "
+                                    "'service'/'components'."
+                                ),
                             },
                             "start_line": {
                                 "type": "integer",
@@ -1458,8 +1532,13 @@ class IterativeTestFixer:
                                     "dummy-data",
                                     "domstubs",
                                     "pfusch",
+                                    "app",
                                 ],
-                                "description": "Optional. Specific script to search. If omitted, searches all.",
+                                "description": (
+                                    "Optional. Specific script to search. If omitted, "
+                                    "searches all. 'app' is the combined module that "
+                                    "stack traces reference."
+                                ),
                             },
                         },
                         "required": ["regex"],
@@ -1590,11 +1669,16 @@ class IterativeTestFixer:
                 "dummy_data": self.current_dummy_data,
                 "domstubs": self._get_helper_content("domstubs.js"),
                 "pfusch": self._get_helper_content("pfusch.js"),
+                "app": self._combined_app_script(),
             }
 
             results = []
+            # 'app' duplicates service+components content; only search it
+            # when explicitly requested.
             files_to_search = (
-                [script_type] if script_type in script_map else script_map.keys()
+                [script_type]
+                if script_type in script_map
+                else [name for name in script_map.keys() if name != "app"]
             )
 
             for name in files_to_search:

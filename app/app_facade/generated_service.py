@@ -47,11 +47,15 @@ from app.app_facade.generated_schemas import (
 )
 from app.app_facade.env_utils import positive_int_env
 from app.app_facade.generated_storage import GeneratedUIStorage
+from app.app_facade.generation_pipeline import (
+    _DUMMY_DATA_TEST_USAGE_GUIDANCE as DUMMY_DATA_TEST_USAGE_GUIDANCE,
+)
 from app.app_facade.generated_types import (
     Actor,
     Scope,  # re-exported for route/tests import compatibility
     validate_identifier,  # noqa: F401  # re-exported for route/tests import compatibility
 )
+from app.app_facade.patch_ops import PATCH_UPDATE_SCHEMA
 from app.app_facade.test_fix_tools import _parse_tap_output, run_tool_driven_test_fix
 from app.app_facade.tool_sampling import ToolSampler
 from app.app_facade.test_runner_service import TestRunnerService
@@ -67,23 +71,6 @@ from app.app_facade.prompt_helpers import (
 
 logger = logging.getLogger("uvicorn.error")
 
-# Error codes / substrings that identify non-retryable LLM API failures.
-# When one of these appears in a phase failure reason we should stop retrying
-# immediately – hammering the API will not help and only wastes quota.
-_FATAL_LLM_ERROR_SUBSTRINGS = (
-    "insufficient_quota",
-    "invalid_api_key",
-    "authentication_error",
-    "permission_denied",
-)
-
-
-def _is_fatal_llm_error(reason: str) -> bool:
-    """Return True when *reason* indicates a non-retryable LLM API error."""
-    lower = reason.lower()
-    return any(sub in lower for sub in _FATAL_LLM_ERROR_SUBSTRINGS)
-
-
 DEFAULT_DESIGN_PROMPT = (
     "Use lightweight, responsive layouts. Prefer utility-first styling via Tailwind "
     "CSS conventions when no explicit design system guidance is provided."
@@ -91,77 +78,13 @@ DEFAULT_DESIGN_PROMPT = (
 
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
-_DUMMY_DATA_TEST_USAGE_GUIDANCE = (
-    "Dummy data module for tests is available as ./dummy_data.js. "
-    "Tests MUST import { dummyData, dummyDataSchemaHints, dummyDataGatewayHints } from './dummy_data.js' and use "
-    "svc.test.addResolved(toolName, dummyData[toolName]) for final resolved results, "
-    "or globalThis.fetch.addRoute(...) when validating raw transport/extraction paths. "
-    "If dummyDataGatewayHints?.[toolName]?.mcp_server_id exists, prefer calling "
-    "svc.call(dummyDataGatewayHints[toolName].mcp_server_id, args, ...) so gateway tools route correctly. "
-    "If dummyDataSchemaHints[toolName] exists, that tool is missing output schema; "
-    "the client should ask for schema and regenerate dummy data before relying on that fixture. "
-    "Tests MUST NOT throw or fail solely because a schema hint exists; "
-    "when hints are present, either inject explicit per-test resolved mocks for asserted fields "
-    "or assert resilient UI behavior without assuming unavailable schema fields. "
-    "Never import './dummy_data.js' in service_script/components_script; "
-    "it is test-only and not browser-delivered at runtime. "
-    "Do NOT inject fetched domain data directly via component initial state or "
-    "test-only event payloads; components must fetch/refetch themselves. "
-    "When asserting concrete field values in tests, derive expectations from a normalized shape (e.g. "
-    "const normalized = data.current_air_quality || data; const pm25 = normalized.pm2_5) instead of assuming flat paths. "
-    "Do NOT hardcode dynamic time/value literals when fixture payload already provides source-of-truth fields; "
-    "assert against transformed fixture values."
-)
-_PATCH_UPDATE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "patch": {
-            "type": "object",
-            "properties": {
-                "html": {
-                    "type": "object",
-                    "properties": {
-                        "page": {"type": "string"},
-                        "snippet": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-                "service_script": {"type": "string"},
-                "components_script": {"type": "string"},
-                "test_script": {"type": "string"},
-                "dummy_data": {"type": "string"},
-                "metadata": {
-                    "type": "object",
-                    "additionalProperties": True,
-                },
-            },
-            "additionalProperties": False,
-        }
-    },
-    "required": ["patch"],
-    "additionalProperties": False,
-}
+# Canonical definitions live in generation_pipeline / patch_ops; re-exported
+# here for import compatibility.
+_DUMMY_DATA_TEST_USAGE_GUIDANCE = DUMMY_DATA_TEST_USAGE_GUIDANCE
+_PATCH_UPDATE_SCHEMA = PATCH_UPDATE_SCHEMA
 
 
 NODE_TEST_TIMEOUT_MS = positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
-
-
-def _sse_event(event: str, payload: Dict[str, Any]) -> bytes:
-    return (
-        f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
-            "utf-8"
-        )
-    )
-
-
-def _assistant_status_event(status: str) -> bytes:
-    return _sse_event(
-        "assistant",
-        {
-            "delta": status,
-            "is_status": True,
-        },
-    )
 
 
 def _load_pfusch_prompt() -> str:

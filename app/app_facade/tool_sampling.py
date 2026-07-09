@@ -747,6 +747,35 @@ class ToolSampler:
             analysis_reason=str(analysis.get("reason") or ""),
         )
 
+    @staticmethod
+    def _tool_name_of(tool: Any) -> Optional[str]:
+        if isinstance(tool, dict):
+            function = tool.get("function", {})
+            return function.get("name") or tool.get("name")
+        function = getattr(tool, "function", None)
+        if function is not None and hasattr(function, "name"):
+            return function.name
+        return getattr(tool, "name", None)
+
+    def dummy_data_covers_tools(
+        self,
+        module_source: Optional[str],
+        allowed_tools: Optional[List[Dict[str, Any]]],
+    ) -> bool:
+        """Return True when an existing dummy-data module already has a
+        fixture entry for every selected tool, so the expensive sampling +
+        LLM generation pipeline can be skipped on updates."""
+        payload = self._extract_dummy_data_payload_from_module(module_source)
+        if not payload:
+            return False
+        for tool in allowed_tools or []:
+            tool_name = self._tool_name_of(tool)
+            if not tool_name or tool_name in _DUMMY_DATA_SAMPLING_EXCLUDED_TOOLS:
+                continue
+            if tool_name not in payload:
+                return False
+        return True
+
     def _extract_dummy_data_payload_from_module(
         self, module_source: Optional[str]
     ) -> Dict[str, Any]:
@@ -876,7 +905,7 @@ class ToolSampler:
         if not dummy_payload:
             return tools, 0
 
-        derived_count = 0
+        candidates: List[Tuple[Dict[str, Any], Dict[str, Any], str, Any]] = []
         for tool in tools:
             if not isinstance(tool, dict):
                 continue
@@ -898,18 +927,32 @@ class ToolSampler:
                 continue
             if self._payload_has_error_markers(sample_payload):
                 continue
+            candidates.append((tool, function, str(tool_name), sample_payload))
 
-            derived_schema = await self._derive_output_schema_from_sample_with_llm(
-                tool_name=str(tool_name),
-                tool_description=function.get("description") or tool.get("description"),
-                input_schema=function.get("parameters")
-                or tool.get("inputSchema")
-                or {},
-                sample_payload=sample_payload,
+        if not candidates:
+            return tools, 0
+
+        derived_schemas = await asyncio.gather(
+            *(
+                self._derive_output_schema_from_sample_with_llm(
+                    tool_name=tool_name,
+                    tool_description=function.get("description")
+                    or tool.get("description"),
+                    input_schema=function.get("parameters")
+                    or tool.get("inputSchema")
+                    or {},
+                    sample_payload=sample_payload,
+                )
+                for tool, function, tool_name, sample_payload in candidates
             )
+        )
+
+        derived_count = 0
+        for (tool, function, _tool_name, _sample), derived_schema in zip(
+            candidates, derived_schemas
+        ):
             if not derived_schema:
                 continue
-
             tool["outputSchema"] = derived_schema
             if isinstance(function, dict):
                 function["outputSchema"] = derived_schema
