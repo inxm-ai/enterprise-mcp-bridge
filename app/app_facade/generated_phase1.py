@@ -669,7 +669,7 @@ async def run_phase1_attempt(
         # service_script + components_script are bundled into one module;
         # duplicate imports are a load-time SyntaxError. Auto-dedupe them,
         # and reject duplicate component registrations.
-        sanitized_service, sanitized_components, import_notes = (
+        sanitized_service, sanitized_components, import_notes, import_conflicts = (
             sanitize_runtime_imports(service_script or "", components_script or "")
         )
         if import_notes:
@@ -683,6 +683,32 @@ async def run_phase1_attempt(
                 current_payload["service_script"] = service_script
             components_script = sanitized_components
             current_payload["components_script"] = components_script
+
+        if import_conflicts:
+            reason = f"import_conflicts: {'; '.join(import_conflicts)}"
+            logger.warning(
+                "[stream_generate_ui] Phase 1 attempt %s failed: %s", attempt, reason
+            )
+            messages.append(Message(role=MessageRole.ASSISTANT, content=content))
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Your generated scripts import the same identifier from two "
+                        f"different modules ({'; '.join(import_conflicts)}). Since "
+                        "service_script and components_script are bundled into one "
+                        "module, alias one of the conflicting imports to a distinct "
+                        "local name and regenerate."
+                    ),
+                )
+            )
+            yield {
+                "type": "result",
+                "success": False,
+                "messages": messages,
+                "reason": reason,
+            }
+            return
 
         duplicate_components = detect_duplicate_component_registrations(
             f"{service_script or ''}\n{components_script or ''}"

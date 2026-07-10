@@ -613,14 +613,22 @@ class IterativeTestFixer:
         model sees the problem immediately instead of via a load-time
         SyntaxError on the next test run."""
         problems: List[str] = []
-        _service, _components, import_notes = sanitize_runtime_imports(
-            self.current_service_script or "",
-            self.current_components_script or "",
+        _service, _components, import_notes, import_conflicts = (
+            sanitize_runtime_imports(
+                self.current_service_script or "",
+                self.current_components_script or "",
+            )
         )
         if import_notes:
             problems.append(
                 "duplicate import declarations across service+components "
                 f"(bundled into one module): {'; '.join(import_notes)}"
+            )
+        if import_conflicts:
+            problems.append(
+                "conflicting imports across service+components — same identifier "
+                "bound to two different source modules, alias one of them: "
+                + "; ".join(import_conflicts)
             )
         duplicates = detect_duplicate_component_registrations(
             f"{self.current_service_script or ''}\n{self.current_components_script or ''}"

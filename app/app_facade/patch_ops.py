@@ -190,7 +190,16 @@ def apply_patch_operations(
                     "current file content."
                 )
                 continue
-            if op_raw.get("replace_all"):
+            replace_all = bool(op_raw.get("replace_all"))
+            if occurrences > 1 and not replace_all:
+                errors.append(
+                    f"op[{index}]: ambiguous search text matches {occurrences} "
+                    f"times in '{target}': '{_preview(search)}'. Include more "
+                    "surrounding context to make it match only once, or set "
+                    "replace_all=true if every occurrence should change."
+                )
+                continue
+            if replace_all:
                 updated = current.replace(search, content)
             else:
                 updated = current.replace(search, content, 1)
@@ -211,104 +220,212 @@ def apply_patch_operations(
 # ---------------------------------------------------------------------------
 
 _IMPORT_LINE_RE = re.compile(r"^[ \t]*import\b")
-_NAMED_IMPORTS_RE = re.compile(r"\{([^}]*)\}")
-_DEFAULT_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_$][\w$]*)\s*(?:,|\s+from\b)")
-_NAMESPACE_IMPORT_RE = re.compile(r"\*\s*as\s+([A-Za-z_$][\w$]*)")
+# Captures the binding clause between `import` and `from '<source>'` so the
+# module specifier is available for source-aware dedup (see
+# ``sanitize_runtime_imports`` docstring for why the specifier matters).
+_IMPORT_CLAUSE_RE = re.compile(
+    r"^(?P<prefix>[ \t]*import\s+)(?P<clause>.+?)\s+from\s+"
+    r"(?P<quote>['\"])(?P<source>[^'\"]+)(?P=quote)(?P<suffix>\s*;?\s*)$"
+)
+_CLAUSE_NAMESPACE_RE = re.compile(r"\*\s*as\s+([A-Za-z_$][\w$]*)")
+_CLAUSE_NAMED_RE = re.compile(r"\{([^}]*)\}")
+_CLAUSE_DEFAULT_RE = re.compile(r"^([A-Za-z_$][\w$]*)")
 _PFUSCH_REGISTRATION_RE = re.compile(r"\bpfusch\(\s*['\"]([A-Za-z][\w-]*)['\"]")
 
 
-def _import_line_identifiers(line: str) -> List[str]:
-    identifiers: List[str] = []
-    default_match = _DEFAULT_IMPORT_RE.match(line)
-    if default_match:
-        identifiers.append(default_match.group(1))
-    namespace_match = _NAMESPACE_IMPORT_RE.search(line)
-    if namespace_match:
-        identifiers.append(namespace_match.group(1))
-    named_match = _NAMED_IMPORTS_RE.search(line)
+def _parse_import_clause(
+    clause: str,
+) -> Tuple[Optional[str], Optional[str], List[Tuple[str, str]]]:
+    """Split an import clause into ``(default_id, namespace_id, named_pairs)``.
+
+    ``named_pairs`` is a list of ``(raw_text, local_name)`` so the original
+    ``orig as alias`` text can be reconstructed verbatim when rebuilding a
+    trimmed clause.
+    """
+    clause = clause.strip()
+    namespace_match = _CLAUSE_NAMESPACE_RE.search(clause)
+    namespace_id = namespace_match.group(1) if namespace_match else None
+
+    named_pairs: List[Tuple[str, str]] = []
+    named_match = _CLAUSE_NAMED_RE.search(clause)
     if named_match:
         for part in named_match.group(1).split(","):
             part = part.strip()
             if not part:
                 continue
-            # `orig as alias` binds the alias
-            alias = part.split(" as ")[-1].strip()
-            if alias:
-                identifiers.append(alias)
-    return identifiers
+            local = part.split(" as ")[-1].strip()
+            if local:
+                named_pairs.append((part, local))
+
+    default_id: Optional[str] = None
+    if not clause.startswith("{") and not clause.startswith("*"):
+        default_match = _CLAUSE_DEFAULT_RE.match(clause)
+        if default_match:
+            default_id = default_match.group(1)
+
+    return default_id, namespace_id, named_pairs
+
+
+def _rebuild_import_clause(
+    default_id: Optional[str],
+    namespace_id: Optional[str],
+    named_pairs: List[Tuple[str, str]],
+) -> str:
+    parts: List[str] = []
+    if default_id:
+        parts.append(default_id)
+    if namespace_id:
+        parts.append(f"* as {namespace_id}")
+    if named_pairs:
+        parts.append("{ " + ", ".join(raw for raw, _local in named_pairs) + " }")
+    return ", ".join(parts)
 
 
 def _dedupe_imports_in_text(
-    text: str, declared: Set[str], seen_side_effect_imports: Set[str]
+    text: str,
+    declared: Dict[str, str],
+    seen_exact_lines: Set[str],
+    conflicts: List[str],
 ) -> Tuple[str, List[str]]:
-    """Remove/trim import lines whose identifiers were already declared."""
+    """Remove import bindings that exactly duplicate an already-declared
+    ``(identifier, source module)`` pair; leave genuine cross-module naming
+    conflicts untouched but recorded in *conflicts* (see
+    ``sanitize_runtime_imports``)."""
     notes: List[str] = []
     out_lines: List[str] = []
     for line in text.split("\n"):
-        if not _IMPORT_LINE_RE.match(line) or " from " not in f" {line} ":
-            side_effect = _IMPORT_LINE_RE.match(line) and re.search(
-                r"import\s+['\"]", line
-            )
-            if side_effect:
-                normalized = line.strip()
-                if normalized in seen_side_effect_imports:
-                    notes.append(f"dropped duplicate side-effect import: {normalized}")
-                    continue
-                seen_side_effect_imports.add(normalized)
+        if not _IMPORT_LINE_RE.match(line):
             out_lines.append(line)
             continue
 
-        identifiers = _import_line_identifiers(line)
-        if not identifiers:
+        clause_match = _IMPORT_CLAUSE_RE.match(line)
+        if not clause_match:
+            # Side-effect import (`import 'x';`) or a shape this sanitizer
+            # doesn't parse (e.g. multi-line braces) — only dedupe on exact
+            # text match, never guess at identifiers without a known source.
+            normalized = line.strip()
+            if normalized.startswith("import"):
+                if normalized in seen_exact_lines:
+                    notes.append(f"dropped duplicate import line: {normalized}")
+                    continue
+                seen_exact_lines.add(normalized)
             out_lines.append(line)
             continue
-        duplicated = [name for name in identifiers if name in declared]
-        fresh = [name for name in identifiers if name not in declared]
-        declared.update(fresh)
-        if not duplicated:
+
+        source = clause_match.group("source")
+        default_id, namespace_id, named_pairs = _parse_import_clause(
+            clause_match.group("clause")
+        )
+        bindings: List[Tuple[str, str]] = []  # (kind, name)
+        if default_id:
+            bindings.append(("default", default_id))
+        if namespace_id:
+            bindings.append(("namespace", namespace_id))
+        bindings.extend(("named", local) for _raw, local in named_pairs)
+        if not bindings:
             out_lines.append(line)
             continue
-        if not fresh:
+
+        # A genuine conflict is the SAME identifier bound to a DIFFERENT
+        # source module. Silently keeping either side would change which
+        # module a reference resolves to, so leave the line untouched and
+        # surface it as an unfixable error instead of guessing.
+        line_has_conflict = False
+        for _kind, name in bindings:
+            prior_source = declared.get(name)
+            if prior_source is not None and prior_source != source:
+                conflicts.append(
+                    f"identifier '{name}' imported from both '{prior_source}' "
+                    f"and '{source}'"
+                )
+                line_has_conflict = True
+        if line_has_conflict:
+            for _kind, name in bindings:
+                declared.setdefault(name, source)
+            out_lines.append(line)
+            continue
+
+        # No conflict on this line — safe to drop any binding that exactly
+        # repeats an already-declared (identifier, source) pair, regardless
+        # of whether it's the default, namespace, or a named binding.
+        dropped: List[str] = []
+        kept_default: Optional[str] = None
+        kept_namespace: Optional[str] = None
+        kept_named: List[Tuple[str, str]] = []
+        if default_id is not None:
+            if default_id in declared:
+                dropped.append(default_id)
+            else:
+                declared[default_id] = source
+                kept_default = default_id
+        if namespace_id is not None:
+            if namespace_id in declared:
+                dropped.append(namespace_id)
+            else:
+                declared[namespace_id] = source
+                kept_namespace = namespace_id
+        for raw, local in named_pairs:
+            if local in declared:
+                dropped.append(local)
+            else:
+                declared[local] = source
+                kept_named.append((raw, local))
+
+        if not dropped:
+            out_lines.append(line)
+            continue
+
+        if not kept_default and not kept_namespace and not kept_named:
             notes.append(
-                f"dropped duplicate import of {{{', '.join(duplicated)}}}"
+                f"dropped duplicate import of {{{', '.join(dropped)}}} from "
+                f"'{source}'"
             )
             continue
-        named_match = _NAMED_IMPORTS_RE.search(line)
-        if named_match:
-            rewritten = (
-                line[: named_match.start()]
-                + "{ "
-                + ", ".join(fresh)
-                + " }"
-                + line[named_match.end() :]
-            )
-            notes.append(
-                f"removed already-imported {{{', '.join(duplicated)}}} from import"
-            )
-            out_lines.append(rewritten)
-        else:
-            # Cannot safely trim non-named imports; keep the line untouched.
-            out_lines.append(line)
+
+        new_clause = _rebuild_import_clause(kept_default, kept_namespace, kept_named)
+        rebuilt = (
+            f"{clause_match.group('prefix')}{new_clause} from "
+            f"{clause_match.group('quote')}{source}{clause_match.group('quote')}"
+            f"{clause_match.group('suffix')}"
+        )
+        notes.append(
+            f"removed already-imported {{{', '.join(dropped)}}} from '{source}' import"
+        )
+        out_lines.append(rebuilt)
     return "\n".join(out_lines), notes
 
 
 def sanitize_runtime_imports(
     service_script: str, components_script: str
-) -> Tuple[str, str, List[str]]:
+) -> Tuple[str, str, List[str], List[str]]:
     """Drop duplicate import declarations across the concatenated runtime
-    scripts (service first, then components — the bundling order)."""
-    declared: Set[str] = set()
-    seen_side_effect: Set[str] = set()
+    scripts (service first, then components — the bundling order).
+
+    Only an import that repeats an IDENTICAL ``(identifier, source module)``
+    pair is treated as a safe, redundant duplicate and removed. When the
+    same local identifier is imported from two *different* source modules
+    (e.g. ``{ format }`` from both ``./dates.js`` and ``./numbers.js``),
+    that's a genuine naming conflict, not a redundant duplicate — silently
+    dropping either side would silently change which module later references
+    resolve to. Conflicts are left untouched in the returned scripts and
+    reported in ``conflicts`` instead, so the caller can reject the payload
+    and ask the model to alias one of the imports.
+
+    Returns ``(sanitized_service, sanitized_components, notes, conflicts)``.
+    """
+    declared: Dict[str, str] = {}
+    seen_exact_lines: Set[str] = set()
+    conflicts: List[str] = []
     sanitized_service, service_notes = _dedupe_imports_in_text(
-        service_script or "", declared, seen_side_effect
+        service_script or "", declared, seen_exact_lines, conflicts
     )
     sanitized_components, component_notes = _dedupe_imports_in_text(
-        components_script or "", declared, seen_side_effect
+        components_script or "", declared, seen_exact_lines, conflicts
     )
     notes = [f"service_script: {note}" for note in service_notes] + [
         f"components_script: {note}" for note in component_notes
     ]
-    return sanitized_service, sanitized_components, notes
+    return sanitized_service, sanitized_components, notes, conflicts
 
 
 def detect_duplicate_component_registrations(runtime_text: str) -> List[str]:
@@ -333,8 +450,8 @@ def enforce_runtime_script_integrity(
     service_text = service if isinstance(service, str) else ""
     components_text = components if isinstance(components, str) else ""
 
-    sanitized_service, sanitized_components, notes = sanitize_runtime_imports(
-        service_text, components_text
+    sanitized_service, sanitized_components, notes, conflicts = (
+        sanitize_runtime_imports(service_text, components_text)
     )
     if isinstance(service, str) and sanitized_service != service:
         payload["service_script"] = sanitized_service
@@ -352,4 +469,9 @@ def enforce_runtime_script_integrity(
         )
         for name in duplicates
     ]
+    errors.extend(
+        f"import conflict: {conflict}; alias one of the imports to a distinct "
+        "local name so both modules can be referenced"
+        for conflict in conflicts
+    )
     return notes, errors
