@@ -90,6 +90,12 @@ _PHASE1_CONTRACT_MESSAGE = (
     "service_script (optional). Do NOT return template_parts, html, or metadata."
 )
 
+# How many characters of each retained failure reason to carry into the next
+# retry's messages (see the retry-feedback loop in
+# ``_stream_generate_and_persist``), and how many recent reasons to keep.
+_PHASE1_RETRY_FEEDBACK_REASON_CHARS = 400
+_PHASE1_RETRY_FEEDBACK_MAX_REASONS = 2
+
 # Substrings that identify non-retryable LLM failures: retrying will not help
 # (context overflow) or only wastes quota (auth / quota errors).
 _FATAL_LLM_ERROR_MARKERS = (
@@ -539,7 +545,10 @@ class GenerationPipeline:
                 attempt_messages = copy.deepcopy(messages)
                 if phase1_failure_reasons:
                     recent = " | ".join(
-                        reason[:400] for reason in phase1_failure_reasons[-2:]
+                        reason[:_PHASE1_RETRY_FEEDBACK_REASON_CHARS]
+                        for reason in phase1_failure_reasons[
+                            -_PHASE1_RETRY_FEEDBACK_MAX_REASONS:
+                        ]
                     )
                     attempt_messages.append(
                         Message(

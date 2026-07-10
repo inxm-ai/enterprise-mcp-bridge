@@ -104,6 +104,45 @@ def test_apply_patch_operations_is_all_or_nothing():
     assert "service_script" in errors[0]
 
 
+def test_apply_patch_operations_rejects_ambiguous_search_without_replace_all():
+    payload = {"components_script": "html.div('x'); html.div('x'); html.div('y');"}
+    candidate, errors = apply_patch_operations(
+        payload,
+        [
+            {
+                "target": "components_script",
+                "op": "replace",
+                "search": "html.div('x');",
+                "content": "html.div('z');",
+            }
+        ],
+    )
+    assert candidate is None
+    assert len(errors) == 1
+    assert "ambiguous search text matches 2 times" in errors[0]
+    assert "components_script" in errors[0]
+    # payload itself must remain untouched — no silent first-match patch
+    assert payload["components_script"] == "html.div('x'); html.div('x'); html.div('y');"
+
+
+def test_apply_patch_operations_ambiguous_search_allowed_with_replace_all():
+    payload = {"components_script": "html.div('x'); html.div('x'); html.div('y');"}
+    candidate, errors = apply_patch_operations(
+        payload,
+        [
+            {
+                "target": "components_script",
+                "op": "replace",
+                "search": "html.div('x');",
+                "content": "html.div('z');",
+                "replace_all": True,
+            }
+        ],
+    )
+    assert errors == []
+    assert candidate["components_script"] == "html.div('z'); html.div('z'); html.div('y');"
+
+
 def test_apply_patch_operations_rejects_empty_and_invalid():
     candidate, errors = apply_patch_operations(DRAFT, [])
     assert candidate is None
@@ -258,40 +297,90 @@ PFUSCH_IMPORT = (
 
 def test_sanitize_runtime_imports_drops_exact_duplicate():
     components = f"{PFUSCH_IMPORT}\npfusch('a-b', {{}}, () => []);\n{PFUSCH_IMPORT}\npfusch('c-d', {{}}, () => []);"
-    service, sanitized, notes = sanitize_runtime_imports("", components)
+    service, sanitized, notes, conflicts = sanitize_runtime_imports("", components)
     assert sanitized.count("import { pfusch") == 1
     assert "pfusch('a-b'" in sanitized and "pfusch('c-d'" in sanitized
     assert notes
+    assert conflicts == []
 
 
 def test_sanitize_runtime_imports_across_service_and_components():
     service = f"{PFUSCH_IMPORT}\nexport function x() {{}}"
     components = f"{PFUSCH_IMPORT}\npfusch('a-b', {{}}, () => []);"
-    sanitized_service, sanitized_components, notes = sanitize_runtime_imports(
+    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
         service, components
     )
     assert sanitized_service == service
     assert "import" not in sanitized_components.split("\n")[0]
     assert "pfusch('a-b'" in sanitized_components
     assert notes
+    assert conflicts == []
 
 
 def test_sanitize_runtime_imports_trims_partial_overlap():
     service = "import { pfusch } from './pfusch.js';"
     components = "import { pfusch, html } from './pfusch.js';\npfusch('a-b');"
-    _s, sanitized_components, notes = sanitize_runtime_imports(service, components)
+    _s, sanitized_components, notes, conflicts = sanitize_runtime_imports(
+        service, components
+    )
     first_line = sanitized_components.split("\n")[0]
     assert "html" in first_line and " pfusch," not in first_line
     assert notes
+    assert conflicts == []
 
 
 def test_sanitize_runtime_imports_keeps_distinct_imports():
     service = "import { a } from './x.js';"
     components = "import { b } from './y.js';\nimport './side.js';"
-    s, c, notes = sanitize_runtime_imports(service, components)
+    s, c, notes, conflicts = sanitize_runtime_imports(service, components)
     assert s == service
     assert c == components
     assert notes == []
+    assert conflicts == []
+
+
+def test_sanitize_runtime_imports_does_not_drop_same_name_different_source():
+    # Regression for a silent-corruption bug: 'format' bound from two
+    # different modules must NOT be treated as a redundant duplicate — the
+    # second import must survive untouched so components' reference to
+    # `format` keeps resolving to its own module.
+    service = "import { format } from './dates.js';"
+    components = "import { format, parse } from './numbers.js';\nparse(format(1));"
+    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
+        service, components
+    )
+    assert sanitized_service == service
+    assert sanitized_components == components  # left completely untouched
+    assert len(conflicts) == 1
+    assert "'format'" in conflicts[0]
+    assert "./dates.js" in conflicts[0] and "./numbers.js" in conflicts[0]
+
+
+def test_sanitize_runtime_imports_drops_duplicate_default_in_mixed_import():
+    # Regression: a duplicated default binding inside a default+named import
+    # must be removed too, not just the named-import portion.
+    service = "import React from 'react';"
+    components = "import React, { useMemo } from 'react';\nuseMemo(() => React.createElement('div'));"
+    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
+        service, components
+    )
+    assert sanitized_service == service
+    first_line = sanitized_components.split("\n")[0]
+    assert first_line == "import { useMemo } from 'react';"
+    assert conflicts == []
+    assert notes
+
+
+def test_sanitize_runtime_imports_drops_exact_duplicate_default_only():
+    service = "import Foo from './foo.js';"
+    components = "import Foo from './foo.js';\nFoo();"
+    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
+        service, components
+    )
+    assert sanitized_service == service
+    assert "import" not in sanitized_components.split("\n")[0]
+    assert conflicts == []
+    assert notes
 
 
 def test_detect_duplicate_component_registrations():
@@ -318,6 +407,20 @@ def test_enforce_runtime_script_integrity_fixes_imports_and_flags_duplicates():
     assert "import" not in payload["components_script"].split("\n")[0]
     assert len(errors) == 1
     assert "issue-list" in errors[0]
+
+
+def test_enforce_runtime_script_integrity_rejects_import_conflict():
+    payload = {
+        "service_script": "import { format } from './dates.js';",
+        "components_script": "import { format } from './numbers.js';\nformat(1);",
+    }
+    original_components = payload["components_script"]
+    notes, errors = enforce_runtime_script_integrity(payload)
+    # left untouched — conflict is reported, not silently resolved either way
+    assert payload["components_script"] == original_components
+    assert len(errors) == 1
+    assert "import conflict" in errors[0]
+    assert "'format'" in errors[0]
 
 
 @pytest.mark.asyncio
