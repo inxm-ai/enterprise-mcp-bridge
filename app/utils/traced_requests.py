@@ -17,6 +17,7 @@ def traced_request(
     group: Optional[str],
     start_message: str,
     extra_attrs: Optional[Dict] = None,
+    user_id: Optional[str] = None,
 ):
     """Context manager to create a span, set common attributes, and log a start message."""
     with tracer.start_as_current_span(operation) as span:
@@ -24,6 +25,8 @@ def traced_request(
             span.set_attribute("session.id", session_value)
         if group:
             span.set_attribute("session.group", group)
+        if user_id:
+            span.set_attribute("user.id", user_id)
         if extra_attrs:
             for k, v in extra_attrs.items():
                 span.set_attribute(k, v)
