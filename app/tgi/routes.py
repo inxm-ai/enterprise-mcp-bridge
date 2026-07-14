@@ -22,6 +22,7 @@ from app.utils.traced_requests import traced_request
 from app.session import try_get_session_id, session_id
 from app.session_manager import mcp_session_context, session_manager
 from app.oauth.token_exchange import UserLoggedOutException
+from app.oauth.user_info import UserInfoExtractor
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -97,6 +98,17 @@ def _resolve_user_token(
 ) -> Optional[str]:
     header_name = TOKEN_NAME.lower()
     return incoming_headers.get(header_name) or access_token
+
+
+def _resolve_user_id_for_tracing(user_token: Optional[str]) -> Optional[str]:
+    """Best-effort caller id for telemetry. Never breaks the chat request."""
+    if not user_token:
+        return None
+    try:
+        return UserInfoExtractor().extract_user_info(user_token).get("sub")
+    except Exception as exc:
+        logger.debug(f"[TGI] Could not resolve user.id for tracing: {exc}")
+        return None
 
 
 def _header_truthy(value: Optional[str]) -> bool:
@@ -354,7 +366,8 @@ async def _handle_chat_completion(
             "chat.model": chat_request.model,
             "chat.prompt_requested": prompt or "",
         },
-    ):
+        user_id=_resolve_user_id_for_tracing(user_token),
+    ) as span:
         done_sent = False
         try:
             if (
@@ -366,6 +379,7 @@ async def _handle_chat_completion(
                 if not chat_request.workflow_execution_id:
                     chat_request.workflow_execution_id = str(uuid4())
                 execution_id = chat_request.workflow_execution_id
+                span.set_attribute("execution_id", execution_id)
 
                 copier = getattr(chat_request, "model_copy", None)
                 background_request = (
