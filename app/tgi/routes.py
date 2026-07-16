@@ -1,4 +1,5 @@
 import asyncio
+import jwt
 import logging
 import os
 from datetime import datetime, timezone
@@ -22,7 +23,6 @@ from app.utils.traced_requests import traced_request
 from app.session import try_get_session_id, session_id
 from app.session_manager import mcp_session_context, session_manager
 from app.oauth.token_exchange import UserLoggedOutException
-from app.oauth.user_info import UserInfoExtractor
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -105,7 +105,12 @@ def _resolve_user_id_for_tracing(user_token: Optional[str]) -> Optional[str]:
     if not user_token:
         return None
     try:
-        return UserInfoExtractor().extract_user_info(user_token).get("sub")
+        payload = jwt.decode(
+            user_token,
+            options={"verify_signature": False},
+            algorithms=["RS256", "HS256"],
+        )
+        return payload.get("sub")
     except Exception as exc:
         logger.debug(f"[TGI] Could not resolve user.id for tracing: {exc}")
         return None

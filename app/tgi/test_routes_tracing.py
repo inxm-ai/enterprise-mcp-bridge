@@ -128,6 +128,8 @@ async def test_chat_span_records_user_id_and_execution_id(monkeypatch, fake_trac
         key="test-secret-key-long-enough-for-hs256",
         algorithm="HS256",
     )
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
     request = _make_request(
         {
             "Accept": "text/event-stream",
