@@ -139,6 +139,17 @@ KEYCLOAK_PROVIDER_REFRESH_MODE = os.getenv(
 MCP_CONNECTION_ID = os.getenv("MCP_CONNECTION_ID", "")
 AUTH_TOKENS_INTERNAL_URL = os.getenv("AUTH_TOKENS_INTERNAL_URL", "")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+# Clients whose tokens may release stored user credentials (matched against
+# azp, falling back to aud). REQUIRED for AUTH_PROVIDER=user-api-key — with
+# no allowlist the retriever fails closed rather than trusting any client
+# in the realm.
+USER_API_KEY_ALLOWED_CLIENTS = [
+    c.strip()
+    for c in os.getenv("USER_API_KEY_ALLOWED_CLIENTS", "").split(",")
+    if c.strip()
+]
+# Exact expected issuer; defaults to the configured realm's issuer URL.
+KEYCLOAK_ISSUER = os.getenv("KEYCLOAK_ISSUER", "")
 
 AUTH_ALLOW_UNSAFE_CERT = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
 LOG_TOKEN_VALUES = os.getenv("LOG_TOKEN_VALUES", "false").lower() == "true"

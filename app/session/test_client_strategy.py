@@ -554,3 +554,43 @@ def test_format_auth_header_value_default(monkeypatch):
         client_strategy.RemoteMCPClientStrategy._format_auth_header_value("tok")
         == "Bearer tok"
     )
+
+
+@pytest.mark.asyncio
+async def test_user_api_key_mode_never_falls_back_to_shared_token(monkeypatch):
+    """AUTH_PROVIDER=user-api-key must fail closed on retrieval errors:
+    neither MCP_REMOTE_BEARER_TOKEN nor the incoming Keycloak token may
+    replace the user's identity."""
+
+    class FailingRetriever:
+        def retrieve_token(self, token):
+            return {"success": False, "error": "connection_key_lookup_failed"}
+
+    class FailingFactory:
+        def get(self):
+            return FailingRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", FailingFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", "user-api-key")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    # _prepare_auth runs in the strategy constructor, so the failure is
+    # expected at build time already.
+    # Case 1: shared bearer token configured — must NOT be used.
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    with pytest.raises(client_strategy.UserLoggedOutException):
+        client_strategy.build_mcp_client_strategy(
+            access_token="user-jwt", requested_group=None
+        )
+
+    # Case 2: no shared token — the incoming token must NOT be forwarded.
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "")
+    with pytest.raises(client_strategy.UserLoggedOutException):
+        client_strategy.build_mcp_client_strategy(
+            access_token="user-jwt", requested_group=None
+        )

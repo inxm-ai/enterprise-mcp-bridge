@@ -181,12 +181,59 @@ Subscription keys are usually sent raw, without a `Bearer` prefix:
 MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
 ```
 
-Combined example — send each user's stored API key as an ESB subscription key:
+Combined example — send each user's stored API key as an ESB subscription key
+(see the full provider documentation below):
 
 ```bash
 AUTH_PROVIDER="user-api-key"
 MCP_REMOTE_AUTH_HEADER_NAME="esb-subscription-key"
 MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
+```
+
+#### AUTH_PROVIDER=user-api-key (INXM-specific integration)
+
+> **Note:** this provider integrates with INXM's `app-auth-tokens` service
+> (currently a private repository). Open-source operators can implement the
+> credential-store contract below themselves, or treat this provider as
+> INXM-platform-specific.
+
+Each authenticated user stores their own API key for this connection in the
+credential store; the bridge fetches the *requesting user's* key per request
+and sends it to the remote MCP (via `Authorization` or the custom header
+configured above). Retrieval failures fail closed — the bridge never falls
+back to `MCP_REMOTE_BEARER_TOKEN` or the incoming Keycloak token in this
+mode, so a store outage cannot silently replace a user identity with a
+shared one.
+
+Required configuration (the provider refuses to operate if any is missing):
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTH_BASE_URL` | Keycloak base URL (JWKS verification of the caller's token) |
+| `KEYCLOAK_REALM` | Realm whose JWKS/issuer are trusted (default `inxm`) |
+| `USER_API_KEY_ALLOWED_CLIENTS` | Comma-separated client ids (matched against `azp`/`aud`) whose tokens may release credentials; empty = reject all |
+| `AUTH_TOKENS_INTERNAL_URL` | Base URL of the credential store (in-cluster) |
+| `MCP_CONNECTION_ID` | Connection id users stored their key under |
+| `INTERNAL_API_SECRET` | Shared secret authenticating the bridge to the credential store — mandatory, `X-Service-ID` alone is spoofable metadata |
+| `SERVICE_NAME` | Sent as `X-Service-ID`; the store enforces that only the connection's owning service may fetch its keys |
+
+Optional: `KEYCLOAK_ISSUER` overrides the expected exact `iss` claim
+(default `{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}`).
+
+Incoming-token requirements: RS256/ES256 signature valid against the realm
+JWKS, `exp` present and unexpired, `iss` exactly the configured issuer,
+`azp` (or an `aud` entry) in `USER_API_KEY_ALLOWED_CLIENTS`, and an
+`email`/`preferred_username`/`upn` claim identifying the user.
+
+Credential-store contract (what an alternative implementation must serve):
+
+```
+GET {AUTH_TOKENS_INTERNAL_URL}/api/internal/connection-key/{email}/{connection}
+Headers: X-Service-ID: {SERVICE_NAME}, X-Internal-Secret: {INTERNAL_API_SECRET}
+
+200 {"success": true, "connection": "...", "key": "<raw key>"}
+404 no key stored           -> surfaced to the user as "add a key in your profile"
+401/403 auth failure        -> retrieval error (fail closed)
 ```
 
 #### MCP_REMOTE_ANON_BEARER_TOKEN

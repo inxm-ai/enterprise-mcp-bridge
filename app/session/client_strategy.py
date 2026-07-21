@@ -26,6 +26,7 @@ from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutExcepti
 from app.utils import mask_token
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
+    AUTH_PROVIDER,
     MCP_REMOTE_ANON_BEARER_TOKEN,
     MCP_REMOTE_AUTH_HEADER_NAME,
     MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE,
@@ -257,6 +258,15 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 log_exception_with_details(logger, "[RemoteMCP]", exc)
 
         if not token_value:
+            # Per-user API key mode must fail closed: falling back to the
+            # shared bearer token or the incoming Keycloak token would
+            # silently replace the user's identity with a shared one and
+            # defeat per-user isolation.
+            if AUTH_PROVIDER == "user-api-key" and self.access_token:
+                raise UserLoggedOutException(
+                    "Per-user API key retrieval failed; refusing to fall "
+                    "back to a shared credential"
+                )
             if MCP_REMOTE_BEARER_TOKEN:
                 token_value = MCP_REMOTE_BEARER_TOKEN
                 logger.info("[RemoteMCP] Falling back to MCP_REMOTE_BEARER_TOKEN")

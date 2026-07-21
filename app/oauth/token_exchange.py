@@ -13,9 +13,11 @@ from app.vars import (
     KEYCLOAK_PROVIDER_ALIAS,
     KEYCLOAK_PROVIDER_REFRESH_MODE,
     KEYCLOAK_REALM,
+    KEYCLOAK_ISSUER,
     LOG_TOKEN_VALUES,
     MCP_CONNECTION_ID,
     SERVICE_NAME,
+    USER_API_KEY_ALLOWED_CLIENTS,
 )
 import jwt
 from jwt import DecodeError, InvalidTokenError
@@ -79,12 +81,14 @@ def _get_jwks_client():
 
 
 def verified_keycloak_claims(token: str) -> Dict[str, Any]:
-    """Verify signature and expiry against Keycloak's JWKS and return claims.
+    """Verify a Keycloak token before it may release a stored credential.
 
-    Raises UserLoggedOutException on any validation failure. Audience is
-    not enforced (Keycloak access tokens commonly carry aud=account and
-    vary per client); the signature check already pins the issuer's keys,
-    and the realm is additionally asserted via the iss claim suffix.
+    Enforces: signature against the realm JWKS, a present and valid exp,
+    the exact configured issuer (KEYCLOAK_ISSUER, defaulting to
+    {AUTH_BASE_URL}/realms/{realm}), and that the token was issued to an
+    allow-listed client (azp, falling back to aud). Fails closed with
+    UserLoggedOutException on any violation — including an unconfigured
+    allowlist, so no client in the realm is trusted implicitly.
     """
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -92,16 +96,31 @@ def verified_keycloak_claims(token: str) -> Dict[str, Any]:
             token,
             signing_key.key,
             algorithms=["RS256", "ES256"],
-            options={"verify_aud": False},
+            options={"verify_aud": False, "require": ["exp", "iss"]},
         )
     except Exception as exc:
         raise UserLoggedOutException(
             f"Access token failed verification: {exc}"
         ) from exc
-    issuer = claims.get("iss", "")
-    if not issuer.endswith(f"/realms/{KEYCLOAK_REALM}"):
+
+    expected_issuer = KEYCLOAK_ISSUER or f"{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}"
+    if claims.get("iss") != expected_issuer:
         raise UserLoggedOutException(
-            f"Access token issued by unexpected realm: {issuer}"
+            f"Access token issued by unexpected issuer: {claims.get('iss')}"
+        )
+
+    if not USER_API_KEY_ALLOWED_CLIENTS:
+        raise UserLoggedOutException(
+            "USER_API_KEY_ALLOWED_CLIENTS is not configured; refusing to "
+            "release credentials for tokens from unspecified clients"
+        )
+    azp = claims.get("azp")
+    aud = claims.get("aud")
+    audiences = aud if isinstance(aud, list) else [aud] if aud else []
+    token_clients = [c for c in [azp, *audiences] if c]
+    if not any(c in USER_API_KEY_ALLOWED_CLIENTS for c in token_clients):
+        raise UserLoggedOutException(
+            f"Access token client(s) {token_clients} not in the allowlist"
         )
     return claims
 
@@ -144,10 +163,18 @@ class UserApiKeyTokenRetriever(TokenRetriever):
         return email
 
     def retrieve_token(self, keycloak_token: str) -> Dict[str, Any]:
-        if not self.auth_tokens_url or not self.connection_id:
+        if (
+            not self.auth_tokens_url
+            or not self.connection_id
+            or not self.internal_secret
+        ):
+            # INTERNAL_API_SECRET is mandatory: without it the only thing
+            # sent to the credential store is the spoofable X-Service-ID,
+            # which is identity metadata, not authentication.
             self.logger.error(
-                "[UserApiKey] AUTH_TOKENS_INTERNAL_URL and MCP_CONNECTION_ID "
-                "must be set for AUTH_PROVIDER=user-api-key"
+                "[UserApiKey] AUTH_TOKENS_INTERNAL_URL, MCP_CONNECTION_ID "
+                "and INTERNAL_API_SECRET must all be set for "
+                "AUTH_PROVIDER=user-api-key"
             )
             return {"success": False, "error": "user_api_key_misconfigured"}
 
