@@ -1,4 +1,4 @@
-from app.vars import KEYCLOAK_PROVIDER_ALIAS
+from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
 from typing import Dict, Optional
@@ -16,8 +16,11 @@ async def decorate_args_with_oauth_token(
 
     oauth_token = None
     if access_token:
-        # If no provider alias, pass through Keycloak access token
-        if not KEYCLOAK_PROVIDER_ALIAS:
+        # Keycloak mode without a provider alias passes the token through;
+        # every other provider (e.g. user-api-key) must go through its
+        # retriever — short-circuiting here would silently forward the
+        # Keycloak token instead of the per-user credential.
+        if AUTH_PROVIDER == "keycloak" and not KEYCLOAK_PROVIDER_ALIAS:
             oauth_token = access_token
         else:
             retriever = TokenRetrieverFactory().get()
