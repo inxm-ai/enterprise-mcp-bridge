@@ -127,3 +127,63 @@ def test_verified_claims_rejects_foreign_realm(monkeypatch):
     )
     with pytest.raises(UserLoggedOutException):
         verified_keycloak_claims("token")
+
+
+def test_retrieve_token_requires_internal_secret(retriever):
+    retriever.internal_secret = ""
+    result = retriever.retrieve_token(_user_token())
+    assert result == {"success": False, "error": "user_api_key_misconfigured"}
+
+
+class _OkJwks:
+    def get_signing_key_from_jwt(self, token):
+        class K:
+            key = "irrelevant"
+
+        return K()
+
+
+def _mock_verified(monkeypatch, claims):
+    monkeypatch.setattr(token_exchange, "_get_jwks_client", lambda: _OkJwks())
+    monkeypatch.setattr(token_exchange.jwt, "decode", lambda *a, **k: claims)
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_ISSUER", "https://auth/realms/inxm")
+
+
+def test_verified_claims_requires_client_allowlist(monkeypatch):
+    from app.oauth.token_exchange import verified_keycloak_claims
+
+    _mock_verified(monkeypatch, {"iss": "https://auth/realms/inxm", "azp": "web"})
+    monkeypatch.setattr(token_exchange, "USER_API_KEY_ALLOWED_CLIENTS", [])
+    with pytest.raises(UserLoggedOutException):
+        verified_keycloak_claims("token")
+
+
+def test_verified_claims_rejects_non_allowlisted_client(monkeypatch):
+    from app.oauth.token_exchange import verified_keycloak_claims
+
+    _mock_verified(
+        monkeypatch,
+        {"iss": "https://auth/realms/inxm", "azp": "desktop", "aud": "account"},
+    )
+    monkeypatch.setattr(
+        token_exchange, "USER_API_KEY_ALLOWED_CLIENTS", ["orchestrator-client"]
+    )
+    with pytest.raises(UserLoggedOutException):
+        verified_keycloak_claims("token")
+
+
+def test_verified_claims_accepts_allowlisted_azp(monkeypatch):
+    from app.oauth.token_exchange import verified_keycloak_claims
+
+    _mock_verified(
+        monkeypatch,
+        {
+            "iss": "https://auth/realms/inxm",
+            "azp": "orchestrator-client",
+            "email": "alice@inxm.ai",
+        },
+    )
+    monkeypatch.setattr(
+        token_exchange, "USER_API_KEY_ALLOWED_CLIENTS", ["orchestrator-client"]
+    )
+    assert verified_keycloak_claims("token")["email"] == "alice@inxm.ai"
