@@ -465,3 +465,92 @@ async def test_remote_strategy_closes_on_cancellation(monkeypatch):
 
     assert closed["session"] is True
     assert closed["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_custom_auth_header_name_and_template(monkeypatch):
+    """Provider token lands in a custom header without a Bearer prefix."""
+
+    class DummyRetriever:
+        def retrieve_token(self, token: str):
+            return {"access_token": "user-api-key-123", "token_type": "Bearer"}
+
+    class DummyFactory:
+        def get(self):
+            return DummyRetriever()
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None):
+        yield object(), object(), lambda: None
+
+    monkeypatch.setattr(
+        client_strategy, "TokenRetrieverFactory", lambda: DummyFactory()
+    )
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "")
+    monkeypatch.setattr(
+        client_strategy, "MCP_REMOTE_AUTH_HEADER_NAME", "esb-subscription-key"
+    )
+    monkeypatch.setattr(
+        client_strategy, "MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE", "{token}"
+    )
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token="kc-token", requested_group=None
+    )
+
+    assert strategy.headers["esb-subscription-key"] == "user-api-key-123"
+    assert "Authorization" not in strategy.headers
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_custom_auth_header_fallback_token(monkeypatch):
+    """Fallback bearer token also honors the custom header name/template."""
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None):
+        yield object(), object(), lambda: None
+
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-key")
+    monkeypatch.setattr(
+        client_strategy, "MCP_REMOTE_AUTH_HEADER_NAME", "esb-subscription-key"
+    )
+    monkeypatch.setattr(
+        client_strategy, "MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE", "{token}"
+    )
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token=None, requested_group=None, anon=True
+    )
+
+    assert strategy.headers["esb-subscription-key"] == "static-key"
+    assert "Authorization" not in strategy.headers
+
+
+def test_format_auth_header_value_default(monkeypatch):
+    monkeypatch.setattr(
+        client_strategy, "MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE", ""
+    )
+    assert (
+        client_strategy.RemoteMCPClientStrategy._format_auth_header_value("tok")
+        == "Bearer tok"
+    )

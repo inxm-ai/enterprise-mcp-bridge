@@ -116,6 +116,18 @@ export MCP_REMOTE_SERVER_FORWARD_HEADERS="X-Request-ID,X-Correlation-ID,User-Age
 
 The bridge forwards these headers from incoming requests to the remote server.
 
+### Custom Auth Header
+
+By default the auth token (exchanged provider token, user API key, or bearer fallback) is sent as `Authorization: Bearer <token>`. If your gateway expects it in a different header — e.g. an ESB in front of Azure APIM that uses `esb-subscription-key` instead of `ocp-apim-subscription-key` — override the header name and value format:
+
+```bash
+export MCP_REMOTE_AUTH_HEADER_NAME="esb-subscription-key"
+# Send the raw key without a "Bearer " prefix
+export MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
+```
+
+The template supports `{token}` and `{token_type}` placeholders; leaving it unset keeps the default `Bearer <token>` format.
+
 ## Complete Example
 
 ### Docker Compose
