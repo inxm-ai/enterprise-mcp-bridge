@@ -27,6 +27,8 @@ from app.utils import mask_token
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
     MCP_REMOTE_ANON_BEARER_TOKEN,
+    MCP_REMOTE_AUTH_HEADER_NAME,
+    MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE,
     MCP_REMOTE_BEARER_TOKEN,
     MCP_REMOTE_CLIENT_ID,
     MCP_REMOTE_CLIENT_SECRET,
@@ -269,20 +271,30 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             # Normalize token_type to proper case (Bearer, not bearer)
             if token_type.lower() == "bearer":
                 token_type = "Bearer"
-            authorization_value = f"{token_type} {token_value}"
+            authorization_value = self._format_auth_header_value(
+                token_value, token_type
+            )
         else:
             self._prepare_fallback_headers()
 
         self._add_env_headers()
         self._forward_allowed_headers()
         if authorization_value:
-            self.headers["Authorization"] = authorization_value
+            self.headers[MCP_REMOTE_AUTH_HEADER_NAME] = authorization_value
             logger.info(
                 mask_token(
-                    "[RemoteMCP] Using provider token for Authorization header",
+                    f"[RemoteMCP] Using provider token for {MCP_REMOTE_AUTH_HEADER_NAME} header",
                     token_value,
                 )
             )
+
+    @staticmethod
+    def _format_auth_header_value(token_value: str, token_type: str = "Bearer") -> str:
+        if MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE:
+            return MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE.format(
+                token=token_value, token_type=token_type
+            )
+        return f"{token_type} {token_value}"
 
     def _add_env_headers(self) -> None:
         for key, value in os.environ.items():
@@ -334,26 +346,29 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     break
 
     def _prepare_fallback_headers(self, *, anon: bool = False) -> None:
-        if (
-            anon
-            and MCP_REMOTE_ANON_BEARER_TOKEN
-            and "Authorization" not in self.headers
-        ):
-            self.headers["Authorization"] = f"Bearer {MCP_REMOTE_ANON_BEARER_TOKEN}"
+        header_name = MCP_REMOTE_AUTH_HEADER_NAME
+        if anon and MCP_REMOTE_ANON_BEARER_TOKEN and header_name not in self.headers:
+            self.headers[header_name] = self._format_auth_header_value(
+                MCP_REMOTE_ANON_BEARER_TOKEN
+            )
             logger.info(
-                "[RemoteMCP] Using MCP_REMOTE_ANON_BEARER_TOKEN for Authorization header"
+                f"[RemoteMCP] Using MCP_REMOTE_ANON_BEARER_TOKEN for {header_name} header"
             )
             return
 
-        if MCP_REMOTE_BEARER_TOKEN and "Authorization" not in self.headers:
-            self.headers["Authorization"] = f"Bearer {MCP_REMOTE_BEARER_TOKEN}"
-            logger.info(
-                "[RemoteMCP] Using MCP_REMOTE_BEARER_TOKEN for Authorization header"
+        if MCP_REMOTE_BEARER_TOKEN and header_name not in self.headers:
+            self.headers[header_name] = self._format_auth_header_value(
+                MCP_REMOTE_BEARER_TOKEN
             )
-        elif self.access_token and "Authorization" not in self.headers:
-            self.headers["Authorization"] = f"Bearer {self.access_token}"
             logger.info(
-                "[RemoteMCP] Using incoming access token for Authorization header"
+                f"[RemoteMCP] Using MCP_REMOTE_BEARER_TOKEN for {header_name} header"
+            )
+        elif self.access_token and header_name not in self.headers:
+            self.headers[header_name] = self._format_auth_header_value(
+                self.access_token
+            )
+            logger.info(
+                f"[RemoteMCP] Using incoming access token for {header_name} header"
             )
 
     @staticmethod

@@ -153,6 +153,42 @@ Static bearer token for remote server authentication.
 MCP_REMOTE_BEARER_TOKEN="service-token-abc123"
 ```
 
+#### MCP_REMOTE_AUTH_HEADER_NAME
+
+Header name used to send the auth token (exchanged provider token, user API key, or bearer fallback) to the remote server.
+
+- **Type:** String
+- **Default:** `Authorization`
+- **Required:** No
+
+Useful when a gateway expects the credential in a custom header, e.g. an ESB in front of Azure APIM using `esb-subscription-key` instead of `ocp-apim-subscription-key`:
+
+```bash
+MCP_REMOTE_AUTH_HEADER_NAME="esb-subscription-key"
+```
+
+#### MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE
+
+Format of the auth header value. Supports the placeholders `{token}` and `{token_type}`.
+
+- **Type:** String
+- **Default:** None (sends `{token_type} {token}`, e.g. `Bearer <token>`)
+- **Required:** No
+
+Subscription keys are usually sent raw, without a `Bearer` prefix:
+
+```bash
+MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
+```
+
+Combined example — send each user's stored API key as an ESB subscription key:
+
+```bash
+AUTH_PROVIDER="user-api-key"
+MCP_REMOTE_AUTH_HEADER_NAME="esb-subscription-key"
+MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
+```
+
 #### MCP_REMOTE_ANON_BEARER_TOKEN
 
 Bearer token for anonymous/unauthenticated requests.
