@@ -8,10 +8,14 @@ from app.vars import (
     AUTH_ALLOW_UNSAFE_CERT,
     AUTH_BASE_URL,
     AUTH_PROVIDER,
+    AUTH_TOKENS_INTERNAL_URL,
+    INTERNAL_API_SECRET,
     KEYCLOAK_PROVIDER_ALIAS,
     KEYCLOAK_PROVIDER_REFRESH_MODE,
     KEYCLOAK_REALM,
     LOG_TOKEN_VALUES,
+    MCP_CONNECTION_ID,
+    SERVICE_NAME,
 )
 import jwt
 from jwt import DecodeError, InvalidTokenError
@@ -36,6 +40,8 @@ class TokenRetrieverFactory:
         provider: str = AUTH_PROVIDER
         if provider == "keycloak":
             return KeyCloakTokenRetriever()
+        elif provider == "user-api-key":
+            return UserApiKeyTokenRetriever()
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -46,6 +52,154 @@ class UserLoggedOutException(Exception):
     def __init__(self, message: str = "User is logged out or unauthorized"):
         self.message = message
         super().__init__(message)
+
+
+_jwks_client = None
+
+
+def _get_jwks_client():
+    """Cached PyJWKClient for the configured Keycloak realm."""
+    global _jwks_client
+    if _jwks_client is None:
+        import ssl
+
+        jwks_url = (
+            f"{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}"
+            "/protocol/openid-connect/certs"
+        )
+        ssl_context = None
+        if AUTH_ALLOW_UNSAFE_CERT:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+        _jwks_client = jwt.PyJWKClient(
+            jwks_url, cache_keys=True, ssl_context=ssl_context
+        )
+    return _jwks_client
+
+
+def verified_keycloak_claims(token: str) -> Dict[str, Any]:
+    """Verify signature and expiry against Keycloak's JWKS and return claims.
+
+    Raises UserLoggedOutException on any validation failure. Audience is
+    not enforced (Keycloak access tokens commonly carry aud=account and
+    vary per client); the signature check already pins the issuer's keys,
+    and the realm is additionally asserted via the iss claim suffix.
+    """
+    try:
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256", "ES256"],
+            options={"verify_aud": False},
+        )
+    except Exception as exc:
+        raise UserLoggedOutException(
+            f"Access token failed verification: {exc}"
+        ) from exc
+    issuer = claims.get("iss", "")
+    if not issuer.endswith(f"/realms/{KEYCLOAK_REALM}"):
+        raise UserLoggedOutException(
+            f"Access token issued by unexpected realm: {issuer}"
+        )
+    return claims
+
+
+class UserApiKeyTokenRetriever(TokenRetriever):
+    """Per-user API keys for a connection (AUTH_PROVIDER=user-api-key).
+
+    The requesting user's Keycloak token identifies them (email claim);
+    their stored key for MCP_CONNECTION_ID is fetched from app-auth-tokens'
+    internal API and used as the bearer credential toward the remote MCP.
+    """
+
+    def __init__(self):
+        self.auth_tokens_url = AUTH_TOKENS_INTERNAL_URL.rstrip("/")
+        self.connection_id = MCP_CONNECTION_ID
+        self.internal_secret = INTERNAL_API_SECRET
+        # X-Service-ID toward app-auth-tokens: the bridge's own identity,
+        # e.g. "mcp-notes-server" (matched by the mcp-* allow-list there).
+        self.service_id = SERVICE_NAME
+        self.allow_unsafe_cert = AUTH_ALLOW_UNSAFE_CERT
+        self.logger = logger
+
+    def _verified_claims(self, keycloak_token: str) -> Dict[str, Any]:
+        return verified_keycloak_claims(keycloak_token)
+
+    def _resolve_email(self, keycloak_token: str) -> str:
+        # A raw credential is released based on this identity — the token
+        # signature MUST be verified, unlike the broker path where Keycloak
+        # itself re-validates the token server-side.
+        claims = self._verified_claims(keycloak_token)
+        email = (
+            claims.get("email")
+            or claims.get("preferred_username")
+            or claims.get("upn")
+        )
+        if not email:
+            raise UserLoggedOutException(
+                "The user's access token carries no email claim"
+            )
+        return email
+
+    def retrieve_token(self, keycloak_token: str) -> Dict[str, Any]:
+        if not self.auth_tokens_url or not self.connection_id:
+            self.logger.error(
+                "[UserApiKey] AUTH_TOKENS_INTERNAL_URL and MCP_CONNECTION_ID "
+                "must be set for AUTH_PROVIDER=user-api-key"
+            )
+            return {"success": False, "error": "user_api_key_misconfigured"}
+
+        email = self._resolve_email(keycloak_token)
+        url = (
+            f"{self.auth_tokens_url}/api/internal/connection-key/"
+            f"{email}/{self.connection_id}"
+        )
+        headers = {"X-Service-ID": self.service_id}
+        if self.internal_secret:
+            headers["X-Internal-Secret"] = self.internal_secret
+
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=10,
+                verify=not self.allow_unsafe_cert,
+            )
+        except requests.RequestException as exc:
+            self.logger.error("[UserApiKey] Connection key lookup failed: %s", exc)
+            return {"success": False, "error": "connection_key_lookup_failed"}
+
+        if response.status_code == 404:
+            raise UserLoggedOutException(
+                f"No API key configured for connection '{self.connection_id}'. "
+                "Add one in your profile under Connections."
+            )
+        if response.status_code != 200:
+            self.logger.error(
+                "[UserApiKey] Connection key lookup returned HTTP %s",
+                response.status_code,
+            )
+            return {"success": False, "error": "connection_key_lookup_failed"}
+
+        try:
+            payload = response.json()
+        except JSONDecodeError:
+            return {"success": False, "error": "connection_key_lookup_failed"}
+        key = payload.get("key")
+        if not key:
+            raise UserLoggedOutException(
+                f"No API key configured for connection '{self.connection_id}'. "
+                "Add one in your profile under Connections."
+            )
+        self.logger.info(
+            mask_token(
+                f"[UserApiKey] Using per-user key for connection {self.connection_id}",
+                key,
+            )
+        )
+        return {"success": True, "access_token": key, "token_type": "Bearer"}
 
 
 class KeyCloakTokenRetriever(TokenRetriever):

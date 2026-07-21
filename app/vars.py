@@ -133,6 +133,13 @@ KEYCLOAK_PROVIDER_REFRESH_MODE = os.getenv(
     "KEYCLOAK_PROVIDER_REFRESH_MODE", "oidc"
 ).lower()
 
+# AUTH_PROVIDER=user-api-key: each user stores their own API key for this
+# connection in app-auth-tokens; the bridge fetches it per request-user via
+# the internal API and sends it to the remote MCP.
+MCP_CONNECTION_ID = os.getenv("MCP_CONNECTION_ID", "")
+AUTH_TOKENS_INTERNAL_URL = os.getenv("AUTH_TOKENS_INTERNAL_URL", "")
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+
 AUTH_ALLOW_UNSAFE_CERT = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
 LOG_TOKEN_VALUES = os.getenv("LOG_TOKEN_VALUES", "false").lower() == "true"
 
