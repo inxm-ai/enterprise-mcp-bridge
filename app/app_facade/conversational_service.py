@@ -27,6 +27,7 @@ from app.app_facade.patch_ops import (
     apply_patch_operations,
     enforce_runtime_script_integrity,
     legacy_patch_to_operations,
+    normalize_patch_response,
 )
 from app.app_facade.generated_types import (
     Actor,
@@ -41,10 +42,12 @@ from app.app_facade.prompt_helpers import (
     sanitize_runtime_action,
 )
 from app.app_facade.sse import assistant_status_event, sse_event
+from app.app_facade.test_fix_tools import _parse_tap_output
 from app.session import MCPSessionBase
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.vars import (
     APP_UI_PATCH_ONLY,
+    APP_UI_PATCH_FIX_ATTEMPTS,
     APP_UI_PATCH_RETRIES,
     GENERATED_UI_MAX_HISTORY_BYTES,
     GENERATED_UI_MAX_HISTORY_ENTRIES,
@@ -62,6 +65,18 @@ UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 _COMPONENTS_SCRIPT_CONTEXT_CHARS = positive_int_env(
     "CONVERSATIONAL_COMPONENTS_SCRIPT_CONTEXT_CHARS", 6000
 )
+_PATCH_ASSISTANT_CONTEXT_CHARS = positive_int_env(
+    "CONVERSATIONAL_PATCH_ASSISTANT_CONTEXT_CHARS", 2000
+)
+_TAP_FAILURE_DIAGNOSTIC_KEYS = (
+    "not ok ",
+    "error:",
+    "code:",
+    "failureType:",
+    "expected:",
+    "actual:",
+    "operator:",
+)
 
 
 def _generation_response_format(schema=None, name: str = "generated_ui"):
@@ -70,6 +85,17 @@ def _generation_response_format(schema=None, name: str = "generated_ui"):
 
 _sse_event = sse_event
 _assistant_status_event = assistant_status_event
+
+
+def _test_failure_signature(output: str) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    """Return stable TAP failure details without paths, stacks, or timings."""
+    _, failed, failure_names = _parse_tap_output(output)
+    diagnostics = tuple(
+        line
+        for raw_line in (output or "").splitlines()
+        if (line := raw_line.strip()).startswith(_TAP_FAILURE_DIAGNOSTIC_KEYS)
+    )
+    return failed, tuple(failure_names), diagnostics
 
 
 class ConversationalService:
@@ -395,6 +421,9 @@ class ConversationalService:
             "use them to gather facts before proposing UI changes. "
             "When this workflow will continue automatically, do not ask for permission to proceed. "
             "State the next action assertively with phrasing that starts with 'I will ...'. "
+            "Do not emit source files, large code blocks, or a rewritten component: a separate "
+            "patch planner applies the edit after your analysis. Describe the intended change "
+            "briefly and identify the exact symbol or expression that should change. "
             "Preserve component-owned data loading and partial rendering: each data-owning "
             "component should manage its own loading/error/data states. "
             "Do not introduce root-level Promise.all() fan-out for unrelated components or a "
@@ -514,6 +543,9 @@ class ConversationalService:
                 "'set' replaces the whole target and must only be used to create a missing file or when "
                 "nearly all of it changes. Prefer several small 'replace' operations over one big 'set'; "
                 "never re-emit unchanged code. Do not include markdown fences. "
+                "For a localized before/after request, replace the smallest unique expression "
+                "(for example encodeURIComponent(saga.name) -> encodeURIComponent(saga.id)); "
+                "do not return the enclosing function or component. "
                 "service_script and components_script are bundled into ONE module at runtime: "
                 "never add an import for an identifier that either file already imports, and never "
                 "register a pfusch component name that already exists — change existing components "
@@ -527,7 +559,9 @@ class ConversationalService:
             )
             payload = {
                 "user_message": user_message,
-                "assistant_message": assistant_message,
+                "assistant_message": assistant_message[
+                    :_PATCH_ASSISTANT_CONTEXT_CHARS
+                ],
                 "current": {
                     "html": draft_payload.get("html"),
                     "service_script": draft_payload.get("service_script"),
@@ -569,9 +603,9 @@ class ConversationalService:
                 parsed = parse_json(content)
             except Exception as exc:
                 return _fail("invalid_patch_json", str(exc))
-            patch = parsed.get("patch")
-            if not isinstance(patch, dict):
-                return _fail("missing_patch_object")
+            patch, patch_shape_error = normalize_patch_response(parsed)
+            if patch is None:
+                return _fail("missing_patch_object", patch_shape_error)
 
             operations = patch.get("operations")
             if not isinstance(operations, list):
@@ -639,13 +673,42 @@ class ConversationalService:
                 and isinstance(test_script, str)
                 and test_script.strip()
             ):
-                success, _ = self.service._run_tests(
+                success, candidate_test_output = self.service._run_tests(
                     service_script,
                     components_script,
                     test_script,
                     candidate.get("dummy_data"),
                 )
                 if not success:
+                    test_script_changed = candidate.get(
+                        "test_script"
+                    ) != draft_payload.get("test_script")
+                    baseline_failed_the_same_way = False
+                    if not test_script_changed:
+                        baseline_success, baseline_test_output = self.service._run_tests(
+                            str(draft_payload.get("service_script") or ""),
+                            str(draft_payload.get("components_script") or ""),
+                            str(draft_payload.get("test_script") or ""),
+                            draft_payload.get("dummy_data"),
+                        )
+                        candidate_signature = _test_failure_signature(
+                            candidate_test_output
+                        )
+                        baseline_signature = _test_failure_signature(
+                            baseline_test_output
+                        )
+                        candidate_failed = candidate_signature[0]
+                        baseline_failed_the_same_way = (
+                            not baseline_success
+                            and candidate_failed > 0
+                            and candidate_signature == baseline_signature
+                        )
+                    if baseline_failed_the_same_way:
+                        logger.warning(
+                            "[GeneratedUI] Patch candidate retained the draft's existing "
+                            "test failures; accepting the non-regressing patch"
+                        )
+                        return {"payload": candidate}
                     logger.warning(
                         "[GeneratedUI] Patch candidate failed tests; invoking iterative fixer loop"
                     )
@@ -674,7 +737,7 @@ class ConversationalService:
                         messages=fix_messages,
                         allowed_tools=selected_tools,
                         access_token=access_token,
-                        max_attempts=8,
+                        max_attempts=max(1, APP_UI_PATCH_FIX_ATTEMPTS),
                     )
                     if fix_success:
                         candidate["service_script"] = fixed_service

@@ -31,6 +31,7 @@ SCRIPT_TARGETS = (
 )
 HTML_TARGETS = ("html_page", "html_snippet")
 PATCH_TARGETS = SCRIPT_TARGETS + HTML_TARGETS
+PATCH_RESPONSE_ENVELOPES = ("result", "data", "output")
 
 PATCH_UPDATE_SCHEMA = {
     "type": "object",
@@ -128,6 +129,61 @@ def legacy_patch_to_operations(patch: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(value, str):
             operations.append({"target": key, "op": "set", "content": value})
     return operations
+
+
+def normalize_patch_response(
+    parsed: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize safe patch response variants emitted by different models.
+
+    The JSON schema asks for ``{"patch": {...}}``, but some compatible model
+    endpoints strip that outer object or add a generic result envelope. Keep
+    the accepted variants explicit so arbitrary JSON is never treated as code.
+    """
+    if not isinstance(parsed, dict):
+        return None, f"root_type={type(parsed).__name__}; expected an object"
+
+    enveloped_candidates = tuple(
+        parsed[key]
+        for key in PATCH_RESPONSE_ENVELOPES
+        if isinstance(parsed.get(key), dict)
+    )
+    candidates = (parsed, *enveloped_candidates)
+
+    for candidate in candidates:
+        patch = candidate.get("patch")
+        if isinstance(patch, dict):
+            return patch, None
+        if isinstance(patch, list):
+            return {"operations": patch}, None
+
+        operations = candidate.get("operations")
+        if isinstance(operations, list):
+            normalized = {"operations": operations}
+            metadata = candidate.get("metadata")
+            if isinstance(metadata, dict):
+                normalized["metadata"] = metadata
+            return normalized, None
+
+        if all(key in candidate for key in ("target", "op", "content")):
+            return {"operations": [candidate]}, None
+
+        if legacy_patch_to_operations(candidate):
+            return candidate, None
+
+    returned_keys = sorted(str(key) for key in parsed.keys())
+    keys_preview = ",".join(returned_keys[:8]) or "<empty>"
+    invalid_patch_detail = (
+        f"; patch_type={type(parsed.get('patch')).__name__}"
+        if "patch" in parsed
+        else ""
+    )
+    return (
+        None,
+        f"top_level_keys={keys_preview}{invalid_patch_detail}; "
+        "expected 'patch', 'operations', "
+        "a single operation, or a supported result envelope",
+    )
 
 
 def apply_patch_operations(
