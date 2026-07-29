@@ -319,7 +319,9 @@ async def test_attempt_patch_update_records_failure_reason_for_missing_patch_obj
     )
 
     assert result is None
-    assert service._last_patch_failure_reason == "missing_patch_object"
+    assert service._last_patch_failure_reason.startswith("missing_patch_object")
+    assert "top_level_keys=not_patch" in service._last_patch_failure_reason
+    assert "expected 'patch', 'operations'" in service._last_patch_failure_reason
 
 
 @pytest.mark.asyncio
@@ -2215,6 +2217,7 @@ def test_run_assistant_message_system_prompt_includes_component_loading_policy()
     assert "console.error" in system_prompt
     assert "do not ask for permission to proceed" in system_prompt
     assert "starts with 'I will ...'" in system_prompt
+    assert "Do not emit source files, large code blocks" in system_prompt
 
 
 def test_run_assistant_message_draft_context_includes_components_script():
@@ -2326,7 +2329,7 @@ def test_attempt_patch_update_prompt_includes_no_global_blocking_loader_guidance
                 "test_script": "",
             },
             user_message="Avoid full-page loading for independent panels",
-            assistant_message="Split loading by component",
+            assistant_message="Split loading by component." + ("x" * 4000),
             access_token=None,
             previous_metadata={},
         )
@@ -2338,6 +2341,9 @@ def test_attempt_patch_update_prompt_includes_no_global_blocking_loader_guidance
         "Preserve component-owned data loading and partial rendering" in system_prompt
     )
     assert "root-level Promise.all() fan-out" in system_prompt
+    patch_payload = json.loads(captured["request"].messages[1].content)
+    assert len(patch_payload["assistant_message"]) == 2000
+    assert "replace the smallest unique expression" in system_prompt
     assert "single full-screen blocking loader" in system_prompt
     assert "console.error" in system_prompt
 

@@ -12,6 +12,7 @@ from app.app_facade.patch_ops import (
     detect_duplicate_component_registrations,
     enforce_runtime_script_integrity,
     legacy_patch_to_operations,
+    normalize_patch_response,
     sanitize_runtime_imports,
 )
 
@@ -174,6 +175,68 @@ def test_legacy_patch_to_operations_converts_whole_file_keys():
     assert all(op["target"] != "html_snippet" for op in ops)
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "operations": [
+                {
+                    "target": "components_script",
+                    "op": "replace",
+                    "search": "saga.name",
+                    "content": "saga.id",
+                }
+            ]
+        },
+        {
+            "patch": [
+                {
+                    "target": "components_script",
+                    "op": "replace",
+                    "search": "saga.name",
+                    "content": "saga.id",
+                }
+            ]
+        },
+        {
+            "result": {
+                "patch": {
+                    "operations": [
+                        {
+                            "target": "components_script",
+                            "op": "replace",
+                            "search": "saga.name",
+                            "content": "saga.id",
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "target": "components_script",
+            "op": "replace",
+            "search": "saga.name",
+            "content": "saga.id",
+        },
+    ],
+)
+def test_normalize_patch_response_accepts_supported_envelopes(response):
+    patch, error = normalize_patch_response(response)
+
+    assert error is None
+    assert patch is not None
+    assert patch["operations"][0]["content"] == "saga.id"
+
+
+def test_normalize_patch_response_reports_unknown_shape():
+    patch, error = normalize_patch_response({"not_patch": {"x": 1}})
+
+    assert patch is None
+    assert error is not None
+    assert "top_level_keys=not_patch" in error
+    assert "expected 'patch', 'operations'" in error
+
+
 def test_patch_update_schema_shape():
     patch_props = PATCH_UPDATE_SCHEMA["properties"]["patch"]
     assert "operations" in patch_props["properties"]
@@ -287,6 +350,75 @@ async def test_attempt_patch_update_records_apply_failure_reason():
     assert result is None
     assert service._last_patch_failure_reason.startswith("patch_apply_failed")
     assert "search text not found" in service._last_patch_failure_reason
+
+
+@pytest.mark.asyncio
+async def test_attempt_patch_update_accepts_same_preexisting_test_failure(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    async def fake_non_stream_completion(_request, _token, _span):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "patch": {
+                                    "operations": [
+                                        {
+                                            "target": "components_script",
+                                            "op": "replace",
+                                            "search": "html.div('hello')",
+                                            "content": "html.div('patched')",
+                                        }
+                                    ]
+                                }
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+    existing_failure = (
+        "TAP version 13\n"
+        "not ok 1 - existing unrelated failure\n"
+        "# tests 1\n"
+        "# pass 0\n"
+        "# fail 1\n"
+    )
+    test_runs = []
+
+    def failing_tests(service_script, components_script, test_script, dummy_data):
+        test_runs.append(components_script)
+        return False, existing_failure
+
+    async def fail_fix_loop(**_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("A non-regressing patch must not enter the fixer")
+
+    monkeypatch.setattr(service, "_run_tests", failing_tests)
+    monkeypatch.setattr(service, "_iterative_test_fix", fail_fix_loop)
+
+    result = await service.conversational_service._attempt_patch_update(
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="dash",
+        draft_payload=dict(DRAFT),
+        user_message="change greeting",
+        assistant_message="I will change the expression only.",
+        access_token=None,
+        previous_metadata={},
+    )
+
+    assert result is not None
+    assert "html.div('patched')" in result["payload"]["components_script"]
+    assert len(test_runs) == 2
+    assert "html.div('patched')" in test_runs[0]
+    assert "html.div('hello')" in test_runs[1]
 
 
 PFUSCH_IMPORT = (

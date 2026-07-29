@@ -312,6 +312,7 @@ APP_UI_SESSION_TTL_MINUTES = int(os.getenv("APP_UI_SESSION_TTL_MINUTES", "120"))
 APP_UI_PATCH_ENABLED = os.getenv("APP_UI_PATCH_ENABLED", "true").lower() == "true"
 APP_UI_PATCH_ONLY = os.getenv("APP_UI_PATCH_ONLY", "true").lower() == "true"
 APP_UI_PATCH_RETRIES = int(os.getenv("APP_UI_PATCH_RETRIES", "2"))
+APP_UI_PATCH_FIX_ATTEMPTS = int(os.getenv("APP_UI_PATCH_FIX_ATTEMPTS", "3"))
 GENERATED_UI_FIX_CODE_FIRST = (
     os.getenv("GENERATED_UI_FIX_CODE_FIRST", "true").lower() == "true"
 )

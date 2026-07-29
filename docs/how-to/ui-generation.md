@@ -219,6 +219,9 @@ Feature flags:
 - `APP_CONVERSATIONAL_UI_ENABLED=true`
 - `APP_UI_SESSION_TTL_MINUTES=120` (default)
 - `APP_UI_PATCH_ENABLED=true` (default)
+- `APP_UI_PATCH_ONLY=true` (default; failed patches never rewrite the whole draft)
+- `APP_UI_PATCH_RETRIES=2` (default)
+- `APP_UI_PATCH_FIX_ATTEMPTS=3` (default; bounds repair work for a patch that introduces test failures)
 
 Start page:
 ```bash
