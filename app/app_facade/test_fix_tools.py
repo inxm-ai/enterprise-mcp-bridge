@@ -808,6 +808,7 @@ class IterativeTestFixer:
                 return ToolResult(success=False, content="Debug code is required.")
             if not isinstance(code, str):
                 code = str(code)
+            code = self._normalize_pfusch_imports(code)
 
             try:
                 timeout = 10 if timeout_seconds is None else int(timeout_seconds)
@@ -833,7 +834,8 @@ class IterativeTestFixer:
                     "if (typeof globalThis.HTMLElement === 'undefined') {",
                     "  setupDomStubs();",
                     "}",
-                    "const { McpService } = await import('./app.js');",
+                    "const __appModule = await import('./app.js');",
+                    "const McpService = __appModule.McpService || globalThis.McpService;",
                     "await import('./components.js');",
                     "let dummyData = null;",
                     "try {",
@@ -1941,6 +1943,7 @@ async def run_tool_driven_test_fix(
 
         attempt = 0
         read_only_streak = 0
+        mutation_required_after_reads = False
         fix_code_assertion_failures = 0
         fix_code_pending_bail_decision = False
         fix_code_bail_override_used = False
@@ -2589,23 +2592,35 @@ async def run_tool_driven_test_fix(
                 tc.function.name in read_only_tools for tc in tool_calls
             )
             if read_only_only:
-                logger.info(
-                    "[iterative_test_fix] Only read/search tools used - not counting as attempt"
-                )
-                read_only_streak += 1
+                if mutation_required_after_reads:
+                    logger.warning(
+                        "[iterative_test_fix] Read-only tools used despite mandatory "
+                        "mutation directive; counting this attempt"
+                    )
+                    read_only_streak = 0
+                else:
+                    logger.info(
+                        "[iterative_test_fix] Only read/search tools used - not counting as attempt"
+                    )
+                    read_only_streak += 1
             else:
                 read_only_streak = 0
 
-            should_force_run_tests_for_streak = (
-                read_only_only and read_only_streak >= READ_ONLY_STREAK_LIMIT
+            should_require_mutation_for_streak = (
+                read_only_only
+                and not mutation_required_after_reads
+                and read_only_streak >= READ_ONLY_STREAK_LIMIT
             )
-            if should_force_run_tests_for_streak:
+            if should_require_mutation_for_streak:
                 logger.info(
-                    "[iterative_test_fix] Read-only streak limit reached (%s). Forcing run_tests.",
+                    "[iterative_test_fix] Read-only streak limit reached (%s). "
+                    "Requiring a mutation on the next turn.",
                     READ_ONLY_STREAK_LIMIT,
                 )
                 read_only_streak = 0
-            elif read_only_only:
+                mutation_required_after_reads = True
+                attempt -= 1
+            elif read_only_only and not mutation_required_after_reads:
                 attempt -= 1
 
             for tool_call in tool_calls:
@@ -2652,6 +2667,7 @@ async def run_tool_driven_test_fix(
                     arguments = {}
 
                 modification_tools = {
+                    "apply_script_patch",
                     "update_test_script",
                     "update_service_script",
                     "update_components_script",
@@ -2660,6 +2676,7 @@ async def run_tool_driven_test_fix(
                 if tool_name in modification_tools:
                     has_modification_tools = True
                     mutation_since_last_test = True
+                    mutation_required_after_reads = False
 
                 tool_desc = _tool_description(tool_name, arguments)
                 logger.info(f"[iterative_test_fix] {tool_desc}")
@@ -2834,12 +2851,8 @@ async def run_tool_driven_test_fix(
                                 )
 
             should_force_run_tests_for_mutation = mutation_since_last_test
-            if should_force_run_tests_for_mutation or should_force_run_tests_for_streak:
-                forced_reason = (
-                    "mutation_without_run_tests"
-                    if should_force_run_tests_for_mutation
-                    else "read_only_streak_limit"
-                )
+            if should_force_run_tests_for_mutation:
+                forced_reason = "mutation_without_run_tests"
                 logger.info(
                     "[iterative_test_fix] Forcing run_tests (%s) before next LLM round",
                     forced_reason,
@@ -2981,6 +2994,28 @@ async def run_tool_driven_test_fix(
                         name=tool_result["name"],
                     )
                 )
+
+            if should_require_mutation_for_streak:
+                allowed_mutation = (
+                    "apply_script_patch or update_test_script"
+                    if strategy_mode == "adjust_test"
+                    else (
+                        "apply_script_patch, update_service_script, or "
+                        "update_components_script"
+                    )
+                )
+                fix_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            "Diagnosis phase is complete. Your next response MUST "
+                            f"call a mutation tool ({allowed_mutation}) with a "
+                            "minimal correction, then run_tests. Do not read or "
+                            "search files again before making that edit."
+                        ),
+                    )
+                )
+                best_snapshot["messages"] = copy.deepcopy(fix_messages)
 
             if "TESTS_PASSING" in content and not all_tests_passed:
                 logger.info("[iterative_test_fix] LLM indicates tests are passing")

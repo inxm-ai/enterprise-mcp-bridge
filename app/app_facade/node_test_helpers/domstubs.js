@@ -1224,6 +1224,20 @@ class PfuschNodeCollection {
         const node = this._firstNode();
         if (node) node.textContent = val;
     }
+    getAttribute(name) {
+        return this._firstNode()?.getAttribute?.(name) ?? null;
+    }
+    hasAttribute(name) {
+        return this._firstNode()?.hasAttribute?.(name) ?? false;
+    }
+    setAttribute(name, value) {
+        this._firstNode()?.setAttribute?.(name, value);
+        return this;
+    }
+    removeAttribute(name) {
+        this._firstNode()?.removeAttribute?.(name);
+        return this;
+    }
     submit() {
         this._firstNode()?.submit?.();
         return this;
@@ -1245,6 +1259,9 @@ class PfuschNodeCollection {
             });
         });
         return new PfuschNodeCollection(matches, this.host);
+    }
+    tryGet(selector) {
+        return this.get(selector);
     }
     map(fn) {
         return this.nodes.map((node) =>

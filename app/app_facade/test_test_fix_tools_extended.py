@@ -678,7 +678,7 @@ async def test_tool_fix_forces_run_tests_after_mutation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tool_fix_read_only_streak_forces_run_tests(monkeypatch):
+async def test_tool_fix_read_only_streak_requires_mutation(monkeypatch):
     monkeypatch.setattr("app.app_facade.test_fix_tools.READ_ONLY_STREAK_LIMIT", 2)
 
     run_calls = {"count": 0}
@@ -725,22 +725,32 @@ async def test_tool_fix_read_only_streak_forces_run_tests(monkeypatch):
         def __init__(self):
             self.llm_client = MockClient()
 
-    success, *_ = await run_tool_driven_test_fix(
-        tgi_service=MockTGIService(),
-        service_script="export class McpService {}",
-        components_script="export const init = () => {};",
-        test_script="import { test } from 'node:test'; test('x', () => { throw new Error('fail'); });",
-        dummy_data=None,
-        messages=[Message(role=MessageRole.SYSTEM, content="system")],
-        allowed_tools=None,
-        access_token=None,
-        max_attempts=3,
-        event_queue=None,
-        extra_headers=None,
+    success, _service, _components, _test, _dummy, messages = (
+        await run_tool_driven_test_fix(
+            tgi_service=MockTGIService(),
+            service_script="export class McpService {}",
+            components_script="export const init = () => {};",
+            test_script=(
+                "import { test } from 'node:test'; "
+                "test('x', () => { throw new Error('fail'); });"
+            ),
+            dummy_data=None,
+            messages=[Message(role=MessageRole.SYSTEM, content="system")],
+            allowed_tools=None,
+            access_token=None,
+            max_attempts=3,
+            event_queue=None,
+            extra_headers=None,
+        )
     )
 
-    assert success is True
-    assert run_calls["count"] >= 2
+    assert success is False
+    assert run_calls["count"] == 1
+    assert any(
+        message.role == MessageRole.USER
+        and "next response MUST call a mutation tool" in (message.content or "")
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
@@ -769,10 +779,21 @@ async def test_fix_code_bails_early_on_repeated_assertion_signature(monkeypatch)
     monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
 
     class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
         async def create(self, **kwargs):
+            self.calls += 1
             return _make_tool_call_response(
-                "search_files",
-                json.dumps({"regex": "aqData\\.pm2_5", "script_type": "test"}),
+                "update_components_script",
+                json.dumps(
+                    {
+                        "new_script": (
+                            "export const init = () => {}; "
+                            f"// attempted runtime fix {self.calls}"
+                        )
+                    }
+                ),
             )
 
     class MockClient:
@@ -883,11 +904,13 @@ async def test_fix_code_bail_override_allows_one_more_focused_attempt(monkeypatc
                                                         "Function",
                                                         (),
                                                         {
-                                                            "name": "search_files",
+                                                            "name": "update_components_script",
                                                             "arguments": json.dumps(
                                                                 {
-                                                                    "regex": "aqData\\.pm2_5",
-                                                                    "script_type": "test",
+                                                                    "new_script": (
+                                                                        "export const init = () => {}; "
+                                                                        f"// attempted runtime fix {self.calls}"
+                                                                    )
                                                                 }
                                                             ),
                                                         },
@@ -1076,7 +1099,18 @@ async def test_tool_start_event_infers_fix_explanation_when_missing(monkeypatch)
     monkeypatch.setattr(IterativeTestFixer, "run_tests", fake_run_tests)
 
     class MockCompletions:
+        def __init__(self):
+            self.calls = 0
+
         async def create(self, **kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                return _make_tool_call_response(
+                    "update_components_script",
+                    json.dumps(
+                        {"new_script": "export const init = () => {}; // fixed"}
+                    ),
+                )
             return type(
                 "Response",
                 (),

@@ -624,6 +624,60 @@ def test_run_debug_code_failure():
     toolkit.cleanup()
 
 
+def test_run_debug_code_uses_global_service_prelude_and_local_pfusch():
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+    toolkit.setup_test_environment("", "", "")
+
+    result = toolkit.run_debug_code(
+        "const pfuschModule = await import("
+        "'https://matthiaskainer.github.io/pfusch/pfusch.min.js');\n"
+        "const svc = new McpService();\n"
+        "return { service: typeof svc.call, pfusch: typeof pfuschModule.pfusch };"
+    )
+
+    assert result.success
+    assert '"service": "function"' in result.content
+    assert '"pfusch": "function"' in result.content
+    toolkit.cleanup()
+
+
+def test_pfusch_node_collection_delegates_attribute_access():
+    helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
+    toolkit = IterativeTestFixer(helpers_dir)
+    components = """
+import { pfusch, html } from 'https://matthiaskainer.github.io/pfusch/pfusch.min.js';
+pfusch('graph-card', {}, () => [
+  html.div({ class: 'graph-container', 'data-graph-cid': 'saga-123' })
+]);
+"""
+    test_script = """
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { pfuschTest } from './domstubs.js';
+import './app.js';
+
+test('collection delegates attributes to its first node', async () => {
+  const component = await pfuschTest('graph-card');
+  const graph = component.get('.graph-container');
+  assert.equal(graph.getAttribute('data-graph-cid'), 'saga-123');
+  assert.equal(graph.hasAttribute('data-graph-cid'), true);
+  graph.setAttribute('data-extra', 'yes');
+  assert.equal(graph.getAttribute('data-extra'), 'yes');
+  graph.removeAttribute('data-extra');
+  assert.equal(graph.hasAttribute('data-extra'), false);
+  assert.equal(component.tryGet('.graph-container').length, 1);
+  assert.equal(component.tryGet('.missing').length, 0);
+});
+"""
+    toolkit.setup_test_environment("", components, test_script)
+
+    result = toolkit.run_tests()
+
+    assert result.success, result.content
+    toolkit.cleanup()
+
+
 def test_search_files():
     """Test searching files with regex."""
     helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")

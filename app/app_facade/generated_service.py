@@ -87,6 +87,35 @@ _PATCH_UPDATE_SCHEMA = PATCH_UPDATE_SCHEMA
 NODE_TEST_TIMEOUT_MS = positive_int_env("GENERATED_UI_NODE_TEST_TIMEOUT_MS", 8000)
 
 
+def _fix_stage_attempt_budget(
+    max_attempts: int, test_source: str
+) -> Tuple[int, int, bool]:
+    """Allocate repair attempts while preserving an assertion-fix fallback."""
+    total = max(1, int(max_attempts))
+    likely_collection_mismatch = bool(
+        re.search(r"\bpfuschTest\s*\(", test_source or "")
+        and (
+            re.search(r"\bcomp\.(?:state|shadowRoot)\b", test_source or "")
+            or re.search(
+                r"\.get\s*\([^)]*\)\s*\.\s*"
+                r"(?:getAttribute|hasAttribute|setAttribute|removeAttribute)\s*\(",
+                test_source or "",
+            )
+        )
+    )
+    if total == 1:
+        return 1, 0, likely_collection_mismatch
+
+    # Always reserve at least one attempt for generated-test corrections.
+    # Collection-wrapper misuse is especially likely to be an assertion bug,
+    # so split a small budget in favor of adjust_test.
+    stage_a = min(total - 1, 12)
+    if likely_collection_mismatch:
+        stage_a = min(stage_a, max(1, total // 2))
+    stage_b = min(8, total - stage_a)
+    return stage_a, stage_b, likely_collection_mismatch
+
+
 def _load_pfusch_prompt() -> str:
     """Load the pfusch ui prompt from the markdown file and replace placeholders."""
     prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_ui_prompt.md")
@@ -325,20 +354,20 @@ class GeneratedUIService:
             )
             return False, passed, max(1, failed)
 
-        test_source = test_script or ""
-        likely_pfusch_collection_mismatch = bool(
-            re.search(r"\bpfuschTest\s*\(", test_source)
-            and re.search(r"\bcomp\.(?:state|shadowRoot)\b", test_source)
+        (
+            stage_a_attempts,
+            stage_b_attempts,
+            likely_pfusch_collection_mismatch,
+        ) = _fix_stage_attempt_budget(
+            max_attempts,
+            test_script or "",
         )
 
-        stage_a_attempts = min(max_attempts, 12)
         if likely_pfusch_collection_mismatch:
-            stage_a_attempts = min(max_attempts, 6)
             logger.info(
-                "[iterative_test_fix] Detected pfuschTest collection access via comp.state/comp.shadowRoot; "
-                "reducing code-first attempts before adjust-test fallback"
+                "[iterative_test_fix] Detected likely pfusch collection assertion "
+                "mismatch; reserving more adjust-test attempts"
             )
-        stage_b_attempts = min(8, max(0, max_attempts - stage_a_attempts))
 
         best = {
             "service_script": service_script,

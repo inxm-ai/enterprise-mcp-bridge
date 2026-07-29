@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -141,6 +142,94 @@ async def test_stream_chat_update_prefers_patch_when_available(tmp_path, monkeyp
         expand=False,
     )
     assert draft["current"]["html"]["snippet"] == "<div>patched</div>"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_update_persists_real_validated_patch_before_success(
+    tmp_path, monkeypatch
+):
+    service, storage = _new_service(tmp_path)
+    scope = Scope(kind="user", identifier="user123")
+    actor = Actor(user_id="user123", groups=["eng"])
+    storage.write(scope, "dash1", "overview", _base_record())
+    session_id = service.create_draft_session(
+        scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
+    )["session_id"]
+    initial_session = storage.read_session(
+        scope, "dash1", "overview", session_id
+    )
+
+    async def fake_select_tools(_session, _requested_tools, _prompt):
+        return []
+
+    async def fake_assistant(**_kwargs):
+        return "I will apply the targeted component update."
+
+    async def fake_non_stream_completion(_request, _token, _span):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "operations": [
+                                    {
+                                        "target": "components_script",
+                                        "op": "replace",
+                                        "search": "export const init = () => {};",
+                                        "content": "export const init = () => 'patched';",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_queue_tests(**_kwargs):
+        persisted = storage.read_session(
+            scope, "dash1", "overview", session_id
+        )
+        assert persisted["draft_payload"]["components_script"] == (
+            "export const init = () => 'patched';"
+        )
+        assert persisted["draft_version"] == initial_session["draft_version"] + 1
+        return {"status": "queued", "run_id": "run-persisted", "trigger": "post_update"}
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+    monkeypatch.setattr(service, "_select_tools", fake_select_tools)
+    monkeypatch.setattr(
+        service.conversational_service, "_run_assistant_message", fake_assistant
+    )
+    monkeypatch.setattr(service, "_run_tests", lambda *_args, **_kwargs: (True, "ok"))
+    monkeypatch.setattr(service.test_runner, "_queue_test_run", fake_queue_tests)
+
+    chunks = []
+    async for chunk in service.conversational_service.stream_chat_update(
+        session=object(),
+        scope=scope,
+        actor=actor,
+        ui_id="dash1",
+        name="overview",
+        session_id=session_id,
+        message="Patch the initializer",
+        tools=[],
+        tool_choice="auto",
+        access_token=None,
+    ):
+        chunks.append(chunk.decode("utf-8"))
+
+    joined = "".join(chunks)
+    assert "patch_applied" in joined
+    assert "run-persisted" in joined
+    persisted = storage.read_session(scope, "dash1", "overview", session_id)
+    assert (
+        persisted["draft_payload"]["components_script"]
+        == "export const init = () => 'patched';"
+    )
 
 
 @pytest.mark.asyncio
@@ -286,6 +375,7 @@ async def test_stream_chat_update_patch_retry_succeeds_before_regenerate(
     )["session_id"]
 
     attempts = {"count": 0}
+    rewrite_modes = []
 
     async def fake_select_tools(_session, _requested_tools, _prompt):
         return [{"type": "function", "function": {"name": "list_items"}}]
@@ -295,6 +385,7 @@ async def test_stream_chat_update_patch_retry_succeeds_before_regenerate(
 
     async def flaky_patch(**_kwargs):
         attempts["count"] += 1
+        rewrite_modes.append(_kwargs.get("rewrite_files"))
         if attempts["count"] == 1:
             service._last_patch_failure_reason = "patch_tests_failed"
             return None
@@ -344,6 +435,8 @@ async def test_stream_chat_update_patch_retry_succeeds_before_regenerate(
     joined = "".join(chunks)
     assert "patch_applied" in joined
     assert attempts["count"] == 2
+    assert rewrite_modes == [False, True]
+    assert "rewrite only the affected source files" in joined
 
 
 @pytest.mark.asyncio

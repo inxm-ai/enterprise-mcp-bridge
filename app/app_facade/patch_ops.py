@@ -6,6 +6,7 @@ planner returns a list of small edit operations that are applied to the
 current draft payload server-side:
 
 * ``replace`` – replace an exact ``search`` string with ``content``
+* ``insert_before`` / ``insert_after`` – add content beside an exact anchor
 * ``append``  – append ``content`` to the end of the target
 * ``set``     – replace the whole target with ``content`` (new/small files)
 
@@ -15,6 +16,7 @@ attempt so the model can correct its search strings.
 """
 
 import copy
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -32,59 +34,61 @@ SCRIPT_TARGETS = (
 HTML_TARGETS = ("html_page", "html_snippet")
 PATCH_TARGETS = SCRIPT_TARGETS + HTML_TARGETS
 PATCH_RESPONSE_ENVELOPES = ("result", "data", "output")
+PATCH_RESPONSE_MAX_JSON_LAYERS = 3
 
 PATCH_UPDATE_SCHEMA = {
     "type": "object",
     "properties": {
-        "patch": {
-            "type": "object",
-            "properties": {
-                "operations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "target": {
-                                "type": "string",
-                                "enum": list(PATCH_TARGETS),
-                            },
-                            "op": {
-                                "type": "string",
-                                "enum": ["replace", "append", "set"],
-                            },
-                            "search": {
-                                "type": "string",
-                                "description": (
-                                    "Exact text copied verbatim from the current "
-                                    "target (required for op=replace)"
-                                ),
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": (
-                                    "Replacement text (replace), appended text "
-                                    "(append), or full new content (set)"
-                                ),
-                            },
-                            "replace_all": {
-                                "type": "boolean",
-                                "description": "Replace every occurrence of search (default false)",
-                            },
-                        },
-                        "required": ["target", "op", "content"],
-                        "additionalProperties": False,
+        "operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": list(PATCH_TARGETS),
+                    },
+                    "op": {
+                        "type": "string",
+                        "enum": [
+                            "replace",
+                            "insert_before",
+                            "insert_after",
+                            "append",
+                            "set",
+                        ],
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Exact text copied verbatim from the current "
+                            "target (required for replace/insert operations)"
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "Replacement or inserted text, appended text "
+                            "(append), or full new content (set)"
+                        ),
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": (
+                            "Replace every occurrence of search (default false)"
+                        ),
                     },
                 },
-                "metadata": {
-                    "type": "object",
-                    "additionalProperties": True,
-                },
+                "required": ["target", "op", "content"],
+                "additionalProperties": False,
             },
-            "required": ["operations"],
-            "additionalProperties": False,
-        }
+        },
+        "metadata": {
+            "type": "object",
+            "additionalProperties": True,
+        },
     },
-    "required": ["patch"],
+    "required": ["operations"],
     "additionalProperties": False,
 }
 
@@ -115,6 +119,52 @@ def _preview(text: str, limit: int = 120) -> str:
     return text if len(text) <= limit else f"{text[:limit]}..."
 
 
+def _whitespace_normalized_spans(text: str, search: str) -> List[Tuple[int, int]]:
+    """Find search spans that differ only in whitespace formatting."""
+    search_parts = re.split(r"\s+", search.strip())
+    if not search_parts or any(not part for part in search_parts):
+        return []
+    pattern = r"\s+".join(re.escape(part) for part in search_parts)
+    return [match.span() for match in re.finditer(pattern, text)]
+
+
+def _shared_unique_suffix_anchor_span(
+    text: str, search: str, content: str
+) -> Optional[Tuple[int, int]]:
+    """Find a shared closing-line anchor for a missing replacement block.
+
+    Models sometimes describe a replacement as ``old block + closing anchor``
+    even when the old block is absent, while correctly preserving the exact
+    closing anchor in the replacement. If that complete line is shared by
+    search/content and occurs exactly once, replacing just the anchor safely
+    turns the operation into an insertion before that boundary.
+    """
+    search_lines = search.splitlines(keepends=True)
+    content_lines = content.splitlines(keepends=True)
+    shared_reversed: List[str] = []
+    for search_line, content_line in zip(
+        reversed(search_lines), reversed(content_lines)
+    ):
+        if search_line != content_line:
+            break
+        shared_reversed.append(search_line)
+    if not shared_reversed:
+        return None
+
+    anchor = "".join(reversed(shared_reversed))
+    if not anchor.strip():
+        return None
+    missing_prefix = search[: -len(anchor)]
+    inserted_prefix = content[: -len(anchor)]
+    if not missing_prefix.strip() or not inserted_prefix.strip():
+        return None
+
+    start = text.find(anchor)
+    if start < 0 or text.find(anchor, start + 1) >= 0:
+        return None
+    return start, start + len(anchor)
+
+
 def legacy_patch_to_operations(patch: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a legacy whole-file patch object into ``set`` operations."""
     operations: List[Dict[str, Any]] = []
@@ -140,6 +190,29 @@ def normalize_patch_response(
     endpoints strip that outer object or add a generic result envelope. Keep
     the accepted variants explicit so arbitrary JSON is never treated as code.
     """
+    return _normalize_patch_response(parsed, json_layer=0)
+
+
+def _normalize_patch_response(
+    parsed: Any,
+    *,
+    json_layer: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if isinstance(parsed, str):
+        if json_layer >= PATCH_RESPONSE_MAX_JSON_LAYERS:
+            return None, (
+                "embedded_patch_json_exceeded_"
+                f"{PATCH_RESPONSE_MAX_JSON_LAYERS}_layers"
+            )
+        try:
+            decoded = json.loads(parsed)
+        except json.JSONDecodeError as exc:
+            return None, (
+                "patch_type=str but value is not JSON: "
+                f"{exc.msg} at position {exc.pos}"
+            )
+        return _normalize_patch_response(decoded, json_layer=json_layer + 1)
+
     if not isinstance(parsed, dict):
         return None, f"root_type={type(parsed).__name__}; expected an object"
 
@@ -156,6 +229,8 @@ def normalize_patch_response(
             return patch, None
         if isinstance(patch, list):
             return {"operations": patch}, None
+        if isinstance(patch, str):
+            return _normalize_patch_response(patch, json_layer=json_layer)
 
         operations = candidate.get("operations")
         if isinstance(operations, list):
@@ -224,11 +299,11 @@ def apply_patch_operations(
             joined = f"{base}\n{content}" if base and not base.endswith("\n") else f"{base}{content}"
             _write_target(candidate, target, joined)
             continue
-        if op == "replace":
+        if op in {"replace", "insert_before", "insert_after"}:
             search = op_raw.get("search")
             if not isinstance(search, str) or not search:
                 errors.append(
-                    f"op[{index}]: replace requires a non-empty 'search' string "
+                    f"op[{index}]: {op} requires a non-empty 'search' string "
                     f"(target '{target}')"
                 )
                 continue
@@ -240,6 +315,46 @@ def apply_patch_operations(
                 continue
             occurrences = current.count(search)
             if occurrences == 0:
+                normalized_spans = _whitespace_normalized_spans(current, search)
+                if len(normalized_spans) == 1:
+                    start, end = normalized_spans[0]
+                    if op == "insert_before":
+                        updated = f"{current[:start]}{content}{current[start:]}"
+                    elif op == "insert_after":
+                        updated = f"{current[:end]}{content}{current[end:]}"
+                    else:
+                        updated = f"{current[:start]}{content}{current[end:]}"
+                    _write_target(candidate, target, updated)
+                    logger.info(
+                        "[GeneratedUI] Applied whitespace-normalized %s "
+                        "to %s for op[%s]",
+                        op,
+                        target,
+                        index,
+                    )
+                    continue
+                if len(normalized_spans) > 1:
+                    errors.append(
+                        f"op[{index}]: whitespace-normalized search text matches "
+                        f"{len(normalized_spans)} times in '{target}': "
+                        f"'{_preview(search)}'. Include more surrounding context."
+                    )
+                    continue
+                if op == "replace":
+                    suffix_span = _shared_unique_suffix_anchor_span(
+                        current, search, content
+                    )
+                    if suffix_span is not None:
+                        start, end = suffix_span
+                        updated = f"{current[:start]}{content}{current[end:]}"
+                        _write_target(candidate, target, updated)
+                        logger.info(
+                            "[GeneratedUI] Rebased missing replacement block "
+                            "onto its unique shared suffix anchor in %s for op[%s]",
+                            target,
+                            index,
+                        )
+                        continue
                 errors.append(
                     f"op[{index}]: search text not found in '{target}': "
                     f"'{_preview(search)}'. Copy the text verbatim from the "
@@ -255,7 +370,17 @@ def apply_patch_operations(
                     "replace_all=true if every occurrence should change."
                 )
                 continue
-            if replace_all:
+            if op == "insert_before":
+                if replace_all:
+                    updated = current.replace(search, f"{content}{search}")
+                else:
+                    updated = current.replace(search, f"{content}{search}", 1)
+            elif op == "insert_after":
+                if replace_all:
+                    updated = current.replace(search, f"{search}{content}")
+                else:
+                    updated = current.replace(search, f"{search}{content}", 1)
+            elif replace_all:
                 updated = current.replace(search, content)
             else:
                 updated = current.replace(search, content, 1)

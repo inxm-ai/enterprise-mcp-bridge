@@ -59,6 +59,34 @@ from app.vars import (
 logger = logging.getLogger("uvicorn.error")
 
 _PATCH_UPDATE_SCHEMA = PATCH_UPDATE_SCHEMA
+_TARGETED_REWRITE_TARGETS = (
+    "service_script",
+    "components_script",
+    "test_script",
+    "dummy_data",
+)
+_TARGETED_REWRITE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "files": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": list(_TARGETED_REWRITE_TARGETS),
+                    },
+                    "content": {"type": "string"},
+                },
+                "required": ["target", "content"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["files"],
+    "additionalProperties": False,
+}
 
 UI_MODEL_HEADERS = {"x-inxm-model-capability": "code-generation"}
 
@@ -96,6 +124,36 @@ def _test_failure_signature(output: str) -> tuple[int, tuple[str, ...], tuple[st
         if (line := raw_line.strip()).startswith(_TAP_FAILURE_DIAGNOSTIC_KEYS)
     )
     return failed, tuple(failure_names), diagnostics
+
+
+def _sync_patched_template_script(
+    candidate: Dict[str, Any], draft_payload: Dict[str, Any]
+) -> bool:
+    """Keep the legacy template script mirror aligned after component edits.
+
+    Older generated payloads store the same source in both
+    ``components_script`` and ``template_parts.script``. Normalization treats
+    divergent values as separate modules and appends the template script. For
+    a conversational component patch, the unchanged template value is stale,
+    not an additional module, so update that mirror before normalization.
+    """
+    candidate_components = candidate.get("components_script")
+    draft_components = draft_payload.get("components_script")
+    if (
+        not isinstance(candidate_components, str)
+        or candidate_components == draft_components
+    ):
+        return False
+
+    candidate_parts = candidate.get("template_parts")
+    draft_parts = draft_payload.get("template_parts")
+    if not isinstance(candidate_parts, dict) or not isinstance(draft_parts, dict):
+        return False
+    if candidate_parts.get("script") != draft_parts.get("script"):
+        return False
+
+    candidate_parts["script"] = candidate_components
+    return True
 
 
 class ConversationalService:
@@ -180,9 +238,16 @@ class ConversationalService:
                 max_attempts = max(1, int(APP_UI_PATCH_RETRIES))
                 last_patch_failure: Optional[str] = None
                 for attempt_index in range(max_attempts):
-                    yield _assistant_status_event(
-                        f"I will try a targeted patch first (attempt {attempt_index + 1}/{max_attempts})."
-                    )
+                    rewrite_files = attempt_index > 0 and last_patch_failure is not None
+                    if rewrite_files:
+                        yield _assistant_status_event(
+                            "I will rewrite only the affected source files because "
+                            f"the operation patch failed (attempt {attempt_index + 1}/{max_attempts})."
+                        )
+                    else:
+                        yield _assistant_status_event(
+                            f"I will try a targeted patch first (attempt {attempt_index + 1}/{max_attempts})."
+                        )
                     patch_attempt = await self._attempt_patch_update(
                         scope=scope,
                         ui_id=ui_id,
@@ -194,6 +259,7 @@ class ConversationalService:
                         access_token=access_token,
                         previous_metadata=session_payload.get("metadata_snapshot", {}),
                         failure_feedback=last_patch_failure,
+                        rewrite_files=rewrite_files,
                     )
                     if patch_attempt:
                         candidate = patch_attempt.get("payload")
@@ -515,6 +581,7 @@ class ConversationalService:
         previous_metadata: Dict[str, Any],
         selected_tools: Optional[List[Dict[str, Any]]] = None,
         failure_feedback: Optional[str] = None,
+        rewrite_files: bool = False,
     ) -> Optional[Dict[str, Any]]:
         self.service._last_patch_failure_reason = None
 
@@ -534,15 +601,20 @@ class ConversationalService:
             return None
 
         try:
-            system_prompt = (
-                "You are a UI patch planner. Return valid JSON only in this shape: "
-                '{"patch":{"operations":[{"target":"components_script","op":"replace","search":"<exact current text>","content":"<replacement>"}],"metadata":{...}}}. '
+            patch_system_prompt = (
+                "You are a UI patch planner. Return valid JSON only with operations "
+                "at the root in this shape: "
+                '{"operations":[{"target":"components_script","op":"replace","search":"<exact current text>","content":"<replacement>"}],"metadata":{...}}. '
+                "Never wrap the response in a 'patch' property. "
                 "Targets: service_script, components_script, test_script, dummy_data, html_page, html_snippet. "
                 "Ops: 'replace' swaps an exact 'search' string (copied VERBATIM from the current file, "
-                "unique enough to match once) with 'content'; 'append' adds 'content' at the end of the target; "
+                "unique enough to match once) with 'content'; 'insert_before' and 'insert_after' add content "
+                "beside an exact existing search anchor; 'append' adds 'content' at the end of the target; "
                 "'set' replaces the whole target and must only be used to create a missing file or when "
                 "nearly all of it changes. Prefer several small 'replace' operations over one big 'set'; "
                 "never re-emit unchanged code. Do not include markdown fences. "
+                "Never use replace to add new code by inventing old text that is not in the current target. "
+                "For additions, use insert_before/insert_after with a verbatim existing anchor. "
                 "For a localized before/after request, replace the smallest unique expression "
                 "(for example encodeURIComponent(saga.name) -> encodeURIComponent(saga.id)); "
                 "do not return the enclosing function or component. "
@@ -551,11 +623,43 @@ class ConversationalService:
                 "register a pfusch component name that already exists — change existing components "
                 "with 'replace' on their current code. "
                 "When the user request involves adding, changing, or fixing tests, you MUST include operations on test_script. "
+                "When component operations change UI labels, rendered content, DOM structure, "
+                "or behavior, inspect the current test_script and include exact replacements for "
+                "every affected assertion. A component patch that leaves current tests stale is incomplete. "
+                "Update existing affected tests instead of adding redundant new tests unless the user "
+                "explicitly requests more coverage. The DOM test stubs do not parse SVG or other "
+                "descendants assigned through innerHTML: assert the container's innerHTML/markup "
+                "instead of querying those synthetic descendants. "
                 "Preserve component-owned data loading and partial rendering. Do not rewrite to "
                 "one root-level Promise.all() fan-out or a single full-screen blocking loader "
                 "for independent components. Keep targeted event-driven refetch behavior. "
                 "In runtime catch blocks, always log with console.error and include component/service context. "
                 "Keep tests deterministic with mocked service/fetch responses and avoid test-only seeding of fetched domain data."
+            )
+            rewrite_system_prompt = (
+                "You are a UI source-file editor. Exact-string operations already "
+                "failed, so return complete replacement content only for affected "
+                "files as valid JSON: "
+                '{"files":[{"target":"components_script","content":"<complete file>"},'
+                '{"target":"test_script","content":"<complete file>"}]}. '
+                "Allowed targets: service_script, components_script, test_script, "
+                "dummy_data. Do not return markdown or unchanged files. For a UI "
+                "structure or behavior change, return both the complete "
+                "components_script and complete test_script. Preserve all unrelated "
+                "state, loading logic, data ownership, event-driven refetching, and "
+                "component registrations. Do not add a second pfusch import or a "
+                "second registration of an existing component. service_script and "
+                "components_script share one runtime module. Update existing tests "
+                "for the new UI rather than adding redundant tests. The DOM stubs do "
+                "not parse descendants assigned through innerHTML; assert stored "
+                "markup on the owning container. pfuschTest returns a "
+                "PfuschNodeCollection: query it with get(selector), inspect length, "
+                "and use at(index)/first for individual results. Do not invent "
+                "unsupported query helpers. Keep tests deterministic and mock "
+                "service/fetch responses."
+            )
+            system_prompt = (
+                rewrite_system_prompt if rewrite_files else patch_system_prompt
             )
             payload = {
                 "user_message": user_message,
@@ -572,9 +676,19 @@ class ConversationalService:
                 },
             }
             if failure_feedback:
+                failure_instruction = (
+                    "Produce complete corrected affected files; do not return patch "
+                    "anchors or repeat the failed operations."
+                    if rewrite_files
+                    else (
+                        "Fix the described problem; when a search string was not "
+                        "found, do not repeat or extend the missing text. Copy an "
+                        "exact existing anchor from the current file and use "
+                        "insert_before/insert_after when adding new code."
+                    )
+                )
                 payload["previous_attempt_failure"] = (
-                    f"{failure_feedback}. Fix the described problem; when a search "
-                    "string was not found, copy the exact text from the current file."
+                    f"{failure_feedback}. {failure_instruction}"
                 )
             request = ChatCompletionRequest(
                 messages=[
@@ -586,8 +700,16 @@ class ConversationalService:
                 ],
                 stream=False,
                 response_format=_generation_response_format(
-                    schema=_PATCH_UPDATE_SCHEMA,
-                    name="generated_ui_patch",
+                    schema=(
+                        _TARGETED_REWRITE_SCHEMA
+                        if rewrite_files
+                        else _PATCH_UPDATE_SCHEMA
+                    ),
+                    name=(
+                        "generated_ui_targeted_rewrite"
+                        if rewrite_files
+                        else "generated_ui_patch"
+                    ),
                 ),
                 extra_headers=UI_MODEL_HEADERS,
             )
@@ -603,38 +725,61 @@ class ConversationalService:
                 parsed = parse_json(content)
             except Exception as exc:
                 return _fail("invalid_patch_json", str(exc))
-            patch, patch_shape_error = normalize_patch_response(parsed)
-            if patch is None:
-                return _fail("missing_patch_object", patch_shape_error)
+            if rewrite_files:
+                files = parsed.get("files") if isinstance(parsed, dict) else None
+                if not isinstance(files, list) or not files:
+                    return _fail("invalid_targeted_rewrite_response")
+                seen_targets = set()
+                operations = []
+                for index, file_obj in enumerate(files):
+                    if not isinstance(file_obj, dict):
+                        return _fail(
+                            "invalid_targeted_rewrite_response",
+                            f"files[{index}] is not an object",
+                        )
+                    target = file_obj.get("target")
+                    content_value = file_obj.get("content")
+                    if (
+                        target not in _TARGETED_REWRITE_TARGETS
+                        or not isinstance(content_value, str)
+                        or not content_value.strip()
+                    ):
+                        return _fail(
+                            "invalid_targeted_rewrite_response",
+                            f"files[{index}] has invalid target/content",
+                        )
+                    if target in seen_targets:
+                        return _fail(
+                            "invalid_targeted_rewrite_response",
+                            f"target '{target}' appears more than once",
+                        )
+                    seen_targets.add(target)
+                    operations.append(
+                        {"target": target, "op": "set", "content": content_value}
+                    )
+                metadata_patch = None
+            else:
+                patch, patch_shape_error = normalize_patch_response(parsed)
+                if patch is None:
+                    return _fail("invalid_patch_response", patch_shape_error)
 
-            operations = patch.get("operations")
-            if not isinstance(operations, list):
-                # Leniency: accept legacy whole-file patch objects from models
-                # that ignore the operations schema.
-                operations = legacy_patch_to_operations(patch)
+                operations = patch.get("operations")
+                if not isinstance(operations, list):
+                    # Leniency: accept legacy whole-file patch objects from models
+                    # that ignore the operations schema.
+                    operations = legacy_patch_to_operations(patch)
 
-            metadata_patch = patch.get("metadata")
+                metadata_patch = patch.get("metadata")
             if operations:
                 candidate, apply_errors = apply_patch_operations(
                     draft_payload, operations
                 )
                 if candidate is None:
                     return _fail("patch_apply_failed", "; ".join(apply_errors))
-                # service_script + components_script are bundled into one ES
-                # module, so duplicate imports / component registrations that
-                # a patch introduces are fatal at runtime. Auto-fix imports,
-                # reject duplicate registrations with actionable feedback.
-                integrity_notes, integrity_errors = enforce_runtime_script_integrity(
-                    candidate
-                )
-                if integrity_notes:
+                if _sync_patched_template_script(candidate, draft_payload):
                     logger.info(
-                        "[GeneratedUI] Patch import auto-dedup applied: %s",
-                        "; ".join(integrity_notes),
-                    )
-                if integrity_errors:
-                    return _fail(
-                        "patch_integrity_failed", "; ".join(integrity_errors)
+                        "[GeneratedUI] Synchronized patched components_script "
+                        "to legacy template_parts.script"
                     )
             elif isinstance(metadata_patch, dict) and metadata_patch:
                 # Metadata-only patch: nothing to apply to scripts/html.
@@ -657,6 +802,22 @@ class ConversationalService:
                 user_message,
                 previous,
             )
+
+            # Normalization can materialize legacy template parts into the
+            # runtime scripts. Validate the final normalized candidate, not
+            # only the pre-normalized patch result.
+            integrity_notes, integrity_errors = enforce_runtime_script_integrity(
+                candidate
+            )
+            if integrity_notes:
+                logger.info(
+                    "[GeneratedUI] Patch import auto-dedup applied: %s",
+                    "; ".join(integrity_notes),
+                )
+            if integrity_errors:
+                return _fail(
+                    "patch_integrity_failed", "; ".join(integrity_errors)
+                )
 
             test_script = candidate.get("test_script") or draft_payload.get(
                 "test_script"
@@ -709,6 +870,23 @@ class ConversationalService:
                             "test failures; accepting the non-regressing patch"
                         )
                         return {"payload": candidate}
+                    if not test_script_changed:
+                        _, failed_count, failed_tests = _parse_tap_output(
+                            candidate_test_output
+                        )
+                        failed_tests_text = (
+                            ", ".join(failed_tests[:3]) or "unknown generated test"
+                        )
+                        return _fail(
+                            "patch_tests_failed_test_update_required",
+                            (
+                                f"failed_count={failed_count}; "
+                                f"failed_tests={failed_tests_text}; "
+                                "the component changed but test_script did not. "
+                                "Return the component operations again and add exact "
+                                "test_script replacements for the affected assertions"
+                            ),
+                        )
                     logger.warning(
                         "[GeneratedUI] Patch candidate failed tests; invoking iterative fixer loop"
                     )

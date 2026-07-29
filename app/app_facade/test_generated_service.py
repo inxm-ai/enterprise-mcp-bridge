@@ -16,6 +16,7 @@ from app.app_facade.generated_service import (
     Actor,
     validate_identifier,
     _PATCH_UPDATE_SCHEMA,
+    _fix_stage_attempt_budget,
 )
 from app.app_facade.prompt_helpers import (
     extract_json_block,
@@ -36,6 +37,19 @@ class DummyTGIService:
         self.llm_client = None
         self.prompt_service = None
         self.tool_service = None
+
+
+def test_fix_stage_attempt_budget_reserves_adjust_test_for_small_budget():
+    assert _fix_stage_attempt_budget(3, "test('x', () => {})") == (2, 1, False)
+
+
+def test_fix_stage_attempt_budget_detects_collection_attribute_assertion():
+    test_source = """
+import { pfuschTest } from './domstubs.js';
+const comp = await pfuschTest('graph-card');
+comp.get('.graph-container').getAttribute('data-cid');
+"""
+    assert _fix_stage_attempt_budget(3, test_source) == (1, 2, True)
 
 
 @pytest.mark.asyncio
@@ -319,7 +333,7 @@ async def test_attempt_patch_update_records_failure_reason_for_missing_patch_obj
     )
 
     assert result is None
-    assert service._last_patch_failure_reason.startswith("missing_patch_object")
+    assert service._last_patch_failure_reason.startswith("invalid_patch_response")
     assert "top_level_keys=not_patch" in service._last_patch_failure_reason
     assert "expected 'patch', 'operations'" in service._last_patch_failure_reason
 
