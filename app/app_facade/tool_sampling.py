@@ -36,7 +36,12 @@ from app.app_facade.prompt_helpers import (
     prompt_with_runtime_context,
     to_json_value,
 )
-from app.vars import EFFECT_TOOLS
+from app.vars import (
+    DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES,
+    DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS,
+    EFFECT_TOOLS,
+    tool_matches_patterns,
+)
 from app.app_facade.generated_types import Scope
 
 logger = logging.getLogger("uvicorn.error")
@@ -68,6 +73,9 @@ _DUMMY_DATA_ERROR_RECOVERY_SCHEMA = {
     "required": ["recoverable", "reason", "retry_arguments"],
     "additionalProperties": False,
 }
+_SAMPLE_ARGUMENT_MAX_DEPTH = 8
+_ERROR_CONTEXT_TRUNCATION_MARKER = "...[truncated]"
+_ERROR_CONTEXT_MAX_TRIM_ATTEMPTS = 8
 
 
 class ToolSampler:
@@ -223,7 +231,11 @@ class ToolSampler:
                     role=MessageRole.SYSTEM,
                     content=(
                         "Generate realistic sample JSON arguments for a tool call. "
-                        "Return only a JSON object that matches the provided schema."
+                        "Return only a JSON object that matches the provided schema. "
+                        "Every identifier, name, path, query, location, or other string "
+                        "must be copied from the task prompt or from an input-schema "
+                        "const, default, example, or enum. Never invent resources. "
+                        "Return an empty object when required values are unavailable."
                     ),
                 ),
                 Message(
@@ -286,6 +298,114 @@ class ToolSampler:
             )
             return None
 
+    def _schema_literal_values(self, schema: Any) -> List[Any]:
+        if not isinstance(schema, dict):
+            return []
+        values: List[Any] = []
+        for keyword in ("const", "default"):
+            if keyword in schema:
+                values.append(schema[keyword])
+        for keyword in ("examples", "enum"):
+            candidates = schema.get(keyword)
+            if isinstance(candidates, list):
+                values.extend(candidates)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for child in properties.values():
+                values.extend(self._schema_literal_values(child))
+        items = schema.get("items")
+        if isinstance(items, dict):
+            values.extend(self._schema_literal_values(items))
+        return values
+
+    def _sample_args_are_grounded(
+        self,
+        *,
+        sample_args: Dict[str, Any],
+        input_schema: Any,
+        prompt: str,
+    ) -> bool:
+        """Reject invented string arguments before any external tool is called."""
+        prompt_text = prompt.casefold()
+        schema_literals = {
+            str(value).casefold()
+            for value in self._schema_literal_values(input_schema)
+            if isinstance(value, (str, int, float, bool))
+        }
+
+        def value_is_grounded(value: Any, schema: Any, depth: int = 0) -> bool:
+            if depth > _SAMPLE_ARGUMENT_MAX_DEPTH:
+                return False
+            if isinstance(schema, dict) and isinstance(value, dict):
+                required = schema.get("required")
+                if isinstance(required, list) and any(
+                    field not in value for field in required
+                ):
+                    return False
+            if isinstance(value, str):
+                candidate = value.strip().casefold()
+                if not candidate:
+                    return True
+                return candidate in prompt_text or candidate in schema_literals
+            if isinstance(value, dict):
+                properties = (
+                    schema.get("properties")
+                    if isinstance(schema, dict)
+                    and isinstance(schema.get("properties"), dict)
+                    else {}
+                )
+                return all(
+                    value_is_grounded(
+                        item,
+                        properties.get(key, {}),
+                        depth + 1,
+                    )
+                    for key, item in value.items()
+                )
+            if isinstance(value, list):
+                item_schema = schema.get("items") if isinstance(schema, dict) else {}
+                return all(
+                    value_is_grounded(item, item_schema, depth + 1) for item in value
+                )
+            return value is None or isinstance(value, (int, float, bool))
+
+        return value_is_grounded(sample_args, input_schema)
+
+    def _bounded_error_context(self, value: Any) -> Any:
+        normalized = to_json_value(value)
+        try:
+            encoded = json.dumps(normalized, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            encoded = str(normalized)
+        encoded_bytes = encoded.encode("utf-8")
+        if len(encoded_bytes) <= DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES:
+            return normalized
+        marker_bytes = _ERROR_CONTEXT_TRUNCATION_MARKER.encode("utf-8")
+        max_summary_bytes = max(
+            0,
+            DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES - len(marker_bytes),
+        )
+        summary_bytes = encoded_bytes[:max_summary_bytes]
+        candidate = {
+            "truncated": True,
+            "original_size_bytes": len(encoded_bytes),
+            "summary": "",
+        }
+        for _ in range(_ERROR_CONTEXT_MAX_TRIM_ATTEMPTS):
+            summary = summary_bytes.decode("utf-8", errors="ignore")
+            candidate["summary"] = f"{summary}{_ERROR_CONTEXT_TRUNCATION_MARKER}"
+            candidate_size = len(
+                json.dumps(candidate, ensure_ascii=False).encode("utf-8")
+            )
+            if candidate_size <= DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES:
+                return candidate
+            overflow = candidate_size - DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES
+            summary_bytes = summary_bytes[: max(0, len(summary_bytes) - overflow)]
+        return {
+            "truncated": True,
+            "original_size_bytes": len(encoded_bytes),
+        }
+
     async def _analyze_sampling_error_with_llm(
         self,
         *,
@@ -333,7 +453,7 @@ class ToolSampler:
                             "task_prompt": prompt,
                             "input_schema": input_schema,
                             "attempted_args": attempted_args,
-                            "error": error_detail,
+                            "error": self._bounded_error_context(error_detail),
                         },
                         ensure_ascii=False,
                     ),
@@ -408,7 +528,7 @@ class ToolSampler:
         sample_args: Dict[str, Any],
         access_token: Optional[str],
     ) -> Any:
-        if tool_name in EFFECT_TOOLS:
+        if tool_matches_patterns(tool_name, EFFECT_TOOLS):
             maybe_result = get_tool_dry_run_response(session, tool_def, sample_args)
             return (
                 await maybe_result
@@ -566,7 +686,7 @@ class ToolSampler:
         error_detail: Any,
         analysis_reason: str,
     ) -> Dict[str, Any]:
-        normalized_error = to_json_value(error_detail)
+        normalized_error = self._bounded_error_context(error_detail)
         if isinstance(normalized_error, dict):
             payload = copy.deepcopy(normalized_error)
         else:
@@ -660,6 +780,17 @@ class ToolSampler:
         )
         if sample_args is None:
             sample_args = self._build_sample_args_for_tool(input_schema)
+        if not self._sample_args_are_grounded(
+            sample_args=sample_args,
+            input_schema=input_schema,
+            prompt=prompt,
+        ):
+            logger.info(
+                "[GeneratedUI] Skipping live sample for tool '%s': "
+                "arguments are not grounded in the prompt or schema",
+                tool_name,
+            )
+            return None
         tool_def: Dict[str, Any] = {
             "name": tool_name,
             "description": tool_description,
@@ -671,12 +802,15 @@ class ToolSampler:
         result: Any = None
         error_detail: Any = None
         try:
-            result = await self._call_tool_for_dummy_sampling(
-                session=session,
-                tool_name=tool_name,
-                tool_def=tool_def,
-                sample_args=sample_args,
-                access_token=access_token,
+            result = await asyncio.wait_for(
+                self._call_tool_for_dummy_sampling(
+                    session=session,
+                    tool_name=tool_name,
+                    tool_def=tool_def,
+                    sample_args=sample_args,
+                    access_token=access_token,
+                ),
+                timeout=DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             logger.warning(
@@ -708,12 +842,30 @@ class ToolSampler:
                 tool_name,
             )
             try:
-                retry_result = await self._call_tool_for_dummy_sampling(
-                    session=session,
-                    tool_name=tool_name,
-                    tool_def=tool_def,
+                if not self._sample_args_are_grounded(
                     sample_args=retry_args,
-                    access_token=access_token,
+                    input_schema=input_schema,
+                    prompt=prompt,
+                ):
+                    logger.info(
+                        "[GeneratedUI] Refusing ungrounded retry arguments for tool '%s'",
+                        tool_name,
+                    )
+                    return self._build_error_dummy_sample(
+                        tool_name=tool_name,
+                        attempted_args=sample_args,
+                        error_detail=error_detail,
+                        analysis_reason="Retry arguments were not grounded",
+                    )
+                retry_result = await asyncio.wait_for(
+                    self._call_tool_for_dummy_sampling(
+                        session=session,
+                        tool_name=tool_name,
+                        tool_def=tool_def,
+                        sample_args=retry_args,
+                        access_token=access_token,
+                    ),
+                    timeout=DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS,
                 )
             except Exception as retry_exc:
                 logger.warning(

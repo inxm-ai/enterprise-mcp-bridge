@@ -890,6 +890,7 @@ class ConversationalService:
                     logger.warning(
                         "[GeneratedUI] Patch candidate failed tests; invoking iterative fixer loop"
                     )
+                    candidate_before_fix = copy.deepcopy(candidate)
                     fix_messages = [
                         Message(role=MessageRole.USER, content=user_message),
                     ]
@@ -922,6 +923,38 @@ class ConversationalService:
                         candidate["components_script"] = fixed_components
                         candidate["test_script"] = fixed_test
                         candidate["dummy_data"] = fixed_dummy_data
+                        if _sync_patched_template_script(
+                            candidate, candidate_before_fix
+                        ):
+                            logger.info(
+                                "[GeneratedUI] Synchronized repaired "
+                                "components_script to legacy template_parts.script"
+                            )
+                        # Match the publish path now. A repaired component must
+                        # survive normalization without the stale legacy script
+                        # being appended as a second module.
+                        self.service._normalise_payload(
+                            candidate,
+                            scope,
+                            ui_id,
+                            name,
+                            user_message,
+                            previous,
+                        )
+                        repair_notes, repair_errors = (
+                            enforce_runtime_script_integrity(candidate)
+                        )
+                        if repair_notes:
+                            logger.info(
+                                "[GeneratedUI] Repaired patch import auto-dedup "
+                                "applied: %s",
+                                "; ".join(repair_notes),
+                            )
+                        if repair_errors:
+                            return _fail(
+                                "patch_integrity_failed_after_fix",
+                                "; ".join(repair_errors),
+                            )
                         logger.info(
                             "[GeneratedUI] Patch candidate repaired via iterative fixer loop"
                         )

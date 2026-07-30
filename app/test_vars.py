@@ -4,6 +4,17 @@ from pathlib import Path
 import pytest
 
 
+def test_tool_patterns_support_globs_and_exact_names():
+    from app.vars import tool_matches_patterns
+
+    patterns = ["create_*", "*_write", "merge_pull_request"]
+
+    assert tool_matches_patterns("create_ticket", patterns)
+    assert tool_matches_patterns("document_write", patterns)
+    assert tool_matches_patterns("merge_pull_request", patterns)
+    assert not tool_matches_patterns("list_tickets", patterns)
+
+
 def test_mcp_map_header_to_input_parsing(monkeypatch):
     monkeypatch.setenv(
         "MCP_MAP_HEADER_TO_INPUT", "userId=x-auth-user-id,email=x-auth-user-email"

@@ -7,6 +7,7 @@ from app.vars import (
     SESSION_FIELD_NAME,
     TGI_ENABLED,
     APP_CONVERSATIONAL_UI_ENABLED,
+    tool_matches_patterns,
 )
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
@@ -450,7 +451,7 @@ async def run_tool(
                 if (
                     x_inxm_dry_run
                     and x_inxm_dry_run.lower() == "true"
-                    and tool_name in EFFECT_TOOLS
+                    and tool_matches_patterns(tool_name, EFFECT_TOOLS)
                 ):
                     tools = map_tools(await session.list_tools())
                     tool = next(

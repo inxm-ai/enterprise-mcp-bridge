@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from fnmatch import fnmatchcase
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,20 @@ MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 # Tools that are modifying or notifying or similar
-EFFECT_TOOLS = [t for t in os.environ.get("EFFECT_TOOLS", "").split(",") if t]
+EFFECT_TOOLS = [
+    pattern.strip()
+    for pattern in os.environ.get("EFFECT_TOOLS", "").split(",")
+    if pattern.strip()
+]
+
+
+def tool_matches_patterns(tool_name: str, patterns: list[str]) -> bool:
+    """Return whether a tool name matches one of the configured glob patterns."""
+    if not isinstance(tool_name, str) or not tool_name:
+        return False
+    return any(fnmatchcase(tool_name, pattern) for pattern in patterns)
+
+
 TGI_ENABLED = os.environ.get("TGI_URL", None) is not None
 
 
@@ -121,6 +135,12 @@ TOOL_CHUNK_SIZE = int(os.getenv("TOOL_CHUNK_SIZE", "10000"))
 AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 
 LLM_MAX_PAYLOAD_BYTES = int(os.getenv("LLM_MAX_PAYLOAD_BYTES", "120000"))
+DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS = float(
+    os.getenv("DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS", "10")
+)
+DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES = int(
+    os.getenv("DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES", "8000")
+)
 
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT")
 OTLP_HEADERS = os.getenv("OTLP_HEADERS", "")

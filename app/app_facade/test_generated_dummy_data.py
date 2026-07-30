@@ -102,6 +102,40 @@ def test_convert_to_js_module(dummy_data_generator):
     assert '"missing_output_schema"' in js
 
 
+def test_compact_dummy_json_string_preserves_valid_json(dummy_data_generator):
+    value = json.dumps(
+        {"items": [{"id": index, "description": "x" * 500} for index in range(10)]}
+    )
+
+    compacted = dummy_data_generator._compact_dummy_value_for_context(value)
+
+    assert len(compacted["items"]) == 2
+    assert all(len(item["description"]) == 200 for item in compacted["items"])
+
+
+def test_compact_dummy_payload_preserves_explicit_string_output(
+    dummy_data_generator,
+):
+    payload = {"render_document": '{"title":"Example"}'}
+    tool_specs = [{"name": "render_document", "outputSchema": {"type": "string"}}]
+
+    compacted = dummy_data_generator._compact_dummy_payload_for_context(
+        payload,
+        tool_specs,
+    )
+
+    assert isinstance(compacted["render_document"], str)
+    assert json.loads(compacted["render_document"]) == {"title": "Example"}
+
+
+def test_compact_dummy_object_limits_property_count(dummy_data_generator):
+    value = {f"field_{index}": index for index in range(100)}
+
+    compacted = dummy_data_generator._compact_dummy_value_for_context(value)
+
+    assert len(compacted) == 20
+
+
 def test_convert_to_js_module_includes_gateway_hints_export(dummy_data_generator):
     js = dummy_data_generator._convert_to_js_module(
         {"search": {"items": []}},

@@ -584,6 +584,105 @@ async def test_attempt_patch_update_does_not_append_stale_template_component():
 
 
 @pytest.mark.asyncio
+async def test_attempt_patch_update_syncs_template_after_iterative_repair(
+    monkeypatch,
+):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    original = (
+        f"{PFUSCH_IMPORT}\n\n"
+        "pfusch('sagas-overview', {}, () => [html.div('overview')]);"
+    )
+    patched = original.replace(
+        "html.div('overview')",
+        "html.a({ href: '/details' }, 'overview')",
+    )
+    repaired = patched.replace(
+        "html.a({ href: '/details' }, 'overview')",
+        "html.a({ class: 'instance-saga-link', href: '/details' }, 'overview')",
+    )
+    draft = {
+        **DRAFT,
+        "components_script": original,
+        "test_script": "test('renders instance link', () => {});",
+        "template_parts": {
+            "title": "Saga Overview",
+            "styles": "",
+            "html": "<sagas-overview></sagas-overview>",
+            "script": original,
+        },
+    }
+
+    async def fake_non_stream_completion(_request, _token, _span):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "operations": [
+                                    {
+                                        "target": "components_script",
+                                        "op": "set",
+                                        "content": patched,
+                                    },
+                                    {
+                                        "target": "test_script",
+                                        "op": "set",
+                                        "content": (
+                                            "test('renders linked instance', () => {});"
+                                        ),
+                                    },
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    service.tgi_service.llm_client = SimpleNamespace(
+        non_stream_completion=fake_non_stream_completion
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_tests",
+        lambda *_args, **_kwargs: (False, "# pass 0\n# fail 1\n"),
+    )
+
+    async def repair_candidate(**_kwargs):
+        return True, "", repaired, "test('fixed', () => {});", None, []
+
+    monkeypatch.setattr(service, "_iterative_test_fix", repair_candidate)
+
+    result = await service.conversational_service._attempt_patch_update(
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="dash",
+        draft_payload=draft,
+        user_message="link saga instances to details",
+        assistant_message="I will add the existing detail link to each instance.",
+        access_token=None,
+        previous_metadata={},
+    )
+
+    assert result is not None
+    payload = result["payload"]
+    assert payload["components_script"] == repaired
+    assert payload["template_parts"]["script"] == repaired
+    service._normalise_payload(
+        payload,
+        Scope(kind="user", identifier="u1"),
+        "ui1",
+        "dash",
+        "Publish conversational draft",
+        {"metadata": {}, "current": draft},
+    )
+    assert payload["components_script"] == repaired
+    assert payload["components_script"].count("pfusch('sagas-overview'") == 1
+
+
+@pytest.mark.asyncio
 async def test_attempt_patch_update_targeted_rewrite_replaces_complete_files():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())

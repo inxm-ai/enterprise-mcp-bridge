@@ -347,8 +347,8 @@ class FastAPIWrapper:
             r.content = []
             return r
 
-        # Ensure the route treats 'add' as an effecting tool
-        monkeypatch.setattr(routes, "EFFECT_TOOLS", ["add"])
+        # Ensure the route expands configured effect-tool glob patterns.
+        monkeypatch.setattr(routes, "EFFECT_TOOLS", ["add*"])
         monkeypatch.setattr(
             routes, "get_tool_dry_run_response", fake_get_tool_dry_run_response
         )

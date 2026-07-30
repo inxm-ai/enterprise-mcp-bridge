@@ -266,9 +266,8 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 token_fingerprint(provider_tokens.get("access_token")),
             )
             if LOG_TOKEN_VALUES:
-                self.logger.info(
-                    "[Keycloak] Stored provider access token (raw): %s",
-                    provider_tokens.get("access_token"),
+                self.logger.warning(
+                    "LOG_TOKEN_VALUES is ignored because credentials must not be logged"
                 )
             # Check if token needs refresh
             if self._token_needs_refresh(provider_tokens):
@@ -335,10 +334,8 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     }
                     return {k: v for k, v in normalized.items() if v is not None}
                 self.logger.error(
-                    mask_token(
-                        f"Unable to parse token response for {self.provider_alias}: {text}",
-                        keycloak_token,
-                    )
+                    "Unable to parse token response for %s",
+                    self.provider_alias,
                 )
                 raise
         elif response.status_code == 401:
@@ -348,17 +345,11 @@ class KeyCloakTokenRetriever(TokenRetriever):
             raise UserLoggedOutException("User is logged out or unauthorized")
         else:
             self.logger.error(
-                mask_token(
-                    f"Failed to retrieve token from {url}: {response.status_code} - {response.text}",
-                    keycloak_token,
-                )
+                "Failed to retrieve provider token from %s: HTTP %s",
+                url,
+                response.status_code,
             )
-            raise Exception(
-                mask_token(
-                    f"Failed to retrieve token: {response.status_code} - {response.text}",
-                    keycloak_token,
-                )
-            )
+            raise Exception(f"Failed to retrieve token: HTTP {response.status_code}")
 
     def _token_needs_refresh(self, token_data: Dict[str, Any]) -> bool:
         """Check if the access token needs to be refreshed"""

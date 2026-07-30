@@ -13,6 +13,7 @@ logger = logging.getLogger("uvicorn.error")
 
 MAX_DUMMY_ARRAY_ELEMENTS = 2
 MAX_DUMMY_STRING_LENGTH = 200
+MAX_DUMMY_OBJECT_PROPERTIES = 20
 
 DUMMY_DATA_SYSTEM_PROMPT = (
     "You are an expert software engineer generating realistic test data. "
@@ -562,8 +563,21 @@ class DummyDataGenerator:
             aliased[mcp_server_id] = payload[tool_name]
         return aliased
 
-    def _compact_dummy_value_for_context(self, value: Any) -> Any:
+    def _compact_dummy_value_for_context(
+        self, value: Any, *, preserve_json_string: bool = False
+    ) -> Any:
         if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped[0] in ("{", "["):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, (dict, list)):
+                    compacted = self._compact_dummy_value_for_context(parsed)
+                    if preserve_json_string:
+                        return json.dumps(compacted, ensure_ascii=False)
+                    return compacted
             if len(value) <= MAX_DUMMY_STRING_LENGTH:
                 return value
             return value[:MAX_DUMMY_STRING_LENGTH]
@@ -576,18 +590,31 @@ class DummyDataGenerator:
         if isinstance(value, dict):
             return {
                 key: self._compact_dummy_value_for_context(item)
-                for key, item in value.items()
+                for key, item in list(value.items())[:MAX_DUMMY_OBJECT_PROPERTIES]
             }
 
         return value
 
     def _compact_dummy_payload_for_context(
-        self, payload: Dict[str, Any]
+        self,
+        payload: Dict[str, Any],
+        tool_specs: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
+        schemas_by_tool = {
+            spec.get("name"): spec.get("outputSchema")
+            for spec in tool_specs or []
+            if isinstance(spec, dict) and isinstance(spec.get("name"), str)
+        }
         return {
-            key: self._compact_dummy_value_for_context(value)
+            key: self._compact_dummy_value_for_context(
+                value,
+                preserve_json_string=(
+                    isinstance(schemas_by_tool.get(key), dict)
+                    and schemas_by_tool[key].get("type") == "string"
+                ),
+            )
             for key, value in payload.items()
         }
 
@@ -729,7 +756,10 @@ class DummyDataGenerator:
         payload = self._apply_observed_samples(payload, enriched_tool_specs)
         schema_hints = self._build_schema_hints(enriched_tool_specs)
         gateway_hints = self._build_gateway_hints(enriched_tool_specs)
+        payload = self._compact_dummy_payload_for_context(
+            payload,
+            enriched_tool_specs,
+        )
         payload = self._apply_gateway_payload_aliases(payload, gateway_hints)
-        payload = self._compact_dummy_payload_for_context(payload)
 
         return self._convert_to_js_module(payload, schema_hints, gateway_hints)

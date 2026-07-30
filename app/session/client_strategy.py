@@ -23,7 +23,6 @@ from app.elicitation import (
 )
 from app.mcp_server.server_params import get_server_params
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
-from app.utils import mask_token
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
     AUTH_PROVIDER,
@@ -247,10 +246,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 )
                 if token_value:
                     logger.info(
-                        mask_token(
-                            "[RemoteMCP] Retrieved provider token via token exchange",
-                            token_value,
-                        )
+                        "[RemoteMCP] Retrieved provider token via token exchange"
                     )
             except UserLoggedOutException:
                 raise
@@ -292,10 +288,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         if authorization_value:
             self.headers[MCP_REMOTE_AUTH_HEADER_NAME] = authorization_value
             logger.info(
-                mask_token(
-                    f"[RemoteMCP] Using provider token for {MCP_REMOTE_AUTH_HEADER_NAME} header",
-                    token_value,
-                )
+                "[RemoteMCP] Using provider token for %s header",
+                MCP_REMOTE_AUTH_HEADER_NAME,
             )
 
     @staticmethod
@@ -403,9 +397,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             f"[RemoteMCP] Headers keys: {list(headers.keys()) if headers else 'None'}"
         )
         if headers and "Authorization" in headers:
-            logger.info(
-                f"[RemoteMCP] Authorization header present: {headers['Authorization'][:20]}..."
-            )
+            logger.info("[RemoteMCP] Authorization header present")
 
         # Detect if this is an SSE-only endpoint (like Atlassian)
         # SSE endpoints typically end with /sse or only support GET+SSE

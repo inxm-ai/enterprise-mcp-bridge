@@ -87,7 +87,7 @@ async def test_generate_dummy_data_samples_unstructured_tool_payload():
                 "description": "Get weather details",
                 "parameters": {
                     "type": "object",
-                    "properties": {"city": {"type": "string"}},
+                    "properties": {"city": {"type": "string", "examples": ["Bretten"]}},
                     "required": ["city"],
                 },
             }
@@ -122,7 +122,7 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
 
     monkeypatch.setattr(
         "app.app_facade.tool_sampling.EFFECT_TOOLS",
-        ["create_ticket"],
+        ["create_*"],
     )
     dry_run_calls = []
 
@@ -150,7 +150,9 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
                 "description": "Create ticket",
                 "parameters": {
                     "type": "object",
-                    "properties": {"title": {"type": "string"}},
+                    "properties": {
+                        "title": {"type": "string", "default": "Sample ticket"}
+                    },
                     "required": ["title"],
                 },
             }
@@ -170,6 +172,88 @@ async def test_generate_dummy_data_uses_dry_run_for_effect_tools(monkeypatch):
     assert dry_run_calls == [True]
     kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
     assert kwargs["tool_specs"][0]["sampleStructuredContent"] == {"id": "dry-1"}
+
+
+@pytest.mark.asyncio
+async def test_generate_dummy_data_does_not_call_tool_with_invented_resource():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    service.dummy_data_generator.generate_dummy_data = AsyncMock(
+        return_value="export const dummyData = {};\n"
+    )
+
+    class Session:
+        async def call_tool(self, *_args, **_kwargs):
+            raise AssertionError("ungrounded sample arguments must not be called")
+
+    allowed_tools = [
+        {
+            "function": {
+                "name": "read_resource",
+                "description": "Read a resource",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"resource": {"type": "string"}},
+                    "required": ["resource"],
+                },
+            }
+        }
+    ]
+
+    await service.tool_sampler._generate_dummy_data(
+        session=Session(),
+        scope=Scope(kind="user", identifier="u1"),
+        ui_id="ui1",
+        name="main",
+        prompt="Build a resource dashboard",
+        allowed_tools=allowed_tools,
+        access_token="tok",
+    )
+
+    kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
+    assert "sampleStructuredContent" not in kwargs["tool_specs"][0]
+
+
+def test_sampling_error_context_is_bounded():
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+
+    compacted = service.tool_sampler._bounded_error_context({"error": "x" * 100_000})
+
+    assert compacted["truncated"] is True
+    assert compacted["original_size_bytes"] > 100_000
+    assert len(json.dumps(compacted).encode("utf-8")) < 9_000
+
+
+@pytest.mark.asyncio
+async def test_dummy_data_tool_sampling_times_out(monkeypatch):
+    storage = GeneratedUIStorage(os.getcwd())
+    service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
+    monkeypatch.setattr(
+        "app.app_facade.tool_sampling.DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    class Session:
+        async def call_tool(self, *_args, **_kwargs):
+            await asyncio.sleep(1)
+
+    result = await service.tool_sampler._sample_tool_output_for_dummy_data(
+        session=Session(),
+        tool_name="read_resource",
+        tool_description="Read a resource",
+        input_schema={
+            "type": "object",
+            "properties": {"resource": {"type": "string", "default": "resource-1"}},
+            "required": ["resource"],
+        },
+        output_schema=None,
+        prompt="Show resource-1",
+        access_token="tok",
+    )
+
+    assert result["_dummy_data_error"] is True
+    assert result["exception_type"] == "TimeoutError"
 
 
 @pytest.mark.asyncio
@@ -422,11 +506,11 @@ async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
                 (request.response_format or {}).get("json_schema", {}).get("name", "")
             )
             if schema_name.endswith("_sample_input"):
-                content = '{"city":"f;gadirtg"}'
+                content = '{"city":"Berlin"}'
             else:
                 content = (
                     '{"recoverable":true,"reason":"invalid city input",'
-                    '"retry_arguments":{"city":"Berlin"}}'
+                    '"retry_arguments":{"city":"Potsdam"}}'
                 )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
@@ -443,14 +527,12 @@ async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
             if len(self.calls) == 1:
                 return SimpleNamespace(
                     isError=True,
-                    structuredContent={
-                        "error": "No coordinates found for city f;gadirtg"
-                    },
+                    structuredContent={"error": "No coordinates found for city Berlin"},
                     content=[],
                 )
             return SimpleNamespace(
                 isError=False,
-                structuredContent={"city": "Berlin", "temperature_c": 8.2},
+                structuredContent={"city": "Potsdam", "temperature_c": 8.2},
                 content=[],
             )
 
@@ -474,17 +556,17 @@ async def test_generate_dummy_data_retries_sampling_with_llm_recovery_args():
         scope=Scope(kind="user", identifier="u1"),
         ui_id="ui1",
         name="main",
-        prompt="Weather dashboard",
+        prompt="Weather dashboard for Berlin and Potsdam",
         allowed_tools=allowed_tools,
         access_token="tok",
     )
 
     assert len(session.calls) == 2
-    assert session.calls[0][1]["city"] == "f;gadirtg"
-    assert session.calls[1][1]["city"] == "Berlin"
+    assert session.calls[0][1]["city"] == "Berlin"
+    assert session.calls[1][1]["city"] == "Potsdam"
     kwargs = service.dummy_data_generator.generate_dummy_data.call_args.kwargs
     assert kwargs["tool_specs"][0]["sampleStructuredContent"] == {
-        "city": "Berlin",
+        "city": "Potsdam",
         "temperature_c": 8.2,
     }
 
@@ -784,7 +866,7 @@ async def test_generate_dummy_data_skips_meta_tools_during_sampling():
                 "description": "Get weather details",
                 "parameters": {
                     "type": "object",
-                    "properties": {"city": {"type": "string"}},
+                    "properties": {"city": {"type": "string", "default": "Berlin"}},
                     "required": ["city"],
                 },
             }
