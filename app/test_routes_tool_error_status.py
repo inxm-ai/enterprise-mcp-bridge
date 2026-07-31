@@ -2,7 +2,10 @@ import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 from app.server import app as fastapi_app
-from app.routes import HTTP_STATUS_TOOL_EXECUTION_ERROR
+from app.routes import (
+    HTTP_STATUS_TOOL_EXECUTION_ERROR,
+    HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT,
+)
 from pydantic import BaseModel
 
 
@@ -57,6 +60,34 @@ def test_tool_execution_error_is_client_error_not_server_error(
     assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
     assert 400 <= response.status_code < 500
     assert "Max 20 URLs are allowed." in response.json()["detail"]
+
+
+def test_upstream_timeout_stays_retryable(client, mock_session_context):
+    """A timeout is transient — the same call may succeed on retry.
+
+    It must map to 5xx (504), never the terminal 4xx bucket: callers route
+    4xx to a no-retry failure, which would kill the task over a blip.
+    """
+    response = _call_failing_tool(
+        client,
+        mock_session_context,
+        # tavily-python's TimeoutError text, as flattened by FastMCP.
+        "Error executing tool crawl: Request timed out after 60 seconds.",
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT
+    assert response.status_code >= 500
+    assert "timed out" in response.json()["detail"]
+
+
+def test_timeout_detection_is_case_insensitive(client, mock_session_context):
+    response = _call_failing_tool(
+        client,
+        mock_session_context,
+        "Error executing tool fetch: Timed Out waiting for upstream.",
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT
 
 
 def test_unknown_tool_still_maps_to_404(client, mock_session_context):

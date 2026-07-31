@@ -64,6 +64,11 @@ _USER_FEEDBACK_KEY_RE = re.compile(r"^_?user_feedback$", re.IGNORECASE)
 # bridge is unhealthy, retrying may help".
 HTTP_STATUS_TOOL_EXECUTION_ERROR = 422
 
+# An upstream service the tool depends on did not answer in time. Unlike a
+# tool execution error this is transient, so it must stay in the 5xx class
+# that callers treat as retryable.
+HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT = 504
+
 tracer = trace.get_tracer(__name__)
 
 if MCP_BASE_PATH:
@@ -497,6 +502,18 @@ async def run_tool(
                     f"[Tool-Call] Tool called with invalid parameters: {tool_name}. Result: {result}"
                 )
                 raise HTTPException(status_code=400, detail=str(result))
+
+            # Timeouts are transient: the same call may succeed on retry, so
+            # they must not fall into the terminal 4xx bucket below. FastMCP
+            # flattens the exception class to prose, so the text is all we
+            # have to classify on.
+            if "timed out" in error_text.lower():
+                logger.warning(
+                    f"[Tool-Call] Upstream timeout in tool {tool_name}: {result}"
+                )
+                raise HTTPException(
+                    status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT, detail=str(result)
+                )
 
             # The tool ran and rejected the request; the bridge itself is healthy.
             # 4xx keeps callers from retrying a failure that cannot succeed.
