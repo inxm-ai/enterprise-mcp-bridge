@@ -276,7 +276,9 @@ class FakeElement {
         if (!this._internals) {
             this._internals = {
                 _element: this,
-                setFormValue(v) {},
+                setFormValue(value) {
+                    this.formValue = value;
+                },
                 setValidity(flags, message) {
                     this.flags = flags || {};
                     this.validationMessage = message || "";
@@ -1244,6 +1246,10 @@ class PfuschNodeCollection {
     }
     click() {
         this._firstNode()?.click?.();
+        return this;
+    }
+    dispatchEvent(event) {
+        this._firstNode()?.dispatchEvent?.(event);
         return this;
     }
     get(selector) {

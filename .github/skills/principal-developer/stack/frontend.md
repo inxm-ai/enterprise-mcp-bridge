@@ -62,14 +62,16 @@ The current FE stack uses [pfusch](https://github.com/MatthiasKainer/pfusch) —
 
 ### Core mechanics
 - Components are defined with `pfusch(tagName, initialState, (state) => [...elements])`.
-- State is a `Proxy` — mutate it directly (`state.count++`). No `setState`, no reducers.
-- Templates return DOM nodes via `html.*` helpers, not JSX or strings.
-- `script()` blocks run **once on mount only** — not on re-render. Never assume they re-run.
+- State is a `Proxy` — assign exact declared top-level keys directly (`state.count++`) and use `state.mutate(...)` for synchronous nested changes.
+- Templates return lightweight `html.*` descriptors, real DOM nodes, strings, static `css` descriptors, `script(...)` descriptors, nested arrays, or falsy entries. There is no virtual DOM.
+- `script()` blocks run once per connected lifecycle, before template-owned nodes are synchronized. Return cleanup for external listeners and subscriptions; reconnecting runs the script again.
 - Shadow DOM is used — styles are scoped, slots are explicit.
+- Keep `css` template text static because compiled stylesheets are held in a global, unbounded cache. Use CSS variables or classes for dynamic values.
+- `helpers.children()` returns the original Light DOM nodes; `helpers.childElements()` returns descriptor-wrapped versions suitable for templates.
 
 ### Component communication — events first
-- Components communicate via namespaced custom events on `window`: `component-name.<channel>.event-name`.
-- Use `window.postMessage(...)` only for cross-boundary integrations (e.g. microfrontends, external listeners). Never as a substitute for properly named events.
+- `trigger(name, detail)` dispatches both `component-name.name` and bare `name` bubbling, composed `CustomEvent`s from the component.
+- It also broadcasts a namespaced `window.postMessage` whose `detail.data` is JSON text. Pass plain serializable data, never a raw DOM event or complex library object.
 - Never create direct references between components — keep them loosely coupled through events.
 
 ### Progressive enhancement
@@ -82,6 +84,7 @@ The current FE stack uses [pfusch](https://github.com/MatthiasKainer/pfusch) —
 - Use `pfuschTest` + `setupDomStubs()` — no browser required.
 - Pattern: mount → flush → interact → flush → assert on rendered output (not internal state).
 - Assert on what the user sees (`textContent`, DOM structure) over asserting on `state.*`.
+- `pfuschTest()` and `.get()` return `PfuschNodeCollection`; prefer `.first`, `.at()`, `.click()`, `.submit()`, `.value`, `.checked`, `.textContent`, attribute helpers, and `.flush()` over indexing `.elements`.
 
 ### Atomic Design mapping in pfusch
 - Atoms → single `pfusch()` components with no child component dependencies.

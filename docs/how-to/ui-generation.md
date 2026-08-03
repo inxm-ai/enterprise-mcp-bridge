@@ -285,24 +285,28 @@ Generated applications use [pfusch](https://matthiaskainer.github.io/pfusch/), a
 
 ```javascript
 // Example generated component
-const { html, state, script, trigger, helpers } = pfusch();
+import { pfusch, html, script } from "https://matthiaskainer.github.io/pfusch/pfusch.min.js";
 
-export default () => {
-  const initialState = {
-    entities: [],
-    loading: false
-  };
-
-  return html.define('entity-list', ({ state }) => {
-    return state.loading 
-      ? html.div('Loading...')
-      : html.ul(
-          state.entities.map(e => 
-            html.li(e.name)
-          )
-        );
-  }, { state: initialState });
-};
+pfusch("entity-list", { entities: [], loading: true }, (state) => [
+  script(async function () {
+    const mcp = globalThis.service || new globalThis.McpService();
+    try {
+      state.entities = await mcp.call(
+        "list_entities",
+        {},
+        { resultKey: "result" }
+      );
+    } catch (error) {
+      console.error("[entity-list] loading failed", error);
+      state.entities = [];
+    } finally {
+      state.loading = false;
+    }
+  }),
+  state.loading
+    ? html.p("Loading...")
+    : html.ul(...state.entities.map(entity => html.li(entity.name)))
+]);
 ```
 
 ## Advanced Features
