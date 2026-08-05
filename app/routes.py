@@ -25,6 +25,7 @@ from app.utils.traced_requests import traced_request
 from app.utils.structured_text_parser import try_parse_structured_text
 from app.session import (
     MCPLocalSessionTask,
+    mcp_session,
     try_get_session_id,
     session_id,
     build_mcp_client_strategy,
@@ -116,6 +117,27 @@ async def home():
     if APP_CONVERSATIONAL_UI_ENABLED:
         result["urls"]["conversational_ui"] = "/app/_generated/start"
     return result
+
+
+@router.get("/healthz/child")
+async def healthz_child():
+    """Startup-probe target proving the child MCP server actually works.
+
+    Opens a fresh anonymous MCP session and lists tools — the two steps that
+    fail when inline-code deps are wrong. Pass/fail only: the child's
+    traceback already lands in pod logs, so no stderr plumbing here.
+    """
+    try:
+        async with mcp_session(anon=True) as session:
+            tools = await session.list_tools()
+    except Exception as e:
+        log_exception_with_details(logger, "[Healthz-Child]", e)
+        raise HTTPException(
+            status_code=503,
+            detail="child MCP server failed to start or list tools",
+        )
+    tool_count = len(getattr(tools, "tools", None) or [])
+    return {"status": "ok", "tools": tool_count}
 
 
 @router.get("/resources")
