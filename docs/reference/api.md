@@ -46,6 +46,28 @@ Health check endpoint.
 
 ---
 
+#### GET /healthz/child
+
+Deep health check proving the child MCP server works: opens a fresh
+anonymous MCP session and calls `list_tools()`. Intended as a Kubernetes
+startup probe target for inline-code deployments, where broken Python
+dependencies would otherwise leave the pod Ready while every session
+spawn fails. Pass/fail only — the child's traceback lands in pod logs.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "tools": 5
+}
+```
+
+**Status Codes:**
+- `200 OK` - Child server started and listed its tools
+- `503 Service Unavailable` - Child failed to start, list tools, or returned a malformed tools list
+
+---
+
 #### GET /
 
 Root endpoint with service information.
