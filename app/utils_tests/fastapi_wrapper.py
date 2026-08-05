@@ -147,9 +147,13 @@ class FastAPIWrapper:
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_tool_error(self):
+        from app.routes import HTTP_STATUS_TOOL_EXECUTION_ERROR
+
         r = self.client.post(f"{self.base_url}/tools/error", json={"message": "fail!"})
+        # A tool that ran and raised is a client-side problem, not a bridge fault:
+        # retrying the same request can never succeed.
         assert (
-            r.status_code >= 500
+            r.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
         ), f"Unexpected status code: {r.status_code}, Response: {r.text}"
 
     def test_parallel_calls(self):

@@ -60,6 +60,16 @@ sessions = session_manager()
 logger = logging.getLogger("uvicorn.error")
 _USER_FEEDBACK_KEY_RE = re.compile(r"^_?user_feedback$", re.IGNORECASE)
 
+# A tool that ran and returned isError is not a bridge fault. Reporting it as
+# 4xx lets callers distinguish "this request will never succeed" from "the
+# bridge is unhealthy, retrying may help".
+HTTP_STATUS_TOOL_EXECUTION_ERROR = 422
+
+# An upstream service the tool depends on did not answer in time. Unlike a
+# tool execution error this is transient, so it must stay in the 5xx class
+# that callers treat as retryable.
+HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT = 504
+
 tracer = trace.get_tracer(__name__)
 
 if MCP_BASE_PATH:
@@ -518,17 +528,34 @@ async def run_tool(
 
         logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
         if result.isError:
-            if "Unknown tool" in result.content[0].text:
+            error_text = result.content[0].text if result.content else ""
+            if "Unknown tool" in error_text:
                 logger.info(f"[Tool-Call] Tool not found: {tool_name}")
                 raise HTTPException(status_code=404, detail=str(result))
-            if "validation error" in result.content[0].text:
+            if "validation error" in error_text:
                 logger.info(
                     f"[Tool-Call] Tool called with invalid parameters: {tool_name}. Result: {result}"
                 )
                 raise HTTPException(status_code=400, detail=str(result))
 
+            # Timeouts are transient: the same call may succeed on retry, so
+            # they must not fall into the terminal 4xx bucket below. FastMCP
+            # flattens the exception class to prose, so the text is all we
+            # have to classify on.
+            if "timed out" in error_text.lower():
+                logger.warning(
+                    f"[Tool-Call] Upstream timeout in tool {tool_name}: {result}"
+                )
+                raise HTTPException(
+                    status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT, detail=str(result)
+                )
+
+            # The tool ran and rejected the request; the bridge itself is healthy.
+            # 4xx keeps callers from retrying a failure that cannot succeed.
             logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
-            raise HTTPException(status_code=500, detail=str(result))
+            raise HTTPException(
+                status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(result)
+            )
         return result
     except ElicitationRequiredError as e:
         raise HTTPException(status_code=409, detail=e.to_client_payload())
