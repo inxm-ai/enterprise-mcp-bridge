@@ -24,6 +24,37 @@ async def test_healthz_child_reports_tool_count_when_child_works():
 
 
 @pytest.mark.asyncio
+async def test_healthz_child_counts_plain_list_returns():
+    async def list_tools():
+        return [object(), object()]
+
+    @asynccontextmanager
+    async def working_session(**kwargs):
+        yield SimpleNamespace(list_tools=list_tools)
+
+    with patch("app.routes.mcp_session", working_session):
+        result = await healthz_child()
+
+    assert result == {"status": "ok", "tools": 2}
+
+
+@pytest.mark.asyncio
+async def test_healthz_child_returns_503_on_malformed_tools_result():
+    async def list_tools():
+        return 42
+
+    @asynccontextmanager
+    async def session_with_malformed_tools(**kwargs):
+        yield SimpleNamespace(list_tools=list_tools)
+
+    with patch("app.routes.mcp_session", session_with_malformed_tools):
+        with pytest.raises(HTTPException) as exc_info:
+            await healthz_child()
+
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_healthz_child_returns_503_when_child_fails_to_start():
     @asynccontextmanager
     async def broken_session(**kwargs):

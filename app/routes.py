@@ -136,7 +136,20 @@ async def healthz_child():
             status_code=503,
             detail="child MCP server failed to start or list tools",
         )
-    tool_count = len(getattr(tools, "tools", None) or [])
+    # list_tools() returns either a container with `.tools` or an iterable
+    # directly (see session_context._to_tool_list). Anything else must fail
+    # the probe rather than count as zero tools and go green.
+    raw_tools = getattr(tools, "tools", tools)
+    try:
+        tool_count = len(list(raw_tools)) if raw_tools is not None else 0
+    except TypeError:
+        logger.error(
+            "[Healthz-Child] Unexpected list_tools result shape: %r", type(tools)
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="child MCP server returned a malformed tools list",
+        )
     return {"status": "ok", "tools": tool_count}
 
 
