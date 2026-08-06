@@ -468,6 +468,56 @@ async def test_remote_strategy_closes_on_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_remote_strategy_teardown_bounded_when_close_hangs(monkeypatch):
+    """A transport whose close never returns must not wedge the session exit.
+
+    Regression test for the anyio _deliver_cancellation busy-loop: cancelling a
+    request while the remote transport hangs in __aexit__ used to leave the
+    event loop spinning forever. Teardown must give up after the configured
+    timeout and let the cancellation propagate.
+    """
+
+    class HangingStreamableContext:
+        async def __aenter__(self):
+            return object(), object(), lambda: None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            await asyncio.Event().wait()
+
+    def fake_streamable_client(url, headers=None, auth=None):
+        return HangingStreamableContext()
+
+    monkeypatch.setattr(
+        client_strategy, "streamablehttp_client", fake_streamable_client
+    )
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token=None, requested_group=None
+    )
+
+    async def cancelled_session():
+        async with strategy.session():
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        # wait_for bounds the test itself: without the teardown timeout this
+        # hangs forever instead of failing an assertion.
+        await asyncio.wait_for(asyncio.shield(cancelled_session()), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_remote_strategy_custom_auth_header_name_and_template(monkeypatch):
     """Provider token lands in a custom header without a Bearer prefix."""
 
@@ -547,9 +597,7 @@ async def test_remote_strategy_custom_auth_header_fallback_token(monkeypatch):
 
 
 def test_format_auth_header_value_default(monkeypatch):
-    monkeypatch.setattr(
-        client_strategy, "MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE", ""
-    )
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE", "")
     assert (
         client_strategy.RemoteMCPClientStrategy._format_auth_header_value("tok")
         == "Bearer tok"
