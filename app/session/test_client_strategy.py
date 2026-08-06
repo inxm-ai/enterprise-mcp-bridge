@@ -1,4 +1,5 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 import pytest
@@ -511,10 +512,15 @@ async def test_remote_strategy_teardown_bounded_when_close_hangs(monkeypatch):
             task.cancel()
             await asyncio.sleep(0)
 
+    started = time.monotonic()
     with pytest.raises(asyncio.CancelledError):
         # wait_for bounds the test itself: without the teardown timeout this
         # hangs forever instead of failing an assertion.
         await asyncio.wait_for(asyncio.shield(cancelled_session()), timeout=5)
+    elapsed = time.monotonic() - started
+    # 10x the 0.1s teardown timeout as scheduling tolerance: asserts the
+    # configured bound is honored, not merely that we exit before wait_for.
+    assert elapsed < 1.0, f"teardown took {elapsed:.2f}s, expected ~0.1s"
 
 
 @pytest.mark.asyncio
