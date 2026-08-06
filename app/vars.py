@@ -194,12 +194,15 @@ MCP_REMOTE_CLIENT_ID = os.getenv("MCP_REMOTE_CLIENT_ID", "")
 MCP_REMOTE_CLIENT_SECRET = os.getenv("MCP_REMOTE_CLIENT_SECRET", "")
 MCP_REMOTE_BEARER_TOKEN = os.getenv("MCP_REMOTE_BEARER_TOKEN", "")
 MCP_REMOTE_ANON_BEARER_TOKEN = os.getenv("MCP_REMOTE_ANON_BEARER_TOKEN", "")
+# Upper bound on remote transport teardown. An unbounded close wedged inside a
+# cancelled scope busy-loops anyio's cancellation delivery (permanent CPU spin).
+MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS = float(
+    os.getenv("MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS", "10")
+)
 # Header carrying the auth token towards the remote MCP server. Gateways like
 # Azure APIM behind an ESB may expect the credential in a custom header (e.g.
 # esb-subscription-key) instead of Authorization.
-MCP_REMOTE_AUTH_HEADER_NAME = os.getenv(
-    "MCP_REMOTE_AUTH_HEADER_NAME", "Authorization"
-)
+MCP_REMOTE_AUTH_HEADER_NAME = os.getenv("MCP_REMOTE_AUTH_HEADER_NAME", "Authorization")
 # Format of the auth header value. Placeholders: {token}, {token_type}.
 # Empty (default) means "{token_type} {token}"; use "{token}" to send the raw
 # credential without a Bearer prefix (typical for subscription keys).

@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import os
@@ -8,6 +7,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
+import anyio
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.stdio import stdio_client
@@ -35,6 +35,7 @@ from app.vars import (
     MCP_REMOTE_REDIRECT_URI,
     MCP_REMOTE_SCOPE,
     MCP_REMOTE_SERVER,
+    MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -403,7 +404,6 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         # SSE endpoints typically end with /sse or only support GET+SSE
         use_sse_only = self.url.endswith("/sse")
         stack = AsyncExitStack()
-        cancelled = False
         try:
             if use_sse_only:
                 logger.info(
@@ -448,15 +448,22 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             if get_session_id:
                 setattr(session, "get_remote_session_id", get_session_id)
             yield session
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
         finally:
+            # Close under an anyio shield, never asyncio.shield: the transports
+            # are anyio task groups, and an uncancellable asyncio future inside
+            # a cancelled anyio scope makes _deliver_cancellation respin every
+            # event-loop tick, pinning the CPU for the life of the process.
+            # The timeout guarantees the scope exits even if teardown hangs.
             try:
-                if cancelled:
-                    await asyncio.shield(stack.aclose())
-                else:
+                with anyio.move_on_after(
+                    MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS, shield=True
+                ) as teardown_scope:
                     await stack.aclose()
+                if teardown_scope.cancelled_caught:
+                    logger.warning(
+                        "[RemoteMCP] Transport teardown timed out after "
+                        f"{MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS}s; abandoning close"
+                    )
             except Exception as exc:
                 logger.debug(f"[RemoteMCP] Error while closing transport: {exc}")
 
