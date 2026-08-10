@@ -24,6 +24,11 @@ EFFECT_TOOLS_CONFIG = "call_counter"
 
 HTTP_OK = 200
 HTTP_INTERNAL_ERROR = 500
+# The externally intended contract: a tool that ran and rejected the request is
+# a client-side failure, never a bridge fault. Asserted as a literal on purpose
+# — importing the bridge's own constant would keep this test green if the
+# constant and the behavior drifted together.
+HTTP_TOOL_EXECUTION_ERROR = 422
 
 
 @pytest.fixture(scope="module")
@@ -61,6 +66,13 @@ def _start_session(bridge) -> str:
     return response.json()[SESSION_HEADER]
 
 
+def _close_session(bridge, session_id: str) -> None:
+    # Sessions hold a live child process until closed; cookie clearing alone
+    # only detaches the client, it does not end the session.
+    response = bridge.post("/session/close", headers={SESSION_HEADER: session_id})
+    assert response.status_code == HTTP_OK, response.text
+
+
 def _call_counter(bridge, session_id: str, headers: dict | None = None) -> object:
     response = bridge.post(
         "/tools/call_counter",
@@ -85,23 +97,28 @@ def test_tool_invocation_returns_structured_result(bridge):
 
 
 def test_sessions_are_isolated_from_each_other(bridge):
-    first_session = _start_session(bridge)
-    bridge.cookies.clear()
-    second_session = _start_session(bridge)
-    bridge.cookies.clear()
+    sessions = []
+    try:
+        first_session = _start_session(bridge)
+        sessions.append(first_session)
+        bridge.cookies.clear()
+        second_session = _start_session(bridge)
+        sessions.append(second_session)
+        bridge.cookies.clear()
 
-    assert first_session != second_session
-    assert _call_counter(bridge, first_session) == 1
-    assert _call_counter(bridge, first_session) == 2
-    # The second session has its own child process, so its counter is fresh.
-    assert _call_counter(bridge, second_session) == 1
+        assert first_session != second_session
+        assert _call_counter(bridge, first_session) == 1
+        assert _call_counter(bridge, first_session) == 2
+        # The second session has its own child process, so its counter is fresh.
+        assert _call_counter(bridge, second_session) == 1
+    finally:
+        for session_id in sessions:
+            _close_session(bridge, session_id)
 
 
 def test_child_tool_exception_maps_to_tool_execution_error(bridge):
-    from app.routes import HTTP_STATUS_TOOL_EXECUTION_ERROR
-
     response = bridge.post("/tools/error", json={"message": "boom"})
-    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR, response.text
+    assert response.status_code == HTTP_TOOL_EXECUTION_ERROR, response.text
 
 
 def test_dry_run_header_is_inert_for_non_effect_tools(bridge):
@@ -116,16 +133,18 @@ def test_dry_run_header_is_inert_for_non_effect_tools(bridge):
 def test_dry_run_never_executes_the_effect_tool(bridge):
     _require_effect_tools_gate()
     session_id = _start_session(bridge)
+    try:
+        assert _call_counter(bridge, session_id) == 1
 
-    assert _call_counter(bridge, session_id) == 1
+        # Offline there is no TGI_URL, so the dry-run path fails server-side —
+        # what matters here is that the real tool is never reached.
+        dry_run = bridge.post(
+            "/tools/call_counter",
+            headers={SESSION_HEADER: session_id, "X-Inxm-Dry-Run": "true"},
+            json={},
+        )
+        assert dry_run.status_code == HTTP_INTERNAL_ERROR, dry_run.text
 
-    # Offline there is no TGI_URL, so the dry-run path fails server-side —
-    # what matters here is that the real tool is never reached.
-    dry_run = bridge.post(
-        "/tools/call_counter",
-        headers={SESSION_HEADER: session_id, "X-Inxm-Dry-Run": "true"},
-        json={},
-    )
-    assert dry_run.status_code == HTTP_INTERNAL_ERROR, dry_run.text
-
-    assert _call_counter(bridge, session_id) == 2
+        assert _call_counter(bridge, session_id) == 2
+    finally:
+        _close_session(bridge, session_id)

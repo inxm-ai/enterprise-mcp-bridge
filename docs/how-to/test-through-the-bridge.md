@@ -47,6 +47,18 @@ bound to the same `app.server:app` object production serves. The bridge spawns
 your server as a stdio child per request, or per session via
 `POST /session/start` — identical to production.
 
+Session children are yours to end: a session's child process stays alive until
+`POST /session/close` is called with its id — leaving the `bridge_client`
+context does **not** close it. Close every session your test starts:
+
+```python
+session_id = bridge.post("/session/start").json()["x-inxm-mcp-session"]
+try:
+    ...
+finally:
+    bridge.post("/session/close", headers={"x-inxm-mcp-session": session_id})
+```
+
 ## Offline conformance servers
 
 Real tool calls often reach real APIs. Keep the suite offline by exposing a

@@ -23,9 +23,11 @@ stdio child process exactly as it does in production.
 Child-process lifecycle
 -----------------------
 The bridge owns the child. Sessionless requests spawn a child for the duration
-of the request; ``POST /session/start`` spawns one that lives until the session
-is closed or the client context exits. Nothing needs Kubernetes or the network
-— everything stays on this machine, offline.
+of the request. ``POST /session/start`` spawns a child that lives until you
+call ``POST /session/close`` with the session id — exiting the
+``bridge_client`` context does NOT close open sessions, so close every session
+your test starts (a ``finally`` block or fixture teardown). Nothing needs
+Kubernetes or the network — everything stays on this machine, offline.
 
 Supported configuration
 -----------------------
