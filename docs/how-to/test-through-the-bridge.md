@@ -99,3 +99,8 @@ cases where useful.
 - The child process needs its dependencies importable by the interpreter you
   put in `mcp_server_command` — in CI, install your MCP package into the same
   environment.
+- **stdio only.** `bridge_client` exercises the bridge's `MCP_SERVER_COMMAND`
+  child-process path exclusively. The bridge's separate remote-MCP mode
+  (`MCP_REMOTE_SERVER`, see [Use Remote MCP Servers](remote-mcp-servers.md)) is
+  a different client strategy — HTTP + OAuth to a hosted server, no child
+  process — and is not supported by this fixture.
