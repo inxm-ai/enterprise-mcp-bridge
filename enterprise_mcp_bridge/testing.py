@@ -21,6 +21,15 @@ test-only route, and no faked transport: the bridge resolves
 ``MCP_SERVER_COMMAND`` per request/session and spawns the MCP server as a
 stdio child process exactly as it does in production.
 
+Scope: stdio only
+-----------------
+This fixture only exercises the bridge's stdio-child code path
+(``MCP_SERVER_COMMAND``). The bridge also has a separate remote-MCP mode
+(``MCP_REMOTE_SERVER``, see ``docs/how-to/remote-mcp-servers.md``) that talks
+to a hosted MCP over HTTP instead of spawning a child — a structurally
+different client strategy, mutually exclusive with ``MCP_SERVER_COMMAND`` in
+the bridge itself. ``bridge_client`` does not cover it.
+
 Child-process lifecycle
 -----------------------
 The bridge owns the child. Sessionless requests spawn a child for the duration
@@ -91,7 +100,9 @@ def bridge_client(
         raise ValueError(
             "mcp_server_command must not be blank: the bridge falls back to its "
             "own default demo server when MCP_SERVER_COMMAND is unset, which "
-            "would silently test the wrong MCP server."
+            "would silently test the wrong MCP server. bridge_client only "
+            "supports stdio-spawned MCP servers; the bridge's remote-MCP mode "
+            "(MCP_REMOTE_SERVER) is not supported by this fixture."
         )
 
     existing_app = sys.modules.get("app")

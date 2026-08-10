@@ -24,6 +24,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO_SERVER_COMMAND = " ".join(
     shlex.quote(part) for part in (sys.executable, str(REPO_ROOT / "mcp" / "server.py"))
 )
+OAUTH_ENV_PROBE_COMMAND = " ".join(
+    shlex.quote(part)
+    for part in (sys.executable, str(REPO_ROOT / "tests" / "oauth_env_probe_server.py"))
+)
 SESSION_HEADER = "x-inxm-mcp-session"
 # call_counter both proves session isolation (stateful child) and, marked as an
 # effect tool, proves dry-run never reaches the real tool.
@@ -155,6 +159,33 @@ def test_dry_run_never_executes_the_effect_tool(bridge):
         assert _call_counter(bridge, session_id) == 2
     finally:
         _close_session(bridge, session_id)
+
+
+def test_oauth_env_propagates_the_caller_access_token_into_the_child(
+    bridge, monkeypatch
+):
+    """OAUTH_ENV is the bridge's real (unmocked) token-propagation seam.
+
+    With the default AUTH_PROVIDER=keycloak and no KEYCLOAK_PROVIDER_ALIAS
+    configured, KeyCloakTokenRetriever passes the caller's access token
+    through unchanged (app/oauth/token_exchange.py), with no network call —
+    so this needs no mocking, only a child that can read its own environment
+    back (tests/oauth_env_probe_server.py). MCP_SERVER_COMMAND is swapped for
+    just this one request; child spawn is per-request, so the other tests in
+    this module are unaffected.
+    """
+    monkeypatch.setenv("MCP_SERVER_COMMAND", OAUTH_ENV_PROBE_COMMAND)
+    monkeypatch.setenv("OAUTH_ENV", "PROPAGATED_TOKEN")
+    access_token = "conformance-test-token-123"  # noqa: S105 -- not a real credential
+
+    response = bridge.post(
+        "/tools/read_env",
+        headers={"X-Auth-Request-Access-Token": access_token},
+        json={"name": "PROPAGATED_TOKEN"},
+    )
+
+    assert response.status_code == HTTP_OK, response.text
+    assert response.json()["structuredContent"]["result"] == access_token
 
 
 def test_bridge_own_app_wins_over_a_consumer_top_level_app_package(tmp_path):
