@@ -17,5 +17,26 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile 
-          push: false 
+          file: ./Dockerfile
+          push: false
+
+  package_install_and_conformance:
+    name: Package Install (testing extra) and Bridge Conformance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install root package with the testing extra
+        run: pip install ".[testing]"
+
+      - name: Verify the installed package imports outside the checkout
+        run: cd "$RUNNER_TEMP" && python -c "import enterprise_mcp_bridge.testing, app.server"
+
+      - name: Run canonical bridge conformance tests
+        run: pytest tests/

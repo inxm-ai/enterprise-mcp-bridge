@@ -18,6 +18,7 @@
   * [Deploy to Kubernetes](how-to/kubernetes.md)
   * [UI Generation](how-to/ui-generation.md)
   * [Workflows and Agents](how-to/workflows.md)
+  * [Test Your MCP Through the Bridge](how-to/test-through-the-bridge.md)
 
 * **Reference**
   * [API Reference](reference/api.md)

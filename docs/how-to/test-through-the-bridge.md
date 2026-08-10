@@ -1,0 +1,76 @@
+# Test Your MCP Through the Bridge
+
+Run your MCP repository's tests against the *real* bridge — real FastAPI app,
+real routes, real stdio child process — without Kubernetes or network access.
+The first time your server meets the bridge should be CI, not the production
+deploy.
+
+## Install
+
+```bash
+pip install "enterprise-mcp-bridge[testing] @ git+https://github.com/inxm-ai/enterprise-mcp-bridge@<tag>"
+```
+
+Pin a tag. The `testing` extra adds pytest; the test-support API itself only
+needs the package's runtime dependencies.
+
+## Use
+
+```python
+import sys
+
+import pytest
+
+from enterprise_mcp_bridge.testing import bridge_client
+
+
+@pytest.fixture(scope="module")
+def bridge():
+    with bridge_client(f"{sys.executable} tests/conformance_server.py") as client:
+        yield client
+
+
+def test_my_tool(bridge):
+    response = bridge.post("/tools/search", json={"query": "inxm"})
+    assert response.status_code == 200
+```
+
+`bridge_client(mcp_server_command, env=None)` is the whole API:
+
+| Parameter | Meaning |
+|---|---|
+| `mcp_server_command` | Exactly what production sets as `MCP_SERVER_COMMAND`. Use `sys.executable` and absolute paths. |
+| `env` | Extra environment variables (e.g. `EFFECT_TOOLS`), applied before the app loads and restored afterwards. |
+
+It yields a [`fastapi.testclient.TestClient`](https://fastapi.tiangolo.com/reference/testclient/)
+bound to the same `app.server:app` object production serves. The bridge spawns
+your server as a stdio child per request, or per session via
+`POST /session/start` — identical to production.
+
+## Offline conformance servers
+
+Real tool calls often reach real APIs. Keep the suite offline by exposing a
+second entrypoint that registers the same tools with a scripted worker:
+production uses `mcp/server.py` → `create_server(real_worker)`; tests use
+`tests/conformance_server.py` → `create_server(scripted_worker)`. Point
+`bridge_client` at the conformance entrypoint — same registration code, same
+stdio path, only the infrastructure edge is substituted.
+
+## What you don't need to test
+
+The generic bridge behaviours — startup and tool listing, session isolation,
+the dry-run gate, child tool exception → HTTP status mapping — are proven once
+in this repo (`tests/test_bridge_conformance.py`). Your suite only adds cases
+for your own tools: at least one success case, plus repo-specific failure
+cases where useful.
+
+## Caveats
+
+- The app module is imported once per process, and a few settings
+  (`EFFECT_TOOLS`, OTLP endpoints, `SERVICE_NAME`) are read at import time.
+  The first `bridge_client(...)` in a pytest run fixes those for the whole
+  run; `MCP_SERVER_COMMAND` itself is re-read per request and may differ
+  between contexts.
+- The child process needs its dependencies importable by the interpreter you
+  put in `mcp_server_command` — in CI, install your MCP package into the same
+  environment.
