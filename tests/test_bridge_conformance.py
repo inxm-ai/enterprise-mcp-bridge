@@ -8,6 +8,7 @@ bridge repo; MCP repositories only add their own tool-specific cases on top.
 Runs offline with plain pytest — no Kubernetes, no network.
 """
 
+import shlex
 import sys
 from pathlib import Path
 
@@ -16,7 +17,12 @@ import pytest
 from enterprise_mcp_bridge.testing import bridge_client
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEMO_SERVER_COMMAND = f"{sys.executable} {REPO_ROOT / 'mcp' / 'server.py'}"
+# get_server_params() parses MCP_SERVER_COMMAND with shlex.split(), so both
+# parts must be individually quoted — sys.executable and the repo checkout
+# path can each contain spaces (e.g. under "Application Support" on macOS).
+DEMO_SERVER_COMMAND = " ".join(
+    shlex.quote(part) for part in (sys.executable, str(REPO_ROOT / "mcp" / "server.py"))
+)
 SESSION_HEADER = "x-inxm-mcp-session"
 # call_counter both proves session isolation (stateful child) and, marked as an
 # effect tool, proves dry-run never reaches the real tool.
