@@ -17,16 +17,21 @@ needs the package's runtime dependencies.
 ## Use
 
 ```python
+import shlex
 import sys
 
 import pytest
 
 from enterprise_mcp_bridge.testing import bridge_client
 
+CONFORMANCE_SERVER_COMMAND = " ".join(
+    shlex.quote(part) for part in (sys.executable, "tests/conformance_server.py")
+)
+
 
 @pytest.fixture(scope="module")
 def bridge():
-    with bridge_client(f"{sys.executable} tests/conformance_server.py") as client:
+    with bridge_client(CONFORMANCE_SERVER_COMMAND) as client:
         yield client
 
 
@@ -39,8 +44,16 @@ def test_my_tool(bridge):
 
 | Parameter | Meaning |
 |---|---|
-| `mcp_server_command` | Exactly what production sets as `MCP_SERVER_COMMAND`. Use `sys.executable` and absolute paths. |
+| `mcp_server_command` | Exactly what production sets as `MCP_SERVER_COMMAND`. Use `sys.executable` and absolute paths. The bridge parses it with `shlex.split()`, so quote each part yourself (`shlex.quote`) — paths with spaces otherwise split incorrectly. Must not be blank; `bridge_client` raises `ValueError` if it is, since a blank value would silently fall back to the bridge's own default demo server. |
 | `env` | Extra environment variables (e.g. `EFFECT_TOOLS`), applied before the app loads and restored afterwards. |
+
+`app` is a common top-level package name, and pytest puts your repository root
+on `sys.path`. `bridge_client` resolves its own `app` package by location, not
+by search order, so it wins the first import even if your repository also has
+a top-level `app` package — but if that package was already imported earlier
+in the same test process, the collision is unresolvable and `bridge_client`
+raises `RuntimeError` rather than guessing. Import `enterprise_mcp_bridge.testing`
+before your own `app` package if you hit this.
 
 It yields a [`fastapi.testclient.TestClient`](https://fastapi.tiangolo.com/reference/testclient/)
 bound to the same `app.server:app` object production serves. The bridge spawns
