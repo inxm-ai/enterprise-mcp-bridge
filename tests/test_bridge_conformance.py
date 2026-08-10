@@ -45,7 +45,18 @@ HTTP_TOOL_EXECUTION_ERROR = 422
 @pytest.fixture(scope="module")
 def bridge():
     with bridge_client(
-        DEMO_SERVER_COMMAND, env={"EFFECT_TOOLS": EFFECT_TOOLS_CONFIG}
+        DEMO_SERVER_COMMAND,
+        env={
+            "EFFECT_TOOLS": EFFECT_TOOLS_CONFIG,
+            # Pinned so test_oauth_env_propagates_the_caller_access_token_into_the_child
+            # owns the pass-through condition it claims to prove, rather than
+            # inheriting whatever AUTH_PROVIDER/KEYCLOAK_PROVIDER_ALIAS happen to
+            # be set in the developer's or CI's ambient environment. These match
+            # app/vars.py's own defaults, so this only makes the dependency
+            # explicit — it does not change default behavior.
+            "AUTH_PROVIDER": "keycloak",
+            "KEYCLOAK_PROVIDER_ALIAS": "",
+        },
     ) as client:
         yield client
         client.cookies.clear()
@@ -166,13 +177,14 @@ def test_oauth_env_propagates_the_caller_access_token_into_the_child(
 ):
     """OAUTH_ENV is the bridge's real (unmocked) token-propagation seam.
 
-    With the default AUTH_PROVIDER=keycloak and no KEYCLOAK_PROVIDER_ALIAS
-    configured, KeyCloakTokenRetriever passes the caller's access token
-    through unchanged (app/oauth/token_exchange.py), with no network call —
-    so this needs no mocking, only a child that can read its own environment
-    back (tests/oauth_env_probe_server.py). MCP_SERVER_COMMAND is swapped for
-    just this one request; child spawn is per-request, so the other tests in
-    this module are unaffected.
+    With AUTH_PROVIDER=keycloak and no KEYCLOAK_PROVIDER_ALIAS — pinned in the
+    `bridge` fixture's env, not left to whatever the developer's or CI's
+    ambient environment happens to have — KeyCloakTokenRetriever passes the
+    caller's access token through unchanged (app/oauth/token_exchange.py),
+    with no network call. So this needs no mocking, only a child that can
+    read its own environment back (tests/oauth_env_probe_server.py).
+    MCP_SERVER_COMMAND is swapped for just this one request; child spawn is
+    per-request, so the other tests in this module are unaffected.
     """
     monkeypatch.setenv("MCP_SERVER_COMMAND", OAUTH_ENV_PROBE_COMMAND)
     monkeypatch.setenv("OAUTH_ENV", "PROPAGATED_TOKEN")
