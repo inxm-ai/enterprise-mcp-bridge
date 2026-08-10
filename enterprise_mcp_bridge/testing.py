@@ -108,11 +108,15 @@ def bridge_client(
     previous = {name: os.environ.get(name) for name in overrides}
     os.environ.update(overrides)
     bridge_root_str = str(_BRIDGE_ROOT)
-    path_inserted = bridge_root_str not in sys.path
-    if path_inserted:
-        sys.path.insert(0, bridge_root_str)
+    original_sys_path = sys.path.copy()
+    # Always move the bridge's own package ahead of the rest of sys.path, even
+    # when it is already present (e.g. via site-packages): a consumer
+    # repository root sits ahead of site-packages once pytest inserts it, so
+    # leaving the existing position in place would still let the consumer's
+    # own top-level `app` package win the import below.
+    sys.path[:] = [bridge_root_str] + [p for p in sys.path if p != bridge_root_str]
     try:
-        # Imported lazily so `overrides` and the sys.path insertion above are
+        # Imported lazily so `overrides` and the sys.path reordering above are
         # in place for the bridge's import-time configuration reads and for
         # resolving `app` to the bridge's own package on first use.
         from app.server import app
@@ -120,8 +124,7 @@ def bridge_client(
         with TestClient(app) as client:
             yield client
     finally:
-        if path_inserted:
-            sys.path.remove(bridge_root_str)
+        sys.path[:] = original_sys_path
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)

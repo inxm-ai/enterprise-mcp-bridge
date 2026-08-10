@@ -9,6 +9,7 @@ Runs offline with plain pytest — no Kubernetes, no network.
 """
 
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -154,3 +155,42 @@ def test_dry_run_never_executes_the_effect_tool(bridge):
         assert _call_counter(bridge, session_id) == 2
     finally:
         _close_session(bridge, session_id)
+
+
+def test_bridge_own_app_wins_over_a_consumer_top_level_app_package(tmp_path):
+    """Regression: a consumer's own `app` package must not shadow the bridge's.
+
+    Must run in a fresh interpreter: this file's own `bridge` fixture already
+    imports the real `app.server` earlier in-process, so by the time any other
+    test here runs, `sys.modules["app"]` is already the bridge's own module
+    and the collision this guards against can no longer be observed.
+
+    A consumer's top-level `app` package lives in their repository root, which
+    pytest puts ahead of site-packages on `sys.path`. Reproduced here by
+    running the subprocess with `cwd=tmp_path`: for `python -c`, `sys.path[0]`
+    is `''` (cwd), so a fake `app` package placed there sits ahead of the
+    installed bridge package exactly as a consumer repo root would.
+    """
+    fake_app = tmp_path / "app"
+    fake_app.mkdir()
+    (fake_app / "__init__.py").write_text("")
+    (fake_app / "server.py").write_text("app = 'THIS-IS-THE-CONSUMERS-OWN-APP'\n")
+
+    script = f"""
+import sys
+from enterprise_mcp_bridge.testing import bridge_client
+
+with bridge_client({DEMO_SERVER_COMMAND!r}) as client:
+    response = client.get("/tools")
+    assert response.status_code == 200, response.text
+    tool_names = {{tool["name"] for tool in response.json()}}
+    assert "add" in tool_names, f"got the consumer's app instead of the bridge's: {{tool_names}}"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
