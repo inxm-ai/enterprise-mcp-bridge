@@ -47,6 +47,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && matrix.python-version == env.DEFAULT_PYTHON_VERSION }} # Tag 'latest' only for the default Python version on main
             type=raw,value=latest-${{ matrix.python-version }},enable=${{ github.ref == 'refs/heads/main' }} # Tag latest per Python version on main
             type=ref,event=tag,suffix=-${{ matrix.python-version }} # Tag with the Git tag and Python version if a tag is pushed
+            type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' && matrix.python-version == env.DEFAULT_PYTHON_VERSION }} # Tag with the commit SHA (default Python version only) so lz-aws's by-SHA sync workflow has an image to pull for untagged main commits
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
