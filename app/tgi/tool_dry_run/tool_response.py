@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 import re
@@ -10,6 +11,8 @@ from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.models import ChatCompletionRequest
 from app.tgi.services.prompt_service import PromptService
 from app.tgi.protocols.chunk_reader import chunk_reader
+
+logger = logging.getLogger("uvicorn.error")
 
 
 async def get_tool_dry_run_response(
@@ -55,14 +58,29 @@ async def get_tool_dry_run_response(
         return cleaned or "tool_response"
 
     prompts = PromptService()
-    # PromptService APIs are async; be tolerant and await if coroutine returned.
-    prompt = await prompts.find_prompt_by_name_or_role(
-        session, f"dryrun_{tool.get('name', 'unknown')}"
+    default_prompt = (
+        "You are a helpful assistant that provides mock responses for tools."
     )
+    # PromptService APIs are async; be tolerant and await if coroutine returned.
+    # Prompt lookup depends on the downstream MCP server's list_prompts, which may
+    # error out for servers that don't implement it cleanly. Never let that fail
+    # the dry run - fall back to the default mock-response prompt instead.
+    try:
+        prompt = await prompts.find_prompt_by_name_or_role(
+            session, f"dryrun_{tool.get('name', 'unknown')}"
+        )
+        if not prompt:
+            prompt = await prompts.find_prompt_by_name_or_role(
+                session, "dryrun_default"
+            )
+    except Exception as exc:
+        logger.warning(
+            f"[DryRun] Failed to look up dry-run prompt for tool "
+            f"'{tool.get('name', 'unknown')}', falling back to default: {exc}"
+        )
+        prompt = None
     if not prompt:
-        prompt = await prompts.find_prompt_by_name_or_role(session, "dryrun_default")
-    if not prompt:
-        prompt = "You are a helpful assistant that provides mock responses for tools."
+        prompt = default_prompt
 
     # If prompt is an object (dict/model), try to extract textual content
     if not isinstance(prompt, str) and hasattr(prompts, "get_prompt_content"):
