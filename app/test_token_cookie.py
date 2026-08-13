@@ -1,5 +1,6 @@
 import pytest
 import subprocess
+import sys
 import time
 import os
 import requests
@@ -29,7 +30,16 @@ def fastapi_app_cookie_auth():
     env["TOKEN_NAME"] = "X-Auth-Token"  # Should be ignored
 
     proc = subprocess.Popen(
-        ["uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", f"{port}"],
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.server:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            f"{port}",
+        ],
         cwd=os.path.dirname(__file__) + "/..",
         env=env,
         stdout=subprocess.PIPE,

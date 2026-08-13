@@ -3757,7 +3757,15 @@ async def test_iterative_test_fix_resets_attempts_on_progress(monkeypatch, caplo
     assert mock_client.call_count == 3
     assert call_index["idx"] == 4
     assert "resetting attempts" in caplog.text
-    assert caplog.text.count("Fix iteration 1/2") == 2
+    # De-duplicate by record identity: when other test modules have already
+    # forced propagation on the shared "uvicorn.error" logger before this
+    # test runs, caplog can end up capturing the same LogRecord twice (once
+    # via the logger's own handler chain, once via root propagation). That's
+    # a capture artifact, not evidence the app logged the line extra times.
+    fix_iteration_1_records = {
+        id(r) for r in caplog.records if r.getMessage() == "[iterative_test_fix] Fix iteration 1/2"
+    }
+    assert len(fix_iteration_1_records) == 2
 
 
 def test_build_phase2_system_prompt_integration(monkeypatch):

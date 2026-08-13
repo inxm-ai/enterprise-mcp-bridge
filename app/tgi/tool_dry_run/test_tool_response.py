@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from app.tgi.tool_dry_run.tool_response import get_tool_dry_run_response
 
 session = None  # Placeholder for MCPSessionBase
@@ -181,6 +182,44 @@ async def test_uses_default_prompt_when_specific_missing(monkeypatch):
     assert MockPromptService.last_instance.calls[0][1] == "dryrun_mytool"
     assert MockPromptService.last_instance.calls[1][1] == "dryrun_default"
     assert client.last_request.messages[0].content == "Default prompt content"
+
+
+class RaisingPromptService:
+    """Mock PromptService whose prompt lookup fails like a broken MCP server."""
+
+    last_instance = None
+
+    def __init__(self, *args, **kwargs):
+        RaisingPromptService.last_instance = self
+        self.calls = []
+
+    async def find_prompt_by_name_or_role(self, session_arg, prompt_name=None):
+        self.calls.append((session_arg, prompt_name))
+        raise HTTPException(status_code=500, detail="Loading prompts failed")
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_hardcoded_prompt_when_lookup_raises(monkeypatch):
+    monkeypatch.setenv("TGI_URL", "http://example")
+    monkeypatch.setattr(
+        "app.tgi.tool_dry_run.tool_response.PromptService", RaisingPromptService
+    )
+    monkeypatch.setattr("app.tgi.tool_dry_run.tool_response.LLMClient", DummyLLMClient)
+
+    tool = _make_tool()
+    valid_input = {"foo": "bar"}
+
+    # Should not raise even though prompt lookup errors out (e.g. the downstream
+    # MCP server fails to list prompts), instead falling back to the default.
+    result = await get_tool_dry_run_response(session, tool, valid_input)
+
+    assert result is not None
+    client = DummyLLMClient.created_instance
+    assert client is not None and client.stream_called
+    assert (
+        client.last_request.messages[0].content
+        == "You are a helpful assistant that provides mock responses for tools."
+    )
 
 
 @pytest.mark.asyncio
