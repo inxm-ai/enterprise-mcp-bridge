@@ -53,9 +53,7 @@ def fake_verifier(monkeypatch):
     """Stand-in for JWKS verification: trusts the two well-known test tokens,
     rejects everything else — mirroring what real verification guarantees."""
 
-    def _verify(token, *, allowed_clients, allowlist_name):
-        if not allowed_clients:
-            raise UserLoggedOutException(f"{allowlist_name} is not configured")
+    def _verify(token):
         if token in (IN_GROUP_TOKEN, OUT_OF_GROUP_TOKEN):
             return jwt.decode(token, options={"verify_signature": False})
         raise UserLoggedOutException("Access token failed verification")
@@ -105,7 +103,6 @@ def client():
 @pytest.fixture
 def required_groups(monkeypatch):
     monkeypatch.setattr(app_vars, "BRIDGE_REQUIRED_GROUPS", ["operators"])
-    monkeypatch.setattr(app_vars, "BRIDGE_ALLOWED_CLIENTS", ["web-client"])
 
 
 @pytest.fixture
@@ -141,13 +138,11 @@ class TestGateUnit:
             ensure_caller_in_required_groups(FORGED_TOKEN)
         assert excinfo.value.status_code == 401
 
-    def test_unconfigured_client_allowlist_fails_closed(self, monkeypatch):
+    def test_group_gate_does_not_require_client_allowlist(
+        self, monkeypatch, fake_verifier
+    ):
         monkeypatch.setattr(app_vars, "BRIDGE_REQUIRED_GROUPS", ["operators"])
-        monkeypatch.setattr(app_vars, "BRIDGE_ALLOWED_CLIENTS", [])
-        monkeypatch.setattr(token_exchange, "_jwks_client", None)
-        with pytest.raises(CallerNotAuthorizedError) as excinfo:
-            ensure_caller_in_required_groups(IN_GROUP_TOKEN)
-        assert excinfo.value.status_code == 401
+        ensure_caller_in_required_groups(IN_GROUP_TOKEN)
 
     def test_out_of_group_is_403(self, required_groups, fake_verifier):
         with pytest.raises(CallerNotAuthorizedError) as excinfo:
@@ -170,9 +165,9 @@ class TestGateUnit:
 
 
 class TestVerifiedCallerClaims:
-    """The shared verifier itself: explicit client policy, signature-first."""
+    """The shared verifier itself: signature and issuer verification."""
 
-    def test_client_allowlist_is_explicit_per_caller(self, monkeypatch):
+    def test_returns_verified_claims(self, monkeypatch):
         from app.oauth.token_exchange import verified_caller_claims
 
         class OkJwks:
@@ -191,16 +186,8 @@ class TestVerifiedCallerClaims:
                 "azp": "bridge-client",
             },
         )
-        claims = verified_caller_claims(
-            "token", allowed_clients=["bridge-client"], allowlist_name="X"
-        )
+        claims = verified_caller_claims("token")
         assert claims["azp"] == "bridge-client"
-        with pytest.raises(UserLoggedOutException):
-            verified_caller_claims(
-                "token", allowed_clients=["other"], allowlist_name="X"
-            )
-        with pytest.raises(UserLoggedOutException):
-            verified_caller_claims("token", allowed_clients=[], allowlist_name="X")
 
 
 class TestRestGate:

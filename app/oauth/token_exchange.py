@@ -79,17 +79,13 @@ def _get_jwks_client():
     return _jwks_client
 
 
-def verified_caller_claims(
-    token: str, *, allowed_clients: list, allowlist_name: str
-) -> Dict[str, Any]:
+def verified_caller_claims(token: str) -> Dict[str, Any]:
     """Verify a Keycloak token and return its claims, or fail closed.
 
     Enforces: signature against the realm JWKS, a present and valid exp,
     the exact configured issuer (KEYCLOAK_ISSUER, defaulting to
-    {AUTH_BASE_URL}/realms/{realm}), and that the token was issued to a
-    client in the caller-supplied allowlist (azp, falling back to aud).
-    Fails closed with UserLoggedOutException on any violation — including
-    an empty allowlist, so no client in the realm is trusted implicitly.
+    {AUTH_BASE_URL}/realms/{realm}). Fails closed with
+    UserLoggedOutException on any violation.
     The bridge accepts direct Bearer tokens (desktop clients bypass the
     ingress proxy), so any authorization decision based on token claims
     must go through this function, never an unverified decode.
@@ -113,6 +109,12 @@ def verified_caller_claims(
             f"Access token issued by unexpected issuer: {claims.get('iss')}"
         )
 
+    return claims
+
+
+def _ensure_allowlisted_client(
+    claims: Dict[str, Any], *, allowed_clients: list, allowlist_name: str
+) -> None:
     if not allowed_clients:
         raise UserLoggedOutException(
             f"{allowlist_name} is not configured; refusing to trust tokens "
@@ -126,16 +128,17 @@ def verified_caller_claims(
         raise UserLoggedOutException(
             f"Access token client(s) {token_clients} not in the allowlist"
         )
-    return claims
 
 
 def verified_keycloak_claims(token: str) -> Dict[str, Any]:
     """Verify a Keycloak token before it may release a stored credential."""
-    return verified_caller_claims(
-        token,
+    claims = verified_caller_claims(token)
+    _ensure_allowlisted_client(
+        claims,
         allowed_clients=USER_API_KEY_ALLOWED_CLIENTS,
         allowlist_name="USER_API_KEY_ALLOWED_CLIENTS",
     )
+    return claims
 
 
 class UserApiKeyTokenRetriever(TokenRetriever):
