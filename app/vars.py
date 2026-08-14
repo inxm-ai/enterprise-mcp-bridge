@@ -215,6 +215,44 @@ MCP_REMOTE_SERVER_FORWARD_HEADERS = [
     if h.strip()
 ]
 
+# Baggage keys the bridge may propagate to downstream MCP servers via _meta.
+# Empty (default) forwards no baggage at all: arbitrary baggage can carry
+# identity or request content and must never be forwarded wholesale.
+# Deployments opt keys in explicitly (e.g. "tenant.id,group.id").
+MCP_TRACE_BAGGAGE_ALLOWLIST = [
+    b.strip()
+    for b in os.getenv("MCP_TRACE_BAGGAGE_ALLOWLIST", "").split(",")
+    if b.strip()
+]
+
+# Groups a caller's token must carry (any of) to use this bridge instance at
+# all. Empty (default) disables the gate. Deployments whose downstream data
+# must stay restricted to an operator group set this so the bridge itself —
+# not only its ingress — enforces the authorization boundary: an
+# authenticated caller outside these groups gets 403 before any downstream
+# contact. Group membership is read from VERIFIED claims only (signature via
+# the realm JWKS, expiry, exact issuer, and the client allowlist below): the
+# bridge accepts direct Bearer tokens, so a forged unsigned token must never
+# pass this gate.
+BRIDGE_REQUIRED_GROUPS = [
+    g.strip() for g in os.getenv("BRIDGE_REQUIRED_GROUPS", "").split(",") if g.strip()
+]
+# Clients whose tokens the group gate accepts (matched against azp, falling
+# back to aud). REQUIRED whenever BRIDGE_REQUIRED_GROUPS is set — with no
+# allowlist the gate fails closed rather than trusting any client in the
+# realm (same idiom as USER_API_KEY_ALLOWED_CLIENTS).
+BRIDGE_ALLOWED_CLIENTS = [
+    c.strip() for c in os.getenv("BRIDGE_ALLOWED_CLIENTS", "").split(",") if c.strip()
+]
+
+# Ceiling on the JSON-encoded size of a downstream tool result. 0 disables
+# the check. Some downstream MCP servers enforce count-based limits, which do
+# not bound every serialized response, so the bridge has its own byte cap.
+MCP_MAX_RESPONSE_BYTES = int(os.getenv("MCP_MAX_RESPONSE_BYTES", "0"))
+
+# Per-call timeout towards the downstream MCP server. 0 keeps SDK defaults.
+MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "0"))
+
 
 def _parse_map_header_to_input(raw: str) -> dict:
     mapping: dict = {}

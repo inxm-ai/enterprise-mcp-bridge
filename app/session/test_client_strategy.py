@@ -412,11 +412,16 @@ async def test_mcp_log_notifications_forwarded(monkeypatch):
     await client_strategy._log_mcp_notification(params_info)
     await client_strategy._log_mcp_notification(params_error)
 
-    assert ("info", "[MCP][tools][INFO] hello") in fake_logger.messages
-    # Second call should log to error with JSON rendered payload
+    # Downstream log payloads are arbitrary untrusted content; only their
+    # shape is recorded, never the content itself.
+    assert fake_logger.messages[0][0] == "info"
+    assert fake_logger.messages[0][1].startswith("[MCP][tools][INFO]")
+    assert "hello" not in fake_logger.messages[0][1]
+    assert "type=str chars=5" in fake_logger.messages[0][1]
     assert fake_logger.messages[-1][0] == "error"
     assert "[MCP][MCP][ERROR]" in fake_logger.messages[-1][1]
-    assert '"detail": "boom"' in fake_logger.messages[-1][1]
+    assert "boom" not in fake_logger.messages[-1][1]
+    assert "type=dict" in fake_logger.messages[-1][1]
 
 
 @pytest.mark.asyncio

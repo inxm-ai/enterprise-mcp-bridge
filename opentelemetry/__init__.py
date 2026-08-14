@@ -1,5 +1,5 @@
 """Minimal stub of the opentelemetry package for testing."""
 
-from . import trace  # noqa: F401
+from . import baggage, trace  # noqa: F401
 
-__all__ = ["trace"]
+__all__ = ["baggage", "trace"]

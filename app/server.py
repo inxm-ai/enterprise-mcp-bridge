@@ -129,8 +129,24 @@ class FilteringSpanExporter(SpanExporter if _OTEL_AVAILABLE else object):
 
 # Configure tracing if OpenTelemetry dependencies are available
 if _OTEL_AVAILABLE:
+    import os as _os
+
+    # Resource identity for deployment validation. OTEL_RESOURCE_ATTRIBUTES
+    # remains the source of truth (Resource.create merges it); these explicit
+    # keys fill in from dedicated env vars when present, omitted otherwise.
+    _resource_attributes = {"service.name": SERVICE_NAME}
+    for _attr, _env in (
+        ("service.version", "SERVICE_VERSION"),
+        ("service.instance.id", "HOSTNAME"),
+        ("deployment.environment.name", "DEPLOYMENT_ENVIRONMENT"),
+        ("enterprise_mcp_bridge.build.id", "BUILD_ID"),
+    ):
+        _value = _os.environ.get(_env, "").strip()
+        if _value:
+            _resource_attributes[_attr] = _value
+
     trace.set_tracer_provider(
-        TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
+        TracerProvider(resource=Resource.create(_resource_attributes))
     )
     tracer_provider = trace.get_tracer_provider()
     if OTLP_ENDPOINT:

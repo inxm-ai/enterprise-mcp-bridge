@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 from opentelemetry.trace import Tracer
 
-from app.utils import mask_token
+from app.utils import mask_token, token_fingerprint
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -22,7 +22,10 @@ def traced_request(
     """Context manager to create a span, set common attributes, and log a start message."""
     with tracer.start_as_current_span(operation) as span:
         if session_value:
-            span.set_attribute("session.id", session_value)
+            # Bridge session values embed the caller's access token
+            # (session_id() concatenates it), so only a fingerprint may
+            # become a span attribute.
+            span.set_attribute("session.id", token_fingerprint(session_value))
         if group:
             span.set_attribute("session.group", group)
         if user_id:

@@ -22,6 +22,16 @@ import os
 import asyncio
 
 from app.utils.traced_requests import traced_request
+from app.utils.mcp_operation import (
+    MCP_METHOD_PROMPTS_GET,
+    MCP_METHOD_RESOURCES_READ,
+    MCP_METHOD_TOOLS_CALL,
+    TRANSPORT_REST,
+    classify_error_text,
+    log_sanitized_exception,
+    mcp_operation_span,
+    safe_arg_keys,
+)
 from app.utils.structured_text_parser import try_parse_structured_text
 from app.session import (
     MCPLocalSessionTask,
@@ -31,14 +41,22 @@ from app.session import (
     build_mcp_client_strategy,
 )
 from app.session_manager import mcp_session_context, session_manager
-from app.session_manager.session_context import map_tools
+from app.session_manager.session_context import (
+    ResponseTooLargeError,
+    ToolPolicyDeniedError,
+    map_tools,
+)
 from app.elicitation import (
     ElicitationRequiredError,
     InvalidUserFeedbackError,
     UnsupportedElicitationSchemaError,
     get_elicitation_coordinator,
 )
-from .oauth.user_info import get_data_access_manager
+from .oauth.user_info import (
+    CallerNotAuthorizedError,
+    ensure_caller_in_required_groups,
+    get_data_access_manager,
+)
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .oauth.token_dependency import get_access_token
@@ -225,19 +243,20 @@ async def get_resource_details(
             access_token,
         )
         incoming_headers = _extract_request_headers(request)
-        with traced_request(
-            tracer,
-            operation="get_resource_details",
+        with mcp_operation_span(
+            method=MCP_METHOD_RESOURCES_READ,
+            target=resource_name,
+            transport=TRANSPORT_REST,
             session_value=x_inxm_mcp_session,
+            access_token=access_token,
             group=group,
-            start_message=f"[Resource-Details] Getting resource details. Session: {x_inxm_mcp_session}, Group: {group}",
-        ):
+        ) as op:
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.list_resources()
                 # find the resource with the given name
-                logger.debug(f"Looking for resource: {resource_name} in {result}")
+                logger.debug(f"Looking for resource: {resource_name}")
                 result = next(
                     (res for res in result.resources if res.name == resource_name), None
                 )
@@ -252,9 +271,16 @@ async def get_resource_details(
                     raise HTTPException(status_code=404, detail="Resource not found")
                 if resource.contents is None:
                     raise HTTPException(status_code=404, detail="Resource is empty")
+                op.record_success(resource)
                 resource = resource.contents[0]
-                logger.info(f"Resource retrieved: {resource}")
+                # Resource bodies are sensitive content; only the mime type
+                # may be logged.
                 mime_type = resource.mimeType or "text/plain"
+                logger.info(
+                    "[Resource-Details] Resource retrieved: %s (%s)",
+                    resource_name,
+                    mime_type,
+                )
                 if hasattr(resource, "blob"):
                     blob = resource.blob
                 else:
@@ -277,13 +303,18 @@ async def get_resource_details(
                 else:
                     return Response(status_code=204)
 
+    except ResponseTooLargeError as e:
+        # Deterministic for this call; the oversized content is never relayed.
+        raise HTTPException(status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(e))
     except HTTPException as e:
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Resource-Details] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        log_exception_with_details(logger, "[Resource-Details]", e)
+        # Resource bodies and downstream error messages are sensitive; only
+        # sanitized exception details reach the logs on this path.
+        log_sanitized_exception(logger, "[Resource-Details]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -482,14 +513,22 @@ async def run_tool(
                     },
                 )
         incoming_headers = _extract_request_headers(request)
-        with traced_request(
-            tracer=tracer,
-            operation="run_tool",
+        logger.info(
+            "[Tool-Call] Tool call: %s, Session: %s, Group: %s, Arg keys: %s",
+            tool_name,
+            token_fingerprint(x_inxm_mcp_session),
+            group,
+            safe_arg_keys(args),
+        )
+        with mcp_operation_span(
+            method=MCP_METHOD_TOOLS_CALL,
+            target=tool_name,
+            transport=TRANSPORT_REST,
             session_value=x_inxm_mcp_session,
+            access_token=access_token,
             group=group,
-            start_message=f"[Tool-Call] Tool call: {tool_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
-            extra_attrs={"tool.name": tool_name},
-        ):
+            arg_keys=safe_arg_keys(args),
+        ) as op:
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
@@ -513,20 +552,29 @@ async def run_tool(
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
-        if not result.isError:
-            if result.structuredContent:
-                logger.info(
-                    f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
-                )
+            if not result.isError:
+                if result.structuredContent:
+                    logger.info(
+                        f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
+                    )
+                else:
+                    for content in result.content:
+                        if hasattr(content, "text") and content.text:
+                            parsed = try_parse_structured_text(content.text)
+                            if parsed is not None:
+                                result.structuredContent = parsed
+                                break
+                op.record_success(result)
             else:
-                for content in result.content:
-                    if hasattr(content, "text") and content.text:
-                        parsed = try_parse_structured_text(content.text)
-                        if parsed is not None:
-                            result.structuredContent = parsed
-                            break
+                error_text = result.content[0].text if result.content else ""
+                op.record_error_result(classify_error_text(error_text), result)
 
-        logger.info(f"[Tool-Call] Tool {tool_name} called. Result: {result}")
+        logger.info(
+            "[Tool-Call] Tool %s called. isError=%s items=%s",
+            tool_name,
+            result.isError,
+            len(result.content) if result.content else 0,
+        )
         if result.isError:
             error_text = result.content[0].text if result.content else ""
             if "Unknown tool" in error_text:
@@ -534,7 +582,7 @@ async def run_tool(
                 raise HTTPException(status_code=404, detail=str(result))
             if "validation error" in error_text:
                 logger.info(
-                    f"[Tool-Call] Tool called with invalid parameters: {tool_name}. Result: {result}"
+                    f"[Tool-Call] Tool called with invalid parameters: {tool_name}."
                 )
                 raise HTTPException(status_code=400, detail=str(result))
 
@@ -543,20 +591,26 @@ async def run_tool(
             # flattens the exception class to prose, so the text is all we
             # have to classify on.
             if "timed out" in error_text.lower():
-                logger.warning(
-                    f"[Tool-Call] Upstream timeout in tool {tool_name}: {result}"
-                )
+                logger.warning(f"[Tool-Call] Upstream timeout in tool {tool_name}")
                 raise HTTPException(
                     status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT, detail=str(result)
                 )
 
             # The tool ran and rejected the request; the bridge itself is healthy.
             # 4xx keeps callers from retrying a failure that cannot succeed.
-            logger.error(f"[Tool-Call] Error in tool {tool_name}: {result}")
+            logger.error(f"[Tool-Call] Error in tool {tool_name}")
             raise HTTPException(
                 status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(result)
             )
         return result
+    except ToolPolicyDeniedError:
+        # Hidden tools must be indistinguishable from missing ones, and the
+        # rejection happens before any downstream contact.
+        raise HTTPException(status_code=404, detail="Tool not found")
+    except ResponseTooLargeError as e:
+        # Deterministic for this call, so it belongs in the terminal 4xx
+        # bucket; the oversized content itself is never relayed.
+        raise HTTPException(status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(e))
     except ElicitationRequiredError as e:
         raise HTTPException(status_code=409, detail=e.to_client_payload())
     except InvalidUserFeedbackError as e:
@@ -583,8 +637,9 @@ async def run_tool(
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        # Handle TaskGroup exceptions with multiple sub-exceptions
-        log_exception_with_details(logger, "[Tool-Call]", e)
+        # Downstream exception messages can embed request/response content,
+        # so only sanitized details reach the logs on this path.
+        log_sanitized_exception(logger, "[Tool-Call]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -616,41 +671,67 @@ async def run_prompt(
             args = dict(args)
             args.pop("inxm-session")
         incoming_headers = _extract_request_headers(request)
-        with traced_request(
-            tracer=tracer,
-            operation="run_prompt",
+        logger.info(
+            "[Prompt-Call] Prompt call: %s, Session: %s, Group: %s, Arg keys: %s",
+            prompt_name,
+            token_fingerprint(x_inxm_mcp_session),
+            group,
+            safe_arg_keys(args),
+        )
+        with mcp_operation_span(
+            method=MCP_METHOD_PROMPTS_GET,
+            target=prompt_name,
+            transport=TRANSPORT_REST,
             session_value=x_inxm_mcp_session,
+            access_token=access_token,
             group=group,
-            start_message=f"[Prompt-Call] Prompt call: {prompt_name}, Session: {x_inxm_mcp_session}, Group: {group}, Args: {args}",
-            extra_attrs={"prompt.name": prompt_name},
-        ):
+            arg_keys=safe_arg_keys(args),
+        ) as op:
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
                 result = await session.call_prompt(prompt_name, args)
 
-        logger.info(f"[Prompt-Call] Prompt {prompt_name} called. Result: {result}")
+            if result.isError:
+                # RunPromptResult carries its error text in `description`.
+                op.record_error_result(
+                    classify_error_text(result.description or ""), result
+                )
+            else:
+                op.record_success(result)
+
+        logger.info(
+            "[Prompt-Call] Prompt %s called. isError=%s", prompt_name, result.isError
+        )
         if result.isError:
-            if "Unknown prompt" in result.content[0].text:
+            # RunPromptResult has no `content` field — its error text lives in
+            # `description`. Reading `content` here raised AttributeError and
+            # collapsed every prompt failure into a generic 500.
+            error_text = result.description or ""
+            if "Unknown prompt" in error_text:
                 logger.info(f"[Prompt-Call] Prompt not found: {prompt_name}")
                 raise HTTPException(status_code=404, detail=str(result))
-            if "validation error" in result.content[0].text:
+            if "validation error" in error_text:
                 logger.info(
-                    f"[Prompt-Call] Prompt called with invalid parameters: {prompt_name}. Result: {result}"
+                    f"[Prompt-Call] Prompt called with invalid parameters: {prompt_name}."
                 )
                 raise HTTPException(status_code=400, detail=str(result))
 
-            logger.error(f"[Prompt-Call] Error in prompt {prompt_name}: {result}")
+            logger.error(f"[Prompt-Call] Error in prompt {prompt_name}")
             raise HTTPException(status_code=500, detail=str(result))
         return result
+    except ResponseTooLargeError as e:
+        # Deterministic for this call; the oversized content is never relayed.
+        raise HTTPException(status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(e))
     except HTTPException as e:
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Prompt-Call] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        # Handle TaskGroup exceptions with multiple sub-exceptions
-        log_exception_with_details(logger, "[Prompt-Call]", e)
+        # Downstream exception messages can embed request/response content,
+        # so only sanitized details reach the logs on this path.
+        log_sanitized_exception(logger, "[Prompt-Call]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -666,8 +747,17 @@ async def start_session(
 ):
     try:
         with tracer.start_as_current_span("start_session") as span:
+            # Same bridge-level authorization boundary as mcp_session_context:
+            # a persistent session must not be creatable by callers outside
+            # BRIDGE_REQUIRED_GROUPS.
+            try:
+                ensure_caller_in_required_groups(access_token)
+            except CallerNotAuthorizedError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail)
             x_inxm_mcp_session = session_id(str(uuid.uuid4()), access_token)
-            span.set_attribute("session.id", x_inxm_mcp_session)
+            # Session values embed the caller's access token; only a
+            # fingerprint may become a span attribute.
+            span.set_attribute("session.id", token_fingerprint(x_inxm_mcp_session))
             if group:
                 span.set_attribute("session.group", group)
 
@@ -755,7 +845,7 @@ async def close_session(
                 ),
                 access_token,
             )
-            span.set_attribute("session.id", x_inxm_mcp_session)
+            span.set_attribute("session.id", token_fingerprint(x_inxm_mcp_session))
             if x_inxm_mcp_session is None:
                 logger.warning("[Session] Session header missing on close.")
                 raise HTTPException(status_code=400, detail="Session header missing")

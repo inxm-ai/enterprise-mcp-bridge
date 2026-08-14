@@ -16,15 +16,24 @@ from app.session_manager.session_manager import SessionManagerBase
 from app.models import RunPromptResult, RunToolsResult
 from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
-from app.oauth.user_info import get_data_access_manager
+from app.oauth.user_info import (
+    CallerNotAuthorizedError,
+    ensure_caller_in_required_groups,
+    get_data_access_manager,
+)
 from app.utils import mask_token
+from app.utils.mcp_operation import (
+    build_trace_meta,
+    downstream_call_kwargs,
+    encoded_result_size,
+)
 from app.vars import (
     MCP_MAP_HEADER_TO_INPUT,
     TOOL_OUTPUT_SCHEMAS,
     MCP_BASE_PATH,
     get_tool_output_schema,
 )
-
+from app import vars as app_vars
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -73,6 +82,70 @@ def get_tool_name(tool: Any) -> Optional[str]:
     return name
 
 
+class ToolPolicyDeniedError(Exception):
+    """A tool call was rejected by the INCLUDE_TOOLS/EXCLUDE_TOOLS policy."""
+
+    def __init__(self, tool_name: str):
+        self.tool_name = tool_name
+        super().__init__(f"Tool not available: {tool_name}")
+
+
+def tool_allowed(tool_name: Optional[str]) -> bool:
+    """Single policy check shared by discovery (tools/list) and execution.
+
+    Discovery filtering alone is not a boundary: a client can call a hidden
+    tool directly, so every execution path must consult this same check.
+    """
+    if not tool_name:
+        return False
+    include_match = any(
+        matches_pattern(tool_name, pattern) for pattern in INCLUDE_TOOLS if pattern
+    )
+    exclude_match = any(
+        matches_pattern(tool_name, pattern) for pattern in EXCLUDE_TOOLS if pattern
+    )
+    if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
+        return False
+    if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
+        return False
+    return True
+
+
+def ensure_tool_allowed(tool_name: str) -> None:
+    """Fail closed before any downstream contact for disallowed tools."""
+    if not tool_allowed(tool_name):
+        logger.warning(f"[ToolPolicy] Rejected disallowed tool call: {tool_name}")
+        raise ToolPolicyDeniedError(tool_name)
+
+
+class ResponseTooLargeError(Exception):
+    """Downstream response exceeded the configured bridge byte ceiling."""
+
+    def __init__(self, size: int, limit: int):
+        self.size = size
+        self.limit = limit
+        super().__init__(
+            f"Downstream response of {size} bytes exceeds the configured "
+            f"ceiling of {limit} bytes"
+        )
+
+
+def enforce_response_ceiling(result: Any) -> Any:
+    """Reject results larger than MCP_MAX_RESPONSE_BYTES (0 disables).
+
+    Downstream count caps do not bound every serialized response, so the
+    bridge enforces its own named byte ceiling. The oversized content is
+    dropped, never partially relayed.
+    """
+    limit = app_vars.MCP_MAX_RESPONSE_BYTES
+    if limit <= 0:
+        return result
+    size = encoded_result_size(result)
+    if size is not None and size > limit:
+        raise ResponseTooLargeError(size, limit)
+    return result
+
+
 def filter_tools(tools: Any) -> list:
     """Filter tool definitions using INCLUDE_TOOLS and EXCLUDE_TOOLS rules."""
     tool_list = _to_tool_list(tools)
@@ -81,20 +154,12 @@ def filter_tools(tools: Any) -> list:
         name = get_tool_name(tool)
         if not name:
             continue
-        include_match = any(
-            matches_pattern(name, pattern) for pattern in INCLUDE_TOOLS if pattern
-        )
-        exclude_match = any(
-            matches_pattern(name, pattern) for pattern in EXCLUDE_TOOLS if pattern
-        )
+        allowed = tool_allowed(name)
         logger.debug(
-            f"[Tools] Filter check -> Tool: {name}, Include Match: {include_match} - {INCLUDE_TOOLS}, Exclude Match: {exclude_match} - {EXCLUDE_TOOLS}"
+            f"[Tools] Filter check -> Tool: {name}, Allowed: {allowed} - include={INCLUDE_TOOLS}, exclude={EXCLUDE_TOOLS}"
         )
-        if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
-            continue
-        if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
-            continue
-        filtered.append(tool)
+        if allowed:
+            filtered.append(tool)
     return filtered
 
 
@@ -386,6 +451,13 @@ async def mcp_session_context(
     incoming_headers: Optional[dict[str, str]] = None,
 ):
     """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes."""
+    # Bridge-level authorization boundary: when BRIDGE_REQUIRED_GROUPS is set,
+    # every request through this seam is gated before any downstream contact.
+    try:
+        ensure_caller_in_required_groups(access_token)
+    except CallerNotAuthorizedError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
     # Sessionless path: validate group access (if present) and open a transient MCP session
     if x_inxm_mcp_session is None:
         if group and access_token:
@@ -411,7 +483,9 @@ async def mcp_session_context(
                         return await list_resources(session.list_resources)
 
                     async def read_resource(self, resource_name: str):
-                        return await session.read_resource(resource_name)
+                        return enforce_response_ceiling(
+                            await session.read_resource(resource_name)
+                        )
 
                     async def list_tools(self):
                         tools = await session.list_tools()
@@ -423,6 +497,7 @@ async def mcp_session_context(
                         args: Optional[Dict],
                         access_token_inner: Optional[str],
                     ):
+                        ensure_tool_allowed(tool_name)
                         tools = await session.list_tools()
                         decorated_args = await decorate_args_with_oauth_token(
                             tools, tool_name, args, access_token_inner
@@ -431,8 +506,12 @@ async def mcp_session_context(
                         decorated_args = inject_headers_into_args(
                             tools, tool_name, decorated_args, incoming_headers
                         )
-                        result = await session.call_tool(tool_name, decorated_args)
-                        return RunToolsResult(result)
+                        result = await session.call_tool(
+                            tool_name,
+                            decorated_args,
+                            **downstream_call_kwargs(session.call_tool),
+                        )
+                        return RunToolsResult(enforce_response_ceiling(result))
 
                     async def call_tool_with_progress(
                         self,
@@ -459,6 +538,7 @@ async def mcp_session_context(
                         Returns:
                             RunToolsResult with the tool execution result
                         """
+                        ensure_tool_allowed(tool_name)
                         tools = await session.list_tools()
                         decorated_args = await decorate_args_with_oauth_token(
                             tools, tool_name, args, access_token_inner
@@ -474,7 +554,7 @@ async def mcp_session_context(
                         if not call_fn:
                             raise RuntimeError("MCP session missing call_tool")
 
-                        call_kwargs: dict[str, Any] = {}
+                        call_kwargs: dict[str, Any] = downstream_call_kwargs(call_fn)
                         try:
                             sig = inspect.signature(call_fn)
                             if "progress_callback" in sig.parameters:
@@ -488,7 +568,7 @@ async def mcp_session_context(
                                 call_kwargs["log_callback"] = log_callback
 
                         result = await call_fn(tool_name, decorated_args, **call_kwargs)
-                        return RunToolsResult(result)
+                        return RunToolsResult(enforce_response_ceiling(result))
 
                     async def call_tool_streaming(
                         self,
@@ -602,7 +682,7 @@ async def mcp_session_context(
                         result = await call_prompt(
                             session.get_prompt, prompt_name, args
                         )
-                        return RunPromptResult(result)
+                        return enforce_response_ceiling(RunPromptResult(result))
 
                 yield SessionDelegate()
         except ValueError as exc:
@@ -635,6 +715,7 @@ async def mcp_session_context(
             args: Optional[Dict],
             access_token_inner: Optional[str],
         ):
+            ensure_tool_allowed(tool_name)
             tools = await mcp_task.request("list_tools")
             decorated_args = await decorate_args_with_oauth_token(
                 tools, tool_name, args, access_token_inner
@@ -644,7 +725,14 @@ async def mcp_session_context(
                 tools, tool_name, decorated_args, incoming_headers
             )
             result = await mcp_task.request(
-                {"action": "run_tool", "tool_name": tool_name, "args": decorated_args}
+                {
+                    "action": "run_tool",
+                    "tool_name": tool_name,
+                    "args": decorated_args,
+                    # Trace context is captured here because the session task
+                    # runs outside this request's span context.
+                    "trace_meta": build_trace_meta(),
+                }
             )
             if isinstance(result, dict):
                 if result.get("error") == "feedback_required":
@@ -659,7 +747,7 @@ async def mcp_session_context(
                         session_key=x_inxm_mcp_session,
                         payload=result.get("elicitation") or {},
                     )
-            return RunToolsResult(result)
+            return RunToolsResult(enforce_response_ceiling(result))
 
         async def call_tool_with_progress(
             self,
@@ -682,6 +770,7 @@ async def mcp_session_context(
             Returns:
                 RunToolsResult with the tool execution result
             """
+            ensure_tool_allowed(tool_name)
             tools = await mcp_task.request("list_tools")
             decorated_args = await decorate_args_with_oauth_token(
                 tools, tool_name, args, access_token_inner
@@ -696,6 +785,7 @@ async def mcp_session_context(
                     "args": decorated_args,
                     "progress_callback": progress_callback,
                     "log_callback": log_callback,
+                    "trace_meta": build_trace_meta(),
                 }
             )
             if isinstance(result, dict):
@@ -711,7 +801,7 @@ async def mcp_session_context(
                         session_key=x_inxm_mcp_session,
                         payload=result.get("elicitation") or {},
                     )
-            return RunToolsResult(result)
+            return RunToolsResult(enforce_response_ceiling(result))
 
         async def call_tool_streaming(
             self,
@@ -828,8 +918,10 @@ async def mcp_session_context(
             return await list_resources(request)
 
         async def read_resource(self, resource_name: str):
-            return await mcp_task.request(
-                {"action": "read_resource", "resource_name": resource_name}
+            return enforce_response_ceiling(
+                await mcp_task.request(
+                    {"action": "read_resource", "resource_name": resource_name}
+                )
             )
 
         async def call_prompt(
@@ -842,7 +934,9 @@ async def mcp_session_context(
                     {"action": "get_prompt", "prompt_name": prompt_name, "args": args}
                 )
 
-            return RunPromptResult(await call_prompt(request, prompt_name, args))
+            return enforce_response_ceiling(
+                RunPromptResult(await call_prompt(request, prompt_name, args))
+            )
 
     try:
         yield TaskDelegate()
