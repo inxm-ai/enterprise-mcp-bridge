@@ -231,20 +231,12 @@ MCP_TRACE_BAGGAGE_ALLOWLIST = [
 # not only its ingress — enforces the authorization boundary: an
 # authenticated caller outside these groups gets 403 before any downstream
 # contact. Group membership is read from VERIFIED claims only (signature via
-# the realm JWKS, expiry, exact issuer, and the client allowlist below): the
+# the realm JWKS, expiry and exact issuer): the
 # bridge accepts direct Bearer tokens, so a forged unsigned token must never
 # pass this gate.
 BRIDGE_REQUIRED_GROUPS = [
     g.strip() for g in os.getenv("BRIDGE_REQUIRED_GROUPS", "").split(",") if g.strip()
 ]
-# Clients whose tokens the group gate accepts (matched against azp, falling
-# back to aud). REQUIRED whenever BRIDGE_REQUIRED_GROUPS is set — with no
-# allowlist the gate fails closed rather than trusting any client in the
-# realm (same idiom as USER_API_KEY_ALLOWED_CLIENTS).
-BRIDGE_ALLOWED_CLIENTS = [
-    c.strip() for c in os.getenv("BRIDGE_ALLOWED_CLIENTS", "").split(",") if c.strip()
-]
-
 # Ceiling on the JSON-encoded size of a downstream tool result. 0 disables
 # the check. Some downstream MCP servers enforce count-based limits, which do
 # not bound every serialized response, so the bridge has its own byte cap.
