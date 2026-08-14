@@ -27,12 +27,29 @@ from mcp.server.lowlevel.server import request_ctx as lowlevel_request_ctx
 
 from app.elicitation import ElicitationRequiredError, get_elicitation_coordinator
 from app.oauth.decorator import decorate_args_with_oauth_token
+from app.oauth.user_info import (
+    CallerNotAuthorizedError,
+    ensure_caller_in_required_groups,
+)
 from app.session import mcp_session
 from app.session_manager.session_context import (
     _to_tool_list,
+    enforce_response_ceiling,
+    ensure_tool_allowed,
     filter_tools,
     inject_headers_into_args,
     list_resources as _list_resources_helper,
+)
+from app.utils.mcp_operation import (
+    MCP_METHOD_PROMPTS_GET,
+    MCP_METHOD_RESOURCES_READ,
+    MCP_METHOD_TOOLS_CALL,
+    TRANSPORT_SSE,
+    classify_error_text,
+    downstream_call_kwargs,
+    log_sanitized_exception,
+    mcp_operation_span,
+    safe_arg_keys,
 )
 from app.vars import (
     MCP_BASE_PATH,
@@ -77,6 +94,36 @@ def _extract_access_token(request: Request) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _request_telemetry_context() -> dict:
+    """Best-effort request/client identifiers from the low-level MCP context.
+
+    Missing context is omitted, never fabricated; nothing here reads request
+    arguments or results.
+    """
+    info: dict = {
+        "request_id": None,
+        "protocol_version": None,
+        "client_name": None,
+        "client_version": None,
+    }
+    ctx = lowlevel_request_ctx.get(None)
+    if ctx is None:
+        return info
+    request_id = getattr(ctx, "request_id", None)
+    if request_id is not None:
+        info["request_id"] = str(request_id)
+    client_params = getattr(getattr(ctx, "session", None), "client_params", None)
+    if client_params is not None:
+        protocol_version = getattr(client_params, "protocolVersion", None)
+        if protocol_version:
+            info["protocol_version"] = str(protocol_version)
+        client_info = getattr(client_params, "clientInfo", None)
+        if client_info is not None:
+            info["client_name"] = getattr(client_info, "name", None)
+            info["client_version"] = getattr(client_info, "version", None)
+    return info
+
+
 def _build_proxy_server(
     downstream,
     access_token: Optional[str],
@@ -94,32 +141,56 @@ def _build_proxy_server(
 
     @proxy.call_tool(validate_input=False)
     async def _call_tool(name: str, arguments: dict) -> types.CallToolResult:
-        tools = await downstream.list_tools()
-        args = await decorate_args_with_oauth_token(
-            tools, name, arguments, access_token
-        )
-        args = inject_headers_into_args(tools, name, args, incoming_headers)
-        for _ in range(3):
-            try:
-                return await downstream.call_tool(name, args)
-            except ElicitationRequiredError as exc:
-                if not session_key:
-                    raise
-                ctx = lowlevel_request_ctx.get(None)
-                if not ctx or not getattr(ctx, "session", None):
-                    raise
-                client_result = await ctx.session.elicit(
-                    message=str(exc.payload.get("message") or ""),
-                    requestedSchema=exc.payload.get("requestedSchema") or {},
-                )
-                coordinator.submit_response(
-                    session_key,
-                    {
-                        "action": client_result.action,
-                        "content": client_result.content,
-                    },
-                )
-        raise RuntimeError("Elicitation retry limit exceeded for proxied tool call")
+        with mcp_operation_span(
+            method=MCP_METHOD_TOOLS_CALL,
+            target=name,
+            transport=TRANSPORT_SSE,
+            session_value=session_key,
+            access_token=access_token,
+            arg_keys=safe_arg_keys(arguments),
+            **_request_telemetry_context(),
+        ) as op:
+            # Discovery filtering alone is bypassable by a direct call, so the
+            # same policy check runs before any downstream contact.
+            ensure_tool_allowed(name)
+            tools = await downstream.list_tools()
+            args = await decorate_args_with_oauth_token(
+                tools, name, arguments, access_token
+            )
+            args = inject_headers_into_args(tools, name, args, incoming_headers)
+            for _ in range(3):
+                try:
+                    result = await downstream.call_tool(
+                        name,
+                        args,
+                        **downstream_call_kwargs(downstream.call_tool),
+                    )
+                    result = enforce_response_ceiling(result)
+                    if getattr(result, "isError", False):
+                        content = getattr(result, "content", None)
+                        error_text = content[0].text if content else ""
+                        op.record_error_result(classify_error_text(error_text), result)
+                    else:
+                        op.record_success(result)
+                    return result
+                except ElicitationRequiredError as exc:
+                    if not session_key:
+                        raise
+                    ctx = lowlevel_request_ctx.get(None)
+                    if not ctx or not getattr(ctx, "session", None):
+                        raise
+                    client_result = await ctx.session.elicit(
+                        message=str(exc.payload.get("message") or ""),
+                        requestedSchema=exc.payload.get("requestedSchema") or {},
+                    )
+                    coordinator.submit_response(
+                        session_key,
+                        {
+                            "action": client_result.action,
+                            "content": client_result.content,
+                        },
+                    )
+            raise RuntimeError("Elicitation retry limit exceeded for proxied tool call")
 
     @proxy.list_prompts()
     async def _list_prompts() -> list[types.Prompt]:
@@ -130,7 +201,20 @@ def _build_proxy_server(
     async def _get_prompt(
         name: str, arguments: dict[str, str] | None
     ) -> types.GetPromptResult:
-        return await downstream.get_prompt(name, arguments)
+        with mcp_operation_span(
+            method=MCP_METHOD_PROMPTS_GET,
+            target=name,
+            transport=TRANSPORT_SSE,
+            session_value=session_key,
+            access_token=access_token,
+            arg_keys=safe_arg_keys(arguments),
+            **_request_telemetry_context(),
+        ) as op:
+            result = enforce_response_ceiling(
+                await downstream.get_prompt(name, arguments)
+            )
+            op.record_success(result)
+            return result
 
     @proxy.list_resources()
     async def _list_resources() -> list[types.Resource]:
@@ -139,8 +223,18 @@ def _build_proxy_server(
 
     # read_resource – register handler directly for clean result pass-through
     async def _read_resource_handler(req: types.ReadResourceRequest):
-        result = await downstream.read_resource(req.params.uri)
-        return types.ServerResult(result)
+        with mcp_operation_span(
+            method=MCP_METHOD_RESOURCES_READ,
+            transport=TRANSPORT_SSE,
+            session_value=session_key,
+            access_token=access_token,
+            **_request_telemetry_context(),
+        ) as op:
+            result = enforce_response_ceiling(
+                await downstream.read_resource(req.params.uri)
+            )
+            op.record_success(result)
+            return types.ServerResult(result)
 
     proxy.request_handlers[types.ReadResourceRequest] = _read_resource_handler
 
@@ -164,6 +258,16 @@ class _SSEConnectionApp:
         access_token = _extract_access_token(request)
         group = request.query_params.get("group")
         incoming_headers = dict(request.headers)
+
+        # Bridge-level authorization boundary (BRIDGE_REQUIRED_GROUPS): reject
+        # before the SSE stream opens so the client gets a proper HTTP status.
+        try:
+            ensure_caller_in_required_groups(access_token)
+        except CallerNotAuthorizedError as exc:
+            logger.warning(f"[MCP-SSE] Connection rejected: {exc.detail}")
+            resp = Response(exc.detail, status_code=exc.status_code)
+            await resp(scope, receive, send)
+            return
 
         # Validate group access *before* opening the SSE stream so we can
         # return a proper HTTP error response.
@@ -207,7 +311,8 @@ class _SSEConnectionApp:
                         proxy.create_initialization_options(),
                     )
         except Exception as exc:
-            logger.error(f"[MCP-SSE] SSE session error: {exc}")
+            # Session errors can wrap downstream content; keep them sanitized.
+            log_sanitized_exception(logger, "[MCP-SSE]", exc)
 
 
 class _SSEMessagesApp:

@@ -41,20 +41,27 @@ from app.vars import (
 logger = logging.getLogger("uvicorn.error")
 
 
-def _serialize_log_data(data: object) -> str:
-    """Render MCP log payload safely for application logs."""
+def _describe_log_data(data: object) -> str:
+    """Safe metadata about an MCP log payload — never its content.
+
+    Downstream logging notifications are arbitrary, untrusted payloads that
+    can carry request arguments, results or credentials; only their shape is
+    recorded — and the payload is never serialized, not even to measure it.
+    """
     try:
         if isinstance(data, (dict, list)):
-            return json.dumps(data, ensure_ascii=False)
-        return str(data)
+            return f"<payload type={type(data).__name__} items={len(data)}>"
+        if isinstance(data, str):
+            return f"<payload type=str chars={len(data)}>"
+        return f"<payload type={type(data).__name__}>"
     except Exception:
-        return "<unserializable MCP log payload>"
+        return f"<payload type={type(data).__name__}>"
 
 
 async def _log_mcp_notification(
     params: types.LoggingMessageNotificationParams,
 ) -> None:
-    """Forward MCP server log notifications into the application logger."""
+    """Record MCP server log notifications without their payload content."""
     log_fn = {
         "debug": logger.debug,
         "info": logger.info,
@@ -67,8 +74,10 @@ async def _log_mcp_notification(
     }.get(params.level, logger.info)
 
     logger_name = params.logger or "MCP"
-    message = _serialize_log_data(params.data)
-    log_fn(f"[MCP][{logger_name}][{params.level.upper()}] {message}")
+    log_fn(
+        f"[MCP][{logger_name}][{params.level.upper()}] "
+        f"{_describe_log_data(params.data)}"
+    )
 
 
 def _make_elicitation_callback(session_key: Optional[str]):

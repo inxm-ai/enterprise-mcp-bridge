@@ -66,8 +66,7 @@ def _get_jwks_client():
         import ssl
 
         jwks_url = (
-            f"{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}"
-            "/protocol/openid-connect/certs"
+            f"{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}" "/protocol/openid-connect/certs"
         )
         ssl_context = None
         if AUTH_ALLOW_UNSAFE_CERT:
@@ -80,15 +79,20 @@ def _get_jwks_client():
     return _jwks_client
 
 
-def verified_keycloak_claims(token: str) -> Dict[str, Any]:
-    """Verify a Keycloak token before it may release a stored credential.
+def verified_caller_claims(
+    token: str, *, allowed_clients: list, allowlist_name: str
+) -> Dict[str, Any]:
+    """Verify a Keycloak token and return its claims, or fail closed.
 
     Enforces: signature against the realm JWKS, a present and valid exp,
     the exact configured issuer (KEYCLOAK_ISSUER, defaulting to
-    {AUTH_BASE_URL}/realms/{realm}), and that the token was issued to an
-    allow-listed client (azp, falling back to aud). Fails closed with
-    UserLoggedOutException on any violation — including an unconfigured
-    allowlist, so no client in the realm is trusted implicitly.
+    {AUTH_BASE_URL}/realms/{realm}), and that the token was issued to a
+    client in the caller-supplied allowlist (azp, falling back to aud).
+    Fails closed with UserLoggedOutException on any violation — including
+    an empty allowlist, so no client in the realm is trusted implicitly.
+    The bridge accepts direct Bearer tokens (desktop clients bypass the
+    ingress proxy), so any authorization decision based on token claims
+    must go through this function, never an unverified decode.
     """
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -109,20 +113,29 @@ def verified_keycloak_claims(token: str) -> Dict[str, Any]:
             f"Access token issued by unexpected issuer: {claims.get('iss')}"
         )
 
-    if not USER_API_KEY_ALLOWED_CLIENTS:
+    if not allowed_clients:
         raise UserLoggedOutException(
-            "USER_API_KEY_ALLOWED_CLIENTS is not configured; refusing to "
-            "release credentials for tokens from unspecified clients"
+            f"{allowlist_name} is not configured; refusing to trust tokens "
+            "from unspecified clients"
         )
     azp = claims.get("azp")
     aud = claims.get("aud")
     audiences = aud if isinstance(aud, list) else [aud] if aud else []
     token_clients = [c for c in [azp, *audiences] if c]
-    if not any(c in USER_API_KEY_ALLOWED_CLIENTS for c in token_clients):
+    if not any(c in allowed_clients for c in token_clients):
         raise UserLoggedOutException(
             f"Access token client(s) {token_clients} not in the allowlist"
         )
     return claims
+
+
+def verified_keycloak_claims(token: str) -> Dict[str, Any]:
+    """Verify a Keycloak token before it may release a stored credential."""
+    return verified_caller_claims(
+        token,
+        allowed_clients=USER_API_KEY_ALLOWED_CLIENTS,
+        allowlist_name="USER_API_KEY_ALLOWED_CLIENTS",
+    )
 
 
 class UserApiKeyTokenRetriever(TokenRetriever):
@@ -152,9 +165,7 @@ class UserApiKeyTokenRetriever(TokenRetriever):
         # itself re-validates the token server-side.
         claims = self._verified_claims(keycloak_token)
         email = (
-            claims.get("email")
-            or claims.get("preferred_username")
-            or claims.get("upn")
+            claims.get("email") or claims.get("preferred_username") or claims.get("upn")
         )
         if not email:
             raise UserLoggedOutException(

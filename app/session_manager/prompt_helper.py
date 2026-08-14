@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.models import RunPromptResult
-
+from app.utils.mcp_operation import safe_arg_keys
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -122,6 +122,7 @@ async def call_prompt(call: any, prompt_name: str, args: Optional[dict] = []):
             )
         )
 
-    # Call the prompt with the provided arguments
-    logger.info(f"Calling prompt: {prompt_name} with args: {args}")
+    # Call the prompt with the provided arguments; argument values are
+    # sensitive request content and stay out of the logs.
+    logger.info(f"Calling prompt: {prompt_name} with arg keys: {safe_arg_keys(args)}")
     return await call(prompt_name, args)

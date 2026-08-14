@@ -10,11 +10,23 @@ from mcp import StdioServerParameters
 
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from ..utils.exception_logging import log_exception_with_details
+from ..utils.mcp_operation import downstream_call_kwargs, safe_arg_keys
 from .client_strategy import (
     MCPClientStrategy,
     LocalMCPClientStrategy,
     build_mcp_client_strategy,
 )
+
+
+def _summarize_request(req) -> str:
+    """Loggable request summary without arguments or payload content."""
+    if isinstance(req, dict):
+        action = req.get("action", "unknown")
+        target = (
+            req.get("tool_name") or req.get("prompt_name") or req.get("resource_name")
+        )
+        return f"action={action} target={target}"
+    return str(req)
 
 
 def try_get_session_id(
@@ -111,10 +123,16 @@ class MCPSessionBase(ABC):
             await self._task
 
     async def request(self, req):
-        logger.debug(f"[{self.__class__.__name__}] Received request: {req}")
+        # Requests carry decorated arguments (including injected credentials)
+        # and responses carry tool results — neither may be logged raw.
+        logger.debug(
+            f"[{self.__class__.__name__}] Received request: {_summarize_request(req)}"
+        )
         await self.request_queue.put(req)
         response = await self.response_queue.get()
-        logger.debug(f"[{self.__class__.__name__}] Response: {response}")
+        logger.debug(
+            f"[{self.__class__.__name__}] Response type: {type(response).__name__}"
+        )
         return response
 
 
@@ -136,7 +154,9 @@ class MCPLocalSessionTask(MCPSessionBase):
                 logger.info("[MCPLocalSessionTask] MCP session established.")
                 while True:
                     req = await self.request_queue.get()
-                    logger.debug(f"[MCPLocalSessionTask] Processing request: {req}")
+                    logger.debug(
+                        f"[MCPLocalSessionTask] Processing: {_summarize_request(req)}"
+                    )
                     if req == "ping":
                         if (
                             last_trigger
@@ -204,7 +224,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                         prompt_name = req["prompt_name"]
                         args = req.get("args", {})
                         logger.info(
-                            f"[MCPLocalSessionTask] Running prompt: {prompt_name} with args: {args}"
+                            f"[MCPLocalSessionTask] Running prompt: {prompt_name} "
+                            f"with arg keys: {safe_arg_keys(args)}"
                         )
                         try:
                             result = await session.get_prompt(prompt_name, args)
@@ -223,7 +244,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                         progress_callback = req.get("progress_callback")
                         log_callback = req.get("log_callback")
                         logger.info(
-                            f"[MCPLocalSessionTask] Running tool with progress: {tool_name} with args: {args}"
+                            f"[MCPLocalSessionTask] Running tool with progress: {tool_name} "
+                            f"with arg keys: {safe_arg_keys(args)}"
                         )
                         try:
                             call_fn = getattr(
@@ -234,7 +256,9 @@ class MCPLocalSessionTask(MCPSessionBase):
                                     "MCP session missing call_tool implementation"
                                 )
 
-                            call_kwargs: dict[str, object] = {}
+                            call_kwargs: dict[str, object] = downstream_call_kwargs(
+                                call_fn, trace_meta=req.get("trace_meta")
+                            )
                             try:
                                 sig = inspect.signature(call_fn)
                                 if "progress_callback" in sig.parameters:
@@ -268,10 +292,18 @@ class MCPLocalSessionTask(MCPSessionBase):
                         tool_name = req["tool_name"]
                         args = req.get("args", {})
                         logger.info(
-                            f"[MCPLocalSessionTask] Running tool: {tool_name} with args: {args}"
+                            f"[MCPLocalSessionTask] Running tool: {tool_name} "
+                            f"with arg keys: {safe_arg_keys(args)}"
                         )
                         try:
-                            result = await session.call_tool(tool_name, args)
+                            result = await session.call_tool(
+                                tool_name,
+                                args,
+                                **downstream_call_kwargs(
+                                    session.call_tool,
+                                    trace_meta=req.get("trace_meta"),
+                                ),
+                            )
                             await self.response_queue.put(result)
                         except ElicitationRequiredError as exc:
                             await self.response_queue.put(exc.to_client_payload())

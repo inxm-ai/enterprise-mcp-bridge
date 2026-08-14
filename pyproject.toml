@@ -3,7 +3,7 @@
 # lists and versions in sync when either changes.
 [project]
 name = "enterprise-mcp-bridge"
-version = "0.4.10"
+version = "0.4.11"
 description = "Wrapper for MCP Clients to be called via REST on a platform"
 license = "GPL-3.0"
 authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]

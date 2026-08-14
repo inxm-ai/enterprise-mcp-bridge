@@ -21,6 +21,13 @@ from app.utils.exception_logging import (
     log_exception_with_details,
 )
 from app.utils import token_fingerprint
+from app.utils.mcp_operation import (
+    MCP_METHOD_TOOLS_CALL,
+    TRANSPORT_REST,
+    classify_error_text,
+    mcp_operation_span,
+    safe_arg_keys,
+)
 from app.vars import SESSION_FIELD_NAME
 from app.sse import stream_tool_call, create_sse_response
 from opentelemetry import trace
@@ -152,7 +159,9 @@ async def run_tool_with_progress(
                     group,
                     incoming_headers,
                 ) as session:
-                    # Create a streaming tool call function
+                    # Create a streaming tool call function. The canonical
+                    # operation span wraps the awaited call (not the SSE
+                    # generator) so it never spans across stream yields.
                     async def call_tool_with_callbacks(
                         name: str,
                         tool_args: Dict[str, Any],
@@ -160,13 +169,31 @@ async def run_tool_with_progress(
                         progress_callback,
                         log_callback,
                     ):
-                        return await session.call_tool_with_progress(
-                            name,
-                            tool_args,
-                            token,
-                            progress_callback=progress_callback,
-                            log_callback=log_callback,
-                        )
+                        with mcp_operation_span(
+                            method=MCP_METHOD_TOOLS_CALL,
+                            target=name,
+                            transport=TRANSPORT_REST,
+                            session_value=x_inxm_mcp_session,
+                            access_token=token,
+                            group=group,
+                            arg_keys=safe_arg_keys(tool_args),
+                        ) as op:
+                            result = await session.call_tool_with_progress(
+                                name,
+                                tool_args,
+                                token,
+                                progress_callback=progress_callback,
+                                log_callback=log_callback,
+                            )
+                            if getattr(result, "isError", False):
+                                content = getattr(result, "content", None)
+                                error_text = content[0].text if content else ""
+                                op.record_error_result(
+                                    classify_error_text(error_text), result
+                                )
+                            else:
+                                op.record_success(result)
+                            return result
 
                     # Stream the tool call events
                     async for event in stream_tool_call(
