@@ -321,9 +321,15 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         retriever = TokenRetrieverFactory().get()
         token_result = retriever.retrieve_token(self.access_token or "")
         token_value = token_result.get("access_token") if token_result else None
+        if not token_value:
+            raise UserLoggedOutException(
+                "Ambient identity provider returned no usable token"
+            )
         token_type = (
             (token_result.get("token_type") if token_result else "Bearer") or "Bearer"
         )
+        if token_type.lower() == "bearer":
+            token_type = "Bearer"
         authorization_value = self._format_auth_header_value(token_value, token_type)
 
         self._add_env_headers()
