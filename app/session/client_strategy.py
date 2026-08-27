@@ -40,6 +40,10 @@ from app.vars import (
 
 logger = logging.getLogger("uvicorn.error")
 
+# Providers that self-fetch a fresh, short-lived bearer token ambiently from
+# the host platform, independent of any end-user/caller identity.
+AMBIENT_IDENTITY_PROVIDERS = {"gcp-metadata", "azure-metadata", "aws-metadata"}
+
 
 def _describe_log_data(data: object) -> str:
     """Safe metadata about an MCP log payload — never its content.
@@ -234,6 +238,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         )
 
     def _prepare_auth(self) -> None:
+        if AUTH_PROVIDER in AMBIENT_IDENTITY_PROVIDERS:
+            self._prepare_ambient_identity_auth()
+            return
+
         if self.anon:
             logger.info(
                 "[RemoteMCP] Anonymous remote session requested; skipping OAuth setup"
@@ -301,6 +309,30 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 "[RemoteMCP] Using provider token for %s header",
                 MCP_REMOTE_AUTH_HEADER_NAME,
             )
+
+    def _prepare_ambient_identity_auth(self) -> None:
+        """Auth for providers that self-fetch a token from the host platform.
+
+        Cloud-agnostic on purpose: which platform it is lives entirely in
+        the TokenRetriever subclass the factory returns. No fallback to
+        MCP_REMOTE_BEARER_TOKEN or the incoming access token — a retriever
+        failure here is fail-closed and propagates as UserLoggedOutException.
+        """
+        retriever = TokenRetrieverFactory().get()
+        token_result = retriever.retrieve_token(self.access_token or "")
+        token_value = token_result.get("access_token") if token_result else None
+        token_type = (
+            (token_result.get("token_type") if token_result else "Bearer") or "Bearer"
+        )
+        authorization_value = self._format_auth_header_value(token_value, token_type)
+
+        self._add_env_headers()
+        self._forward_allowed_headers()
+        self.headers[MCP_REMOTE_AUTH_HEADER_NAME] = authorization_value
+        logger.info(
+            "[RemoteMCP] Using ambient identity token for %s header",
+            MCP_REMOTE_AUTH_HEADER_NAME,
+        )
 
     @staticmethod
     def _format_auth_header_value(token_value: str, token_type: str = "Bearer") -> str:

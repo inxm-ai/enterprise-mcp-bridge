@@ -174,6 +174,44 @@ KEYCLOAK_ISSUER = os.getenv("KEYCLOAK_ISSUER", "")
 AUTH_ALLOW_UNSAFE_CERT = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
 LOG_TOKEN_VALUES = os.getenv("LOG_TOKEN_VALUES", "false").lower() == "true"
 
+# AUTH_PROVIDER=gcp-metadata: fetch a fresh GCP service-account identity
+# token from the local metadata server on every connection (no persistence).
+# Only reachable when running on GCE/Cloud Run/GKE.
+GCP_METADATA_SERVER_URL = os.getenv(
+    "GCP_METADATA_SERVER_URL", "http://metadata.google.internal"
+)
+# Audience for the identity token. Empty (default) falls back to
+# MCP_REMOTE_SERVER, matching Cloud Run's own --audiences=<service-url>
+# convention. Override if the remote server validates against origin only.
+GCP_METADATA_IDENTITY_AUDIENCE = os.getenv("GCP_METADATA_IDENTITY_AUDIENCE", "")
+GCP_METADATA_TOKEN_TIMEOUT_SECONDS = float(
+    os.getenv("GCP_METADATA_TOKEN_TIMEOUT_SECONDS", "3")
+)
+
+# AUTH_PROVIDER=azure-metadata: fetch a fresh OAuth2 access token for a
+# resource from Azure's Instance Metadata Service on every connection (no
+# persistence). Only reachable when running on an Azure resource with a
+# managed identity assigned.
+AZURE_METADATA_SERVER_URL = os.getenv(
+    "AZURE_METADATA_SERVER_URL", "http://169.254.169.254"
+)
+# Resource/audience for the token. Empty (default) falls back to
+# MCP_REMOTE_SERVER.
+AZURE_METADATA_IDENTITY_RESOURCE = os.getenv("AZURE_METADATA_IDENTITY_RESOURCE", "")
+# Client ID of a user-assigned managed identity. Empty (default) uses the
+# resource's system-assigned managed identity.
+AZURE_METADATA_CLIENT_ID = os.getenv("AZURE_METADATA_CLIENT_ID", "")
+AZURE_METADATA_TOKEN_TIMEOUT_SECONDS = float(
+    os.getenv("AZURE_METADATA_TOKEN_TIMEOUT_SECONDS", "3")
+)
+
+# AUTH_PROVIDER=aws-metadata: read the IRSA/EKS Pod Identity OIDC token from
+# the file path in the standard AWS_WEB_IDENTITY_TOKEN_FILE env var on every
+# connection (no persistence, no bridge-specific config — EKS sets this
+# automatically). Unlike GCP/Azure this is a file read, not a metadata-
+# server HTTP call: AWS's IMDS hands out SigV4 signing credentials, not a
+# portable bearer token for an arbitrary external audience.
+
 MCP_SESSION_MANAGER = os.getenv("MCP_SESSION_MANAGER", "InMemorySessionManager")
 MCP_GROUP_DATA_ACCESS_TEMPLATE = os.getenv(
     "MCP_GROUP_DATA_ACCESS_TEMPLATE", "g/{group_id}"

@@ -9,6 +9,13 @@ from app.vars import (
     AUTH_BASE_URL,
     AUTH_PROVIDER,
     AUTH_TOKENS_INTERNAL_URL,
+    AZURE_METADATA_CLIENT_ID,
+    AZURE_METADATA_IDENTITY_RESOURCE,
+    AZURE_METADATA_SERVER_URL,
+    AZURE_METADATA_TOKEN_TIMEOUT_SECONDS,
+    GCP_METADATA_IDENTITY_AUDIENCE,
+    GCP_METADATA_SERVER_URL,
+    GCP_METADATA_TOKEN_TIMEOUT_SECONDS,
     INTERNAL_API_SECRET,
     KEYCLOAK_PROVIDER_ALIAS,
     KEYCLOAK_PROVIDER_REFRESH_MODE,
@@ -16,9 +23,11 @@ from app.vars import (
     KEYCLOAK_ISSUER,
     LOG_TOKEN_VALUES,
     MCP_CONNECTION_ID,
+    MCP_REMOTE_SERVER,
     SERVICE_NAME,
     USER_API_KEY_ALLOWED_CLIENTS,
 )
+import os
 import jwt
 from jwt import DecodeError, InvalidTokenError
 
@@ -44,6 +53,12 @@ class TokenRetrieverFactory:
             return KeyCloakTokenRetriever()
         elif provider == "user-api-key":
             return UserApiKeyTokenRetriever()
+        elif provider == "gcp-metadata":
+            return GcpMetadataTokenRetriever()
+        elif provider == "azure-metadata":
+            return AzureManagedIdentityTokenRetriever()
+        elif provider == "aws-metadata":
+            return AwsWebIdentityTokenRetriever()
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -241,6 +256,113 @@ class UserApiKeyTokenRetriever(TokenRetriever):
             )
         )
         return {"success": True, "access_token": key, "token_type": "Bearer"}
+
+
+class AmbientIdentityTokenRetriever(TokenRetriever):
+    """Base for retrievers that self-fetch a fresh, short-lived bearer
+    token ambiently from the host platform on every call.
+
+    Unlike KeyCloakTokenRetriever/UserApiKeyTokenRetriever, these ignore the
+    caller's token entirely and never persist anything — the platform is
+    trusted to vouch for the bridge's own identity. Any failure (timeout,
+    connection error, non-2xx, empty body, missing file) fails closed via
+    UserLoggedOutException: there is no legitimate fallback to a shared or
+    caller-supplied token for an ambient-identity provider.
+    """
+
+    unavailable_message = "Ambient identity provider unreachable"
+    logger = logger
+
+    def _fetch_token(self) -> str:
+        raise NotImplementedError
+
+    def retrieve_token(self, token: str) -> Dict[str, Any]:
+        try:
+            raw_token = self._fetch_token()
+        except UserLoggedOutException:
+            raise
+        except Exception as exc:
+            self.logger.error(
+                "[%s] %s: %s", type(self).__name__, self.unavailable_message, exc
+            )
+            raise UserLoggedOutException(self.unavailable_message) from exc
+
+        if not raw_token:
+            raise UserLoggedOutException(self.unavailable_message)
+
+        return {"success": True, "access_token": raw_token, "token_type": "Bearer"}
+
+
+class GcpMetadataTokenRetriever(AmbientIdentityTokenRetriever):
+    """AUTH_PROVIDER=gcp-metadata: GCE/Cloud Run/GKE metadata-server identity token."""
+
+    unavailable_message = (
+        "GCP metadata server unreachable — this auth mode requires running "
+        "on GCE/Cloud Run/GKE"
+    )
+
+    def _fetch_token(self) -> str:
+        audience = GCP_METADATA_IDENTITY_AUDIENCE or MCP_REMOTE_SERVER
+        url = (
+            f"{GCP_METADATA_SERVER_URL.rstrip('/')}/computeMetadata/v1/"
+            "instance/service-accounts/default/identity"
+        )
+        response = requests.get(
+            url,
+            headers={"Metadata-Flavor": "Google"},
+            params={"audience": audience},
+            timeout=GCP_METADATA_TOKEN_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.text.strip()
+
+
+class AzureManagedIdentityTokenRetriever(AmbientIdentityTokenRetriever):
+    """AUTH_PROVIDER=azure-metadata: Azure Instance Metadata Service managed-identity token."""
+
+    unavailable_message = (
+        "Azure Instance Metadata Service unreachable — this auth mode "
+        "requires running on an Azure resource with a managed identity"
+    )
+
+    def _fetch_token(self) -> str:
+        resource = AZURE_METADATA_IDENTITY_RESOURCE or MCP_REMOTE_SERVER
+        url = f"{AZURE_METADATA_SERVER_URL.rstrip('/')}/metadata/identity/oauth2/token"
+        params = {"api-version": "2018-02-01", "resource": resource}
+        if AZURE_METADATA_CLIENT_ID:
+            params["client_id"] = AZURE_METADATA_CLIENT_ID
+        response = requests.get(
+            url,
+            headers={"Metadata": "true"},
+            params=params,
+            timeout=AZURE_METADATA_TOKEN_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json().get("access_token")
+
+
+class AwsWebIdentityTokenRetriever(AmbientIdentityTokenRetriever):
+    """AUTH_PROVIDER=aws-metadata: EKS IRSA/Pod Identity projected OIDC token.
+
+    AWS's instance metadata service hands out SigV4 signing credentials, not
+    a portable bearer JWT for an arbitrary external audience, so there is no
+    metadata-server HTTP call to make here. The equivalent ambient,
+    short-lived identity token on AWS is the OIDC token Kubernetes projects
+    into the pod filesystem for IRSA/Pod Identity, at the path given by the
+    standard AWS_WEB_IDENTITY_TOKEN_FILE env var (set automatically by EKS).
+    """
+
+    unavailable_message = (
+        "AWS_WEB_IDENTITY_TOKEN_FILE unreadable — this auth mode requires "
+        "running on EKS with IAM Roles for Service Accounts (IRSA) / Pod Identity"
+    )
+
+    def _fetch_token(self) -> str:
+        token_file = os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE", "")
+        if not token_file:
+            raise UserLoggedOutException(self.unavailable_message)
+        with open(token_file, "r") as f:
+            return f.read().strip()
 
 
 class KeyCloakTokenRetriever(TokenRetriever):

@@ -236,6 +236,92 @@ Headers: X-Service-ID: {SERVICE_NAME}, X-Internal-Secret: {INTERNAL_API_SECRET}
 401/403 auth failure        -> retrieval error (fail closed)
 ```
 
+#### AUTH_PROVIDER=gcp-metadata / azure-metadata / aws-metadata (ambient cloud identity)
+
+These three providers self-fetch a fresh, short-lived bearer token from the
+platform the bridge is running on, on every remote-MCP connection. There is
+no caller-token dependency and no persistence — the platform vouches for the
+*bridge's own* identity, not the end user's. This makes them the right fit
+for unattended, service-to-service auth toward a Cloud Run/Azure/EKS-hosted
+remote MCP server, in contrast to `keycloak`/`user-api-key`, which forward or
+exchange the *requesting user's* identity.
+
+All three fail closed: if the platform call fails (unreachable, timeout,
+non-2xx, missing file), the bridge raises rather than falling back to
+`MCP_REMOTE_BEARER_TOKEN` or the incoming access token — a metadata-service
+outage must never silently swap in a shared or wrong credential.
+
+**`gcp-metadata`** — fetches a GCE/Cloud Run/GKE service-account identity
+token from the local metadata server. Only reachable when the bridge itself
+runs on that infrastructure.
+
+| Variable | Purpose |
+| --- | --- |
+| `GCP_METADATA_SERVER_URL` | Metadata server base URL (default `http://metadata.google.internal`; override to point at a stub server in tests) |
+| `GCP_METADATA_IDENTITY_AUDIENCE` | Audience claim for the identity token. Empty (default) falls back to `MCP_REMOTE_SERVER`, matching Cloud Run's own `--audiences=<service-url>` convention — override if the remote server validates against origin only |
+| `GCP_METADATA_TOKEN_TIMEOUT_SECONDS` | Timeout for the metadata-server call (default `3`) |
+
+```bash
+AUTH_PROVIDER="gcp-metadata"
+MCP_REMOTE_SERVER="https://my-mcp-service-abc123.a.run.app"
+```
+
+```
+GET {GCP_METADATA_SERVER_URL}/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>
+Headers: Metadata-Flavor: Google
+
+200 <raw JWT text body>   -> used directly as the bearer token
+non-2xx / timeout         -> retrieval error (fail closed)
+```
+
+**`azure-metadata`** — fetches an OAuth2 access token for a resource from
+Azure's Instance Metadata Service (IMDS), using the resource's managed
+identity. Only reachable when the bridge runs on an Azure resource
+(VM, Container App, AKS, etc.) with a managed identity assigned.
+
+| Variable | Purpose |
+| --- | --- |
+| `AZURE_METADATA_SERVER_URL` | IMDS base URL (default `http://169.254.169.254`; override to point at a stub server in tests) |
+| `AZURE_METADATA_IDENTITY_RESOURCE` | Resource/audience for the token. Empty (default) falls back to `MCP_REMOTE_SERVER` |
+| `AZURE_METADATA_CLIENT_ID` | Client ID of a user-assigned managed identity. Empty (default) uses the resource's system-assigned identity |
+| `AZURE_METADATA_TOKEN_TIMEOUT_SECONDS` | Timeout for the IMDS call (default `3`) |
+
+```bash
+AUTH_PROVIDER="azure-metadata"
+MCP_REMOTE_SERVER="https://my-mcp-app.azurewebsites.net"
+```
+
+```
+GET {AZURE_METADATA_SERVER_URL}/metadata/identity/oauth2/token?api-version=2018-02-01&resource=<resource>[&client_id=<AZURE_METADATA_CLIENT_ID>]
+Headers: Metadata: true
+
+200 {"access_token": "...", ...}   -> access_token field used as the bearer token
+non-2xx / timeout                  -> retrieval error (fail closed)
+```
+
+**`aws-metadata`** — reads the IRSA/EKS Pod Identity OIDC token from the
+file path in the standard `AWS_WEB_IDENTITY_TOKEN_FILE` env var, which EKS
+sets automatically for pods with a service-account IAM role (no
+bridge-specific config needed). **This is a file read, not an HTTP metadata
+call** — unlike GCP/Azure, AWS's instance metadata service hands out SigV4
+signing credentials for the AWS API, not a portable bearer JWT for an
+arbitrary external audience, so there is no metadata-server request that
+fits this use case on AWS. The IRSA-projected token (a JWT the Kubernetes
+kubelet rotates automatically, hourly by default) is the closest ambient,
+short-lived equivalent.
+
+```bash
+AUTH_PROVIDER="aws-metadata"
+# AWS_WEB_IDENTITY_TOKEN_FILE is set automatically by EKS; no other config needed.
+```
+
+```
+read({AWS_WEB_IDENTITY_TOKEN_FILE})
+
+file readable, non-empty -> contents (trimmed) used directly as the bearer token
+unset / missing / empty  -> retrieval error (fail closed)
+```
+
 #### MCP_REMOTE_ANON_BEARER_TOKEN
 
 Bearer token for anonymous/unauthenticated requests.
