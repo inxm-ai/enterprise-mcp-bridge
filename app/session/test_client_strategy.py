@@ -653,3 +653,100 @@ async def test_user_api_key_mode_never_falls_back_to_shared_token(monkeypatch):
         client_strategy.build_mcp_client_strategy(
             access_token="user-jwt", requested_group=None
         )
+
+
+@pytest.mark.parametrize(
+    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
+)
+@pytest.mark.parametrize("access_token,anon", [(None, False), (None, True), ("user-jwt", False)])
+def test_ambient_identity_providers_set_header_regardless_of_caller_identity(
+    monkeypatch, provider, access_token, anon
+):
+    """Ambient-identity providers self-fetch a token and must win over both
+    the anon path and the "no caller token" early-return in _prepare_auth."""
+
+    class DummyRetriever:
+        def retrieve_token(self, token):
+            return {"access_token": "ambient-token", "token_type": "Bearer"}
+
+    class DummyFactory:
+        def get(self):
+            return DummyRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", DummyFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", provider)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token=access_token, requested_group=None, anon=anon
+    )
+
+    assert strategy.headers["Authorization"] == "Bearer ambient-token"
+
+
+@pytest.mark.parametrize(
+    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
+)
+def test_ambient_identity_providers_fail_closed_never_fall_back(monkeypatch, provider):
+    """A retriever failure must never fall back to MCP_REMOTE_BEARER_TOKEN
+    or an incoming caller token for an ambient-identity provider."""
+
+    class FailingRetriever:
+        def retrieve_token(self, token):
+            raise client_strategy.UserLoggedOutException("platform unreachable")
+
+    class FailingFactory:
+        def get(self):
+            return FailingRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", FailingFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", provider)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    with pytest.raises(client_strategy.UserLoggedOutException):
+        client_strategy.build_mcp_client_strategy(
+            access_token="user-jwt", requested_group=None
+        )
+
+
+@pytest.mark.parametrize(
+    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
+)
+def test_ambient_identity_providers_fail_closed_on_empty_token(monkeypatch, provider):
+    """A retriever returning a dict with no usable access_token must fail
+    closed, not send an "Bearer None" Authorization header."""
+
+    class EmptyTokenRetriever:
+        def retrieve_token(self, token):
+            return {"success": True, "access_token": None, "token_type": "Bearer"}
+
+    class EmptyTokenFactory:
+        def get(self):
+            return EmptyTokenRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", EmptyTokenFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", provider)
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    with pytest.raises(client_strategy.UserLoggedOutException):
+        client_strategy.build_mcp_client_strategy(
+            access_token=None, requested_group=None
+        )
