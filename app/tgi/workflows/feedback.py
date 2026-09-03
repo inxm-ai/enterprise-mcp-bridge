@@ -115,7 +115,10 @@ def parse_feedback_payload(raw: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 def normalize_feedback_option(item: Any) -> Optional[tuple[str, str]]:
-    """Normalise a single feedback option to ``(key, value)``."""
+    """Normalise an option to ``(key, value)``.
+
+    Items with ``id`` prefer display_label, label, name, description, then key.
+    """
     if item is None:
         return None
     if isinstance(item, dict):
@@ -127,8 +130,13 @@ def normalize_feedback_option(item: Any) -> Optional[tuple[str, str]]:
             return str(key), str(value)
         if "id" in item:
             key = item.get("id")
+            # MCP tools often return same-name items; explicit human labels must win.
             value = (
-                item.get("name") or item.get("description") or item.get("label") or key
+                item.get("display_label")
+                or item.get("label")
+                or item.get("name")
+                or item.get("description")
+                or key
             )
             return str(key), str(value)
         if item:

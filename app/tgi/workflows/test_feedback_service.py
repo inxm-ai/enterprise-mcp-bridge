@@ -10,6 +10,8 @@ from app.tgi.workflows.feedback import (
     _flatten_schema_properties,
     build_feedback_payload,
     flatten_object_to_input_fields,
+    normalize_feedback_option,
+    normalize_feedback_options,
     resolve_choice_input_fields,
 )
 from app.tgi.workflows.state import WorkflowExecutionState
@@ -169,6 +171,40 @@ async def test_feedback_service_keeps_fast_ask_path_for_small_context():
 # ---------------------------------------------------------------------------
 # Pure-function unit tests for context-driven form generation
 # ---------------------------------------------------------------------------
+
+
+class TestNormalizeFeedbackOption:
+    def test_display_label_wins_for_id_item(self):
+        assert normalize_feedback_option(
+            {"id": "d1", "name": "Dokumente", "display_label": "HR/Dokumente"}
+        ) == ("d1", "HR/Dokumente")
+
+    def test_label_beats_name_for_id_item(self):
+        assert normalize_feedback_option(
+            {"id": "d1", "name": "Dokumente", "label": "HR"}
+        ) == ("d1", "HR")
+
+    def test_name_remains_id_item_fallback(self):
+        assert normalize_feedback_option({"id": "d1", "name": "Dokumente"}) == (
+            "d1",
+            "Dokumente",
+        )
+
+    def test_empty_display_label_is_skipped(self):
+        assert normalize_feedback_option(
+            {"id": "d1", "display_label": "", "name": "Dokumente"}
+        ) == ("d1", "Dokumente")
+
+    def test_normalized_options_keep_order_and_distinct_display_labels(self):
+        assert normalize_feedback_options(
+            [
+                {"id": "d1", "name": "Dokumente", "display_label": "HR/Dokumente"},
+                {"id": "d2", "name": "Dokumente", "display_label": "IT/Dokumente"},
+            ]
+        ) == [
+            {"key": "d1", "value": "HR/Dokumente"},
+            {"key": "d2", "value": "IT/Dokumente"},
+        ]
 
 
 class TestInferPrimitiveSchema:
