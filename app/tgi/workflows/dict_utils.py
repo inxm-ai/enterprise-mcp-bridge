@@ -6,7 +6,8 @@ All functions are stateless and side-effect-free (except the mutating
 variants which modify the dict in-place).
 """
 
-from typing import Any
+import json
+from typing import Any, Optional
 
 
 def get_path_value(data: dict, path: str) -> Any:
@@ -84,3 +85,25 @@ def set_nested_value(target: dict, path_parts: list[str], value: Any) -> None:
             current[part] = {}
         current = current[part]
     current[path_parts[-1]] = value
+
+
+def collect_exposed_returns(
+    names: Optional[list[str]], agent_context: dict
+) -> dict[str, Any]:
+    """Pick the listed agent-context fields for a client-visible chunk.
+
+    Inline ``<return>`` tags store text; JSON object/array text is decoded so
+    the client receives structure rather than a string to re-parse.
+    """
+    exposed: dict[str, Any] = {}
+    for name in names or []:
+        value = get_path_value(agent_context, name)
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip()[:1] in ("{", "["):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
+        exposed[name] = value
+    return exposed

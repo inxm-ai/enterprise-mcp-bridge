@@ -79,6 +79,10 @@ class WorkflowAgentDef:
     returns: Optional[List[str]] = None
     on_tool_error: Optional[str] = None
     stop_point: bool = False
+    # Agent-context fields (captured tool returns or inline <return> tags) that
+    # are copied into a client-visible ``agent_returns`` chunk. Never exposes
+    # the whole context; only the listed names.
+    expose_returns: Optional[List[str]] = None
 
     @property
     def should_pass_through(self) -> bool:

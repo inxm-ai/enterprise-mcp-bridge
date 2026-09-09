@@ -76,6 +76,13 @@ def append_user_message(
         state.context["user_query"] = message
 
 
+def discard_last_user_message(state: WorkflowExecutionState, message: str) -> None:
+    """Drop *message* from history when it was just appended but not accepted."""
+    history = state.context.get("user_messages")
+    if isinstance(history, list) and history and history[-1] == message:
+        history.pop()
+
+
 def append_assistant_message(
     state: WorkflowExecutionState, message: Optional[str]
 ) -> None:

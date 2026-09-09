@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Coroutine, Optional
 
-from app.tgi.workflows import context_builder, error_analysis, tag_parser
+from app.tgi.workflows import context_builder, dict_utils, error_analysis, tag_parser
 from app.tgi.workflows.arg_injector import ToolResultCapture
 from app.tgi.workflows.models import WorkflowAgentDef, WorkflowExecutionState
 
@@ -26,6 +26,10 @@ END_TAG = "</passthrough>"
 
 
 # ---------------------------------------------------------------------------
+# Chunk metadata marking user-facing agent prose (pass-through deltas).
+PASSTHROUGH_METADATA = {"passthrough": True}
+
+
 # Accumulated results from a single agent stream
 # ---------------------------------------------------------------------------
 @dataclass
@@ -101,7 +105,9 @@ async def process_agent_stream(
     ) -> Optional[str]:
         if not delta:
             return None
-        event = record_event_fn(state, delta)
+        # Mark user-facing prose so clients can tell it from engine notices
+        # (which share status/role) without matching on text.
+        event = record_event_fn(state, delta, metadata=PASSTHROUGH_METADATA)
         if add_to_history:
             result.passthrough_history.append(delta.strip())
         return event
@@ -165,13 +171,23 @@ async def process_agent_stream(
 
                 # --- tool results ---
                 if parsed.tool_result:
-                    _process_tool_result(
+                    exposed = _process_tool_result(
                         parsed.tool_result,
                         agent_context,
                         state.context,
                         result,
                         result_capture,
+                        expose_returns=agent_def.expose_returns,
                     )
+                    if exposed:
+                        # Early checkpoint: a captured return reaches the client
+                        # before the agent invocation completes.
+                        yield record_event_fn(
+                            state,
+                            "",
+                            status="agent_returns",
+                            metadata={"agent": agent_def.agent, "returns": exposed},
+                        )
 
                 # --- content / passthrough ---
                 if parsed.content:
@@ -241,7 +257,9 @@ async def process_agent_stream(
                                 passthrough_pending = "\n"
                                 passthrough_emitted_len = 0
                         else:
-                            yield record_event_fn(state, parsed.content)
+                            yield record_event_fn(
+                                state, parsed.content, metadata=PASSTHROUGH_METADATA
+                            )
                             result.emitted_passthrough = True
 
                 for event in await _flush_progress(wait=False):
@@ -261,7 +279,9 @@ async def process_agent_stream(
             else:
                 fallback_visible = tag_parser.strip_tags(result.content_text)
             if fallback_visible:
-                yield record_event_fn(state, fallback_visible)
+                yield record_event_fn(
+                    state, fallback_visible, metadata=PASSTHROUGH_METADATA
+                )
                 result.emitted_passthrough = True
 
     except Exception:
@@ -280,10 +300,16 @@ def _process_tool_result(
     state_context: dict[str, Any],
     result: StreamResult,
     result_capture: Optional[ToolResultCapture],
-) -> None:
-    """Extract returns, detect errors, compact + store tool result."""
+    expose_returns: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Extract returns, detect errors, compact + store tool result.
+
+    Returns the exposed return values this tool result changed (empty when the
+    agent exposes nothing or nothing new was captured).
+    """
     tool_result_content = tool_result.get("content", "")
     tool_result_name = tool_result.get("name")
+    exposed_before = dict_utils.collect_exposed_returns(expose_returns, agent_context)
 
     tool_error = error_analysis.tool_result_has_error(tool_result_content)
     if tool_result_name:
@@ -325,6 +351,13 @@ def _process_tool_result(
             full_results[tool_result_name] = full_result
     except Exception:
         agent_context["result"] = tool_result_content
+
+    exposed_after = dict_utils.collect_exposed_returns(expose_returns, agent_context)
+    return {
+        name: value
+        for name, value in exposed_after.items()
+        if exposed_before.get(name) != value
+    }
 
 
 # ---------------------------------------------------------------------------

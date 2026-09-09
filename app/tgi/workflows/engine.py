@@ -38,7 +38,7 @@ from app.tgi.workflows import (
     stream_processor,
     tag_parser,
 )
-from app.tgi.workflows.feedback import FeedbackService
+from app.tgi.workflows.feedback import FeedbackService, awaiting_action_result
 from app.tgi.workflows.reroute import RoutingService
 
 logger = logging.getLogger("uvicorn.error")
@@ -223,16 +223,21 @@ class WorkflowEngine:
                 )
                 preresolved_tools = modified  # Use modified schema for routing
 
-            routing_check = await self.routing_service.routing_intent_check(
-                session,
-                workflow_def,
-                user_message_local,
-                request,
-                access_token,
-                span,
-                routing_tools=preresolved_tools,
-                execution_id=execution_id,
-            )
+            # A message answering a machine action pause is protocol, not user
+            # intent: routing it could hand the conversation away (observed live).
+            # merge_feedback validates it instead.
+            routing_check = None
+            if not awaiting_action_result(state):
+                routing_check = await self.routing_service.routing_intent_check(
+                    session,
+                    workflow_def,
+                    user_message_local,
+                    request,
+                    access_token,
+                    span,
+                    routing_tools=preresolved_tools,
+                    execution_id=execution_id,
+                )
             if routing_check and routing_check.get("reroute") and not no_reroute:
                 reason = routing_check["reroute"]
                 state.completed = True
@@ -256,7 +261,7 @@ class WorkflowEngine:
 
             if state.awaiting_feedback:
                 if user_message_local:
-                    await self.feedback_service.merge_feedback(
+                    decision = await self.feedback_service.merge_feedback(
                         state,
                         user_message_local,
                         request,
@@ -264,6 +269,25 @@ class WorkflowEngine:
                         span,
                         save_fn=self.state_store.save_state,
                     )
+                    if decision:
+                        # A machine action pause accepts only its own, first
+                        # result; the pause and the goal text stay as they were.
+                        state_management.discard_last_user_message(
+                            state, user_message_local
+                        )
+                        yield self._record_event(
+                            state,
+                            f"Feedback not accepted: {decision.get('code')}",
+                            status=(
+                                "feedback_replayed"
+                                if decision.get("verdict") == "replay"
+                                else "feedback_rejected"
+                            ),
+                            role="system",
+                            metadata=decision,
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
                     if "_resume_agent" not in state.context:
                         resume_target = state_management.find_feedback_agent(state)
                         if resume_target:

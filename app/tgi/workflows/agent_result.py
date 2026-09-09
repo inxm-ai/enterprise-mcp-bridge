@@ -11,6 +11,7 @@ free of direct dependencies on ``WorkflowEngine``.
 
 import copy
 import logging
+import uuid
 from typing import Any, AsyncGenerator, Callable, Optional
 
 from app.elicitation import canonicalize_elicitation_payload
@@ -147,6 +148,19 @@ async def finalize_agent_result(
 
     if reroute_reason:
         agent_context["reroute_reason"] = reroute_reason
+
+    # Client-visible structured returns for this invocation, emitted before any
+    # pause so a question or action request still carries the agent's outcome.
+    exposed = dict_utils.collect_exposed_returns(
+        agent_def.expose_returns, agent_context
+    )
+    if exposed:
+        yield record_event_fn(
+            state,
+            "",
+            status="agent_returns",
+            metadata={"agent": agent_def.agent, "returns": exposed},
+        )
 
     # ---- Feedback handling ----
     if feedback_needed:
@@ -359,20 +373,31 @@ async def _handle_reroute(
     ask_cfg = matched_cfg.get("ask") if isinstance(matched_cfg, dict) else None
 
     if isinstance(ask_cfg, dict):
-        question = await render_feedback_question_fn(
-            ask_cfg,
-            agent_context,
-            state.context,
-            request,
-            access_token,
-            span,
-            execution_id=state.execution_id,
-        )
+        action_kind = ask_cfg.get("kind") == feedback_mod.ACTION_FEEDBACK_KIND
+        if action_kind:
+            # A machine round trip: the client, not a person, reads this pause,
+            # so the configured text is used verbatim instead of a model call.
+            question = str(ask_cfg.get("question") or "Action requested.")
+        else:
+            question = await render_feedback_question_fn(
+                ask_cfg,
+                agent_context,
+                state.context,
+                request,
+                access_token,
+                span,
+                execution_id=state.execution_id,
+            )
         choices = feedback_mod.build_feedback_choices(
             ask_cfg, agent_context, state.context
         )
         feedback_payload = feedback_mod.build_feedback_payload(
-            question, choices, agent_context, state.context
+            question,
+            choices,
+            agent_context,
+            state.context,
+            kind=feedback_mod.ACTION_FEEDBACK_KIND if action_kind else None,
+            request_id=str(uuid.uuid4()) if action_kind else None,
         )
         events = _setup_feedback(
             state,

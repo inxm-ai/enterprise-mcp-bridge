@@ -68,6 +68,12 @@ class WorkflowRepository:
                             returns=returns_value,
                             on_tool_error=on_tool_error_value,
                             stop_point=stop_point_value,
+                            expose_returns=[
+                                str(name)
+                                for name in (agent.get("expose_returns") or [])
+                                if isinstance(name, str) and name
+                            ]
+                            or None,
                         )
                     )
                 definitions[flow_id] = WorkflowDefinition(

@@ -7,6 +7,7 @@ Pure functions cover parsing, normalisation and payload construction.
 rendering feedback questions and deciding whether to rerun agents.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -580,8 +581,17 @@ def build_feedback_payload(
     choices: list[dict[str, Any]],
     agent_context: dict[str, Any],
     shared_context: dict[str, Any],
+    *,
+    kind: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Build a canonical feedback payload from a rendered question and choices."""
+    """Build a canonical feedback payload from a rendered question and choices.
+
+    A choice may declare ``payload_from`` (a context path); its resolved value is
+    carried as ``payload`` so structured agent data reaches the client without
+    prose parsing. ``kind="action"`` plus ``request_id`` mark a machine round
+    trip that :func:`classify_action_feedback` validates on the way back.
+    """
     expected_responses: list[dict[str, Any]] = []
     for choice in choices:
         entry: dict[str, Any] = {
@@ -601,9 +611,15 @@ def build_feedback_payload(
         if "options" in choice:
             entry["options"] = choice.get("options") or []
         for key, value in choice.items():
-            if key in {"id", "to", "with", "each", "options"}:
+            if key in {"id", "to", "with", "each", "options", "payload_from"}:
                 continue
             entry[key] = value
+        payload_from = choice.get("payload_from")
+        if isinstance(payload_from, str) and payload_from:
+            resolved = get_path_value(agent_context, payload_from)
+            if resolved is None:
+                resolved = get_path_value(shared_context, payload_from)
+            entry["payload"] = parse_feedback_json_value(resolved)
         expected_responses.append(entry)
     selection_ids = [
         str(entry.get("id"))
@@ -660,6 +676,10 @@ def build_feedback_payload(
     meta: dict[str, Any] = {"expected_responses": expected_responses}
     if input_fields_meta:
         meta["input_fields"] = input_fields_meta
+    if kind:
+        meta["kind"] = kind
+    if request_id:
+        meta["request_id"] = request_id
     return {
         "message": question,
         "requestedSchema": requested_schema,
@@ -838,6 +858,99 @@ def resolve_feedback_action(
         "assignments": assignments,
         "input_fields": choice_input,
     }
+
+
+# ---------------------------------------------------------------------------
+# Machine action round trips (``ask.kind == "action"``)
+# ---------------------------------------------------------------------------
+
+ACTION_FEEDBACK_KIND = "action"
+ACCEPTED_ACTION_RESULTS_KEY = "_accepted_action_results"
+
+
+def pending_action_spec(agent_entry: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Return the pending elicitation spec when it is a machine action pause."""
+    spec = agent_entry.get("elicitation_spec")
+    meta = spec.get("meta") if isinstance(spec, dict) else None
+    if not isinstance(meta, dict) or meta.get("kind") != ACTION_FEEDBACK_KIND:
+        return None
+    return spec
+
+
+def awaiting_action_result(state: WorkflowExecutionState) -> bool:
+    """True while the current agent is paused on a machine action request."""
+    if not state.awaiting_feedback or not state.current_agent:
+        return False
+    agents = state.context.get("agents") or {}
+    entry = agents.get(state.current_agent)
+    return isinstance(entry, dict) and pending_action_spec(entry) is not None
+
+
+def action_result_digest(parsed: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def classify_action_feedback(
+    agent_entry: dict[str, Any],
+    shared_context: dict[str, Any],
+    feedback: str,
+) -> Optional[dict[str, Any]]:
+    """Validate *feedback* against a pending action request.
+
+    Returns ``None`` for ordinary human pauses (legacy behaviour untouched).
+    Otherwise ``{"verdict": "accept" | "replay" | "reject", "code": ...}``.
+    Only ``accept`` may change workflow state; ``replay`` means the identical
+    result was already accepted and the recorded outcome stands.
+    """
+    from app.tgi.workflows import tag_parser
+
+    spec = pending_action_spec(agent_entry)
+    if spec is None:
+        return None
+    expected_id = (spec.get("meta") or {}).get("request_id")
+    verdict: dict[str, Any] = {"pending_request_id": expected_id}
+    tag = tag_parser.extract_tag(feedback, "user_feedback")
+    if not tag:
+        return {**verdict, "verdict": "reject", "code": "untagged_text"}
+    try:
+        parsed = json.loads(tag.strip())
+    except ValueError:
+        return {**verdict, "verdict": "reject", "code": "malformed"}
+    if not isinstance(parsed, dict):
+        return {**verdict, "verdict": "reject", "code": "malformed"}
+    request_id = parsed.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return {**verdict, "verdict": "reject", "code": "missing_request_id"}
+    verdict["request_id"] = request_id
+    digest = action_result_digest(parsed)
+    ledger = shared_context.get(ACCEPTED_ACTION_RESULTS_KEY)
+    recorded = ledger.get(request_id) if isinstance(ledger, dict) else None
+    if recorded is not None:
+        if recorded == digest:
+            return {**verdict, "verdict": "replay", "code": "duplicate_replay"}
+        return {**verdict, "verdict": "reject", "code": "duplicate_conflict"}
+    if request_id != expected_id:
+        return {**verdict, "verdict": "reject", "code": "request_mismatch"}
+    content = parsed.get("content")
+    selection = content.get("selection") if isinstance(content, dict) else None
+    choice_ids = {
+        str(entry.get("id"))
+        for entry in feedback_expected_entries(spec)
+        if isinstance(entry, dict)
+    }
+    if selection not in choice_ids:
+        return {**verdict, "verdict": "reject", "code": "unknown_selection"}
+    return {**verdict, "verdict": "accept", "digest": digest}
+
+
+def record_accepted_action_result(
+    shared_context: dict[str, Any], decision: dict[str, Any]
+) -> None:
+    ledger = shared_context.setdefault(ACCEPTED_ACTION_RESULTS_KEY, {})
+    ledger[decision["request_id"]] = decision["digest"]
 
 
 # ---------------------------------------------------------------------------
@@ -1145,24 +1258,37 @@ class FeedbackService:
         access_token: Optional[str],
         span,
         save_fn: Callable[[WorkflowExecutionState], None],
-    ) -> None:
+    ) -> Optional[dict[str, Any]]:
         """Process user feedback and merge it into workflow state.
 
         Handles structured feedback (decline/cancel/selection) as well as
         free-text feedback that may trigger user query re-summarisation and
         agent rerun decisions.
 
+        Returns ``None`` when the feedback was merged. For a pending machine
+        action pause, an invalid, stale or already-consumed result is returned
+        as the rejection/replay decision and the state is left untouched.
+
         ``save_fn`` is called once at the end to persist the updated state.
         """
         from app.tgi.workflows import state_management, tag_parser
 
-        state.awaiting_feedback = False
-        state_management.reset_feedback_pause_notice(state)
-
+        agent_entry: Optional[dict[str, Any]] = None
+        action_decision: Optional[dict[str, Any]] = None
         if state.current_agent:
             agent_entry = state.context["agents"].setdefault(
                 state.current_agent, {"content": "", "pass_through": False}
             )
+            action_decision = classify_action_feedback(
+                agent_entry, state.context, feedback
+            )
+            if action_decision and action_decision["verdict"] != "accept":
+                return action_decision
+
+        state.awaiting_feedback = False
+        state_management.reset_feedback_pause_notice(state)
+
+        if agent_entry is not None:
             prior_content = agent_entry.get("content", "")
             logger.info(
                 "[FeedbackService.merge_feedback] Agent '%s' receiving feedback. "
@@ -1209,8 +1335,11 @@ class FeedbackService:
                     reroute_target = feedback_action.get("target")
                     input_fields = feedback_action.get("input_fields")
                     assignments = feedback_action.get("assignments")
+                    # Action results are not user adjustments: they must not be
+                    # folded into the goal text.
                     if (
-                        reroute_target == state.current_agent
+                        action_decision is None
+                        and reroute_target == state.current_agent
                         and isinstance(input_fields, dict)
                         and isinstance(assignments, dict)
                     ):
@@ -1306,4 +1435,7 @@ class FeedbackService:
                     )
 
         state.context.setdefault("feedback", []).append(feedback)
+        if action_decision is not None:
+            record_accepted_action_result(state.context, action_decision)
         save_fn(state)
+        return None
