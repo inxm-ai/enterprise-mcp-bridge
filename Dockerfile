@@ -1,7 +1,7 @@
 ARG PYTHON_VERSION=3.11
 
 # --- Stage 1: Testing ---
-FROM python:${PYTHON_VERSION}-slim-bullseye AS testing
+FROM python:${PYTHON_VERSION}-slim-bookworm AS testing
 
 # Install system dependencies for Python and Node
 RUN apt-get update && apt-get install -y \
@@ -19,7 +19,7 @@ RUN pip install black && black --check .
 RUN pytest
 
 # --- Stage 2: Production ---
-FROM python:${PYTHON_VERSION}-slim-bullseye AS production
+FROM python:${PYTHON_VERSION}-slim-bookworm AS production
 
 # Install  production dependencies
 RUN apt-get update && apt-get install -y \
