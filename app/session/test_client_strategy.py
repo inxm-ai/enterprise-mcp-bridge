@@ -52,14 +52,12 @@ async def test_remote_strategy_uses_token_exchange(monkeypatch):
         captured["stream_url"] = url
         captured["stream_headers"] = headers
         captured["stream_auth"] = auth
-        yield object(), object(), lambda: "remote-session-id"
+        yield object(), object()
 
     monkeypatch.setattr(
         client_strategy, "TokenRetrieverFactory", lambda: DummyFactory()
     )
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
 
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
@@ -95,8 +93,6 @@ async def test_remote_strategy_uses_token_exchange(monkeypatch):
             session.kwargs.get("logging_callback")
             is client_strategy._log_mcp_notification
         )
-        assert hasattr(session, "get_remote_session_id")
-        assert session.get_remote_session_id() == "remote-session-id"
     assert captured["stream_auth"] is None
     assert captured["stream_url"] == "https://remote.example"
     assert captured["stream_headers"]["Authorization"] == "Bearer provider-token"
@@ -111,11 +107,9 @@ async def test_remote_strategy_anon_prefers_bearer_token(monkeypatch):
     async def fake_streamable_client(url, headers=None, auth=None):
         headers_seen["headers"] = headers
         headers_seen["auth"] = auth
-        yield object(), object(), lambda: None
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -156,11 +150,9 @@ async def test_remote_strategy_anon_uses_access_token_header(monkeypatch):
     async def fake_streamable_client(url, headers=None, auth=None):
         headers_seen["headers"] = headers
         headers_seen["auth"] = auth
-        yield object(), object(), lambda: None
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -230,11 +222,9 @@ async def test_remote_strategy_forwards_allowed_headers(monkeypatch):
     @asynccontextmanager
     async def fake_streamable_client(url, headers=None, auth=None):
         captured["stream_headers"] = headers
-        yield object(), object(), lambda: "remote-session-id"
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
@@ -289,11 +279,9 @@ async def test_remote_strategy_headers_case_insensitive(monkeypatch):
     @asynccontextmanager
     async def fake_streamable_client(url, headers=None, auth=None):
         captured["stream_headers"] = headers
-        yield object(), object(), lambda: "remote-session-id"
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
@@ -336,11 +324,9 @@ async def test_remote_strategy_forward_all_headers(monkeypatch):
     @asynccontextmanager
     async def fake_streamable_client(url, headers=None, auth=None):
         captured["stream_headers"] = headers
-        yield object(), object(), lambda: "remote-session-id"
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
@@ -436,7 +422,7 @@ async def test_remote_strategy_closes_on_cancellation(monkeypatch):
 
     class FakeStreamableContext:
         async def __aenter__(self):
-            return object(), object(), lambda: None
+            return object(), object()
 
         async def __aexit__(self, exc_type, exc, tb):
             await asyncio.sleep(0)
@@ -446,9 +432,7 @@ async def test_remote_strategy_closes_on_cancellation(monkeypatch):
     def fake_streamable_client(url, headers=None, auth=None):
         return FakeStreamableContext()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", SlowExitSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -485,7 +469,7 @@ async def test_remote_strategy_teardown_bounded_when_close_hangs(monkeypatch):
 
     class HangingStreamableContext:
         async def __aenter__(self):
-            return object(), object(), lambda: None
+            return object(), object()
 
         async def __aexit__(self, exc_type, exc, tb):
             await asyncio.Event().wait()
@@ -493,9 +477,7 @@ async def test_remote_strategy_teardown_bounded_when_close_hangs(monkeypatch):
     def fake_streamable_client(url, headers=None, auth=None):
         return HangingStreamableContext()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -542,14 +524,12 @@ async def test_remote_strategy_custom_auth_header_name_and_template(monkeypatch)
 
     @asynccontextmanager
     async def fake_streamable_client(url, headers=None, auth=None):
-        yield object(), object(), lambda: None
+        yield object(), object()
 
     monkeypatch.setattr(
         client_strategy, "TokenRetrieverFactory", lambda: DummyFactory()
     )
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -579,11 +559,9 @@ async def test_remote_strategy_custom_auth_header_fallback_token(monkeypatch):
 
     @asynccontextmanager
     async def fake_streamable_client(url, headers=None, auth=None):
-        yield object(), object(), lambda: None
+        yield object(), object()
 
-    monkeypatch.setattr(
-        client_strategy, "streamablehttp_client", fake_streamable_client
-    )
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
     monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
     monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
@@ -655,10 +633,10 @@ async def test_user_api_key_mode_never_falls_back_to_shared_token(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("provider", ["gcp-metadata", "azure-metadata", "aws-metadata"])
 @pytest.mark.parametrize(
-    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
+    "access_token,anon", [(None, False), (None, True), ("user-jwt", False)]
 )
-@pytest.mark.parametrize("access_token,anon", [(None, False), (None, True), ("user-jwt", False)])
 def test_ambient_identity_providers_set_header_regardless_of_caller_identity(
     monkeypatch, provider, access_token, anon
 ):
@@ -690,9 +668,7 @@ def test_ambient_identity_providers_set_header_regardless_of_caller_identity(
     assert strategy.headers["Authorization"] == "Bearer ambient-token"
 
 
-@pytest.mark.parametrize(
-    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
-)
+@pytest.mark.parametrize("provider", ["gcp-metadata", "azure-metadata", "aws-metadata"])
 def test_ambient_identity_providers_fail_closed_never_fall_back(monkeypatch, provider):
     """A retriever failure must never fall back to MCP_REMOTE_BEARER_TOKEN
     or an incoming caller token for an ambient-identity provider."""
@@ -721,9 +697,7 @@ def test_ambient_identity_providers_fail_closed_never_fall_back(monkeypatch, pro
         )
 
 
-@pytest.mark.parametrize(
-    "provider", ["gcp-metadata", "azure-metadata", "aws-metadata"]
-)
+@pytest.mark.parametrize("provider", ["gcp-metadata", "azure-metadata", "aws-metadata"])
 def test_ambient_identity_providers_fail_closed_on_empty_token(monkeypatch, provider):
     """A retriever returning a dict with no usable access_token must fail
     closed, not send an "Bearer None" Authorization header."""

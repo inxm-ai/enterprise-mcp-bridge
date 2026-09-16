@@ -9,6 +9,10 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from pydantic import BaseModel
+
+from app.utils.mcp_operation import is_mcp_error
+from app.utils import mcp_fields
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from app.session import mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
@@ -213,10 +217,10 @@ def map_tools(tools):
             description = getattr(tool, "description", None)
             if not description and hasattr(tool, "function"):
                 description = getattr(getattr(tool, "function"), "description", None)
-            input_schema = getattr(tool, "inputSchema", None)
+            input_schema = mcp_fields.input_schema(tool)
             if input_schema is None and hasattr(tool, "function"):
                 input_schema = getattr(getattr(tool, "function"), "parameters", None)
-            output_schema = getattr(tool, "outputSchema", None)
+            output_schema = mcp_fields.output_schema(tool)
             if output_schema is None and hasattr(tool, "function"):
                 output_schema = getattr(getattr(tool, "function"), "outputSchema", None)
             if output_schema is None:
@@ -390,11 +394,7 @@ def inject_headers_into_args(
         return args or {}
 
     # Obtain input schema properties
-    input_schema = None
-    if hasattr(tool_def, "inputSchema"):
-        input_schema = getattr(tool_def, "inputSchema")
-    elif isinstance(tool_def, dict):
-        input_schema = tool_def.get("inputSchema")
+    input_schema = mcp_fields.input_schema(tool_def)
 
     props = (
         (input_schema or {}).get("properties", {})
@@ -425,11 +425,7 @@ async def list_resources(list_resources: any):
     except Exception as e:
         logger.warning(f"[ResourcesHelper] Error listing resources: {str(e)}")
         # Not every MCP has list_resources, so deal with it friendly
-        if (
-            hasattr(e, "__class__")
-            and e.__class__.__name__ == "McpError"
-            and "Method not found" in str(e)
-        ):
+        if is_mcp_error(e) and "Method not found" in str(e):
             if len(system_resources) < 1:
                 logger.info("[ResourcesHelper] No system resources available")
                 raise HTTPException(status_code=404, detail="Method not found")
@@ -615,13 +611,14 @@ async def mcp_session_context(
                             )
 
                         def _coerce_result_payload(result_obj: Any) -> Any:
-                            if hasattr(result_obj, "structuredContent"):
-                                structured = getattr(result_obj, "structuredContent")
-                                if structured is not None:
-                                    return structured
+                            structured = mcp_fields.structured_content(result_obj)
+                            if structured is not None:
+                                return structured
                             if hasattr(result_obj, "model_dump"):
                                 try:
-                                    return result_obj.model_dump(exclude_none=True)
+                                    return mcp_fields.dump(
+                                        result_obj, exclude_none=True
+                                    )
                                 except Exception:
                                     pass
                             if isinstance(result_obj, dict):
@@ -846,13 +843,12 @@ async def mcp_session_context(
                 )
 
             def _coerce_result_payload(result_obj: Any) -> Any:
-                if hasattr(result_obj, "structuredContent"):
-                    structured = getattr(result_obj, "structuredContent")
-                    if structured is not None:
-                        return structured
+                structured = mcp_fields.structured_content(result_obj)
+                if structured is not None:
+                    return structured
                 if hasattr(result_obj, "model_dump"):
                     try:
-                        return result_obj.model_dump(exclude_none=True)
+                        return mcp_fields.dump(result_obj, exclude_none=True)
                     except Exception:
                         pass
                 if isinstance(result_obj, dict):

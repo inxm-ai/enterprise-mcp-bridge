@@ -14,7 +14,7 @@ import pytest
 from mcp import types
 
 from app.session_manager import session_context
-from app.sse.mcp_proxy import _build_proxy_server
+from app.sse.mcp_proxy import _build_proxy_handlers
 from app.utils import mcp_operation
 from app.utils_tests.recording_tracer import RecordingTracer, span_payload_text
 
@@ -46,7 +46,7 @@ def _make_mock_downstream(result_text="result"):
 
 
 def _build(downstream):
-    return _build_proxy_server(
+    return _build_proxy_handlers(
         downstream,
         access_token=None,
         incoming_headers=None,
@@ -55,10 +55,7 @@ def _build(downstream):
 
 
 def _call_tool_request(name, arguments=None):
-    return types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(name=name, arguments=arguments or {}),
-    )
+    return types.CallToolRequestParams(name=name, arguments=arguments or {})
 
 
 @pytest.fixture
@@ -91,11 +88,11 @@ class TestExecutionTimePolicy:
     ):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("hidden_tool", {"x": "v"}))
+        result = await handler(None, _call_tool_request("hidden_tool", {"x": "v"}))
 
-        assert result.root.isError
+        assert result.is_error
         # The SDK refreshes its tool cache (a discovery call) before invoking
         # the handler; what must never happen is the execution itself.
         downstream.call_tool.assert_not_awaited()
@@ -106,22 +103,22 @@ class TestExecutionTimePolicy:
     ):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("get_span_details"))
+        result = await handler(None, _call_tool_request("get_span_details"))
 
-        assert result.root.isError
+        assert result.is_error
         downstream.call_tool.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_allowed_tool_passes(self, pilot_allowlist, recording_tracer):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("allowed_tool", {"x": "v"}))
+        result = await handler(None, _call_tool_request("allowed_tool", {"x": "v"}))
 
-        assert not result.root.isError
+        assert not result.is_error
         downstream.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -130,9 +127,9 @@ class TestExecutionTimePolicy:
     ):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        await handler(_call_tool_request("hidden_tool"))
+        await handler(None, _call_tool_request("hidden_tool"))
 
         span = next(
             s for s in recording_tracer.spans if s.name == "tools/call hidden_tool"
@@ -146,9 +143,9 @@ class TestCanonicalSpan:
     async def test_call_tool_emits_one_canonical_span(self, recording_tracer):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        await handler(_call_tool_request("allowed_tool", {"x": "v"}))
+        await handler(None, _call_tool_request("allowed_tool", {"x": "v"}))
 
         spans = [
             s for s in recording_tracer.spans if s.name == "tools/call allowed_tool"
@@ -165,15 +162,13 @@ class TestCanonicalSpan:
     async def test_get_prompt_emits_canonical_span(self, recording_tracer):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.GetPromptRequest]
+        handler = proxy["on_get_prompt"]
 
         await handler(
-            types.GetPromptRequest(
-                method="prompts/get",
-                params=types.GetPromptRequestParams(
-                    name="my_prompt", arguments={"topic": CANARY_SECRET}
-                ),
-            )
+            None,
+            types.GetPromptRequestParams(
+                name="my_prompt", arguments={"topic": CANARY_SECRET}
+            ),
         )
 
         span = next(
@@ -187,14 +182,9 @@ class TestCanonicalSpan:
     async def test_read_resource_emits_canonical_span(self, recording_tracer):
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.ReadResourceRequest]
+        handler = proxy["on_read_resource"]
 
-        await handler(
-            types.ReadResourceRequest(
-                method="resources/read",
-                params=types.ReadResourceRequestParams(uri="file:///demo.txt"),
-            )
-        )
+        await handler(None, types.ReadResourceRequestParams(uri="file:///demo.txt"))
 
         span = next(s for s in recording_tracer.spans if s.name == "resources/read")
         assert span.attributes["mcp.method.name"] == "resources/read"
@@ -208,12 +198,14 @@ class TestSseCanary:
     ):
         downstream = _make_mock_downstream(result_text=f"payload {CANARY_SECRET}")
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("allowed_tool", {"x": CANARY_SECRET}))
+        result = await handler(
+            None, _call_tool_request("allowed_tool", {"x": CANARY_SECRET})
+        )
 
         # API contract: the client still receives the result.
-        assert CANARY_SECRET in result.root.content[0].text
+        assert CANARY_SECRET in result.content[0].text
         assert CANARY_SECRET not in capture_logs.text
         for span in recording_tracer.spans:
             assert CANARY_SECRET not in span_payload_text(span)
@@ -225,11 +217,13 @@ class TestSseCanary:
         downstream = _make_mock_downstream()
         downstream.call_tool.side_effect = RuntimeError(f"boom {CANARY_SECRET}")
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("allowed_tool"))
+        # A bridge fault is not a tool error: it propagates, and the SDK answers
+        # the client with a generic internal error instead of the message.
+        with pytest.raises(RuntimeError):
+            await handler(None, _call_tool_request("allowed_tool"))
 
-        assert result.root.isError
         assert CANARY_SECRET not in capture_logs.text
         span = next(
             s for s in recording_tracer.spans if s.name == "tools/call allowed_tool"
@@ -256,9 +250,9 @@ class TestTraceMetaPropagation:
 
         downstream = _make_mock_downstream()
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        await handler(_call_tool_request("allowed_tool", {"x": "v"}))
+        await handler(None, _call_tool_request("allowed_tool", {"x": "v"}))
 
         meta = downstream.call_tool.await_args.kwargs.get("meta")
         assert meta["traceparent"] == "00-feedface-cafebabe-01"
@@ -280,15 +274,10 @@ class TestTraceMetaPropagation:
             ]
         )
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.GetPromptRequest]
+        handler = proxy["on_get_prompt"]
 
         with pytest.raises(Exception) as excinfo:
-            await handler(
-                types.GetPromptRequest(
-                    method="prompts/get",
-                    params=types.GetPromptRequestParams(name="my_prompt"),
-                )
-            )
+            await handler(None, types.GetPromptRequestParams(name="my_prompt"))
         assert "ceiling" in str(excinfo.value)
 
     @pytest.mark.asyncio
@@ -298,13 +287,61 @@ class TestTraceMetaPropagation:
         monkeypatch.setattr(app_vars, "MCP_MAX_RESPONSE_BYTES", 32)
         downstream = _make_mock_downstream(result_text="y" * 500)
         proxy = _build(downstream)
-        handler = proxy.request_handlers[types.CallToolRequest]
+        handler = proxy["on_call_tool"]
 
-        result = await handler(_call_tool_request("allowed_tool"))
+        result = await handler(None, _call_tool_request("allowed_tool"))
 
-        assert result.root.isError
-        assert "y" * 500 not in str(result.root.content)
+        assert result.is_error
+        assert "y" * 500 not in str(result.content)
         span = next(
             s for s in recording_tracer.spans if s.name == "tools/call allowed_tool"
         )
         assert span.attributes["error.type"] == "response_too_large"
+
+
+class TestDownstreamProtocolErrors:
+    @pytest.mark.asyncio
+    async def test_a_downstream_mcp_error_is_a_tool_error_classified_by_its_text(
+        self, recording_tracer
+    ):
+        from mcp.shared.exceptions import MCPError
+
+        downstream = _make_mock_downstream()
+        downstream.call_tool.side_effect = MCPError(
+            code=-32001, message="Request timed out after 30s"
+        )
+        proxy = _build(downstream)
+
+        result = await proxy["on_call_tool"](None, _call_tool_request("allowed_tool"))
+
+        assert result.is_error
+        assert "timed out" in result.content[0].text
+        span = next(
+            s for s in recording_tracer.spans if s.name == "tools/call allowed_tool"
+        )
+        assert span.attributes["error.type"] == "upstream_timeout"
+
+    @pytest.mark.asyncio
+    async def test_a_retryable_typed_error_is_recorded_as_transient(
+        self, recording_tracer
+    ):
+        downstream = _make_mock_downstream()
+        downstream.call_tool.return_value = types.CallToolResult(
+            content=[types.TextContent(type="text", text="busy: held (retryable)")],
+            isError=True,
+            structuredContent={
+                "result": {
+                    "status": "error",
+                    "error": {"code": "busy", "retryable": True},
+                }
+            },
+        )
+        proxy = _build(downstream)
+
+        result = await proxy["on_call_tool"](None, _call_tool_request("allowed_tool"))
+
+        assert result.is_error
+        span = next(
+            s for s in recording_tracer.spans if s.name == "tools/call allowed_tool"
+        )
+        assert span.attributes["error.type"] == "downstream_transient_error"

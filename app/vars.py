@@ -280,6 +280,10 @@ BRIDGE_REQUIRED_GROUPS = [
 # not bound every serialized response, so the bridge has its own byte cap.
 MCP_MAX_RESPONSE_BYTES = int(os.getenv("MCP_MAX_RESPONSE_BYTES", "0"))
 
+MCP_PROTOCOL_NEGOTIATION = (
+    os.getenv("MCP_PROTOCOL_NEGOTIATION", "legacy").strip().lower()
+)
+
 # Per-call timeout towards the downstream MCP server. 0 keeps SDK defaults.
 MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "0"))
 

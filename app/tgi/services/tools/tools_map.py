@@ -1,4 +1,5 @@
 import copy
+from app.utils import mcp_fields
 import app.vars as vars_module
 
 _SCHEMA_DROP_KEYS = {
@@ -183,11 +184,14 @@ def map_tools(tools, include_output_schema=False):
                 description = description or getattr(func, "description", None)
                 if hasattr(func, "parameters"):
                     input_schema = getattr(func, "parameters") or {}
-                if hasattr(func, "outputSchema"):
-                    output_schema = getattr(func, "outputSchema")
+                func_output = mcp_fields.read(
+                    func, "output_schema", "outputSchema", mcp_fields.MISSING
+                )
+                if func_output is not mcp_fields.MISSING:
+                    output_schema = func_output
             description = description or getattr(tool, "description", None)
-            input_schema = input_schema or getattr(tool, "inputSchema", {}) or {}
-            output_schema = output_schema or getattr(tool, "outputSchema", None)
+            input_schema = input_schema or mcp_fields.input_schema(tool) or {}
+            output_schema = output_schema or mcp_fields.output_schema(tool)
             if output_schema is None:
                 output_schema = vars_module.get_tool_output_schema(name)
 

@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any, Iterable
 from opentelemetry import trace
 from fastapi import HTTPException
 
+from app.utils import mcp_fields
 from app.tgi.models import Message, MessageRole
 from app.session import MCPSessionBase
 
@@ -322,7 +323,7 @@ class PromptService:
                 # Call the prompt to get its content
                 result = await session.call_prompt(prompt["name"], {})
 
-                if result.isError:
+                if mcp_fields.is_error(result):
                     error_msg = f"Error getting prompt content: {result}"
                     self.logger.error(f"[PromptService] {error_msg}")
                     span.set_attribute("error", True)

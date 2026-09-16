@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from app.utils.mcp_operation import is_mcp_error
 from app.models import RunPromptResult
 from app.utils.mcp_operation import safe_arg_keys
 
@@ -57,11 +58,7 @@ async def list_prompts(list_prompts: any):
     except Exception as e:
         logger.warning(f"[PromptHelper] Error listing prompts: {str(e)}")
         # Not every MCP has list_prompts, so deal with it friendly
-        if (
-            hasattr(e, "__class__")
-            and e.__class__.__name__ == "McpError"
-            and "Method not found" in str(e)
-        ):
+        if is_mcp_error(e) and "Method not found" in str(e):
             if len(system_prompts) < 1:
                 logger.info("[PromptHelper] No system prompts available")
                 raise HTTPException(status_code=404, detail="Method not found")

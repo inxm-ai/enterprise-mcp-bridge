@@ -1,6 +1,8 @@
 from pydantic import BaseModel
-from typing import Optional, Dict
-from mcp.server.fastmcp.prompts import base
+from typing import Any, Optional, Dict
+from mcp.server.mcpserver.prompts import base
+
+from app.utils.mcp_fields import MISSING, is_error, read, structured_content
 
 
 class MCPRequest(BaseModel):
@@ -14,40 +16,41 @@ class RunToolRequest(BaseModel):
 
 class RunToolResultContent(BaseModel):
     text: str
-    structuredContent: Optional[Dict]
+    # Any JSON value: protocol 2026-07-28 no longer limits structured content to objects.
+    structuredContent: Optional[Any]
 
     def __init__(self, resultEntry):
         super().__init__(
-            text=resultEntry.text,
-            structuredContent=(
-                resultEntry.structuredContent
-                if hasattr(resultEntry, "structuredContent")
-                else None
-            ),
+            text=str(read(resultEntry, "text", "text", "")),
+            structuredContent=structured_content(resultEntry),
         )
 
 
 def error_finder(result):
-    if hasattr(result, "isError") and result.isError:
-        return result.isError
+    if is_error(result):
+        return True
     if hasattr(result, "error") and result.error:
         return True
     if (
         hasattr(result, "content")
         and isinstance(result.content, list)
-        and any(getattr(item, "isError", False) for item in result.content)
+        and any(is_error(item) for item in result.content)
     ):
         return True
     return False
 
 
 def content_resolver(result, isError):
-    if isError and hasattr(result, "error"):
-        return [RunToolResultContent({"text": result.error})]
-    if hasattr(result, "content") and isinstance(result.content, list):
-        return [RunToolResultContent(item) for item in result.content]
-    if hasattr(result, "text"):
-        return [RunToolResultContent({"text": result.text})]
+    """The content blocks of a result, whether it is an SDK model, a bridge model or a dict."""
+    error = read(result, "error", "error")
+    if isError and error:
+        return [RunToolResultContent({"text": error})]
+    content = read(result, "content", "content")
+    if isinstance(content, list):
+        return [RunToolResultContent(item) for item in content]
+    text = read(result, "text", "text", MISSING)
+    if text is not MISSING:
+        return [RunToolResultContent({"text": text})]
     if isError:
         return [RunToolResultContent({"text": "An error occurred"})]
     return []
@@ -109,7 +112,7 @@ class RunPromptResult(BaseModel):
 class RunToolsResult(BaseModel):
     isError: bool
     content: list[RunToolResultContent]
-    structuredContent: Optional[Dict]
+    structuredContent: Optional[Any]
 
     def __init__(self, result):
         isError = error_finder(result)
@@ -117,9 +120,5 @@ class RunToolsResult(BaseModel):
         super().__init__(
             isError=isError,
             content=content,
-            structuredContent=(
-                result.structuredContent
-                if hasattr(result, "structuredContent")
-                else None
-            ),
+            structuredContent=structured_content(result),
         )

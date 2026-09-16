@@ -118,6 +118,38 @@ def downstream_server_label() -> Optional[str]:
     return None
 
 
+ERROR_TYPE_DOWNSTREAM_TRANSIENT = "downstream_transient_error"
+
+MCP_ERROR_CLASS_NAMES = ("McpError", "MCPError")
+
+
+def is_mcp_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is the SDK's protocol error (``McpError`` in 1.x, ``MCPError`` in v2), by name."""
+    return type(exc).__name__ in MCP_ERROR_CLASS_NAMES
+
+
+def retryable_typed_error(result: Any) -> bool:
+    """Whether a tool's typed error result says a retry can help (`structuredContent.result.error.retryable`)."""
+    from app.utils import mcp_fields
+
+    structured = mcp_fields.structured_content(result)
+    if not isinstance(structured, dict):
+        return False
+    payload = structured.get("result", structured)
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return isinstance(error, dict) and error.get("retryable") is True
+
+
+def classify_error_result(result: Any) -> str:
+    """Map a downstream isError result to a bounded error type: its typed payload first, then its text."""
+    if retryable_typed_error(result):
+        return ERROR_TYPE_DOWNSTREAM_TRANSIENT
+    content = getattr(result, "content", None) or []
+    first = content[0] if content else None
+    text = getattr(first, "text", None) if first is not None else None
+    return classify_error_text(text or "")
+
+
 def classify_error_text(error_text: str) -> str:
     """Map a downstream isError result to a bounded error type.
 
@@ -173,8 +205,7 @@ def classify_exception(exc: BaseException) -> str:
         return ERROR_TYPE_AUTHORIZATION
     if isinstance(exc, TimeoutError):
         return ERROR_TYPE_UPSTREAM_TIMEOUT
-    exc_name = type(exc).__name__
-    if exc_name == "McpError" and "timed out" in str(exc).lower():
+    if is_mcp_error(exc) and "timed out" in str(exc).lower():
         return ERROR_TYPE_UPSTREAM_TIMEOUT
     return ERROR_TYPE_BRIDGE_INTERNAL
 
@@ -230,7 +261,6 @@ def downstream_call_kwargs(
     span context (e.g. in the persistent session task).
     """
     import inspect
-    from datetime import timedelta
 
     from app import vars as app_vars
 
@@ -249,9 +279,9 @@ def downstream_call_kwargs(
     if app_vars.MCP_TOOL_TIMEOUT_SECONDS > 0 and (
         "read_timeout_seconds" in params or has_var_kw
     ):
-        kwargs["read_timeout_seconds"] = timedelta(
-            seconds=app_vars.MCP_TOOL_TIMEOUT_SECONDS
-        )
+        # A float: SDK v2 hands it straight to anyio.fail_after (1.x accepted a
+        # timedelta as well).
+        kwargs["read_timeout_seconds"] = float(app_vars.MCP_TOOL_TIMEOUT_SECONDS)
     return kwargs
 
 

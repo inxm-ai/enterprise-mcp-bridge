@@ -8,9 +8,9 @@ default does not gain an env-var-echoing tool.
 
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("mcp-oauth-env-probe-server")
+mcp = MCPServer("mcp-oauth-env-probe-server")
 
 
 @mcp.tool()

@@ -1,10 +1,10 @@
+from app.utils.mcp_fields import input_schema
 from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
 from typing import Dict, Optional
 
 from app.oauth.token_exchange import TokenRetrieverFactory
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -34,12 +34,13 @@ async def decorate_args_with_oauth_token(
     if args is None:
         args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
-    if tool_info and hasattr(tool_info, "inputSchema") and tool_info.inputSchema:
+    schema = input_schema(tool_info) if tool_info else None
+    if schema:
         # inputSchema might be a dict or an object with 'properties'
-        if isinstance(tool_info.inputSchema, dict):
-            properties = tool_info.inputSchema.get("properties", {})
+        if isinstance(schema, dict):
+            properties = schema.get("properties", {})
         else:
-            properties = getattr(tool_info.inputSchema, "properties", {})
+            properties = getattr(schema, "properties", {})
         if "oauth_token" in properties:
             if oauth_token:
                 args["oauth_token"] = oauth_token

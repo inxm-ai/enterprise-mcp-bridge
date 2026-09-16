@@ -8,6 +8,7 @@ import logging
 import inspect
 import time
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from app.utils import mcp_fields
 from app.vars import TGI_MODEL_NAME, TOOL_CHUNK_SIZE, GENERATED_UI_TOOL_TEXT_CAP
 from opentelemetry import trace
 
@@ -466,13 +467,8 @@ class ToolService:
                     result = await result
 
                 # Normalize common result shapes (object or dict)
-                result_is_error = getattr(result, "isError", None)
-                if result_is_error is None and isinstance(result, dict):
-                    result_is_error = result.get("isError")
-
-                structured = getattr(result, "structuredContent", None)
-                if structured is None and isinstance(result, dict):
-                    structured = result.get("structuredContent")
+                result_is_error = mcp_fields.read(result, "is_error", "isError")
+                structured = mcp_fields.structured_content(result)
 
                 content_entries = getattr(result, "content", None)
                 if content_entries is None and isinstance(result, dict):

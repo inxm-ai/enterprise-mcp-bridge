@@ -1,3 +1,4 @@
+import base64
 import logging
 import io
 import re
@@ -17,6 +18,7 @@ from fastapi.responses import (
     Response,
 )
 from typing import Optional, Dict
+from pydantic import BaseModel
 import uuid
 import os
 import asyncio
@@ -27,12 +29,15 @@ from app.utils.mcp_operation import (
     MCP_METHOD_RESOURCES_READ,
     MCP_METHOD_TOOLS_CALL,
     TRANSPORT_REST,
+    classify_error_result,
     classify_error_text,
+    retryable_typed_error,
     log_sanitized_exception,
     mcp_operation_span,
     safe_arg_keys,
 )
 from app.utils.structured_text_parser import try_parse_structured_text
+from app.utils import mcp_fields
 from app.session import (
     MCPLocalSessionTask,
     mcp_session,
@@ -88,6 +93,9 @@ HTTP_STATUS_TOOL_EXECUTION_ERROR = 422
 # that callers treat as retryable.
 HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT = 504
 
+HTTP_STATUS_TOOL_RETRYABLE_ERROR = 503
+RETRY_AFTER_SECONDS = "5"
+
 tracer = trace.get_tracer(__name__)
 
 if MCP_BASE_PATH:
@@ -95,6 +103,13 @@ if MCP_BASE_PATH:
     logger.info(f"Using MCP_BASE_PATH: {MCP_BASE_PATH}")
 else:
     logger.info("No MCP_BASE_PATH set, using root path")
+
+
+def _error_detail(result) -> object:
+    """The failed result as the HTTP error's detail: the envelope itself, so a caller reads the typed payload as JSON."""
+    if isinstance(result, BaseModel):
+        return result.model_dump()
+    return str(result)
 
 
 def _extract_request_headers(request: Request) -> dict[str, str]:
@@ -275,7 +290,7 @@ async def get_resource_details(
                 resource = resource.contents[0]
                 # Resource bodies are sensitive content; only the mime type
                 # may be logged.
-                mime_type = resource.mimeType or "text/plain"
+                mime_type = mcp_fields.mime_type(resource) or "text/plain"
                 logger.info(
                     "[Resource-Details] Resource retrieved: %s (%s)",
                     resource_name,
@@ -290,12 +305,16 @@ async def get_resource_details(
                 else:
                     text = ""
                 if blob:
-                    # If blob is bytes, wrap in BytesIO; if file-like, use directly
+                    # BlobResourceContents carries the bytes base64-encoded, the
+                    # way the protocol sends them; the caller gets the file, not
+                    # its encoding. Bytes and file-like blobs pass through.
+                    if isinstance(blob, str):
+                        return Response(
+                            content=base64.b64decode(blob), media_type=mime_type
+                        )
                     if isinstance(blob, bytes):
-                        stream = io.BytesIO(blob)
-                    else:
-                        stream = blob
-                    return StreamingResponse(stream, media_type=mime_type)
+                        return Response(content=blob, media_type=mime_type)
+                    return StreamingResponse(blob, media_type=mime_type)
                 elif mime_type == "text/html":
                     return HTMLResponse(content=text, media_type=mime_type)
                 elif text:
@@ -552,8 +571,9 @@ async def run_tool(
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
-            if not result.isError:
-                if result.structuredContent:
+            is_error = mcp_fields.is_error(result)
+            if not is_error:
+                if mcp_fields.structured_content(result):
                     logger.info(
                         f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
                     )
@@ -562,29 +582,28 @@ async def run_tool(
                         if hasattr(content, "text") and content.text:
                             parsed = try_parse_structured_text(content.text)
                             if parsed is not None:
-                                result.structuredContent = parsed
+                                mcp_fields.set_structured_content(result, parsed)
                                 break
                 op.record_success(result)
             else:
-                error_text = result.content[0].text if result.content else ""
-                op.record_error_result(classify_error_text(error_text), result)
+                op.record_error_result(classify_error_result(result), result)
 
         logger.info(
             "[Tool-Call] Tool %s called. isError=%s items=%s",
             tool_name,
-            result.isError,
+            is_error,
             len(result.content) if result.content else 0,
         )
-        if result.isError:
+        if is_error:
             error_text = result.content[0].text if result.content else ""
             if "Unknown tool" in error_text:
                 logger.info(f"[Tool-Call] Tool not found: {tool_name}")
-                raise HTTPException(status_code=404, detail=str(result))
+                raise HTTPException(status_code=404, detail=_error_detail(result))
             if "validation error" in error_text:
                 logger.info(
                     f"[Tool-Call] Tool called with invalid parameters: {tool_name}."
                 )
-                raise HTTPException(status_code=400, detail=str(result))
+                raise HTTPException(status_code=400, detail=_error_detail(result))
 
             # Timeouts are transient: the same call may succeed on retry, so
             # they must not fall into the terminal 4xx bucket below. FastMCP
@@ -593,14 +612,26 @@ async def run_tool(
             if "timed out" in error_text.lower():
                 logger.warning(f"[Tool-Call] Upstream timeout in tool {tool_name}")
                 raise HTTPException(
-                    status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT, detail=str(result)
+                    status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT,
+                    detail=_error_detail(result),
+                )
+
+            if retryable_typed_error(result):
+                logger.warning(
+                    f"[Tool-Call] Retryable typed error from tool {tool_name}"
+                )
+                raise HTTPException(
+                    status_code=HTTP_STATUS_TOOL_RETRYABLE_ERROR,
+                    detail=_error_detail(result),
+                    headers={"Retry-After": RETRY_AFTER_SECONDS},
                 )
 
             # The tool ran and rejected the request; the bridge itself is healthy.
             # 4xx keeps callers from retrying a failure that cannot succeed.
             logger.error(f"[Tool-Call] Error in tool {tool_name}")
             raise HTTPException(
-                status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR, detail=str(result)
+                status_code=HTTP_STATUS_TOOL_EXECUTION_ERROR,
+                detail=_error_detail(result),
             )
         return result
     except ToolPolicyDeniedError:
@@ -692,7 +723,7 @@ async def run_prompt(
             ) as session:
                 result = await session.call_prompt(prompt_name, args)
 
-            if result.isError:
+            if mcp_fields.is_error(result):
                 # RunPromptResult carries its error text in `description`.
                 op.record_error_result(
                     classify_error_text(result.description or ""), result
@@ -701,24 +732,26 @@ async def run_prompt(
                 op.record_success(result)
 
         logger.info(
-            "[Prompt-Call] Prompt %s called. isError=%s", prompt_name, result.isError
+            "[Prompt-Call] Prompt %s called. isError=%s",
+            prompt_name,
+            mcp_fields.is_error(result),
         )
-        if result.isError:
+        if mcp_fields.is_error(result):
             # RunPromptResult has no `content` field — its error text lives in
             # `description`. Reading `content` here raised AttributeError and
             # collapsed every prompt failure into a generic 500.
             error_text = result.description or ""
             if "Unknown prompt" in error_text:
                 logger.info(f"[Prompt-Call] Prompt not found: {prompt_name}")
-                raise HTTPException(status_code=404, detail=str(result))
+                raise HTTPException(status_code=404, detail=_error_detail(result))
             if "validation error" in error_text:
                 logger.info(
                     f"[Prompt-Call] Prompt called with invalid parameters: {prompt_name}."
                 )
-                raise HTTPException(status_code=400, detail=str(result))
+                raise HTTPException(status_code=400, detail=_error_detail(result))
 
             logger.error(f"[Prompt-Call] Error in prompt {prompt_name}")
-            raise HTTPException(status_code=500, detail=str(result))
+            raise HTTPException(status_code=500, detail=_error_detail(result))
         return result
     except ResponseTooLargeError as e:
         # Deterministic for this call; the oversized content is never relayed.

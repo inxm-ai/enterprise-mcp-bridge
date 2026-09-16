@@ -28,6 +28,9 @@ from typing import Any, AsyncGenerator, Callable, Dict, Optional
 
 from fastapi.responses import StreamingResponse
 
+from pydantic import BaseModel
+
+from app.utils import mcp_fields
 from app.elicitation import (
     ElicitationRequiredError,
     InvalidUserFeedbackError,
@@ -307,23 +310,28 @@ def _serialize_result(result: Any) -> Any:
     if isinstance(result, dict):
         return result
 
-    # If it has a model_dump method (Pydantic model), use it
+    # If it has a model_dump method (Pydantic model), use it; by alias, so an
+    # SDK v2 model (snake_case fields) still streams the protocol's names.
     if hasattr(result, "model_dump"):
-        return result.model_dump()
+        return mcp_fields.dump(result)
 
     # If it has common MCP result attributes, extract them
     result_dict = {}
 
-    if hasattr(result, "isError"):
-        result_dict["isError"] = result.isError
+    error_flag = mcp_fields.read(result, "is_error", "isError", mcp_fields.MISSING)
+    if error_flag is not mcp_fields.MISSING:
+        result_dict["isError"] = error_flag
     if hasattr(result, "content"):
         content = result.content
         if isinstance(content, list):
             result_dict["content"] = [_serialize_content_item(item) for item in content]
         else:
             result_dict["content"] = content
-    if hasattr(result, "structuredContent"):
-        result_dict["structuredContent"] = result.structuredContent
+    structured = mcp_fields.read(
+        result, "structured_content", "structuredContent", mcp_fields.MISSING
+    )
+    if structured is not mcp_fields.MISSING:
+        result_dict["structuredContent"] = structured
 
     return result_dict if result_dict else str(result)
 
@@ -333,7 +341,7 @@ def _serialize_content_item(item: Any) -> Any:
     if isinstance(item, dict):
         return item
     if hasattr(item, "model_dump"):
-        return item.model_dump()
+        return mcp_fields.dump(item)
     if hasattr(item, "text"):
         result = {"text": item.text}
         if hasattr(item, "type"):

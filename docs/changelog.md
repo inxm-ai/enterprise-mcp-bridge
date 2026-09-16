@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation site using Docsify
 - Diataxis-based documentation structure (Tutorials, How-To, Reference, Explanation)
 - GitHub Pages deployment workflow
+- A tool or prompt error's HTTP `detail` is the result envelope as JSON (`isError`, `content`, `structuredContent`) instead of its printed form, so callers read the typed payload without parsing text
+- A typed tool error whose `structuredContent.result.error.retryable` is true is reported as HTTP 503 with a `Retry-After` header, so callers keep retrying failures the tool itself calls transient; other `isError` results stay 422
+- The negotiated MCP protocol revision is logged once per downstream session (`[MCP] Protocol ... negotiated with ...`)
+
+### Changed
+- MCP Python SDK v2 (`mcp>=2.2,<3`). Sessions still open with the `initialize` handshake (protocol 2025-11-25 and earlier) by default; `MCP_PROTOCOL_NEGOTIATION=auto` probes `server/discover` first and speaks 2026-07-28 to servers that support it, falling back to the handshake for the rest. The modern wire carries no client-bound notifications, so progress streaming, log forwarding and elicitation are not yet proven on it; enable it per deployment. The REST envelopes (`isError`, `structuredContent`, `inputSchema`, ...) are unchanged
+- The SSE proxy builds its low-level MCP server from explicit handlers (`_build_proxy_handlers`); a failed proxied tool call is still answered as a tool error, never as a protocol error
+
+### Fixed
+- `GET /resources/{name}` streamed a binary resource's base64 text; it now streams the decoded bytes with the resource's media type
 
 ## [0.4.2] - 2024-01-15
 

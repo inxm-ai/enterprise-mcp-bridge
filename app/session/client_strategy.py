@@ -10,11 +10,14 @@ from urllib.parse import urlparse
 import anyio
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.client.client import negotiate_auto
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.client.sse import sse_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
+from app.utils import mcp_fields
 from app.elicitation import (
     ElicitationRequiredError,
     InvalidUserFeedbackError,
@@ -36,6 +39,7 @@ from app.vars import (
     MCP_REMOTE_SCOPE,
     MCP_REMOTE_SERVER,
     MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS,
+    MCP_PROTOCOL_NEGOTIATION,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -84,13 +88,52 @@ async def _log_mcp_notification(
     )
 
 
+async def _negotiate(session) -> None:
+    """Open the session at the protocol revision MCP_PROTOCOL_NEGOTIATION selects.
+
+    ``legacy`` is the ``initialize`` handshake. ``auto`` is the SDK's own
+    policy: probe ``server/discover`` (2026-07-28) and fall back to the
+    handshake for a server that does not know it. The negotiated revision is
+    logged once per session: the canary for which servers still speak the
+    handshake era.
+    """
+    if MCP_PROTOCOL_NEGOTIATION == "auto":
+        await negotiate_auto(session)
+    else:
+        await session.initialize()
+    server_info = getattr(session, "server_info", None)
+    logger.info(
+        "[MCP] Protocol %s negotiated with %s",
+        getattr(session, "protocol_version", None),
+        getattr(server_info, "name", None) or "unnamed server",
+    )
+
+
+@asynccontextmanager
+async def _streamable_client(url: str, headers=None, auth=None):
+    """The streamable HTTP transport with the bridge's headers and auth on its client.
+
+    SDK v2 takes a ready HTTP client instead of headers and auth; the client
+    is owned here, so it is closed here.
+    """
+    http_client = create_mcp_http_client(headers=headers, auth=auth)
+    async with http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+        ):
+            yield read, write
+
+
 def _make_elicitation_callback(session_key: Optional[str]):
     coordinator = get_elicitation_coordinator()
 
     async def _elicitation_callback(_context, params: types.ElicitRequestParams):
         raw_payload = {
             "message": params.message,
-            "requestedSchema": dict(params.requestedSchema or {}),
+            "requestedSchema": dict(
+                mcp_fields.read(params, "requested_schema", "requestedSchema") or {}
+            ),
             "meta": dict(params.meta or {}),
         }
         try:
@@ -155,7 +198,7 @@ class LocalMCPClientStrategy(MCPClientStrategy):
                     logging_callback=_log_mcp_notification,
                     elicitation_callback=_make_elicitation_callback(self.session_key),
                 ) as session:
-                    await session.initialize()
+                    await _negotiate(session)
                     yield session
         finally:
             try:
@@ -326,8 +369,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 "Ambient identity provider returned no usable token"
             )
         token_type = (
-            (token_result.get("token_type") if token_result else "Bearer") or "Bearer"
-        )
+            token_result.get("token_type") if token_result else "Bearer"
+        ) or "Bearer"
         if token_type.lower() == "bearer":
             token_type = "Bearer"
         authorization_value = self._format_auth_header_value(token_value, token_type)
@@ -462,11 +505,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                         headers=headers,
                     )
                 )
-                get_session_id = None
             else:
                 logger.info("[RemoteMCP] Using StreamableHTTP client (full protocol)")
-                read, write, get_session_id = await stack.enter_async_context(
-                    streamablehttp_client(
+                read, write = await stack.enter_async_context(
+                    _streamable_client(
                         self.url,
                         headers=headers,
                         auth=self._auth_provider,
@@ -482,7 +524,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 )
             )
             try:
-                await session.initialize()
+                await _negotiate(session)
             except Exception as e:
                 logger.error(
                     f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
@@ -492,8 +534,6 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
                 )
                 raise
-            if get_session_id:
-                setattr(session, "get_remote_session_id", get_session_id)
             yield session
         finally:
             # Close under an anyio shield, never asyncio.shield: the transports
