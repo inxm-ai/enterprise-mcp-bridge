@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, Cookie, Query, Request, HTTPException
 
+from app.utils import mcp_fields
 from app.elicitation import get_elicitation_coordinator
 from app.oauth.token_dependency import get_access_token
 from app.oauth.token_exchange import UserLoggedOutException
@@ -24,7 +25,7 @@ from app.utils import token_fingerprint
 from app.utils.mcp_operation import (
     MCP_METHOD_TOOLS_CALL,
     TRANSPORT_REST,
-    classify_error_text,
+    classify_error_result,
     mcp_operation_span,
     safe_arg_keys,
 )
@@ -185,11 +186,9 @@ async def run_tool_with_progress(
                                 progress_callback=progress_callback,
                                 log_callback=log_callback,
                             )
-                            if getattr(result, "isError", False):
-                                content = getattr(result, "content", None)
-                                error_text = content[0].text if content else ""
+                            if mcp_fields.is_error(result):
                                 op.record_error_result(
-                                    classify_error_text(error_text), result
+                                    classify_error_result(result), result
                                 )
                             else:
                                 op.record_success(result)

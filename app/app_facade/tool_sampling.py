@@ -20,6 +20,7 @@ from typing import (
     Tuple,
 )
 
+from app.utils import mcp_fields
 from app.session import MCPSessionBase
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
@@ -615,9 +616,7 @@ class ToolSampler:
         return None
 
     def _result_has_sampling_error(self, result: Any) -> bool:
-        is_error = getattr(result, "isError", None)
-        if is_error is None and isinstance(result, dict):
-            is_error = result.get("isError")
+        is_error = mcp_fields.read(result, "is_error", "isError")
         if is_error is True:
             return True
 
@@ -635,11 +634,7 @@ class ToolSampler:
         if explicit_error:
             return True
 
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         if self._payload_has_error_markers(structured):
             return True
 
@@ -659,11 +654,7 @@ class ToolSampler:
         if explicit_error:
             return to_json_value(explicit_error)
 
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         if self._payload_has_error_markers(structured):
             return to_json_value(structured)
 
@@ -699,11 +690,7 @@ class ToolSampler:
         return payload
 
     def _extract_sample_from_success_tool_result(self, result: Any) -> Optional[Any]:
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         resolved = self._resolve_sample_value(structured)
         if resolved is not None:
             return resolved
@@ -1146,16 +1133,23 @@ class ToolSampler:
                 output_schema = function.get("outputSchema") or tool.get("outputSchema")
             else:
                 function = getattr(tool, "function", None)
-                output_schema = getattr(tool, "outputSchema", None)
-                input_schema = getattr(tool, "inputSchema", None) or {}
+                output_schema = mcp_fields.output_schema(tool)
+                input_schema = mcp_fields.input_schema(tool) or {}
                 if function and hasattr(function, "name"):
                     tool_name = function.name
                 if function and hasattr(function, "description"):
                     tool_description = function.description
                 if function and hasattr(function, "parameters"):
                     input_schema = getattr(function, "parameters") or input_schema
-                if function and hasattr(function, "outputSchema"):
-                    output_schema = getattr(function, "outputSchema")
+                function_output = (
+                    mcp_fields.read(
+                        function, "output_schema", "outputSchema", mcp_fields.MISSING
+                    )
+                    if function
+                    else mcp_fields.MISSING
+                )
+                if function_output is not mcp_fields.MISSING:
+                    output_schema = function_output
             if not tool_name:
                 return None
             if tool_name in _DUMMY_DATA_SAMPLING_EXCLUDED_TOOLS:

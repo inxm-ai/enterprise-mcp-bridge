@@ -14,7 +14,7 @@ POST {base}/sse/messages     — JSON-RPC message channel
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -23,7 +23,8 @@ from starlette.routing import Route
 from mcp import types
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
-from mcp.server.lowlevel.server import request_ctx as lowlevel_request_ctx
+from mcp.server.lowlevel.server import ServerRequestContext
+from mcp.shared.exceptions import MCPError
 
 from app.elicitation import ElicitationRequiredError, get_elicitation_coordinator
 from app.oauth.decorator import decorate_args_with_oauth_token
@@ -33,6 +34,8 @@ from app.oauth.user_info import (
 )
 from app.session import mcp_session
 from app.session_manager.session_context import (
+    ResponseTooLargeError,
+    ToolPolicyDeniedError,
     _to_tool_list,
     enforce_response_ceiling,
     ensure_tool_allowed,
@@ -40,12 +43,13 @@ from app.session_manager.session_context import (
     inject_headers_into_args,
     list_resources as _list_resources_helper,
 )
+from app.utils import mcp_fields
 from app.utils.mcp_operation import (
     MCP_METHOD_PROMPTS_GET,
     MCP_METHOD_RESOURCES_READ,
     MCP_METHOD_TOOLS_CALL,
     TRANSPORT_SSE,
-    classify_error_text,
+    classify_error_result,
     downstream_call_kwargs,
     log_sanitized_exception,
     mcp_operation_span,
@@ -94,7 +98,7 @@ def _extract_access_token(request: Request) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _request_telemetry_context() -> dict:
+def _request_telemetry_context(ctx: Optional[ServerRequestContext]) -> dict:
     """Best-effort request/client identifiers from the low-level MCP context.
 
     Missing context is omitted, never fabricated; nothing here reads request
@@ -106,41 +110,61 @@ def _request_telemetry_context() -> dict:
         "client_name": None,
         "client_version": None,
     }
-    ctx = lowlevel_request_ctx.get(None)
     if ctx is None:
         return info
     request_id = getattr(ctx, "request_id", None)
     if request_id is not None:
         info["request_id"] = str(request_id)
+    protocol_version = getattr(ctx, "protocol_version", None)
     client_params = getattr(getattr(ctx, "session", None), "client_params", None)
     if client_params is not None:
-        protocol_version = getattr(client_params, "protocolVersion", None)
-        if protocol_version:
-            info["protocol_version"] = str(protocol_version)
-        client_info = getattr(client_params, "clientInfo", None)
+        protocol_version = protocol_version or mcp_fields.read(
+            client_params, "protocol_version", "protocolVersion"
+        )
+        client_info = mcp_fields.read(client_params, "client_info", "clientInfo")
         if client_info is not None:
             info["client_name"] = getattr(client_info, "name", None)
             info["client_version"] = getattr(client_info, "version", None)
+    if protocol_version:
+        info["protocol_version"] = str(protocol_version)
     return info
 
 
-def _build_proxy_server(
+def _build_proxy_handlers(
     downstream,
     access_token: Optional[str],
     incoming_headers: Optional[dict[str, str]],
     session_key: Optional[str],
-) -> Server:
-    """Create an MCP Server whose handlers proxy to *downstream*."""
-    proxy = Server(SERVICE_NAME)
+) -> dict[str, Callable[..., Awaitable[Any]]]:
+    """The proxy's request handlers, keyed by the ``Server`` keyword each one wires into.
+
+    Handlers take the low-level server's ``(ctx, params)``; ``_build_proxy_server``
+    passes the dict straight to ``Server``. Kept apart so a test can call one.
+    """
     coordinator = get_elicitation_coordinator()
 
-    @proxy.list_tools()
-    async def _list_tools() -> list[types.Tool]:
+    async def list_tools(ctx, params) -> types.ListToolsResult:
         tools = await downstream.list_tools()
-        return filter_tools(_to_tool_list(tools))
+        return types.ListToolsResult(tools=filter_tools(_to_tool_list(tools)))
 
-    @proxy.call_tool(validate_input=False)
-    async def _call_tool(name: str, arguments: dict) -> types.CallToolResult:
+    async def call_tool(
+        ctx, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        # The failures that mean "the tool ran, or was refused" leave as tool
+        # errors, the same set the REST route maps to statuses. Anything else
+        # is a bridge fault: it propagates, and the SDK answers with a generic
+        # internal error rather than the exception's message.
+        try:
+            return await _call_tool(ctx, params)
+        except (ToolPolicyDeniedError, ResponseTooLargeError, MCPError) as exc:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))],
+                is_error=True,
+            )
+
+    async def _call_tool(ctx, params: types.CallToolRequestParams):
+        name = params.name
+        arguments = params.arguments or {}
         with mcp_operation_span(
             method=MCP_METHOD_TOOLS_CALL,
             target=name,
@@ -148,7 +172,7 @@ def _build_proxy_server(
             session_value=session_key,
             access_token=access_token,
             arg_keys=safe_arg_keys(arguments),
-            **_request_telemetry_context(),
+            **_request_telemetry_context(ctx),
         ) as op:
             # Discovery filtering alone is bypassable by a direct call, so the
             # same policy check runs before any downstream contact.
@@ -166,22 +190,20 @@ def _build_proxy_server(
                         **downstream_call_kwargs(downstream.call_tool),
                     )
                     result = enforce_response_ceiling(result)
-                    if getattr(result, "isError", False):
-                        content = getattr(result, "content", None)
-                        error_text = content[0].text if content else ""
-                        op.record_error_result(classify_error_text(error_text), result)
+                    if mcp_fields.is_error(result):
+                        op.record_error_result(classify_error_result(result), result)
                     else:
                         op.record_success(result)
                     return result
                 except ElicitationRequiredError as exc:
                     if not session_key:
                         raise
-                    ctx = lowlevel_request_ctx.get(None)
-                    if not ctx or not getattr(ctx, "session", None):
+                    session = getattr(ctx, "session", None)
+                    if session is None:
                         raise
-                    client_result = await ctx.session.elicit(
+                    client_result = await session.elicit(
                         message=str(exc.payload.get("message") or ""),
-                        requestedSchema=exc.payload.get("requestedSchema") or {},
+                        requested_schema=exc.payload.get("requestedSchema") or {},
                     )
                     coordinator.submit_response(
                         session_key,
@@ -190,55 +212,83 @@ def _build_proxy_server(
                             "content": client_result.content,
                         },
                     )
-            raise RuntimeError("Elicitation retry limit exceeded for proxied tool call")
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text",
+                        text="Elicitation retry limit exceeded for proxied tool call",
+                    )
+                ],
+                is_error=True,
+            )
 
-    @proxy.list_prompts()
-    async def _list_prompts() -> list[types.Prompt]:
+    async def list_prompts(ctx, params) -> types.ListPromptsResult:
         result = await downstream.list_prompts()
-        return list(result.prompts) if hasattr(result, "prompts") else list(result)
+        prompts = list(result.prompts) if hasattr(result, "prompts") else list(result)
+        return types.ListPromptsResult(prompts=prompts)
 
-    @proxy.get_prompt()
-    async def _get_prompt(
-        name: str, arguments: dict[str, str] | None
+    async def get_prompt(
+        ctx, params: types.GetPromptRequestParams
     ) -> types.GetPromptResult:
         with mcp_operation_span(
             method=MCP_METHOD_PROMPTS_GET,
-            target=name,
+            target=params.name,
             transport=TRANSPORT_SSE,
             session_value=session_key,
             access_token=access_token,
-            arg_keys=safe_arg_keys(arguments),
-            **_request_telemetry_context(),
+            arg_keys=safe_arg_keys(params.arguments),
+            **_request_telemetry_context(ctx),
         ) as op:
             result = enforce_response_ceiling(
-                await downstream.get_prompt(name, arguments)
+                await downstream.get_prompt(params.name, params.arguments)
             )
             op.record_success(result)
             return result
 
-    @proxy.list_resources()
-    async def _list_resources() -> list[types.Resource]:
+    async def list_resources(ctx, params) -> types.ListResourcesResult:
         result = await _list_resources_helper(downstream.list_resources)
-        return list(result.resources) if hasattr(result, "resources") else list(result)
+        resources = (
+            list(result.resources) if hasattr(result, "resources") else list(result)
+        )
+        return types.ListResourcesResult(resources=resources)
 
-    # read_resource – register handler directly for clean result pass-through
-    async def _read_resource_handler(req: types.ReadResourceRequest):
+    async def read_resource(
+        ctx, params: types.ReadResourceRequestParams
+    ) -> types.ReadResourceResult:
         with mcp_operation_span(
             method=MCP_METHOD_RESOURCES_READ,
             transport=TRANSPORT_SSE,
             session_value=session_key,
             access_token=access_token,
-            **_request_telemetry_context(),
+            **_request_telemetry_context(ctx),
         ) as op:
             result = enforce_response_ceiling(
-                await downstream.read_resource(req.params.uri)
+                await downstream.read_resource(params.uri)
             )
             op.record_success(result)
-            return types.ServerResult(result)
+            return result
 
-    proxy.request_handlers[types.ReadResourceRequest] = _read_resource_handler
+    return {
+        "on_list_tools": list_tools,
+        "on_call_tool": call_tool,
+        "on_list_prompts": list_prompts,
+        "on_get_prompt": get_prompt,
+        "on_list_resources": list_resources,
+        "on_read_resource": read_resource,
+    }
 
-    return proxy
+
+def _build_proxy_server(
+    downstream,
+    access_token: Optional[str],
+    incoming_headers: Optional[dict[str, str]],
+    session_key: Optional[str],
+) -> Server:
+    """Create an MCP Server whose handlers proxy to *downstream*."""
+    handlers = _build_proxy_handlers(
+        downstream, access_token, incoming_headers, session_key
+    )
+    return Server(SERVICE_NAME, **handlers)
 
 
 # ---------------------------------------------------------------------------

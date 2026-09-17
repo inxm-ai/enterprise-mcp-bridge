@@ -139,6 +139,8 @@ RUN pip install -r /mcp/requirements.txt
 ENV MCP_SERVER_COMMAND="python /mcp/server.py"
 ```
 
+This installs your server's requirements on top of the bridge, so any `mcp` pin in them must stay within the bridge's own range (`mcp>=2.2,<3`); an older pin downgrades the SDK the bridge imports and it no longer starts.
+
 Build and run:
 ```bash
 docker build -t my-mcp-bridge .

@@ -16,16 +16,17 @@ from contextlib import asynccontextmanager
 from mcp import types
 
 from app.elicitation import ElicitationRequiredError
+from mcp.server import Server
+
 from app.sse.mcp_proxy import (
+    _build_proxy_handlers,
     _build_proxy_server,
     _extract_access_token,
-    lowlevel_request_ctx,
     get_sse_proxy_routes,
     sse_transport,
     _SSEConnectionApp,
     _SSEMessagesApp,
 )
-
 
 # ---------------------------------------------------------------------------
 # Route / transport configuration
@@ -91,8 +92,9 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {"X-Auth-Request-Access-Token": "tok_123"}
         request.cookies = {}
-        with patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"), patch(
-            "app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
         ):
             assert _extract_access_token(request) == "tok_123"
 
@@ -100,8 +102,9 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {}
         request.cookies = {"_oauth2_proxy": "cookie_tok"}
-        with patch("app.sse.mcp_proxy.TOKEN_SOURCE", "cookie"), patch(
-            "app.sse.mcp_proxy.TOKEN_COOKIE_NAME", "_oauth2_proxy"
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "cookie"),
+            patch("app.sse.mcp_proxy.TOKEN_COOKIE_NAME", "_oauth2_proxy"),
         ):
             assert _extract_access_token(request) == "cookie_tok"
 
@@ -109,8 +112,9 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {}
         request.cookies = {}
-        with patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"), patch(
-            "app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
         ):
             assert _extract_access_token(request) is None
 
@@ -172,13 +176,28 @@ class TestProxyServerBuilder:
             incoming_headers=None,
             session_key="sess-1",
         )
-        # Should have handlers for standard MCP request types
-        assert types.ListToolsRequest in proxy.request_handlers
-        assert types.CallToolRequest in proxy.request_handlers
-        assert types.ListPromptsRequest in proxy.request_handlers
-        assert types.GetPromptRequest in proxy.request_handlers
-        assert types.ListResourcesRequest in proxy.request_handlers
-        assert types.ReadResourceRequest in proxy.request_handlers
+        # A real low-level server, built from one handler per standard method
+        assert isinstance(proxy, Server)
+        handlers = _build_proxy_handlers(
+            downstream, access_token=None, incoming_headers=None, session_key="s"
+        )
+        assert set(handlers) == {
+            "on_list_tools",
+            "on_call_tool",
+            "on_list_prompts",
+            "on_get_prompt",
+            "on_list_resources",
+            "on_read_resource",
+        }
+        for method in (
+            "tools/list",
+            "tools/call",
+            "prompts/list",
+            "prompts/get",
+            "resources/list",
+            "resources/read",
+        ):
+            assert proxy.get_request_handler(method) is not None, method
 
     def test_proxy_server_name(self):
         downstream = _make_mock_downstream()
@@ -193,39 +212,33 @@ class TestProxyServerBuilder:
     @pytest.mark.asyncio
     async def test_list_tools_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token=None,
             incoming_headers=None,
             session_key="sess-1",
         )
 
-        handler = proxy.request_handlers[types.ListToolsRequest]
-        req = types.ListToolsRequest(method="tools/list")
-        result = await handler(req)
+        result = await handlers["on_list_tools"](None, None)
 
         downstream.list_tools.assert_awaited_once()
-        assert result.root.tools is not None
+        assert result.tools is not None
 
     @pytest.mark.asyncio
     async def test_call_tool_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token="tok",
             incoming_headers={},
             session_key="sess-1",
         )
 
-        handler = proxy.request_handlers[types.CallToolRequest]
-        req = types.CallToolRequest(
-            method="tools/call",
-            params=types.CallToolRequestParams(name="my_tool", arguments={"x": "val"}),
-        )
-        result = await handler(req)
+        params = types.CallToolRequestParams(name="my_tool", arguments={"x": "val"})
+        result = await handlers["on_call_tool"](None, params)
 
         downstream.call_tool.assert_awaited_once()
-        assert not result.root.isError
+        assert not result.is_error
 
     @pytest.mark.asyncio
     async def test_call_tool_round_trips_elicitation(self):
@@ -250,17 +263,13 @@ class TestProxyServerBuilder:
                 isError=False,
             ),
         ]
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token="tok",
             incoming_headers={},
             session_key="sess-1",
         )
-        handler = proxy.request_handlers[types.CallToolRequest]
-        req = types.CallToolRequest(
-            method="tools/call",
-            params=types.CallToolRequestParams(name="my_tool", arguments={"x": "val"}),
-        )
+        params = types.CallToolRequestParams(name="my_tool", arguments={"x": "val"})
         fake_ctx = SimpleNamespace(
             session=SimpleNamespace(
                 elicit=AsyncMock(
@@ -270,74 +279,62 @@ class TestProxyServerBuilder:
                 )
             )
         )
-        token = lowlevel_request_ctx.set(fake_ctx)
-        try:
-            result = await handler(req)
-        finally:
-            lowlevel_request_ctx.reset(token)
+        result = await handlers["on_call_tool"](fake_ctx, params)
 
-        assert not result.root.isError
+        assert not result.is_error
         assert downstream.call_tool.await_count == 2
         fake_ctx.session.elicit.assert_awaited_once()
         elicit_kwargs = fake_ctx.session.elicit.await_args.kwargs
         assert elicit_kwargs["message"] == "Pick a mode"
-        assert elicit_kwargs["requestedSchema"]["type"] == "object"
+        assert elicit_kwargs["requested_schema"]["type"] == "object"
         assert (
-            elicit_kwargs["requestedSchema"]["properties"]["mode"]["type"] == "string"
+            elicit_kwargs["requested_schema"]["properties"]["mode"]["type"] == "string"
         )
 
     @pytest.mark.asyncio
     async def test_list_prompts_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token=None,
             incoming_headers=None,
             session_key="sess-1",
         )
 
-        handler = proxy.request_handlers[types.ListPromptsRequest]
-        req = types.ListPromptsRequest(method="prompts/list")
-        result = await handler(req)
+        result = await handlers["on_list_prompts"](None, None)
 
         downstream.list_prompts.assert_awaited_once()
-        assert result.root.prompts is not None
+        assert result.prompts is not None
 
     @pytest.mark.asyncio
     async def test_get_prompt_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token=None,
             incoming_headers=None,
             session_key="sess-1",
         )
 
-        handler = proxy.request_handlers[types.GetPromptRequest]
-        req = types.GetPromptRequest(
-            method="prompts/get",
-            params=types.GetPromptRequestParams(name="my_prompt"),
+        await handlers["on_get_prompt"](
+            None, types.GetPromptRequestParams(name="my_prompt")
         )
-        await handler(req)
 
         downstream.get_prompt.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_read_resource_proxies_to_downstream(self):
         downstream = _make_mock_downstream()
-        proxy = _build_proxy_server(
+        handlers = _build_proxy_handlers(
             downstream,
             access_token=None,
             incoming_headers=None,
             session_key="sess-1",
         )
 
-        handler = proxy.request_handlers[types.ReadResourceRequest]
-        req = types.ReadResourceRequest(
-            method="resources/read",
-            params=types.ReadResourceRequestParams(uri="file:///test.txt"),
+        await handlers["on_read_resource"](
+            None, types.ReadResourceRequestParams(uri="file:///test.txt")
         )
-        await handler(req)
 
         downstream.read_resource.assert_awaited_once()
 
@@ -382,13 +379,16 @@ class TestSSEConnectionAppGroupValidation:
         async def fake_mcp_session(**_kwargs):
             yield downstream
 
-        with patch(
-            "app.sse.mcp_proxy._build_proxy_server", return_value=mock_proxy
-        ), patch(
-            "app.sse.mcp_proxy.sse_transport.connect_sse", side_effect=fake_connect_sse
-        ) as mock_connect, patch(
-            "app.sse.mcp_proxy.mcp_session", side_effect=fake_mcp_session
-        ) as mock_mcp_session:
+        with (
+            patch("app.sse.mcp_proxy._build_proxy_server", return_value=mock_proxy),
+            patch(
+                "app.sse.mcp_proxy.sse_transport.connect_sse",
+                side_effect=fake_connect_sse,
+            ) as mock_connect,
+            patch(
+                "app.sse.mcp_proxy.mcp_session", side_effect=fake_mcp_session
+            ) as mock_mcp_session,
+        ):
             await app(scope, receive, send)
 
         mock_connect.assert_called_once()
@@ -444,10 +444,13 @@ class TestSSEConnectionAppGroupValidation:
         mock_data_mgr = MagicMock()
         mock_data_mgr.resolve_data_resource.side_effect = PermissionError("denied")
 
-        with patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"), patch(
-            "app.sse.mcp_proxy.TOKEN_NAME", "x-auth-request-access-token"
-        ), patch(
-            "app.oauth.user_info.get_data_access_manager", return_value=mock_data_mgr
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "x-auth-request-access-token"),
+            patch(
+                "app.oauth.user_info.get_data_access_manager",
+                return_value=mock_data_mgr,
+            ),
         ):
             await app(scope, receive, capture_send)
 

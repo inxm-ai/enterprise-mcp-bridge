@@ -1,9 +1,12 @@
+import json
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
+from mcp import types
 from app.server import app as fastapi_app
 from app.routes import (
     HTTP_STATUS_TOOL_EXECUTION_ERROR,
+    HTTP_STATUS_TOOL_RETRYABLE_ERROR,
     HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT,
 )
 from pydantic import BaseModel
@@ -59,7 +62,7 @@ def test_tool_execution_error_is_client_error_not_server_error(
 
     assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
     assert 400 <= response.status_code < 500
-    assert "Max 20 URLs are allowed." in response.json()["detail"]
+    assert "Max 20 URLs are allowed." in json.dumps(response.json()["detail"])
 
 
 def test_upstream_timeout_stays_retryable(client, mock_session_context):
@@ -77,7 +80,7 @@ def test_upstream_timeout_stays_retryable(client, mock_session_context):
 
     assert response.status_code == HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT
     assert response.status_code >= 500
-    assert "timed out" in response.json()["detail"]
+    assert "timed out" in json.dumps(response.json()["detail"])
 
 
 def test_timeout_detection_is_case_insensitive(client, mock_session_context):
@@ -116,3 +119,101 @@ def test_error_result_with_empty_content_does_not_crash(client, mock_session_con
     )
 
     assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+
+
+def _typed_error(retryable: bool) -> dict:
+    """The fleet's typed error result, as a tool returns it under structuredContent.result."""
+    return {
+        "result": {
+            "status": "error",
+            "contract_version": "1.0",
+            "error": {
+                "code": "busy",
+                "message": "held elsewhere",
+                "retryable": retryable,
+            },
+        }
+    }
+
+
+def test_retryable_typed_error_stays_retryable(client, mock_session_context):
+    """A tool that says its failure is transient must not land in the terminal 4xx bucket."""
+    mock_session_context.call_tool.return_value = MockResult(
+        content=[MockContent(text="busy: held elsewhere (retryable)")],
+        isError=True,
+        structuredContent=_typed_error(retryable=True),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_RETRYABLE_ERROR
+    assert response.status_code >= 500
+    assert response.headers["Retry-After"]
+    detail = response.json()["detail"]
+    assert detail["isError"] is True
+    assert detail["structuredContent"]["result"]["error"]["retryable"] is True
+
+
+def test_typed_error_that_is_not_retryable_is_terminal(client, mock_session_context):
+    mock_session_context.call_tool.return_value = MockResult(
+        content=[MockContent(text="unknown_master: nope")],
+        isError=True,
+        structuredContent=_typed_error(retryable=False),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+
+
+def test_retryable_typed_error_wins_over_timeout_prose(client, mock_session_context):
+    """The typed payload is the tool's own verdict; the text heuristics only cover tools without one."""
+    mock_session_context.call_tool.return_value = MockResult(
+        content=[MockContent(text="busy: lock timed out (retryable)")],
+        isError=True,
+        structuredContent=_typed_error(retryable=True),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_RETRYABLE_ERROR
+    assert response.headers["Retry-After"]
+
+
+def test_dict_shaped_error_result_keeps_its_envelope(client, mock_session_context):
+    mock_session_context.call_tool.return_value = {
+        "isError": True,
+        "content": [{"type": "text", "text": "Unknown tool: nope_tool"}],
+    }
+
+    response = client.post(
+        "/tools/nope_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["isError"] is True
+    assert response.json()["detail"]["content"][0]["text"] == "Unknown tool: nope_tool"
+
+
+def test_sdk_v2_error_detail_uses_the_wire_names(client, mock_session_context):
+    mock_session_context.call_tool.return_value = types.CallToolResult(
+        content=[types.TextContent(type="text", text="busy")],
+        isError=True,
+        structuredContent=_typed_error(retryable=False),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+    detail = response.json()["detail"]
+    assert detail["isError"] is True
+    assert detail["structuredContent"]["result"]["error"]["code"] == "busy"
+    assert "is_error" not in detail

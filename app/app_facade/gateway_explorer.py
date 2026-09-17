@@ -18,6 +18,7 @@ from typing import (
     Tuple,
 )
 
+from app.utils import mcp_fields
 from app.session import MCPSessionBase
 from app.utils import token_fingerprint
 from app.tgi.models import ChatCompletionRequest, Message, MessageRole
@@ -372,11 +373,7 @@ class GatewayExplorer:
                 if t:
                     text_parts.append(str(t))
 
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         if structured is not None:
             text_parts.append(json.dumps(to_json_value(structured), ensure_ascii=False))
 
@@ -385,9 +382,7 @@ class GatewayExplorer:
     @staticmethod
     def _result_is_error(result: Any) -> bool:
         """Return True if the tool-call result indicates an error."""
-        if isinstance(result, dict):
-            return bool(result.get("isError"))
-        return bool(getattr(result, "isError", False))
+        return mcp_fields.is_error(result)
 
     def _json_from_result(self, result: Any) -> Any:
         """Parse the first JSON payload found in a tool-call result."""
@@ -478,11 +473,7 @@ class GatewayExplorer:
         """
         payloads: List[Any] = []
 
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         if structured is not None:
             payloads.append(to_json_value(structured))
 
@@ -579,11 +570,7 @@ class GatewayExplorer:
         """
         payloads: List[Any] = []
 
-        structured = (
-            result.get("structuredContent")
-            if isinstance(result, dict)
-            else getattr(result, "structuredContent", None)
-        )
+        structured = mcp_fields.structured_content(result)
         if structured is not None:
             payloads.append(to_json_value(structured))
 

@@ -1,8 +1,8 @@
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.mcpserver import MCPServer, Context
 import time
 
 # Create an MCP server
-mcp = FastMCP("mcp-EXAMPLE-server")
+mcp = MCPServer("mcp-EXAMPLE-server")
 
 
 # Two simple demo examples

@@ -111,6 +111,18 @@ class DictStructuredSession:
         return await DummySession().list_tools()
 
 
+class EmptyStructuredSession:
+    async def call_tool(self, name, args, access_token):
+        return {
+            "isError": False,
+            "content": [{"text": "not the payload"}],
+            "structuredContent": {},
+        }
+
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
+
 class JsonTextErrorSession:
     async def call_tool(self, name, args, access_token):
         return {
@@ -813,6 +825,16 @@ async def test_structured_content_dict_preferred_over_content(tool_service):
     assert "structuredContent" not in raw  # normalized result payload
     content = json.loads(raw["content"])
     assert content == {"result": {"ok": True, "name": "list-files", "args": {}}}
+
+
+@pytest.mark.asyncio
+async def test_empty_structured_content_is_the_payload(tool_service):
+    await tool_service.get_all_mcp_tools(DummySession())
+    tool_call = make_tool_call(name="list-files", args="{}", id="call_empty")
+    raw = await tool_service.execute_tool_call(
+        EmptyStructuredSession(), tool_call, None
+    )
+    assert json.loads(raw["content"]) == {}
 
 
 @pytest.mark.asyncio

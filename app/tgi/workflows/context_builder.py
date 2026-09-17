@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from app.utils import mcp_fields
 from app.tgi.workflows.dict_utils import get_path_value, set_nested_value
 from app.tgi.workflows.lazy_context import LazyContextProvider
 from app.tgi.workflows.tag_parser import extract_passthrough_content, strip_tags
@@ -586,7 +587,7 @@ def normalize_tools(tools: Optional[list]) -> list:
                     "parameters": (
                         getattr(func, "parameters", None)
                         if func
-                        else getattr(tool, "inputSchema", None)
+                        else mcp_fields.input_schema(tool)
                     ),
                 },
             }

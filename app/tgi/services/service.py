@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import HTTPException
 from opentelemetry import trace
 
+from app.utils import mcp_fields
 from app.tgi.models import (
     Message,
     MessageRole,
@@ -132,7 +133,7 @@ class TGIService:
                 # Call the prompt to get its content
                 result = await session.call_prompt(prompt.name, {})
 
-                if result.isError:
+                if mcp_fields.is_error(result):
                     error_msg = f"Error getting prompt content: {result}"
                     self.logger.error(f"[TGI] {error_msg}")
                     span.set_attribute("error", True)
@@ -247,7 +248,7 @@ class TGIService:
                         function=FunctionDefinition(
                             name=mcp_tool.name,
                             description=getattr(mcp_tool, "description", ""),
-                            parameters=getattr(mcp_tool, "inputSchema", {}),
+                            parameters=mcp_fields.input_schema(mcp_tool) or {},
                         ),
                     )
                     openai_tools.append(tool)
@@ -306,7 +307,7 @@ class TGIService:
                     tool_call.function.name, args, access_token
                 )
 
-                if result.isError:
+                if mcp_fields.is_error(result):
                     error_content = ""
                     if hasattr(result, "content") and result.content:
                         error_content = (
@@ -328,23 +329,27 @@ class TGIService:
 
                 # Format successful result
                 content = ""
-                structured = getattr(result, "structuredContent", None)
-                if structured is None and isinstance(result, dict):
-                    structured = result.get("structuredContent")
+                structured = mcp_fields.structured_content(result)
 
                 raw_content = getattr(result, "content", None)
                 if raw_content is None and isinstance(result, dict):
                     raw_content = result.get("content")
 
-                if structured:
+                if mcp_fields.has_structured_content(result):
                     content = json.dumps(structured)
                 elif raw_content:
-                    if (
-                        isinstance(raw_content, list)
-                        and len(raw_content) == 1
-                        and hasattr(raw_content[0], "structuredContent")
-                    ):
-                        content = json.dumps(raw_content[0].structuredContent)
+                    item_structured = (
+                        mcp_fields.read(
+                            raw_content[0],
+                            "structured_content",
+                            "structuredContent",
+                            mcp_fields.MISSING,
+                        )
+                        if isinstance(raw_content, list) and len(raw_content) == 1
+                        else mcp_fields.MISSING
+                    )
+                    if item_structured is not mcp_fields.MISSING:
+                        content = json.dumps(item_structured)
                     else:
                         content = json.dumps(
                             [

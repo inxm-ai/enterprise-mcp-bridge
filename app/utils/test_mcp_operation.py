@@ -1,3 +1,4 @@
+import inspect
 import jwt
 import pytest
 from fastapi import HTTPException
@@ -175,7 +176,17 @@ class TestTraceMeta:
         kwargs = downstream_call_kwargs(
             call_with_timeout, trace_meta={"traceparent": "00-abc"}
         )
-        assert kwargs["read_timeout_seconds"].total_seconds() == 7.0
+        # A float, the type the real SDK session takes (a timedelta broke every call on v2).
+        assert kwargs["read_timeout_seconds"] == 7.0
+        assert isinstance(kwargs["read_timeout_seconds"], float)
+        from mcp import ClientSession
+
+        annotation = (
+            inspect.signature(ClientSession.call_tool)
+            .parameters["read_timeout_seconds"]
+            .annotation
+        )
+        assert "float" in str(annotation)
         assert kwargs["meta"] == {"traceparent": "00-abc"}
 
 

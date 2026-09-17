@@ -222,6 +222,28 @@ class TestTGIService:
         assert "Tool list-files executed" in result["content"]
 
     @pytest.mark.asyncio
+    async def test_execute_tool_call_keeps_empty_structured_content(self, tgi_service):
+        class EmptyStructuredSession:
+            async def call_tool(self, name, args, access_token):
+                return {
+                    "isError": False,
+                    "content": [{"text": "not the payload"}],
+                    "structuredContent": {},
+                }
+
+        tool_call = ToolCall(
+            id="call_123",
+            type="function",
+            function=ToolCallFunction(name="list-files", arguments="{}"),
+        )
+
+        result = await tgi_service.execute_tool_call(
+            EmptyStructuredSession(), tool_call, None
+        )
+
+        assert result["content"] == "{}"
+
+    @pytest.mark.asyncio
     async def test_execute_tool_call_invalid_json(self, tgi_service, mock_tools):
         """Test tool execution with invalid JSON arguments."""
         session = MockMCPSession(tools=mock_tools)
