@@ -306,8 +306,6 @@ async def get_resource_details(
                     text = resource.text or ""
                 else:
                     text = ""
-                # A zero-byte blob is still a binary resource: the caller gets
-                # an empty body under the declared media type, not a 204.
                 if blob is not None:
                     # BlobResourceContents carries the bytes base64-encoded, the
                     # way the protocol sends them; the caller gets the file, not
@@ -610,10 +608,6 @@ async def run_tool(
                 )
                 raise HTTPException(status_code=400, detail=_error_detail(result))
 
-            # A tool that types its failure as retryable has said more than
-            # its prose can: it wins over the text heuristics below, so a
-            # retryable error whose message mentions a timeout still gets
-            # the 503 and Retry-After.
             if retryable_typed_error(result):
                 logger.warning(
                     f"[Tool-Call] Retryable typed error from tool {tool_name}"
