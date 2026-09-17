@@ -75,6 +75,28 @@ async def test_blob_resource_is_streamed_decoded():
 
 
 @pytest.mark.asyncio
+async def test_zero_byte_blob_is_served_empty_under_its_media_type():
+    """An empty file is still a file: the declared type with an empty body, not a 204."""
+    contents = types.BlobResourceContents(uri="pptx://deck/abc", mimeType=PPTX, blob="")
+    with patch(
+        "app.routes.mcp_session_context",
+        lambda *args, **kwargs: _SessionContext(_session_serving(contents)),
+    ):
+        response = await get_resource_details(
+            "deck.pptx",
+            request=MagicMock(headers={}),
+            access_token=None,
+            x_inxm_mcp_session_header=None,
+            x_inxm_mcp_session_cookie=None,
+            group=None,
+        )
+
+    assert response.status_code == 200
+    assert response.media_type == PPTX
+    assert await _body(response) == b""
+
+
+@pytest.mark.asyncio
 async def test_text_resource_is_still_served_as_text():
     contents = types.TextResourceContents(
         uri="pptx://deck/abc", mimeType="text/plain", text="hello"

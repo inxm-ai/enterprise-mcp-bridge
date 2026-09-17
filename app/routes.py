@@ -107,8 +107,10 @@ else:
 
 def _error_detail(result) -> object:
     """The failed result as the HTTP error's detail: the envelope itself, so a caller reads the typed payload as JSON."""
+    if isinstance(result, dict):
+        return result
     if isinstance(result, BaseModel):
-        return result.model_dump()
+        return mcp_fields.dump(result)
     return str(result)
 
 
@@ -304,7 +306,9 @@ async def get_resource_details(
                     text = resource.text or ""
                 else:
                     text = ""
-                if blob:
+                # A zero-byte blob is still a binary resource: the caller gets
+                # an empty body under the declared media type, not a 204.
+                if blob is not None:
                     # BlobResourceContents carries the bytes base64-encoded, the
                     # way the protocol sends them; the caller gets the file, not
                     # its encoding. Bytes and file-like blobs pass through.
@@ -573,14 +577,15 @@ async def run_tool(
 
             is_error = mcp_fields.is_error(result)
             if not is_error:
-                if mcp_fields.structured_content(result):
+                if mcp_fields.has_structured_content(result):
                     logger.info(
                         f"[Tool-Call] Result for tool {tool_name} already has structuredContent. Skipping parsing."
                     )
                 else:
-                    for content in result.content:
-                        if hasattr(content, "text") and content.text:
-                            parsed = try_parse_structured_text(content.text)
+                    for content in mcp_fields.content(result):
+                        text = mcp_fields.read(content, "text", "text")
+                        if text:
+                            parsed = try_parse_structured_text(text)
                             if parsed is not None:
                                 mcp_fields.set_structured_content(result, parsed)
                                 break
@@ -592,10 +597,10 @@ async def run_tool(
             "[Tool-Call] Tool %s called. isError=%s items=%s",
             tool_name,
             is_error,
-            len(result.content) if result.content else 0,
+            len(mcp_fields.content(result)),
         )
         if is_error:
-            error_text = result.content[0].text if result.content else ""
+            error_text = mcp_fields.first_text(result)
             if "Unknown tool" in error_text:
                 logger.info(f"[Tool-Call] Tool not found: {tool_name}")
                 raise HTTPException(status_code=404, detail=_error_detail(result))
@@ -604,6 +609,20 @@ async def run_tool(
                     f"[Tool-Call] Tool called with invalid parameters: {tool_name}."
                 )
                 raise HTTPException(status_code=400, detail=_error_detail(result))
+
+            # A tool that types its failure as retryable has said more than
+            # its prose can: it wins over the text heuristics below, so a
+            # retryable error whose message mentions a timeout still gets
+            # the 503 and Retry-After.
+            if retryable_typed_error(result):
+                logger.warning(
+                    f"[Tool-Call] Retryable typed error from tool {tool_name}"
+                )
+                raise HTTPException(
+                    status_code=HTTP_STATUS_TOOL_RETRYABLE_ERROR,
+                    detail=_error_detail(result),
+                    headers={"Retry-After": RETRY_AFTER_SECONDS},
+                )
 
             # Timeouts are transient: the same call may succeed on retry, so
             # they must not fall into the terminal 4xx bucket below. FastMCP
@@ -614,16 +633,6 @@ async def run_tool(
                 raise HTTPException(
                     status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT,
                     detail=_error_detail(result),
-                )
-
-            if retryable_typed_error(result):
-                logger.warning(
-                    f"[Tool-Call] Retryable typed error from tool {tool_name}"
-                )
-                raise HTTPException(
-                    status_code=HTTP_STATUS_TOOL_RETRYABLE_ERROR,
-                    detail=_error_detail(result),
-                    headers={"Retry-After": RETRY_AFTER_SECONDS},
                 )
 
             # The tool ran and rejected the request; the bridge itself is healthy.

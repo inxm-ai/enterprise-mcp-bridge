@@ -78,6 +78,22 @@ def test_error_results_are_classified_by_payload_then_text():
     assert classify_error_result(timeout) == ERROR_TYPE_UPSTREAM_TIMEOUT
 
 
+def test_a_dict_shaped_error_result_is_classified_by_its_text():
+    timeout = {"isError": True, "content": [{"text": "Request timed out"}]}
+
+    assert classify_error_result(timeout) == ERROR_TYPE_UPSTREAM_TIMEOUT
+
+
+def test_falsy_structured_content_counts_as_present():
+    for value in ({}, [], 0, False, ""):
+        assert mcp_fields.has_structured_content({"structuredContent": value})
+        assert mcp_fields.has_structured_content(
+            types.CallToolResult(content=[], structuredContent=value)
+        )
+    assert not mcp_fields.has_structured_content({})
+    assert not mcp_fields.has_structured_content(types.CallToolResult(content=[]))
+
+
 def test_the_sdk_protocol_error_is_recognised_under_its_v2_name():
     error = MCPError(code=-32001, message="Request timed out")
 

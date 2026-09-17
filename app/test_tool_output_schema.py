@@ -227,3 +227,24 @@ async def test_tool_output_schema_parsing_pluralized_name_alias():
         )
 
         assert result.structuredContent == {"value": []}
+
+
+def test_empty_structured_content_is_not_overwritten_from_text(
+    client, mock_session_context
+):
+    """`{}` is a structured result in its own right; the text must not be parsed over it."""
+    tool_result = MockResult(
+        content=[MockContent(text=json.dumps({"parsed": "from text"}))],
+        structuredContent={},
+    )
+    mock_session_context.call_tool.return_value = tool_result
+
+    with patch.dict(app.vars.TOOL_OUTPUT_SCHEMAS, {}, clear=True):
+        response = client.post(
+            "/tools/some_tool",
+            headers={"x-inxm-mcp-session": "test-session"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["structuredContent"] == {}

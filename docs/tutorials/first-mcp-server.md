@@ -135,8 +135,10 @@ if __name__ == "__main__":
 Create `requirements.txt`:
 
 ```
-mcp
+mcp>=2.2,<3
 ```
+
+The bridge is built on MCP SDK v2, and the bundled server's requirements are installed after the bridge itself, so a server pinned to an older SDK line would downgrade the bridge underneath it. Keep the range in step with the bridge's `pyproject.toml`.
 
 ## Step 4: Test Your MCP Server Locally
 

@@ -49,6 +49,31 @@ def structured_content(result: Any) -> Any:
     return read(result, "structured_content", "structuredContent")
 
 
+def has_structured_content(result: Any) -> bool:
+    """Whether the result carries structured content, whatever its value.
+
+    Structured content is any JSON value, so ``{}``, ``[]``, ``0`` and
+    ``false`` are results in their own right and must not read as absent.
+    ``None`` is: an SDK model always has the attribute and defaults it to
+    ``None``, and the protocol has no null structured content.
+    """
+    value = read(result, "structured_content", "structuredContent", MISSING)
+    return value is not MISSING and value is not None
+
+
+def content(result: Any) -> list:
+    """The result's content items, from an object or a dict; empty when there are none."""
+    return read(result, "content", "content") or []
+
+
+def first_text(result: Any) -> str:
+    """The text of the first content item, or ``""`` when there is none."""
+    items = content(result)
+    if not items:
+        return ""
+    return read(items[0], "text", "text") or ""
+
+
 def set_structured_content(result: Any, value: Any) -> None:
     """Write the structured content back under whichever name the object carries."""
     if isinstance(result, dict):

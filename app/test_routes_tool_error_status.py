@@ -2,6 +2,7 @@ import json
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
+from mcp import types
 from app.server import app as fastapi_app
 from app.routes import (
     HTTP_STATUS_TOOL_EXECUTION_ERROR,
@@ -167,3 +168,52 @@ def test_typed_error_that_is_not_retryable_is_terminal(client, mock_session_cont
     )
 
     assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+
+
+def test_retryable_typed_error_wins_over_timeout_prose(client, mock_session_context):
+    """The typed payload is the tool's own verdict; the text heuristics only cover tools without one."""
+    mock_session_context.call_tool.return_value = MockResult(
+        content=[MockContent(text="busy: lock timed out (retryable)")],
+        isError=True,
+        structuredContent=_typed_error(retryable=True),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_RETRYABLE_ERROR
+    assert response.headers["Retry-After"]
+
+
+def test_dict_shaped_error_result_keeps_its_envelope(client, mock_session_context):
+    mock_session_context.call_tool.return_value = {
+        "isError": True,
+        "content": [{"type": "text", "text": "Unknown tool: nope_tool"}],
+    }
+
+    response = client.post(
+        "/tools/nope_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["isError"] is True
+    assert response.json()["detail"]["content"][0]["text"] == "Unknown tool: nope_tool"
+
+
+def test_sdk_v2_error_detail_uses_the_wire_names(client, mock_session_context):
+    mock_session_context.call_tool.return_value = types.CallToolResult(
+        content=[types.TextContent(type="text", text="busy")],
+        isError=True,
+        structuredContent=_typed_error(retryable=False),
+    )
+
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+    detail = response.json()["detail"]
+    assert detail["isError"] is True
+    assert detail["structuredContent"]["result"]["error"]["code"] == "busy"
+    assert "is_error" not in detail

@@ -503,7 +503,7 @@ class ToolService:
 
                 # Format successful result
                 content = ""
-                if structured:
+                if mcp_fields.has_structured_content(result):
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {str(structured)[1000:]}"
                     )

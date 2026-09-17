@@ -142,12 +142,11 @@ def retryable_typed_error(result: Any) -> bool:
 
 def classify_error_result(result: Any) -> str:
     """Map a downstream isError result to a bounded error type: its typed payload first, then its text."""
+    from app.utils import mcp_fields
+
     if retryable_typed_error(result):
         return ERROR_TYPE_DOWNSTREAM_TRANSIENT
-    content = getattr(result, "content", None) or []
-    first = content[0] if content else None
-    text = getattr(first, "text", None) if first is not None else None
-    return classify_error_text(text or "")
+    return classify_error_text(mcp_fields.first_text(result))
 
 
 def classify_error_text(error_text: str) -> str:

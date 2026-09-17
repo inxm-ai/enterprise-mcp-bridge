@@ -335,7 +335,7 @@ class TGIService:
                 if raw_content is None and isinstance(result, dict):
                     raw_content = result.get("content")
 
-                if structured:
+                if mcp_fields.has_structured_content(result):
                     content = json.dumps(structured)
                 elif raw_content:
                     item_structured = (
