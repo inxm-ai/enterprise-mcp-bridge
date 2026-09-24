@@ -46,7 +46,9 @@ from app.session import (
     build_mcp_client_strategy,
 )
 from app.session_manager import mcp_session_context, session_manager
+from app import vars as app_vars
 from app.session_manager.session_context import (
+    close_idle_sessions,
     ResponseTooLargeError,
     ToolPolicyDeniedError,
     map_tools,
@@ -827,9 +829,15 @@ async def start_session(
                 logger.error(f"[Session] Invalid MCP configuration: {exc}")
                 raise HTTPException(status_code=400, detail=str(exc))
 
-            mcp_task = MCPLocalSessionTask(strategy)
-            mcp_task.start()
-            sessions.set(x_inxm_mcp_session, mcp_task)
+            if app_vars.MCP_SESSIONLESS:
+                # Every call opens its own transient downstream session; the id is
+                # only returned so clients that always start a session keep working.
+                logger.debug("[Session] Sessionless mode: no session task started")
+            else:
+                await close_idle_sessions(sessions)
+                mcp_task = MCPLocalSessionTask(strategy)
+                mcp_task.start()
+                sessions.set(x_inxm_mcp_session, mcp_task)
 
             session_info = {SESSION_FIELD_NAME: x_inxm_mcp_session}
             if group:
@@ -885,6 +893,8 @@ async def close_session(
             if x_inxm_mcp_session is None:
                 logger.warning("[Session] Session header missing on close.")
                 raise HTTPException(status_code=400, detail="Session header missing")
+            if app_vars.MCP_SESSIONLESS:
+                return {"status": "closed"}
             mcp_task = sessions.pop(x_inxm_mcp_session, None)
             if not mcp_task:
                 logger.warning(

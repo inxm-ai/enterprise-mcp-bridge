@@ -280,6 +280,18 @@ BRIDGE_REQUIRED_GROUPS = [
 # not bound every serialized response, so the bridge has its own byte cap.
 MCP_MAX_RESPONSE_BYTES = int(os.getenv("MCP_MAX_RESPONSE_BYTES", "0"))
 
+# Serve every request on a transient downstream session: /session/start spawns
+# nothing and session ids are ignored. For stdio servers whose per-session
+# subprocess is expensive, and for deployments with more than one replica
+# (sessions live in pod memory).
+MCP_SESSIONLESS = os.getenv("MCP_SESSIONLESS", "false").lower() == "true"
+
+# Close sessions nobody used for this many seconds. 0 keeps a session until
+# /session/close, which clients that never close (CLI, scripts) leak.
+MCP_SESSION_IDLE_TIMEOUT_SECONDS = float(
+    os.getenv("MCP_SESSION_IDLE_TIMEOUT_SECONDS", "0")
+)
+
 MCP_PROTOCOL_NEGOTIATION = (
     os.getenv("MCP_PROTOCOL_NEGOTIATION", "legacy").strip().lower()
 )
