@@ -1,0 +1,211 @@
+# AI assets declared by hand (OPE-489).
+#
+# The Trusera AI-BOM scan only sees AI it can find in source code. List here
+# anything it cannot see: models reached through config or a gateway, prompts,
+# and data that leaves the service. The org inventory merges this file into
+# the scanner's CycloneDX output.
+#
+# Asset types: model-endpoint | model | prompt | dataset | agent | mcp-server | library
+# Status:      confirmed | unconfirmed (someone still needs to check it)
+
+schema_version: 1
+owner: bolaji@inxm.ai
+reviewed: 2026-09-24
+
+assets:
+  - id: bridge-llm-endpoint
+    type: model-endpoint
+    name: OpenAI-compatible LLM endpoint used by the bridge
+    status: confirmed
+    provider: OpenAI-compatible endpoint set by TGI_URL (the deployer's LLM gateway or a public provider)
+    purpose: >-
+      Single outbound LLM connection for every AI feature of the bridge:
+      tool-calling chat (/tgi/v1/chat/completions), A2A endpoint (/tgi/v1/a2a),
+      the planning orchestrator, the workflow engine, the generated-UI feature
+      (/app/_generated/...), tool dry-run responses (X-Inxm-Dry-Run header),
+      A2A agent-card summaries, and conversation summarization/compression.
+      Off by default: all of these return an error or are skipped unless
+      TGI_URL is set.
+    code:
+      - app/tgi/clients/llm_client.py
+      - app/tgi/services/proxied_tgi_service.py
+      - app/tgi/routes.py
+    config:
+      TGI_URL: Base URL of the OpenAI-compatible API; unset disables LLM features
+      TGI_TOKEN: API key sent as bearer token (secret)
+      TGI_CONVERSATION_MODE: chat/completions (default) or responses API style
+      DEFAULT_MODEL: Default model name (alias TGI_MODEL_NAME); also gates the agent card
+      LLM_MAX_PAYLOAD_BYTES: Payload size above which messages are compressed/summarized
+    data_sent:
+      - User chat messages and prompts sent to the bridge
+      - System prompts (bridge-built, from the wrapped MCP server, or SYSTEM_DEFINED_PROMPTS)
+      - Tool names, descriptions and input/output schemas of the wrapped MCP server
+      - Tool call results returned by the wrapped MCP server (may contain user or business data)
+      - Workflow context and earlier agent outputs
+    data_classification: user prompts and MCP tool results (treat as confidential)
+    notes: >-
+      Uses the openai Python SDK (AsyncOpenAI) purely as a generic
+      OpenAI-compatible client with base_url=TGI_URL; it is not tied to OpenAI.
+      Model is chosen by the deployer (request model or DEFAULT_MODEL). The
+      render.yaml demo points TGI_URL at the public OpenAI API; production
+      deployments point it at the deployer's own gateway.
+
+  - id: bridge-configured-model
+    type: model
+    name: Model selected by DEFAULT_MODEL / request model field
+    status: unconfirmed
+    provider: Whatever the TGI_URL endpoint serves
+    purpose: >-
+      Chat/tool-calling model used for all bridge LLM calls. README recommends a
+      code-capable model for UI generation. The actual model per deployment is
+      not in this repo.
+    config:
+      DEFAULT_MODEL: Model name passed to the endpoint
+
+  - id: well-planned-orchestrator
+    type: agent
+    name: Well-planned tool orchestrator (intent + plan + tool loop)
+    status: confirmed
+    purpose: >-
+      When a chat request sets tool_choice "auto", the LLM classifies intent,
+      builds a todo plan and runs MCP tools step by step.
+    code:
+      - app/tgi/behaviours/well_planned_orchestrator.py
+      - app/tgi/behaviours/todos/todo_manager.py
+      - app/tgi/services/tool_chat_runner.py
+      - app/tgi/services/tools/tool_argument_fixer_service.py
+    data_sent:
+      - User prompt, tool list, tool results
+
+  - id: workflow-engine
+    type: agent
+    name: Multi-agent workflow engine
+    status: confirmed
+    purpose: >-
+      Runs JSON workflow definitions (loaded from WORKFLOWS_PATH) as a chain of
+      LLM agents that call MCP tools, reroute, and wait for user feedback.
+      In-house code; no LangChain or other agent framework.
+    code:
+      - app/tgi/workflows/engine.py
+      - app/tgi/workflows/agent.py
+      - app/tgi/workflows/reroute.py
+      - app/tgi/workflows/contextual_llm_helper.py
+    config:
+      WORKFLOWS_PATH: Directory of workflow JSON definitions (enables the engine)
+      WORKFLOW_DB_BACKEND: sqlite (default) or postgres for execution state
+      WORKFLOW_DATABASE_URL: Postgres DSN when backend is postgres (secret)
+      WORKFLOW_MAX_PARALLEL_AGENTS: Parallel agent limit
+    notes: >-
+      Each agent's "description" in the workflow JSON is sent as its system
+      prompt. Workflow context (including agent outputs and tool results) and
+      events are persisted in the workflow state DB, with owner_id.
+
+  - id: generated-ui
+    type: agent
+    name: Generated UI builder (LLM writes HTML/JS apps over MCP tools)
+    status: confirmed
+    purpose: >-
+      Generates and iteratively patches small web apps and a conversational UI
+      that call the wrapped MCP tools. Can sample real tool outputs and ask the
+      LLM for dummy data to test the generated code.
+    code:
+      - app/app_facade/generated_service.py
+      - app/app_facade/generation_pipeline.py
+      - app/app_facade/conversational_service.py
+      - app/app_facade/tool_sampling.py
+      - app/app_facade/generated_dummy_data.py
+      - app/app_facade/gateway_explorer.py
+    config:
+      APP_CONVERSATIONAL_UI_ENABLED: Enables the conversational UI (default false)
+      GENERATED_WEB_PATH: Where generated apps and chat sessions are stored on disk
+      GENERATED_UI_PROMPT_DUMP: If set, writes full LLM request payloads to this path
+    data_sent:
+      - User UI request and chat history, tool schemas, sampled tool outputs
+    notes: >-
+      GENERATED_UI_PROMPT_DUMP stores full prompts on disk and should stay unset
+      in production.
+
+  - id: tool-dry-run
+    type: agent
+    name: LLM-simulated tool responses (dry run)
+    status: confirmed
+    purpose: >-
+      With header X-Inxm-Dry-Run true, the LLM invents a plausible tool
+      response from the tool schema instead of calling the real tool.
+    code:
+      - app/tgi/tool_dry_run/tool_response.py
+      - app/routes.py
+
+  - id: prompt-generated-ui
+    type: prompt
+    name: Generated UI system prompts (phase 1 and phase 2)
+    status: confirmed
+    code:
+      - app/app_facade/pfusch_ui_prompt.md
+      - app/app_facade/pfusch_ui_phase2_prompt.md
+      - app/app_facade/prompt_helpers.py
+
+  - id: prompt-inline-system
+    type: prompt
+    name: Inline system prompts in Python code
+    status: confirmed
+    purpose: >-
+      Planner/intent, workflow routing, summarization, context compression,
+      agent-card summary and dry-run prompts built as strings in code.
+    code:
+      - app/tgi/behaviours/well_planned_orchestrator.py
+      - app/tgi/workflows/engine.py
+      - app/tgi/workflows/stream_processor.py
+      - app/tgi/workflows/reroute.py
+      - app/tgi/workflows/contextual_llm_helper.py
+      - app/tgi/services/service.py
+      - app/tgi/services/tool_chat_runner.py
+      - app/tgi/services/message_summarization_service.py
+      - app/tgi/context_compressor.py
+      - app/tgi/tool_dry_run/tool_response.py
+      - app/well_known/agent.py
+      - app/app_facade/generation_pipeline.py
+      - app/app_facade/generated_phase2.py
+      - app/app_facade/conversational_service.py
+    notes: >-
+      Deployers can also inject prompts at runtime via SYSTEM_DEFINED_PROMPTS
+      (app/session_manager/prompt_helper.py) or via the wrapped MCP server's
+      own prompts, and via workflow JSON files; those are not in this repo.
+
+  - id: wrapped-mcp-servers
+    type: mcp-server
+    name: MCP servers wrapped by the bridge
+    status: unconfirmed
+    purpose: >-
+      The bridge runs one MCP server per deployment (local command or remote
+      URL) and exposes it over REST; the bridge's LLM features act on behalf of
+      that server. Believed to front the inxm MCP server fleet (~40 servers).
+    config:
+      MCP_SERVER_COMMAND: Local MCP server command
+      MCP_REMOTE_SERVER: Remote MCP server URL
+      MCP_GIT_CLONE: Git repo cloned at start (demo only)
+
+  - id: lib-openai-sdk
+    type: library
+    name: openai Python SDK (generic OpenAI-compatible client)
+    status: confirmed
+    code:
+      - app/tgi/clients/llm_client.py
+
+false_positives:
+  - match: "LangChain"
+    reason: >-
+      No LangChain dependency or import anywhere in the repo; the hit in
+      app/tgi/workflows/engine.py is the variable name "workflow_chain".
+  - match: "Model reference: gpt-4o-mini"
+    reason: Only in the test file app/tgi/behaviours/test_well_planned.py; not a deployed model.
+  - match: "Model reference: claude-3-haiku"
+    reason: Only in the test file app/tgi/models/test_model_formats.py; not a deployed model.
+  - match: "Model reference: gpt-4"
+    reason: >-
+      Only in app/tgi/test_tgi.py and an example value in
+      docs/tutorials/github-integration.md; the real model is set by DEFAULT_MODEL.
+  - match: "vLLM"
+    reason: >-
+      The scanner matches test doubles such as InspectingLLM and RecoveringLLM in
+      test files. vLLM isn't a dependency or import anywhere in the repo.
