@@ -4,12 +4,14 @@ import re
 from fnmatch import fnmatchcase
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
 TOKEN_COOKIE_NAME = os.environ.get("TOKEN_COOKIE_NAME", "_oauth2_proxy")
 TOKEN_SOURCE = os.environ.get("TOKEN_SOURCE", "header").lower()
 SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
+DRY_RUN_HEADER_NAME = "X-Inxm-Dry-Run"
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
@@ -26,6 +28,18 @@ def tool_matches_patterns(tool_name: str, patterns: list[str]) -> bool:
     if not isinstance(tool_name, str) or not tool_name:
         return False
     return any(fnmatchcase(tool_name, pattern) for pattern in patterns)
+
+
+def is_dry_run_effect_call(
+    dry_run_header: Optional[str], tool_name: str, effect_tools: list[str]
+) -> bool:
+    """Return whether a tool call must be answered with a dry-run response.
+
+    The contract is per tool name, so every transport must use this decision.
+    """
+    if not dry_run_header or dry_run_header.lower() != "true":
+        return False
+    return tool_matches_patterns(tool_name, effect_tools)
 
 
 TGI_ENABLED = os.environ.get("TGI_URL", None) is not None

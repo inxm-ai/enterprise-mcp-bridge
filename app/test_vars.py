@@ -15,6 +15,20 @@ def test_tool_patterns_support_globs_and_exact_names():
     assert not tool_matches_patterns("list_tickets", patterns)
 
 
+def test_dry_run_applies_only_to_effect_tools_with_true_header():
+    from app.vars import is_dry_run_effect_call
+
+    effect_tools = ["create_*"]
+
+    assert is_dry_run_effect_call("true", "create_ticket", effect_tools)
+    assert is_dry_run_effect_call("TRUE", "create_ticket", effect_tools)
+    assert not is_dry_run_effect_call(None, "create_ticket", effect_tools)
+    assert not is_dry_run_effect_call("false", "create_ticket", effect_tools)
+    assert not is_dry_run_effect_call("1", "create_ticket", effect_tools)
+    assert not is_dry_run_effect_call("true", "list_tickets", effect_tools)
+    assert not is_dry_run_effect_call("true", "create_ticket", [])
+
+
 def test_mcp_map_header_to_input_parsing(monkeypatch):
     monkeypatch.setenv(
         "MCP_MAP_HEADER_TO_INPUT", "userId=x-auth-user-id,email=x-auth-user-email"

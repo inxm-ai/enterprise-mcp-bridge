@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import json
@@ -7,6 +8,7 @@ from typing import Any
 
 from app.json.schema_validation import validate_schema
 from app.session.session import MCPSessionBase
+from app.session_manager.session_context import map_tools
 from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.models import ChatCompletionRequest
 from app.tgi.services.prompt_service import PromptService
@@ -161,3 +163,17 @@ async def get_tool_dry_run_response(
         content=[SimpleNamespace(text=aggregated)],
         structuredContent=None,
     )
+
+
+async def dry_run_tool_result(
+    session: MCPSessionBase, tool_name: str, tool_input: dict
+) -> Any:
+    """Answer a tool call with a simulated result instead of executing the tool."""
+    tools = map_tools(await session.list_tools())
+    tool = next((tool for tool in tools if tool.get("name") == tool_name), None)
+    # Tests and other callsites may patch get_tool_dry_run_response with a
+    # sync function, so await only when a coroutine comes back.
+    maybe_result = get_tool_dry_run_response(session, tool, tool_input)
+    if asyncio.iscoroutine(maybe_result):
+        return await maybe_result
+    return maybe_result
