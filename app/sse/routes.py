@@ -29,7 +29,13 @@ from app.utils.mcp_operation import (
     mcp_operation_span,
     safe_arg_keys,
 )
-from app.vars import SESSION_FIELD_NAME
+from app.tgi.tool_dry_run.tool_response import dry_run_tool_result
+from app.vars import (
+    DRY_RUN_HEADER_NAME,
+    EFFECT_TOOLS,
+    SESSION_FIELD_NAME,
+    is_dry_run_effect_call,
+)
 from app.sse import stream_tool_call, create_sse_response
 from opentelemetry import trace
 
@@ -68,6 +74,7 @@ async def run_tool_with_progress(
     request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
+    x_inxm_dry_run: Optional[str] = Header(None, alias=DRY_RUN_HEADER_NAME),
     access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
@@ -109,6 +116,7 @@ async def run_tool_with_progress(
         request: FastAPI request object
         x_inxm_mcp_session_header: Session ID from header
         x_inxm_mcp_session_cookie: Session ID from cookie
+        x_inxm_dry_run: "true" answers EFFECT_TOOLS calls with a dry-run result
         access_token: OAuth access token
         args: Tool arguments
         group: Group name for group-specific data access
@@ -179,13 +187,20 @@ async def run_tool_with_progress(
                             group=group,
                             arg_keys=safe_arg_keys(tool_args),
                         ) as op:
-                            result = await session.call_tool_with_progress(
-                                name,
-                                tool_args,
-                                token,
-                                progress_callback=progress_callback,
-                                log_callback=log_callback,
-                            )
+                            if is_dry_run_effect_call(
+                                x_inxm_dry_run, name, EFFECT_TOOLS
+                            ):
+                                result = await dry_run_tool_result(
+                                    session, name, tool_args or {}
+                                )
+                            else:
+                                result = await session.call_tool_with_progress(
+                                    name,
+                                    tool_args,
+                                    token,
+                                    progress_callback=progress_callback,
+                                    log_callback=log_callback,
+                                )
                             if mcp_fields.is_error(result):
                                 op.record_error_result(
                                     classify_error_result(result), result

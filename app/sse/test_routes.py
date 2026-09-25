@@ -234,3 +234,76 @@ class TestSSERouteHeaders:
             # Check SSE-specific headers
             assert response.headers.get("cache-control") == "no-cache"
             assert response.headers.get("x-accel-buffering") == "no"
+
+
+class TestSSEStreamDryRun:
+    """The streaming route honours X-Inxm-Dry-Run exactly like POST /tools/{name}."""
+
+    @pytest.fixture
+    def dry_run_calls(self, monkeypatch):
+        calls = []
+
+        async def fake_get_tool_dry_run_response(session, tool, tool_input):
+            calls.append((tool.get("name") if tool else None, tool_input))
+            return MockRunToolsResult("dry-run")
+
+        monkeypatch.setattr("app.sse.routes.EFFECT_TOOLS", ["create_*"])
+        monkeypatch.setattr(
+            "app.tgi.tool_dry_run.tool_response.get_tool_dry_run_response",
+            fake_get_tool_dry_run_response,
+        )
+        return calls
+
+    def _stream(self, client, tool_name, headers):
+        with patch("app.sse.routes.mcp_session_context") as mock_context:
+            mock_delegate = AsyncMock()
+            mock_delegate.list_tools = AsyncMock(
+                return_value=[{"name": tool_name, "inputSchema": {}}]
+            )
+            mock_delegate.call_tool_with_progress = AsyncMock(
+                return_value=MockRunToolsResult("real")
+            )
+            mock_context.return_value.__aenter__ = AsyncMock(return_value=mock_delegate)
+            mock_context.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            response = client.post(
+                f"/tools/{tool_name}/stream", headers=headers, json={"title": "x"}
+            )
+
+        assert response.status_code == 200
+        events = [
+            json.loads(line[6:])
+            for line in response.content.decode("utf-8").split("\n")
+            if line.startswith("data: ")
+        ]
+        return events, mock_delegate.call_tool_with_progress
+
+    def test_dry_run_effect_tool_emits_dry_run_result_without_calling_tool(
+        self, client, dry_run_calls
+    ):
+        events, call_tool_with_progress = self._stream(
+            client, "create_interaction_request", {"X-Inxm-Dry-Run": "true"}
+        )
+
+        call_tool_with_progress.assert_not_called()
+        assert dry_run_calls == [("create_interaction_request", {"title": "x"})]
+        assert [e["type"] for e in events] == ["result"]
+        assert events[0]["data"]["structuredContent"] == {"result": "dry-run"}
+
+    def test_effect_tool_without_header_calls_tool(self, client, dry_run_calls):
+        events, call_tool_with_progress = self._stream(
+            client, "create_interaction_request", {}
+        )
+
+        call_tool_with_progress.assert_called_once()
+        assert dry_run_calls == []
+        assert events[-1]["data"]["structuredContent"] == {"result": "real"}
+
+    def test_dry_run_header_is_inert_for_non_effect_tools(self, client, dry_run_calls):
+        events, call_tool_with_progress = self._stream(
+            client, "list_interaction_requests", {"X-Inxm-Dry-Run": "true"}
+        )
+
+        call_tool_with_progress.assert_called_once()
+        assert dry_run_calls == []
+        assert events[-1]["data"]["structuredContent"] == {"result": "real"}
