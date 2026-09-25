@@ -169,3 +169,60 @@ def test_process_template_error_handling(monkeypatch):
     result = process_template(template, "mock_access_token", "mock_group_id")
 
     assert result == "command --data {data_path}"
+
+
+def _record_templated_tokens(monkeypatch):
+    seen_tokens = []
+
+    def mock_get_data_access_manager():
+        class MockDataManager:
+            def resolve_data_resource(self, access_token, requested_group):
+                seen_tokens.append(access_token)
+                return f"u/{access_token}"
+
+        return MockDataManager()
+
+    monkeypatch.setattr(
+        server_params, "get_data_access_manager", mock_get_data_access_manager
+    )
+    return seen_tokens
+
+
+def test_mcp_env_template_uses_caller_token_not_exchanged_token(monkeypatch):
+    env = {
+        "OAUTH_ENV": "SLACK_TOKEN",
+        "MCP_ENV_CACHE_PATH": "/cache/{data_path}/cache.json",
+    }
+    patch_module(monkeypatch, env=env)
+    monkeypatch.setattr(
+        server_params,
+        "TokenRetrieverFactory",
+        lambda: DummyTokenRetrieverFactory("provider_token"),
+    )
+    seen_tokens = _record_templated_tokens(monkeypatch)
+
+    params = server_params.get_server_params(access_token="caller_jwt")
+
+    assert params.env["SLACK_TOKEN"] == "provider_token"
+    assert params.env["CACHE_PATH"] == "/cache/u/caller_jwt/cache.json"
+    assert seen_tokens == ["caller_jwt"]
+
+
+def test_command_template_uses_caller_token_not_exchanged_token(monkeypatch):
+    env = {
+        "OAUTH_ENV": "SLACK_TOKEN",
+        "MCP_SERVER_COMMAND": "server --cache /cache/{data_path}",
+    }
+    patch_module(monkeypatch, env=env)
+    monkeypatch.setattr(
+        server_params,
+        "TokenRetrieverFactory",
+        lambda: DummyTokenRetrieverFactory("provider_token"),
+    )
+    seen_tokens = _record_templated_tokens(monkeypatch)
+
+    params = server_params.get_server_params(access_token="caller_jwt")
+
+    assert params.command == "server"
+    assert params.args == ["--cache", "/cache/u/caller_jwt"]
+    assert seen_tokens == ["caller_jwt"]
