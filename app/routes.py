@@ -8,7 +8,8 @@ from app.vars import (
     SESSION_FIELD_NAME,
     TGI_ENABLED,
     APP_CONVERSATIONAL_UI_ENABLED,
-    tool_matches_patterns,
+    DRY_RUN_HEADER_NAME,
+    is_dry_run_effect_call,
 )
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
@@ -21,7 +22,6 @@ from typing import Optional, Dict
 from pydantic import BaseModel
 import uuid
 import os
-import asyncio
 
 from app.utils.traced_requests import traced_request
 from app.utils.mcp_operation import (
@@ -71,7 +71,7 @@ from .utils.exception_logging import (
     log_exception_with_details,
 )
 from .tgi.routes import router as tgi_router
-from .tgi.tool_dry_run.tool_response import get_tool_dry_run_response
+from .tgi.tool_dry_run.tool_response import dry_run_tool_result
 from .app_facade.route import router as app_facade_router
 from app.well_known.agent import router as agent_router
 from app.well_known.oauth_metadata import router as oauth_metadata_router
@@ -495,7 +495,7 @@ async def run_tool(
     request: Request,
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
-    x_inxm_dry_run: Optional[str] = Header(None, alias="X-Inxm-Dry-Run"),
+    x_inxm_dry_run: Optional[str] = Header(None, alias=DRY_RUN_HEADER_NAME),
     access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
@@ -553,23 +553,8 @@ async def run_tool(
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
-                if (
-                    x_inxm_dry_run
-                    and x_inxm_dry_run.lower() == "true"
-                    and tool_matches_patterns(tool_name, EFFECT_TOOLS)
-                ):
-                    tools = map_tools(await session.list_tools())
-                    tool = next(
-                        (tool for tool in tools if tool.get("name") == tool_name), None
-                    )
-                    # get_tool_dry_run_response is async; but tests and other
-                    # callsites may patch it with a sync function. Support both
-                    # by detecting coroutine returns and awaiting when needed.
-                    maybe_result = get_tool_dry_run_response(session, tool, args or {})
-                    if asyncio.iscoroutine(maybe_result):
-                        result = await maybe_result
-                    else:
-                        result = maybe_result
+                if is_dry_run_effect_call(x_inxm_dry_run, tool_name, EFFECT_TOOLS):
+                    result = await dry_run_tool_result(session, tool_name, args or {})
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 

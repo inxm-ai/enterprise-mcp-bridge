@@ -336,6 +336,7 @@ class FastAPIWrapper:
         the HTTP response contains the expected dry-run payload.
         """
         import app.routes as routes
+        import app.tgi.tool_dry_run.tool_response as tool_response
         from types import SimpleNamespace
 
         called = []
@@ -354,7 +355,7 @@ class FastAPIWrapper:
         # Ensure the route expands configured effect-tool glob patterns.
         monkeypatch.setattr(routes, "EFFECT_TOOLS", ["add*"])
         monkeypatch.setattr(
-            routes, "get_tool_dry_run_response", fake_get_tool_dry_run_response
+            tool_response, "get_tool_dry_run_response", fake_get_tool_dry_run_response
         )
 
         response = self.client.post(
