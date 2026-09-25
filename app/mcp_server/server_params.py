@@ -84,14 +84,13 @@ def defined_env(
     else:
         logger.info("No OAUTH_ENV set, using default environment variables")
 
+    # Templates resolve the caller's identity, so they use the incoming
+    # token; token_result may hold a downstream credential (e.g. a
+    # Keycloak-brokered Slack token) that carries no user claims.
     for key, value in env.copy().items():
         if key.startswith("MCP_ENV_"):
             env_name = key[len("MCP_ENV_") :]
-            env[env_name] = process_template(
-                value,
-                token_result["access_token"] if token_result else None,
-                requested_group,
-            )
+            env[env_name] = process_template(value, access_token, requested_group)
 
     return (env, token_result)
 
@@ -102,15 +101,13 @@ def get_server_params(
     anon: bool = False,
 ) -> StdioServerParameters:
     env_command = os.environ.get("MCP_SERVER_COMMAND")
-    env, token_result = defined_env(
+    env, _token_result = defined_env(
         os.environ.copy(), access_token, requested_group, anon
     )
 
-    # Process command template with dynamic data path
-    if env_command and token_result:
-        processed_command = process_template(
-            env_command, token_result["access_token"], requested_group
-        )
+    # Process command template with dynamic data path (caller identity)
+    if env_command and access_token:
+        processed_command = process_template(env_command, access_token, requested_group)
         if processed_command != env_command:
             logger.info("Processed command template from MCP_SERVER_COMMAND")
             env_command = processed_command
