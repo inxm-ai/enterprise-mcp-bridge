@@ -438,6 +438,28 @@ async def list_resources(list_resources: any):
     return resources
 
 
+async def close_idle_sessions(sessions: SessionManagerBase) -> None:
+    """Stop sessions idle past MCP_SESSION_IDLE_TIMEOUT_SECONDS (0 disables)."""
+    max_idle_seconds = app_vars.MCP_SESSION_IDLE_TIMEOUT_SECONDS
+    if max_idle_seconds <= 0:
+        return
+    for session_key, mcp_task in sessions.pop_idle(max_idle_seconds):
+        logger.info(
+            mask_token(f"[MCP] Closing idle session: {session_key}", session_key)
+        )
+        try:
+            await mcp_task.stop()
+        except Exception:
+            # The session is already out of the map; a failed stop must not fail
+            # the unrelated request that triggered the sweep.
+            logger.warning(
+                mask_token(
+                    f"[MCP] Failed to stop idle session: {session_key}", session_key
+                ),
+                exc_info=True,
+            )
+
+
 @asynccontextmanager
 async def mcp_session_context(
     sessions: SessionManagerBase,
@@ -455,7 +477,7 @@ async def mcp_session_context(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     # Sessionless path: validate group access (if present) and open a transient MCP session
-    if x_inxm_mcp_session is None:
+    if x_inxm_mcp_session is None or app_vars.MCP_SESSIONLESS:
         if group and access_token:
             data_manager = get_data_access_manager()
             try:
@@ -688,6 +710,7 @@ async def mcp_session_context(
         return
 
     # Sessionful path: reuse existing task, but surface a common delegate API
+    await close_idle_sessions(sessions)
     mcp_task = sessions.get(x_inxm_mcp_session)
     if not mcp_task:
         logger.warning(
