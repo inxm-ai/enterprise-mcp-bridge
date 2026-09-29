@@ -146,7 +146,6 @@ TGI_CONVERSATION_MODE = normalize_tgi_conversation_mode(
 )
 
 TOOL_CHUNK_SIZE = int(os.getenv("TOOL_CHUNK_SIZE", "10000"))
-AGENT_CARD_CACHE_FILE = os.getenv("AGENT_CARD_CACHE_FILE", "/tmp/agent_card_cache.json")
 
 LLM_MAX_PAYLOAD_BYTES = int(os.getenv("LLM_MAX_PAYLOAD_BYTES", "120000"))
 DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS = float(
