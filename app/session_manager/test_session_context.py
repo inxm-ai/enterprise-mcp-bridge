@@ -98,6 +98,64 @@ async def test_sessionless_call_tool_injects_headers(monkeypatch):
         assert result.structuredContent["args"]["keep"] == "value"
 
 
+def _list_tools_validation_error():
+    """A real pydantic.ValidationError — standing in for the one SDK v2
+    raises out of list_tools() when a downstream tool's outputSchema has a
+    non-'object' root type."""
+    from pydantic import TypeAdapter
+
+    try:
+        TypeAdapter(int).validate_python("not-an-int")
+    except Exception as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+@pytest.mark.asyncio
+async def test_sessionless_call_tool_survives_a_list_tools_schema_validation_error(
+    monkeypatch,
+):
+    """One downstream tool with a non-conforming outputSchema must not take
+    every other tool's calls down with it (regression: a tool like
+    `get_interaction_status` failed on every call whenever a sibling tool's
+    outputSchema had a root type other than 'object', because list_tools()
+    validates every tool in the response, not just the one being called)."""
+
+    class _AsyncMCPContext:
+        async def __aenter__(self):
+            obj = types.SimpleNamespace()
+            obj.list_tools = AsyncMock(
+                side_effect=_list_tools_validation_error()
+            )
+
+            async def _call_tool(name, args):
+                return types.SimpleNamespace(
+                    content=[types.SimpleNamespace(text="ok")],
+                    structuredContent={"args": args},
+                    isError=False,
+                )
+
+            obj.call_tool = AsyncMock(side_effect=_call_tool)
+            return obj
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sc, "mcp_session", lambda *a, **k: _AsyncMCPContext())
+
+    async with sc.mcp_session_context(
+        sessions=None,
+        x_inxm_mcp_session=None,
+        access_token=None,
+        group=None,
+        incoming_headers={},
+    ) as delegate:
+        result = await delegate.call_tool(
+            "get_interaction_status", {"interaction_id": "abc"}, None
+        )
+        assert result.structuredContent["args"] == {"interaction_id": "abc"}
+
+
 @pytest.mark.asyncio
 async def test_cached_mapped_tools_reads_and_writes(monkeypatch, tmp_path):
     cache_file = tmp_path / "tools.json"

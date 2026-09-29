@@ -9,7 +9,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.utils.mcp_operation import is_mcp_error
 from app.utils import mcp_fields
@@ -69,6 +69,33 @@ def _to_tool_list(tools: Any) -> list:
         return list(tools or [])
     except Exception:
         return []
+
+
+class _EmptyToolsResult:
+    """Stand-in for a ListToolsResult the bridge could not validate."""
+
+    tools: list = []
+
+
+async def _tools_for_decoration(session) -> Any:
+    """Best-effort ``list_tools()`` for arg decoration ahead of a tool call.
+
+    SDK v2 validates every tool's ``outputSchema`` in the response, so one
+    downstream tool with a non-conforming schema (e.g. a root type other
+    than ``object``) raises and would otherwise take down every other
+    tool's calls with it. Decoration only needs the *target* tool's own
+    schema, so a validation failure here is not fatal to the call — it
+    just means oauth-token/header decoration is skipped for this call.
+    """
+    try:
+        return await session.list_tools()
+    except ValidationError as exc:
+        logger.warning(
+            "[Tool-Call] list_tools() failed downstream schema validation; "
+            "proceeding without tool schema info: %s",
+            exc,
+        )
+        return _EmptyToolsResult()
 
 
 def get_tool_name(tool: Any) -> Optional[str]:
@@ -516,7 +543,7 @@ async def mcp_session_context(
                         access_token_inner: Optional[str],
                     ):
                         ensure_tool_allowed(tool_name)
-                        tools = await session.list_tools()
+                        tools = await _tools_for_decoration(session)
                         decorated_args = await decorate_args_with_oauth_token(
                             tools, tool_name, args, access_token_inner
                         )
@@ -557,7 +584,7 @@ async def mcp_session_context(
                             RunToolsResult with the tool execution result
                         """
                         ensure_tool_allowed(tool_name)
-                        tools = await session.list_tools()
+                        tools = await _tools_for_decoration(session)
                         decorated_args = await decorate_args_with_oauth_token(
                             tools, tool_name, args, access_token_inner
                         )
