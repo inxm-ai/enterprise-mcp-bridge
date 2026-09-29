@@ -111,22 +111,37 @@ def _list_tools_validation_error():
     raise AssertionError("expected a ValidationError")
 
 
-@pytest.mark.asyncio
-async def test_sessionless_call_tool_survives_a_list_tools_schema_validation_error(
-    monkeypatch,
-):
-    """One downstream tool with a non-conforming outputSchema must not take
-    every other tool's calls down with it (regression: a tool like
-    `get_interaction_status` failed on every call whenever a sibling tool's
-    outputSchema had a root type other than 'object', because list_tools()
-    validates every tool in the response, not just the one being called)."""
+def _mcp_context_with_broken_list_tools():
+    """A fake downstream session whose list_tools() fails the way SDK v2's
+    does when one tool's outputSchema doesn't conform, but whose raw
+    dispatcher (the bridge's fallback path) still returns the full,
+    unvalidated tool list."""
+
+    class _Dispatcher:
+        async def send_raw_request(self, method, params, opts):
+            assert method == "tools/list"
+            return {
+                "tools": [
+                    {
+                        "name": "get_interaction_status",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"interaction_id": {"type": "string"}},
+                        },
+                    },
+                    {
+                        "name": "list_inbox",
+                        "inputSchema": {"type": "object", "properties": {}},
+                        "outputSchema": {"type": "array"},
+                    },
+                ]
+            }
 
     class _AsyncMCPContext:
         async def __aenter__(self):
             obj = types.SimpleNamespace()
-            obj.list_tools = AsyncMock(
-                side_effect=_list_tools_validation_error()
-            )
+            obj.list_tools = AsyncMock(side_effect=_list_tools_validation_error())
+            obj._dispatcher = _Dispatcher()
 
             async def _call_tool(name, args):
                 return types.SimpleNamespace(
@@ -141,7 +156,45 @@ async def test_sessionless_call_tool_survives_a_list_tools_schema_validation_err
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr(sc, "mcp_session", lambda *a, **k: _AsyncMCPContext())
+    return _AsyncMCPContext()
+
+
+@pytest.mark.asyncio
+async def test_sessionless_list_tools_survives_a_schema_validation_error(monkeypatch):
+    """One downstream tool with a non-conforming outputSchema must not take
+    every other tool's listing down with it (regression: GET /tools and
+    GET /tools/{name} 500'd whenever any tool's outputSchema had a root
+    type other than 'object', because list_tools() validates every tool in
+    the response at once)."""
+    monkeypatch.setattr(
+        sc, "mcp_session", lambda *a, **k: _mcp_context_with_broken_list_tools()
+    )
+
+    async with sc.mcp_session_context(
+        sessions=None,
+        x_inxm_mcp_session=None,
+        access_token=None,
+        group=None,
+        incoming_headers={},
+    ) as delegate:
+        tools = await delegate.list_tools()
+        assert {sc.get_tool_name(t) for t in tools} == {
+            "get_interaction_status",
+            "list_inbox",
+        }
+
+
+@pytest.mark.asyncio
+async def test_sessionless_call_tool_survives_a_list_tools_schema_validation_error(
+    monkeypatch,
+):
+    """The same failure must not block calling the tool that *is* well
+    formed either (regression: `get_interaction_status` failed on every
+    call whenever the sibling `list_inbox` tool's outputSchema had a root
+    type other than 'object')."""
+    monkeypatch.setattr(
+        sc, "mcp_session", lambda *a, **k: _mcp_context_with_broken_list_tools()
+    )
 
     async with sc.mcp_session_context(
         sessions=None,
