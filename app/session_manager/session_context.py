@@ -82,6 +82,15 @@ async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
     only one tool is actually broken. On that failure, re-fetch the raw,
     unvalidated payload and keep only the tools that individually validate,
     logging and dropping the rest by name.
+
+    A perpetually failing ``list_tools()`` is worse than a bad listing: SDK
+    v2's own ``call_tool()`` calls ``list_tools()`` *again*, internally, to
+    populate ``ClientSession._tool_output_schemas`` the first time it sees a
+    tool, and raises the same way when that lookup fails — so every tool
+    call would crash too, not just listings, with no call site of ours in
+    the traceback to catch it. Feed the recovered listing through the
+    session's own (idempotent) ``_absorb_tool_listing`` so that cache is
+    already warm by the time ``call_tool()`` checks it.
     """
     try:
         return await session.list_tools()
@@ -103,7 +112,11 @@ async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
                     if isinstance(raw_tool, dict)
                     else "<unknown>",
                 )
-        return mcp_types.ListToolsResult(tools=kept)
+        recovered = mcp_types.ListToolsResult(tools=kept)
+        absorb = getattr(session, "_absorb_tool_listing", None)
+        if absorb is not None:
+            recovered = absorb(recovered, complete=True)
+        return recovered
 
 
 def get_tool_name(tool: Any) -> Optional[str]:

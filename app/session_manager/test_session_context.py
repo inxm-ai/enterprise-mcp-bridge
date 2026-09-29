@@ -160,6 +160,51 @@ def _mcp_context_with_broken_list_tools():
 
 
 @pytest.mark.asyncio
+async def test_resilient_list_tools_warms_the_sessions_output_schema_cache():
+    """regression: SDK v2's own `call_tool()` calls `list_tools()` again,
+    internally, the first time it sees a tool name, to populate
+    `ClientSession._tool_output_schemas` — and raises the same validation
+    error when that internal call fails, from inside `call_tool()` itself,
+    where no call site of ours can catch it. `call_tool` never even 500'd
+    with a normal traceback for this: the bridge's stdio subprocess is torn
+    down as a side effect, so every symptom pointed at the *transport*
+    dying, not at a second, hidden `list_tools()` call three frames below
+    `call_tool()`. `resilient_list_tools` must feed its recovered listing
+    through the session's own `_absorb_tool_listing` so that cache is
+    already warm before `call_tool()` ever checks it."""
+
+    class _Dispatcher:
+        async def send_raw_request(self, method, params, opts):
+            return {
+                "tools": [
+                    {
+                        "name": "get_interaction_status",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+
+    session = types.SimpleNamespace()
+    session.list_tools = AsyncMock(side_effect=_list_tools_validation_error())
+    session._dispatcher = _Dispatcher()
+    absorbed = []
+
+    def _absorb_tool_listing(result, *, complete):
+        absorbed.append((result, complete))
+        return result
+
+    session._absorb_tool_listing = _absorb_tool_listing
+
+    result = await sc.resilient_list_tools(session)
+
+    assert [sc.get_tool_name(t) for t in result.tools] == ["get_interaction_status"]
+    assert len(absorbed) == 1
+    recovered_result, complete = absorbed[0]
+    assert recovered_result is result
+    assert complete is True
+
+
+@pytest.mark.asyncio
 async def test_sessionless_list_tools_survives_a_schema_validation_error(monkeypatch):
     """One downstream tool with a non-conforming outputSchema must not take
     every other tool's listing down with it (regression: GET /tools and
