@@ -20,7 +20,7 @@ dependencies = [
     "opentelemetry-exporter-otlp",
     "opentelemetry-instrumentation-fastapi",
     "openai",
-    "ag2[a2a]>=1.1.1,<2",
+    "ag2[a2a]>=1.1.0,<2",
     "a2a-sdk[http-server]>=1.1.0,<2",
     "genson",
     "psycopg[binary]"
