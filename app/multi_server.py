@@ -222,7 +222,7 @@ def tools_cache_paths(default_file: Path, default_lock_file: Path) -> tuple[Path
     if not server:
         return default_file, default_lock_file
     cache_file = default_file.with_name(f"{default_file.name}.{server.id}")
-    lock_file = cache_file.with_name(cache_file.name + ".lock")
+    lock_file = default_lock_file.with_name(f"{default_lock_file.name}.{server.id}")
     return cache_file, lock_file
 
 
