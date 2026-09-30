@@ -46,6 +46,7 @@ from app.multi_server import (
     current_tool_filters,
     tools_cache_paths,
     session_storage_key,
+    current_sessionless,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -544,7 +545,7 @@ async def mcp_session_context(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     # Sessionless path: validate group access (if present) and open a transient MCP session
-    if x_inxm_mcp_session is None or app_vars.MCP_SESSIONLESS:
+    if x_inxm_mcp_session is None or current_sessionless(app_vars.MCP_SESSIONLESS):
         if group and access_token:
             data_manager = get_data_access_manager()
             try:
