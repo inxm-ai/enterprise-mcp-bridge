@@ -130,3 +130,20 @@ async def test_executor_forwards_request_context_and_completes(monkeypatch):
     assert len(artifacts) == 1
     assert artifacts[0].artifact.parts[0].text == "hello from agent"
     assert statuses[-1].status.state.name == "TASK_STATE_COMPLETED"
+
+
+def test_agent_card_uses_forwarded_public_origin():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(build_a2a_app())
+    response = client.get(
+        "/.well-known/agent-card.json",
+        headers={
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "bridge.example.com",
+        },
+    )
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["supportedInterfaces"][0]["url"] == "https://bridge.example.com/tgi/v1/a2a"
