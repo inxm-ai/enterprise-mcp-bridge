@@ -51,6 +51,7 @@ from app.multi_server import (
     current_base_path,
     current_sessionless,
     is_multi_server_mode,
+    session_cookie_name,
     session_storage_key,
 )
 from app.session_manager.session_context import (
@@ -845,7 +846,7 @@ async def start_session(
             response = JSONResponse(content=session_info)
             cookie_path = current_base_path("/") if is_multi_server_mode() else "/"
             response.set_cookie(
-                key=SESSION_FIELD_NAME,
+                key=session_cookie_name(SESSION_FIELD_NAME),
                 value=x_inxm_mcp_session,
                 path=cookie_path,
                 httponly=True,
