@@ -115,7 +115,8 @@ def test_single_server_mode_preserves_defaults(monkeypatch):
 
     assert multi_server.is_multi_server_mode() is False
     assert multi_server.match_server("/anything") is None
-    assert multi_server.current_remote_url("https://legacy/mcp") == "https://legacy/mcp"
+    legacy_remote = multi_server.current_remote_url("https://legacy/mcp")
+    assert legacy_remote == "https://legacy/mcp"
     assert multi_server.current_command("python legacy.py") == "python legacy.py"
     assert multi_server.current_tool_filters(["a"], ["b"]) == (["a"], ["b"])
     assert multi_server.current_sessionless(True) is True
@@ -256,7 +257,12 @@ def test_multi_server_routes_are_isolated(monkeypatch):
         assert two_tools.status_code == 200
         assert [tool["name"] for tool in two_tools.json()] == ["two_echo"]
 
-        assert client.post("/api/mcp/one/tools/one_echo", json={}).status_code == 200
-        assert client.post("/api/mcp/two/tools/two_echo", json={}).status_code == 200
-        assert client.post("/api/mcp/one/tools/two_echo", json={}).status_code == 404
-        assert client.get("/api/mcp/unknown/tools").status_code == 404
+        one_call = client.post("/api/mcp/one/tools/one_echo", json={})
+        two_call = client.post("/api/mcp/two/tools/two_echo", json={})
+        cross_call = client.post("/api/mcp/one/tools/two_echo", json={})
+        unknown = client.get("/api/mcp/unknown/tools")
+
+        assert one_call.status_code == 200
+        assert two_call.status_code == 200
+        assert cross_call.status_code == 404
+        assert unknown.status_code == 404
