@@ -90,8 +90,8 @@ class ServerConfig:
         )
 
 
-def _load_servers() -> tuple[ServerConfig, ...]:
-    raw = os.environ.get("MCP_SERVERS", "").strip()
+def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
+    raw = raw.strip()
     if not raw:
         return ()
     try:
@@ -101,6 +101,8 @@ def _load_servers() -> tuple[ServerConfig, ...]:
     if not isinstance(parsed, list) or not parsed:
         raise ValueError("MCP_SERVERS must be a non-empty JSON array")
 
+    if not all(isinstance(item, dict) for item in parsed):
+        raise ValueError("MCP_SERVERS entries must be JSON objects")
     servers = tuple(ServerConfig.from_mapping(item) for item in parsed)
     ids = [server.id for server in servers]
     paths = [server.base_path for server in servers]
@@ -111,6 +113,10 @@ def _load_servers() -> tuple[ServerConfig, ...]:
     if "/" in paths and len(paths) > 1:
         raise ValueError("base_path '/' cannot be combined with other MCP servers")
     return servers
+
+
+def _load_servers() -> tuple[ServerConfig, ...]:
+    return parse_servers(os.environ.get("MCP_SERVERS", ""))
 
 
 SERVERS = _load_servers()
