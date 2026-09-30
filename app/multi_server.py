@@ -210,6 +210,22 @@ def current_sessionless(default: bool) -> bool:
     return server.sessionless
 
 
+def session_cookie_name(default_name: str) -> str:
+    server = current_server()
+    if not server:
+        return default_name
+    return f"{default_name}.{server.id}"
+
+
+def session_cookie_value(
+    cookies: dict[str, str], default_name: str, legacy_value: Optional[str] = None
+) -> Optional[str]:
+    server = current_server()
+    if not server:
+        return legacy_value
+    return cookies.get(session_cookie_name(default_name))
+
+
 def session_storage_key(session_id: Optional[str]) -> Optional[str]:
     if session_id is None:
         return None
