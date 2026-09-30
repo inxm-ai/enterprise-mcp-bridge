@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from http.cookies import SimpleCookie
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -244,6 +245,34 @@ def tools_cache_paths(default_file: Path, default_lock_file: Path) -> tuple[Path
     return cache_file, lock_file
 
 
+def _rewrite_session_cookie_header(scope, server: ServerConfig) -> None:
+    cookie_name = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
+    server_cookie_name = f"{cookie_name}.{server.id}"
+    headers = list(scope.get("headers") or [])
+    cookie_index = next(
+        (i for i, (name, _value) in enumerate(headers) if name.lower() == b"cookie"),
+        None,
+    )
+    if cookie_index is None:
+        return
+
+    raw_cookie = headers[cookie_index][1].decode("latin-1")
+    parsed = SimpleCookie()
+    try:
+        parsed.load(raw_cookie)
+    except Exception:
+        return
+
+    parsed.pop(cookie_name, None)
+    selected = parsed.get(server_cookie_name)
+    if selected is not None:
+        parsed[cookie_name] = selected.value
+
+    rewritten = "; ".join(morsel.OutputString() for morsel in parsed.values())
+    headers[cookie_index] = (b"cookie", rewritten.encode("latin-1"))
+    scope["headers"] = headers
+
+
 class MultiServerContextMiddleware:
     """Bind the configured server to the current ASGI request."""
 
@@ -259,6 +288,7 @@ class MultiServerContextMiddleware:
             await self.app(scope, receive, send)
             return
         token = bind_server(server)
+        _rewrite_session_cookie_header(scope, server)
         try:
             await self.app(scope, receive, send)
         finally:
