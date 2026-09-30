@@ -82,8 +82,9 @@ def test_server_context_isolates_session_cache_filters_and_env():
     alpha_token = multi_server.bind_server(alpha)
     try:
         assert multi_server.session_storage_key("same") == "alpha:same"
-        assert multi_server.tools_cache_paths(default_cache, default_lock)[0] == Path(
-            "/tmp/tools.json.alpha"
+        assert multi_server.tools_cache_paths(default_cache, default_lock) == (
+            Path("/tmp/tools.json.alpha"),
+            Path("/tmp/tools.json.lock.alpha"),
         )
         assert multi_server.current_tool_filters(["default"], [])[0] == ["alpha_*"]
         assert multi_server.current_env({"BASE": "1"}) == {
@@ -97,8 +98,9 @@ def test_server_context_isolates_session_cache_filters_and_env():
     nested_token = multi_server.bind_server(nested)
     try:
         assert multi_server.session_storage_key("same") == "nested:same"
-        assert multi_server.tools_cache_paths(default_cache, default_lock)[0] == Path(
-            "/tmp/tools.json.nested"
+        assert multi_server.tools_cache_paths(default_cache, default_lock) == (
+            Path("/tmp/tools.json.nested"),
+            Path("/tmp/tools.json.lock.nested"),
         )
         include, exclude = multi_server.current_tool_filters(["default"], [])
         assert include == []
