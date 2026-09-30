@@ -121,3 +121,61 @@ def test_single_server_mode_preserves_defaults(monkeypatch):
     assert multi_server.tools_cache_paths(
         Path("/tmp/tools.json"), Path("/tmp/tools.lock")
     ) == (Path("/tmp/tools.json"), Path("/tmp/tools.lock"))
+
+
+def test_backend_selection_can_mix_local_and_remote():
+    from app.session.client_strategy import (
+        LocalMCPClientStrategy,
+        RemoteMCPClientStrategy,
+        build_mcp_client_strategy,
+    )
+
+    alpha, nested = _servers()
+
+    token = multi_server.bind_server(alpha)
+    try:
+        strategy = build_mcp_client_strategy(
+            access_token=None,
+            requested_group=None,
+            anon=True,
+        )
+        assert isinstance(strategy, LocalMCPClientStrategy)
+        assert strategy.server_params.command == "python"
+        assert strategy.server_params.args == ["alpha.py"]
+        assert strategy.server_params.env["ALPHA_ONLY"] == "1"
+    finally:
+        multi_server.reset_server(token)
+
+    token = multi_server.bind_server(nested)
+    try:
+        strategy = build_mcp_client_strategy(
+            access_token=None,
+            requested_group=None,
+            anon=True,
+        )
+        assert isinstance(strategy, RemoteMCPClientStrategy)
+        assert strategy.url == "https://example.invalid/mcp"
+    finally:
+        multi_server.reset_server(token)
+
+
+def test_tool_filters_are_request_local(monkeypatch):
+    from app.session_manager import session_context
+
+    monkeypatch.setattr(session_context, "INCLUDE_TOOLS", [])
+    monkeypatch.setattr(session_context, "EXCLUDE_TOOLS", [])
+    alpha, nested = _servers()
+
+    token = multi_server.bind_server(alpha)
+    try:
+        assert session_context.tool_allowed("alpha_read")
+        assert not session_context.tool_allowed("beta_read")
+    finally:
+        multi_server.reset_server(token)
+
+    token = multi_server.bind_server(nested)
+    try:
+        assert session_context.tool_allowed("alpha_read")
+        assert not session_context.tool_allowed("admin_delete")
+    finally:
+        multi_server.reset_server(token)
