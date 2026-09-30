@@ -27,7 +27,11 @@ from mcp.server.lowlevel.server import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
 from app.elicitation import ElicitationRequiredError, get_elicitation_coordinator
-from app.multi_server import configured_servers, is_multi_server_mode, session_storage_key
+from app.multi_server import (
+    configured_servers,
+    is_multi_server_mode,
+    session_storage_key,
+)
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import (
     CallerNotAuthorizedError,
