@@ -566,7 +566,9 @@ def build_mcp_client_strategy(
 ) -> MCPClientStrategy:
     remote_server = current_remote_url(MCP_REMOTE_SERVER).strip()
     if remote_server:
-        mcp_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")).strip()
+        mcp_command = current_command(
+            os.environ.get("MCP_SERVER_COMMAND", "")
+        ).strip()
         if mcp_command:
             logger.error(
                 "[ClientStrategy] MCP_REMOTE_SERVER and MCP_SERVER_COMMAND are both set; cannot use both"
