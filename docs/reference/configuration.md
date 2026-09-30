@@ -126,7 +126,9 @@ MCP_SERVERS='[
 ```
 
 Session state, SSE transport state, tool filtering, and tool-cache files are
-isolated by server. In sessionless mode, `/session/start` remains available
+isolated by server. Overlapping base paths are supported; the most specific
+matching base path selects the server context. In sessionless mode,
+`/session/start` remains available
 for client compatibility but does not create a persistent downstream session.
 
 ### LLM Configuration
