@@ -14,8 +14,12 @@ from ag2.a2a import A2AServer, build_card
 from a2a.server.agent_execution import AgentExecutor as A2AAgentExecutor
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
+from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.tasks import TaskUpdater
-from a2a.types import AgentSkill, Part, Task, TaskState, TaskStatus
+from a2a.types import AgentCard, AgentSkill, Part, Task, TaskState, TaskStatus
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from app.session import session_id, try_get_session_id
 from app.session_manager import mcp_session_context
@@ -29,9 +33,7 @@ from app.tgi.routes import (
 )
 from app.vars import (
     DEFAULT_MODEL,
-    HOST,
     MCP_BASE_PATH,
-    PORT,
     SERVICE_NAME,
     SESSION_FIELD_NAME,
     TOKEN_COOKIE_NAME,
@@ -102,15 +104,43 @@ def _legacy_card_path() -> str:
     return f"{base}/.well-known/agent.json"
 
 
-def _public_a2a_url() -> str:
+def _public_a2a_url(request: Optional[Request] = None) -> str:
     explicit = os.getenv("A2A_PUBLIC_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
 
-    scheme = os.getenv("A2A_PUBLIC_SCHEME", "https").strip() or "https"
-    host = HOST or "localhost"
-    port = f":{PORT}" if PORT else ""
-    return f"{scheme}://{host}{port}{_rpc_path()}"
+    if request is not None:
+        forwarded = request.headers.get("forwarded", "")
+        forwarded_values: dict[str, str] = {}
+        if forwarded:
+            for item in forwarded.split(",", 1)[0].split(";"):
+                key, sep, value = item.strip().partition("=")
+                if sep:
+                    forwarded_values[key.lower()] = value.strip().strip('"')
+
+        scheme = (
+            forwarded_values.get("proto")
+            or request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+            or request.url.scheme
+        )
+        host = (
+            forwarded_values.get("host")
+            or request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+            or request.headers.get("host", "")
+        )
+        forwarded_port = request.headers.get("x-forwarded-port", "").split(",", 1)[0].strip()
+        if forwarded_port and host and ":" not in host:
+            default_port = (scheme == "https" and forwarded_port == "443") or (
+                scheme == "http" and forwarded_port == "80"
+            )
+            if not default_port:
+                host = f"{host}:{forwarded_port}"
+        if host:
+            return f"{scheme}://{host}{_rpc_path()}"
+
+    # Internal placeholder used by the handler; discovery responses replace
+    # this with a request-derived public URL when A2A_PUBLIC_URL is unset.
+    return f"http://localhost{_rpc_path()}"
 
 
 class BridgeA2AExecutor(A2AAgentExecutor):
@@ -213,18 +243,14 @@ class BridgeA2AExecutor(A2AAgentExecutor):
         await updater.cancel()
 
 
-def build_a2a_app(executor: Optional[A2AAgentExecutor] = None):
-    """Build AG2's standards-compliant JSON-RPC A2A ASGI application."""
-    agent = Agent(name=SERVICE_NAME)
-    server = A2AServer(agent, executor=executor or BridgeA2AExecutor())
-
+def _build_agent_card(agent: Agent, url: str) -> AgentCard:
     description = (
         "Enterprise MCP Bridge agent backed by MCP tools, authentication, "
         "sessions, and workflow orchestration."
     )
-    card = build_card(
+    return build_card(
         agent,
-        url=_public_a2a_url(),
+        url=url,
         description=description,
         skills=[
             AgentSkill(
@@ -237,10 +263,34 @@ def build_a2a_app(executor: Optional[A2AAgentExecutor] = None):
             )
         ],
     )
-    return server.build_jsonrpc(
+
+
+def build_a2a_app(executor: Optional[A2AAgentExecutor] = None):
+    """Build AG2's standards-compliant JSON-RPC A2A ASGI application."""
+    agent = Agent(name=SERVICE_NAME)
+    server = A2AServer(agent, executor=executor or BridgeA2AExecutor())
+
+    internal_card = _build_agent_card(agent, _public_a2a_url())
+    app = server.build_jsonrpc(
         url=_public_a2a_url(),
-        card=card,
+        card=internal_card,
         rpc_url=_rpc_path(),
         card_url=_card_path(),
         legacy_card_url=_legacy_card_path(),
     )
+
+    async def _serve_public_card(request: Request):
+        card = _build_agent_card(agent, _public_a2a_url(request))
+        return JSONResponse(agent_card_to_dict(card))
+
+    card_paths = {_card_path(), _legacy_card_path()}
+    app.routes[:] = [
+        route for route in app.routes if getattr(route, "path", None) not in card_paths
+    ]
+    app.routes.extend(
+        [
+            Route(_card_path(), endpoint=_serve_public_card, methods=["GET"]),
+            Route(_legacy_card_path(), endpoint=_serve_public_card, methods=["GET"]),
+        ]
+    )
+    return app
