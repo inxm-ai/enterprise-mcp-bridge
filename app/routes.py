@@ -535,7 +535,9 @@ async def run_tool(
                     },
                 )
             coordinator = get_elicitation_coordinator()
-            if not coordinator.submit_feedback(x_inxm_mcp_session, user_feedback):
+            if not coordinator.submit_feedback(
+                session_storage_key(x_inxm_mcp_session), user_feedback
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail={
