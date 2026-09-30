@@ -45,6 +45,7 @@ from app.multi_server import (
     current_remote_url,
     current_tool_filters,
     tools_cache_paths,
+    session_storage_key,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -777,7 +778,8 @@ async def mcp_session_context(
 
     # Sessionful path: reuse existing task, but surface a common delegate API
     await close_idle_sessions(sessions)
-    mcp_task = sessions.get(x_inxm_mcp_session)
+    storage_key = session_storage_key(x_inxm_mcp_session)
+    mcp_task = sessions.get(storage_key)
     if not mcp_task:
         logger.warning(
             mask_token(
