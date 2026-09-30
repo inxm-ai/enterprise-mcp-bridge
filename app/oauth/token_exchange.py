@@ -34,6 +34,7 @@ from jwt import DecodeError, InvalidTokenError
 import requests
 
 from app.utils import mask_token, token_fingerprint
+from app.multi_server import current_remote_url
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -302,7 +303,7 @@ class GcpMetadataTokenRetriever(AmbientIdentityTokenRetriever):
     )
 
     def _fetch_token(self) -> str:
-        audience = GCP_METADATA_IDENTITY_AUDIENCE or MCP_REMOTE_SERVER
+        audience = GCP_METADATA_IDENTITY_AUDIENCE or current_remote_url(MCP_REMOTE_SERVER)
         url = (
             f"{GCP_METADATA_SERVER_URL.rstrip('/')}/computeMetadata/v1/"
             "instance/service-accounts/default/identity"
@@ -326,7 +327,7 @@ class AzureManagedIdentityTokenRetriever(AmbientIdentityTokenRetriever):
     )
 
     def _fetch_token(self) -> str:
-        resource = AZURE_METADATA_IDENTITY_RESOURCE or MCP_REMOTE_SERVER
+        resource = AZURE_METADATA_IDENTITY_RESOURCE or current_remote_url(MCP_REMOTE_SERVER)
         url = f"{AZURE_METADATA_SERVER_URL.rstrip('/')}/metadata/identity/oauth2/token"
         params = {"api-version": "2018-02-01", "resource": resource}
         if AZURE_METADATA_CLIENT_ID:
