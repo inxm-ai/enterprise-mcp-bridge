@@ -22,6 +22,7 @@ from uuid import uuid4
 from app.utils.traced_requests import traced_request
 from app.session import try_get_session_id, session_id
 from app.session_manager import mcp_session_context, session_manager
+from app.multi_server import session_storage_key
 from app.oauth.token_exchange import UserLoggedOutException
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
@@ -176,7 +177,7 @@ def _maybe_submit_pending_user_feedback(
     if not parsed:
         return
     coordinator = get_elicitation_coordinator()
-    coordinator.submit_feedback(session_key, parsed)
+    coordinator.submit_feedback(session_storage_key(session_key), parsed)
 
 
 def _is_continue_placeholder(text: Optional[str]) -> bool:
