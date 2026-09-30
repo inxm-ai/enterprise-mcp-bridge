@@ -844,13 +844,11 @@ async def start_session(
                 group,
             )
             response = JSONResponse(content=session_info)
+            cookie_path = current_base_path("/") if is_multi_server_mode() else "/"
             response.set_cookie(
                 key=SESSION_FIELD_NAME,
                 value=x_inxm_mcp_session,
-                path=(
-                    current_base_path("") if is_multi_server_mode() else "/"
-                )
-                or "/",
+                path=cookie_path,
                 httponly=True,
                 samesite="lax",
                 secure=(
