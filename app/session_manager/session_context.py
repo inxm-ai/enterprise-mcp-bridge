@@ -833,7 +833,7 @@ async def mcp_session_context(
                 if result.get("error") == "invalid_feedback":
                     raise InvalidUserFeedbackError(
                         str(result.get("detail") or "Invalid user feedback."),
-                        session_key=x_inxm_mcp_session,
+                        session_key=storage_key,
                         payload=result.get("elicitation") or {},
                     )
             return RunToolsResult(enforce_response_ceiling(result))
@@ -887,7 +887,7 @@ async def mcp_session_context(
                 if result.get("error") == "invalid_feedback":
                     raise InvalidUserFeedbackError(
                         str(result.get("detail") or "Invalid user feedback."),
-                        session_key=x_inxm_mcp_session,
+                        session_key=storage_key,
                         payload=result.get("elicitation") or {},
                     )
             return RunToolsResult(enforce_response_ceiling(result))
