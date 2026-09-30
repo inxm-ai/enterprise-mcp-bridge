@@ -23,6 +23,7 @@ from typing import (
 from fastapi import HTTPException
 
 from app.session import MCPSessionBase
+from app.multi_server import current_base_path
 from app.vars import (
     MCP_BASE_PATH,
     GENERATED_UI_PROMPT_DUMP,
@@ -37,7 +38,7 @@ from app.tgi.models import (
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.app_facade.generated_output_factory import (
     GeneratedUIOutputFactory,
-    MCP_SERVICE_TEST_HELPER_SCRIPT,
+    _mcp_service_test_helper_script,
 )
 from app.app_facade.generated_dummy_data import (
     DummyDataGenerator,
@@ -123,7 +124,7 @@ def _load_pfusch_prompt() -> str:
         with open(prompt_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()
         # Replace the MCP_BASE_PATH placeholder
-        return prompt_content.replace("{{MCP_BASE_PATH}}", MCP_BASE_PATH)
+        return prompt_content.replace("{{MCP_BASE_PATH}}", current_base_path(MCP_BASE_PATH))
     except Exception as e:
         logger.error(f"Error loading pfusch prompt: {e}")
         raise e
@@ -222,7 +223,7 @@ class GeneratedUIService:
             resolved_service_code = service_code or ""
             # Always inject the global McpService/service safety prelude in tests.
             # It writes only to globalThis and avoids top-level symbol collisions.
-            service_prelude = MCP_SERVICE_TEST_HELPER_SCRIPT
+            service_prelude = _mcp_service_test_helper_script()
             combined_code = f"{service_prelude}\n\n{resolved_service_code}\n\n{mocked_components_code}"
 
             with open(os.path.join(tmpdir, "app.js"), "w", encoding="utf-8") as f:
