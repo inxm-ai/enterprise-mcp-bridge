@@ -6,6 +6,7 @@ from mcp import StdioServerParameters
 from app.oauth.token_exchange import TokenRetrieverFactory
 from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
+from app.multi_server import current_command, current_env
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -100,9 +101,9 @@ def get_server_params(
     requested_group: Optional[str] = None,
     anon: bool = False,
 ) -> StdioServerParameters:
-    env_command = os.environ.get("MCP_SERVER_COMMAND")
+    env_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")) or None
     env, _token_result = defined_env(
-        os.environ.copy(), access_token, requested_group, anon
+        current_env(os.environ.copy()), access_token, requested_group, anon
     )
 
     # Process command template with dynamic data path (caller identity)
