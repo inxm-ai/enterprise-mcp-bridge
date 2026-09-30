@@ -304,7 +304,6 @@ def test_request_local_advertised_paths(monkeypatch):
         multi_server.reset_server(token)
 
 
-
 def test_a2a_routes_can_be_mounted_per_server():
     from app.tgi.a2a_runtime import build_a2a_app
 
@@ -314,3 +313,88 @@ def test_a2a_routes_can_be_mounted_per_server():
     assert "/api/mcp/alpha/tgi/v1/a2a" in paths
     assert "/api/mcp/alpha/.well-known/agent-card.json" in paths
     assert "/api/mcp/alpha/.well-known/agent.json" in paths
+
+
+
+def test_overlapping_paths_use_server_specific_session_cookies():
+    from http.cookies import SimpleCookie
+
+    alpha, nested = _servers()
+    scope = {
+        "headers": [
+            (
+                b"cookie",
+                (
+                    "x-inxm-mcp-session.alpha=parent-session; "
+                    "x-inxm-mcp-session.nested=nested-session"
+                ).encode("latin-1"),
+            )
+        ]
+    }
+
+    multi_server._rewrite_session_cookie_header(scope, nested)
+
+    cookie = SimpleCookie()
+    cookie.load(scope["headers"][0][1].decode("latin-1"))
+    assert cookie["x-inxm-mcp-session"].value == "nested-session"
+    assert cookie["x-inxm-mcp-session.alpha"].value == "parent-session"
+
+
+def test_generated_ui_artifacts_use_request_local_base_path():
+    from app.app_facade.generated_output_factory import _mcp_service_class_source
+    from app.app_facade.generated_service import _load_pfusch_prompt
+
+    server = multi_server.ServerConfig(
+        id="alpha",
+        base_path="/api/mcp/alpha",
+        command="python alpha.py",
+    )
+    token = multi_server.bind_server(server)
+    try:
+        service_source = _mcp_service_class_source()
+        prompt = _load_pfusch_prompt()
+        assert "/api/mcp/alpha/tools" in service_source
+        assert "/api/mcp/alpha/tgi/v1/chat/completions" in service_source
+        assert "/api/mcp/alpha" in prompt
+    finally:
+        multi_server.reset_server(token)
+
+
+def test_metadata_identity_uses_request_local_remote_url(monkeypatch):
+    from app.oauth import token_exchange
+
+    captured = {}
+
+    class Response:
+        text = "token"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"access_token": "token"}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["params"] = kwargs.get("params")
+        return Response()
+
+    monkeypatch.setattr(token_exchange.requests, "get", fake_get)
+    monkeypatch.setattr(token_exchange, "GCP_METADATA_IDENTITY_AUDIENCE", "")
+    monkeypatch.setattr(token_exchange, "AZURE_METADATA_IDENTITY_RESOURCE", "")
+    monkeypatch.setattr(token_exchange, "MCP_REMOTE_SERVER", "https://legacy.invalid/mcp")
+
+    server = multi_server.ServerConfig(
+        id="remote",
+        base_path="/api/mcp/remote",
+        remote_url="https://remote.example/mcp",
+    )
+    token = multi_server.bind_server(server)
+    try:
+        token_exchange.GcpMetadataTokenRetriever()._fetch_token()
+        assert captured["params"]["audience"] == "https://remote.example/mcp"
+
+        token_exchange.AzureManagedIdentityTokenRetriever()._fetch_token()
+        assert captured["params"]["resource"] == "https://remote.example/mcp"
+    finally:
+        multi_server.reset_server(token)
