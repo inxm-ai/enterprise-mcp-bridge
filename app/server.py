@@ -11,6 +11,7 @@ from prometheus_client import Info
 
 from app.sse.mcp_proxy import get_sse_proxy_routes
 from app.utils.prometheus_routing import safe_route_name_resolver
+from app.tgi.a2a_runtime import build_a2a_app
 
 
 class OTELFormatter(logging.Formatter):
@@ -173,6 +174,11 @@ app_info = Info("fastapi_app_info", "Application Info")
 app_info.info({"app_name": SERVICE_NAME})
 
 app.include_router(router)
+
+# Mount standards-compliant A2A JSON-RPC + agent-card routes provided by AG2.
+# The existing MCP bridge remains the execution backend.
+for _a2a_route in build_a2a_app().routes:
+    app.router.routes.insert(0, _a2a_route)
 
 for route in get_sse_proxy_routes():
     app.router.routes.insert(0, route)
