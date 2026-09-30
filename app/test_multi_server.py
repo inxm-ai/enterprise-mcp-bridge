@@ -51,6 +51,11 @@ def test_parse_servers_supports_local_and_remote_entries():
         [{"id": "x", "base_path": "/", "command": "x"}],
         [{"id": "x", "base_path": "/x", "command": "x", "url": "https://x"}],
         [{"id": "x", "base_path": "/x"}],
+        [{"id": "x", "base_path": "/x", "command": "x", "include_tools": {}}],
+        [{"id": "x", "base_path": "/x", "command": "x", "include_tools": ""}],
+        [{"id": "x", "base_path": "/x", "command": "x", "exclude_tools": {}}],
+        [{"id": "x", "base_path": "/x", "command": "x", "exclude_tools": ""}],
+        [{"id": "x", "base_path": "/x", "command": "x", "env": []}],
         [
             {"id": "x", "base_path": "/x", "command": "x"},
             {"id": "x", "base_path": "/y", "command": "y"},
