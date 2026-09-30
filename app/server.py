@@ -16,6 +16,7 @@ from app.multi_server import (
     is_multi_server_mode,
 )
 from app.utils.prometheus_routing import safe_route_name_resolver
+from app.tgi.a2a_runtime import build_a2a_app
 
 
 class OTELFormatter(logging.Formatter):
@@ -184,6 +185,16 @@ if is_multi_server_mode():
         app.include_router(router, prefix=server_config.base_path)
 else:
     app.include_router(router)
+
+# Mount standards-compliant A2A JSON-RPC + agent-card routes provided by AG2.
+# The existing MCP bridge remains the execution backend.
+if is_multi_server_mode():
+    for server_config in configured_servers():
+        for _a2a_route in build_a2a_app(base_path=server_config.base_path).routes:
+            app.router.routes.insert(0, _a2a_route)
+else:
+    for _a2a_route in build_a2a_app().routes:
+        app.router.routes.insert(0, _a2a_route)
 
 for route in get_sse_proxy_routes():
     app.router.routes.insert(0, route)

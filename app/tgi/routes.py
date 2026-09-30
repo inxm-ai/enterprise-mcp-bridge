@@ -14,7 +14,6 @@ from fastapi import (
     Depends,
 )
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, ValidationError
 from opentelemetry import trace
 import json
 from uuid import uuid4
@@ -41,10 +40,9 @@ from app.tgi.workflows.models import WorkflowExecutionState
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.tgi.protocols.chunk_reader import (
     chunk_reader,
-    ChunkFormat,
     accumulate_content,
 )
-from app.vars import DEFAULT_MODEL, SESSION_FIELD_NAME, SERVICE_NAME, TOKEN_NAME
+from app.vars import SESSION_FIELD_NAME, TOKEN_NAME
 from app.oauth.token_dependency import get_access_token
 
 # Initialize components
@@ -55,45 +53,8 @@ tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("uvicorn.error")
 
 
-class A2AParams(BaseModel):
-    prompt: str
-
-
-class A2ARequest(BaseModel):
-    jsonrpc: str = "2.0"
-    method: str
-    params: A2AParams
-    id: str
-
-
-class A2AResponse(BaseModel):
-    jsonrpc: str = "2.0"
-    result: Optional[Any] = None
-    error: Optional[Any] = None
-    id: str
-
 
 # --- Helper Functions ---
-def _create_a2a_response(result: Any, request_id: str) -> A2AResponse:
-    """Creates a JSON-RPC 2.0 compliant success response."""
-    return A2AResponse(result={"completion": result}, id=request_id)
-
-
-def _create_a2a_error_response(code: int, message: str, request_id: str) -> A2AResponse:
-    """Creates a JSON-RPC 2.0 compliant error response."""
-    return A2AResponse(error={"code": code, "message": message}, id=request_id)
-
-
-def _extract_request_id(raw_body: Any) -> str:
-    """Extracts a best-effort request id from an incoming payload."""
-    if isinstance(raw_body, dict):
-        for key in ("id", "request_id", "requestId", "tool_call_id", "toolCallId"):
-            value = raw_body.get(key)
-            if value is not None:
-                return str(value)
-    return "unknown"
-
-
 def _resolve_user_token(
     incoming_headers: dict[str, str], access_token: Optional[str]
 ) -> Optional[str]:
@@ -281,42 +242,6 @@ def _parse_timestamp(value: str) -> str:
         .replace("+00:00", "Z")
     )
 
-
-def _coerce_a2a_request(raw_body: Any) -> A2ARequest:
-    """Coerces various payload shapes into an A2ARequest."""
-    if not isinstance(raw_body, dict):
-        raise ValueError("Request body must be a JSON object")
-
-    if "jsonrpc" in raw_body or {"method", "params", "id"}.issubset(raw_body.keys()):
-        return A2ARequest.model_validate(raw_body)
-
-    # Some clients send params but omit jsonrpc/id. Respect their data when possible.
-    if "params" in raw_body and isinstance(raw_body["params"], dict):
-        params_dict = raw_body["params"]
-        prompt = params_dict.get("prompt")
-        if prompt:
-            request_id = raw_body.get("id") or str(uuid4())
-            method = raw_body.get("method") or SERVICE_NAME
-            return A2ARequest(
-                method=str(method),
-                params=A2AParams(prompt=prompt),
-                id=str(request_id),
-                jsonrpc=str(raw_body.get("jsonrpc", "2.0")),
-            )
-
-    # Minimal payload (prompt at top level)
-    prompt = raw_body.get("prompt")
-    if prompt:
-        request_id = raw_body.get("id") or raw_body.get("request_id") or str(uuid4())
-        method = raw_body.get("method") or SERVICE_NAME
-        return A2ARequest(
-            method=str(method),
-            params=A2AParams(prompt=prompt),
-            id=str(request_id),
-            jsonrpc=str(raw_body.get("jsonrpc", "2.0")),
-        )
-
-    raise ValueError("Invalid A2A request payload: missing 'prompt'")
 
 
 # --- Core Logic Abstraction ---
@@ -829,228 +754,3 @@ async def list_workflows(
     return JSONResponse(
         content={"workflows": [_serialize_workflow(state) for state in workflows]}
     )
-
-
-@router.post("/a2a")
-async def a2a_chat_completion(
-    request: Request,
-    access_token: Optional[str] = Depends(get_access_token),
-    x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
-    x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
-    prompt: Optional[str] = Query(None, description="Specific prompt name to use"),
-    group: Optional[str] = Query(
-        None, description="Group name for sessionless group-specific data access"
-    ),
-):
-    """
-    A2A-compliant endpoint that maps an A2A JSON-RPC request to an internal
-    OpenAI-compatible chat completion call.
-    """
-    raw_body: Any = None
-    parse_error: Optional[str] = None
-    try:
-        raw_body = await request.json()
-    except json.JSONDecodeError as exc:
-        parse_error = f"Invalid JSON payload: {exc.msg}"
-    except Exception as exc:  # pragma: no cover - defensive, should be rare
-        parse_error = f"Unable to read request body: {str(exc)}"
-
-    request_id = _extract_request_id(raw_body)
-
-    if parse_error:
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32600,
-                message=f"Invalid Request: {parse_error}",
-                request_id=request_id,
-            ).model_dump()
-        )
-
-    try:
-        a2a_request = _coerce_a2a_request(raw_body)
-    except (ValidationError, ValueError) as exc:
-        message = str(exc)
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32600,
-                message=f"Invalid Request: {message}",
-                request_id=request_id,
-            ).model_dump()
-        )
-
-    stream_requested = False
-    if isinstance(raw_body, dict):
-        stream_requested = bool(
-            raw_body.get("stream") or (raw_body.get("params") or {}).get("stream")
-        )
-
-    incoming_headers = dict(request.headers)
-
-    try:
-        if a2a_request.method != SERVICE_NAME:
-            return JSONResponse(
-                content=_create_a2a_error_response(
-                    code=-32601,
-                    message=f"Method not found. Expected method '{SERVICE_NAME}'.",
-                    request_id=a2a_request.id,
-                ).model_dump()
-            )
-
-        model = DEFAULT_MODEL
-        if not model:
-            return JSONResponse(
-                content=_create_a2a_error_response(
-                    code=-32600,
-                    message="No default model configured, cannot start agent.",
-                    request_id=a2a_request.id,
-                ).model_dump()
-            )
-
-        params_dict = raw_body.get("params") if isinstance(raw_body, dict) else {}
-        use_workflow_param = None
-        workflow_execution_id = None
-        if isinstance(raw_body, dict):
-            use_workflow_param = raw_body.get("use_workflow")
-            workflow_execution_id = raw_body.get("workflow_execution_id")
-        if isinstance(params_dict, dict):
-            use_workflow_param = (
-                params_dict.get("use_workflow", use_workflow_param)
-                or use_workflow_param
-            )
-            workflow_execution_id = (
-                params_dict.get("workflow_execution_id", workflow_execution_id)
-                or workflow_execution_id
-            )
-
-        # Map A2A prompt to an OpenAI chat request
-        chat_request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": a2a_request.params.prompt}],
-            model=model,
-            stream=stream_requested,
-            use_workflow=use_workflow_param,
-            workflow_execution_id=workflow_execution_id,
-        )
-
-        x_inxm_mcp_session = session_id(
-            try_get_session_id(x_inxm_mcp_session_header, x_inxm_mcp_session_cookie),
-            access_token,
-        )
-
-        accept_header = request.headers.get("accept", "")
-        is_streaming = chat_request.stream or "text/event-stream" in accept_header
-
-        if is_streaming:
-            # We must set the streaming flag for the _handle_chat_completion function
-            chat_request.stream = True
-
-            async def a2a_streaming_response():
-                stream_gen = _handle_chat_completion(
-                    request,
-                    chat_request,
-                    access_token,
-                    x_inxm_mcp_session,
-                    group,
-                    prompt,
-                    incoming_headers,
-                )
-                # Iterate the ChunkReader without using its async context manager
-                # so we can control when the underlying async generator is
-                # closed and ensure it happens in this same task. Setting
-                # _entered=True allows using the reader's async iterators.
-                reader = chunk_reader(stream_gen)
-                reader._entered = True
-                try:
-                    async for chunk in reader.as_json(
-                        ChunkFormat.A2A, request_id=a2a_request.id
-                    ):
-                        yield chunk
-                finally:
-                    # Close the underlying stream generator in this task and
-                    # suppress any GeneratorExit/RuntimeError that can occur
-                    # from cross-task cancel scopes in some test environments.
-                    try:
-                        if hasattr(stream_gen, "aclose"):
-                            await stream_gen.aclose()
-                    except BaseException as e:
-                        # Catch BaseException (including ExceptionGroup) here because
-                        # closing an async generator during context teardown can
-                        # raise exception groups originating from other task/cancel
-                        # scope interactions. These are expected in some test
-                        # environments and safe to ignore for stream cleanup.
-                        logger.debug(f"Ignoring base error closing stream_gen: {e}")
-
-            return StreamingResponse(
-                a2a_streaming_response(),
-                media_type=None,
-                headers={
-                    "Content-Type": "text/event-stream",
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                    "Transfer-Encoding": "chunked",
-                },
-            )
-        else:
-            chat_request.stream = False
-            user_token = _resolve_user_token(incoming_headers, access_token)
-            async with mcp_session_context(
-                sessions,
-                x_inxm_mcp_session,
-                access_token,
-                group,
-                incoming_headers,
-            ) as session:
-                result = await tgi_service.chat_completion(
-                    session, chat_request, user_token, access_token, prompt
-                )
-
-            if _is_async_iterable(result):
-                full_response = await accumulate_content(result)  # type: ignore[arg-type]
-            else:
-                full_response = _extract_completion_content(result)
-
-            return JSONResponse(
-                content=_create_a2a_response(
-                    result=full_response, request_id=a2a_request.id
-                ).model_dump()
-            )
-
-    except (HTTPException, ValidationError) as e:
-        error_detail = e.detail if isinstance(e, HTTPException) else str(e)
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32600,
-                message=f"Invalid Request: {error_detail}",
-                request_id=a2a_request.id,
-            ).model_dump()
-        )
-    except PermissionError as e:
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32000,
-                message=f"Access denied: {str(e)}",
-                request_id=a2a_request.id,
-            ).model_dump()
-        )
-    except UserLoggedOutException as e:
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32000, message=e.message, request_id=a2a_request.id
-            ).model_dump()
-        )
-    except Exception as e:
-        log_exception_with_details(logger, "[A2A]", e)
-        child_http_exception = find_exception_in_exception_groups(e, HTTPException)
-        if child_http_exception:
-            return JSONResponse(
-                content=_create_a2a_error_response(
-                    code=child_http_exception.status_code,
-                    message=child_http_exception.detail,
-                    request_id=a2a_request.id,
-                ).model_dump()
-            )
-        return JSONResponse(
-            content=_create_a2a_error_response(
-                code=-32000, message="Internal server error", request_id=a2a_request.id
-            ).model_dump()
-        )

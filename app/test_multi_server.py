@@ -304,27 +304,13 @@ def test_request_local_advertised_paths(monkeypatch):
         multi_server.reset_server(token)
 
 
-def test_agent_cache_paths_are_server_local(monkeypatch, tmp_path):
-    from app.well_known import agent
 
-    monkeypatch.setattr(
-        agent, "AGENT_CARD_CACHE_FILE", str(tmp_path / "agent-card.json")
-    )
-    alpha = multi_server.ServerConfig(
-        id="alpha", base_path="/alpha", command="python alpha.py"
-    )
-    beta = multi_server.ServerConfig(
-        id="beta", base_path="/beta", command="python beta.py"
-    )
+def test_a2a_routes_can_be_mounted_per_server():
+    from app.tgi.a2a_runtime import build_a2a_app
 
-    token = multi_server.bind_server(alpha)
-    try:
-        assert agent._agent_cache_path().endswith("agent-card.json.alpha")
-    finally:
-        multi_server.reset_server(token)
+    app = build_a2a_app(base_path="/api/mcp/alpha")
+    paths = {getattr(route, "path", None) for route in app.routes}
 
-    token = multi_server.bind_server(beta)
-    try:
-        assert agent._agent_cache_path().endswith("agent-card.json.beta")
-    finally:
-        multi_server.reset_server(token)
+    assert "/api/mcp/alpha/tgi/v1/a2a" in paths
+    assert "/api/mcp/alpha/.well-known/agent-card.json" in paths
+    assert "/api/mcp/alpha/.well-known/agent.json" in paths

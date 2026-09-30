@@ -165,7 +165,6 @@ services:
       KEYCLOAK_PROVIDER_REFRESH_MODE: broker
       TOKEN_NAME: X-Forwarded-Access-Token
       MCP_BASE_PATH: /api/mcp/atlassian
-      AGENT_CARD_CACHE_FILE: /data/agent-card-cache.json
       MCP_REMOTE_SERVER: "${ATLASSIAN_MCP_SERVER:-https://mcp.atlassian.com/v1/sse}"
       MCP_REMOTE_SCOPE: "${ATLASSIAN_MCP_SCOPE:-}"
       MCP_REMOTE_CLIENT_ID: "${ATLASSIAN_MCP_CLIENT_ID:-}"

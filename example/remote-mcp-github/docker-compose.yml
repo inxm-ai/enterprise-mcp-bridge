@@ -157,7 +157,6 @@ services:
       KEYCLOAK_REALM: inxm
       KEYCLOAK_PROVIDER_ALIAS: github
       MCP_BASE_PATH: /api/mcp/github
-      AGENT_CARD_CACHE_FILE: /data/agent-card-cache.json
       MCP_REMOTE_SERVER: https://api.githubcopilot.com/mcp/
       MCP_REMOTE_SCOPE: "${GITHUB_OAUTH_SCOPES}"
       MCP_REMOTE_CLIENT_ID: "${GITHUB_CLIENT_ID}"

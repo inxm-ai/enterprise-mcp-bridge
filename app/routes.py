@@ -81,7 +81,6 @@ from .utils.exception_logging import (
 from .tgi.routes import router as tgi_router
 from .tgi.tool_dry_run.tool_response import dry_run_tool_result
 from .app_facade.route import router as app_facade_router
-from app.well_known.agent import router as agent_router
 from app.well_known.oauth_metadata import router as oauth_metadata_router
 from app.sse.routes import router as sse_router
 
@@ -922,9 +921,6 @@ async def close_session(
 
 # Include TGI router
 router.include_router(tgi_router)
-
-# Include well-known agent router
-router.include_router(agent_router)
 
 # Include OAuth discovery endpoints (RFC 9728 / RFC 8414)
 router.include_router(oauth_metadata_router)
