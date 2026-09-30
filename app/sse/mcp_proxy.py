@@ -72,17 +72,6 @@ logger = logging.getLogger("uvicorn.error")
 
 
 # ---------------------------------------------------------------------------
-# Transport setup
-# ---------------------------------------------------------------------------
-
-
-def _message_endpoint_path() -> str:
-    """Full relative path for the SSE messages POST endpoint."""
-    base = (MCP_BASE_PATH or "").rstrip("/")
-    return f"{base}/sse/messages"
-
-
-# ---------------------------------------------------------------------------
 # Token / query helpers
 # ---------------------------------------------------------------------------
 
