@@ -47,7 +47,7 @@ from app.session import (
 )
 from app.session_manager import mcp_session_context, session_manager
 from app import vars as app_vars
-from app.multi_server import is_multi_server_mode, session_storage_key
+from app.multi_server import current_base_path, is_multi_server_mode, session_storage_key
 from app.session_manager.session_context import (
     close_idle_sessions,
     ResponseTooLargeError,
@@ -840,6 +840,7 @@ async def start_session(
             response.set_cookie(
                 key=SESSION_FIELD_NAME,
                 value=x_inxm_mcp_session,
+                path=current_base_path(MCP_BASE_PATH) or "/",
                 httponly=True,
                 samesite="lax",
                 secure=(
