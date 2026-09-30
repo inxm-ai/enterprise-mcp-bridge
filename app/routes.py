@@ -847,7 +847,10 @@ async def start_session(
             response.set_cookie(
                 key=SESSION_FIELD_NAME,
                 value=x_inxm_mcp_session,
-                path=(current_base_path("") if is_multi_server_mode() else "/") or "/",
+                path=(
+                    current_base_path("") if is_multi_server_mode() else "/"
+                )
+                or "/",
                 httponly=True,
                 samesite="lax",
                 secure=(
