@@ -47,6 +47,7 @@ from app.session import (
 )
 from app.session_manager import mcp_session_context, session_manager
 from app import vars as app_vars
+from app.multi_server import is_multi_server_mode, session_storage_key
 from app.session_manager.session_context import (
     close_idle_sessions,
     ResponseTooLargeError,
@@ -100,9 +101,11 @@ RETRY_AFTER_SECONDS = "5"
 
 tracer = trace.get_tracer(__name__)
 
-if MCP_BASE_PATH:
+if MCP_BASE_PATH and not is_multi_server_mode():
     router.prefix = MCP_BASE_PATH
     logger.info(f"Using MCP_BASE_PATH: {MCP_BASE_PATH}")
+elif is_multi_server_mode():
+    logger.info("Using MCP_SERVERS multi-server routing")
 else:
     logger.info("No MCP_BASE_PATH set, using root path")
 
@@ -808,7 +811,7 @@ async def start_session(
                 strategy = build_mcp_client_strategy(
                     access_token=access_token,
                     requested_group=group,
-                    session_key=x_inxm_mcp_session,
+                    session_key=session_storage_key(x_inxm_mcp_session),
                 )
             except ValueError as exc:
                 logger.error(f"[Session] Invalid MCP configuration: {exc}")
@@ -822,7 +825,7 @@ async def start_session(
                 await close_idle_sessions(sessions)
                 mcp_task = MCPLocalSessionTask(strategy)
                 mcp_task.start()
-                sessions.set(x_inxm_mcp_session, mcp_task)
+                sessions.set(session_storage_key(x_inxm_mcp_session), mcp_task)
 
             session_info = {SESSION_FIELD_NAME: x_inxm_mcp_session}
             if group:
@@ -880,7 +883,7 @@ async def close_session(
                 raise HTTPException(status_code=400, detail="Session header missing")
             if app_vars.MCP_SESSIONLESS:
                 return {"status": "closed"}
-            mcp_task = sessions.pop(x_inxm_mcp_session, None)
+            mcp_task = sessions.pop(session_storage_key(x_inxm_mcp_session), None)
             if not mcp_task:
                 logger.warning(
                     mask_token(
