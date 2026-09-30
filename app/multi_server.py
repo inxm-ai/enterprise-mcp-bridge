@@ -73,13 +73,19 @@ class ServerConfig:
                 f"MCP server {server_id!r} must define exactly one of command or url"
             )
 
-        env_raw = raw.get("env") or {}
+        env_raw = raw.get("env")
+        if env_raw is None:
+            env_raw = {}
         if not isinstance(env_raw, dict):
             raise ValueError(f"MCP server {server_id!r} env must be an object")
         env = {str(k): str(v) for k, v in env_raw.items()}
 
-        include = raw.get("include_tools") or []
-        exclude = raw.get("exclude_tools") or []
+        include = raw.get("include_tools")
+        exclude = raw.get("exclude_tools")
+        if include is None:
+            include = []
+        if exclude is None:
+            exclude = []
         sessionless = raw.get("sessionless")
         if sessionless is not None and not isinstance(sessionless, bool):
             raise ValueError(
