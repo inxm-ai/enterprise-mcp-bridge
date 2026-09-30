@@ -1,5 +1,6 @@
 from app.session.session import mcp_session
 from app.session_manager.session_context import map_tools
+from app.multi_server import current_base_path, current_server_id
 from app.tgi.models import ChatCompletionRequest
 from opentelemetry import trace
 from app.tgi.clients.llm_client import LLMClient
@@ -24,12 +25,23 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 tracer = trace.get_tracer(__name__)
 _agent_card_cache = None
+_agent_card_cache_by_server: dict[str, dict] = {}
 _running = False
+_running_servers: set[str] = set()
+
+
+def _agent_cache_path() -> str | None:
+    path = AGENT_CARD_CACHE_FILE
+    server_id = current_server_id()
+    if not path or not server_id:
+        return path
+    directory, filename = os.path.split(path)
+    return os.path.join(directory, f"{filename}.{server_id}")
 
 
 def _load_agent_card_from_file() -> dict | None:
-    """Load agent card from AGENT_CARD_CACHE_FILE if present and valid."""
-    path = AGENT_CARD_CACHE_FILE
+    """Load the current server's agent-card cache file if present and valid."""
+    path = _agent_cache_path()
     if not path:
         return None
     try:
@@ -43,8 +55,8 @@ def _load_agent_card_from_file() -> dict | None:
 
 
 def _save_agent_card_to_file(card: dict) -> None:
-    """Atomically write the agent card JSON to AGENT_CARD_CACHE_FILE."""
-    path = AGENT_CARD_CACHE_FILE
+    """Atomically write the current server's agent-card cache file."""
+    path = _agent_cache_path()
     if not path:
         return
     dirpath = os.path.dirname(path) or "."
@@ -65,6 +77,45 @@ def _save_agent_card_to_file(card: dict) -> None:
     except Exception:
         # Do not fail agent creation if we cannot write the cache
         return
+
+
+def _get_cached_agent_card() -> dict | None:
+    server_id = current_server_id()
+    if server_id:
+        cached = _agent_card_cache_by_server.get(server_id)
+        if cached is not None:
+            return cached
+        cached = _load_agent_card_from_file()
+        if cached is not None:
+            _agent_card_cache_by_server[server_id] = cached
+        return cached
+    return _agent_card_cache
+
+
+def _set_cached_agent_card(card: dict) -> None:
+    global _agent_card_cache
+    server_id = current_server_id()
+    if server_id:
+        _agent_card_cache_by_server[server_id] = card
+    else:
+        _agent_card_cache = card
+
+
+def _generation_running() -> bool:
+    server_id = current_server_id()
+    return server_id in _running_servers if server_id else _running
+
+
+def _set_generation_running(value: bool) -> None:
+    global _running
+    server_id = current_server_id()
+    if server_id:
+        if value:
+            _running_servers.add(server_id)
+        else:
+            _running_servers.discard(server_id)
+    else:
+        _running = value
 
 
 def get_description(reply: str) -> str:
@@ -96,8 +147,6 @@ def get_as_list(reply: str) -> list[str]:
 
 @router.get("/.well-known/agent.json")
 async def get_agent_card():
-    global _agent_card_cache
-    global _running
     with tracer.start_as_current_span("get_agent_card") as span:
         if not DEFAULT_MODEL:
             span.set_attribute("agent_card.available", False)
@@ -105,16 +154,17 @@ async def get_agent_card():
 
         span.set_attribute("agent_card.available", True)
         # try load from in-memory cache first
-        if _agent_card_cache is not None:
+        cached_agent_card = _get_cached_agent_card()
+        if cached_agent_card is not None:
             span.set_attribute("agent_card.cache.hit", True)
-            return JSONResponse(content=_agent_card_cache)
+            return JSONResponse(content=cached_agent_card)
 
-        if _running:
+        if _generation_running():
             raise HTTPException(
                 status_code=429, detail="Agent card generation in progress"
             )
 
-        _running = True
+        _set_generation_running(True)
         span.set_attribute("agent_card.cache.hit", False)
 
         try:
@@ -139,7 +189,7 @@ async def get_agent_card():
                 agent_card = {
                     "name": SERVICE_NAME,
                     "description": get_description(summary),
-                    "url": f"https://{HOST}{':' + str(PORT) if PORT else ''}{MCP_BASE_PATH}/tgi/v1/a2a",
+                    "url": f"https://{HOST}{':' + str(PORT) if PORT else ''}{current_base_path(MCP_BASE_PATH)}/tgi/v1/a2a",
                     "version": "1.0.0",
                     "capabilities": {"streaming": True, "pushNotifications": False},
                     "authentication": {"schemes": ["bearer"] if OAUTH_ENV else []},
@@ -221,7 +271,7 @@ async def get_agent_card():
                         skill["parameter_schema"] = tool["inputSchema"]
                     agent_card["skills"].append(skill)
 
-                _agent_card_cache = agent_card
+                _set_cached_agent_card(agent_card)
 
                 _save_agent_card_to_file(agent_card)
                 return JSONResponse(content=agent_card)
@@ -229,7 +279,7 @@ async def get_agent_card():
             logger.exception("Agent card generation failed")
             raise
         finally:
-            _running = False
+            _set_generation_running(False)
 
 
 # Try to populate the in-memory cache from disk
