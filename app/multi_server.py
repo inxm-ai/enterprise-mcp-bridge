@@ -58,6 +58,10 @@ class ServerConfig:
                 f"MCP server {server_id!r} base_path must start with '/'"
             )
         base_path = base_path.rstrip("/") or "/"
+        if base_path == "/":
+            raise ValueError(
+                f"MCP server {server_id!r} base_path cannot be root in multi-server mode"
+            )
 
         command = raw.get("command")
         remote_url = raw.get("url", raw.get("remote_url"))
@@ -117,8 +121,6 @@ def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
         raise ValueError("MCP_SERVERS contains duplicate server ids")
     if len(paths) != len(set(paths)):
         raise ValueError("MCP_SERVERS contains duplicate base paths")
-    if "/" in paths and len(paths) > 1:
-        raise ValueError("base_path '/' cannot be combined with other MCP servers")
     return servers
 
 
