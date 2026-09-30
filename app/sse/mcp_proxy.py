@@ -72,6 +72,22 @@ logger = logging.getLogger("uvicorn.error")
 
 
 # ---------------------------------------------------------------------------
+# Legacy transport compatibility
+# ---------------------------------------------------------------------------
+
+
+def _message_endpoint_path() -> str:
+    """Full relative path for the legacy single-server SSE messages endpoint."""
+    base = (MCP_BASE_PATH or "").rstrip("/")
+    return f"{base}/sse/messages"
+
+
+# Keep these module-level symbols for existing callers/tests. Multi-server routes
+# still create one dedicated transport per configured server.
+sse_transport = SseServerTransport(_message_endpoint_path())
+
+
+# ---------------------------------------------------------------------------
 # Token / query helpers
 # ---------------------------------------------------------------------------
 
@@ -290,8 +306,8 @@ def _build_proxy_server(
 class _SSEConnectionApp:
     """``GET /sse`` – establish SSE connection and run proxy MCP server."""
 
-    def __init__(self, transport: SseServerTransport):
-        self.transport = transport
+    def __init__(self, transport: Optional[SseServerTransport] = None):
+        self.transport = transport or sse_transport
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -361,8 +377,8 @@ class _SSEConnectionApp:
 class _SSEMessagesApp:
     """``POST /sse/messages`` – JSON-RPC message channel."""
 
-    def __init__(self, transport: SseServerTransport):
-        self.transport = transport
+    def __init__(self, transport: Optional[SseServerTransport] = None):
+        self.transport = transport or sse_transport
 
     async def __call__(self, scope, receive, send):
         await self.transport.handle_post_message(scope, receive, send)
