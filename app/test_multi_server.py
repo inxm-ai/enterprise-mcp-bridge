@@ -48,6 +48,7 @@ def test_parse_servers_supports_local_and_remote_entries():
     [
         [],
         [{"id": "x", "base_path": "relative", "command": "x"}],
+        [{"id": "x", "base_path": "/", "command": "x"}],
         [{"id": "x", "base_path": "/x", "command": "x", "url": "https://x"}],
         [{"id": "x", "base_path": "/x"}],
         [
@@ -266,3 +267,64 @@ def test_multi_server_routes_are_isolated(monkeypatch):
         assert two_call.status_code == 200
         assert cross_call.status_code == 404
         assert unknown.status_code == 404
+
+
+def test_request_local_advertised_paths(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.app_facade import route as app_route
+    from app.well_known import oauth_metadata
+
+    server = multi_server.ServerConfig(
+        id="alpha",
+        base_path="/api/mcp/alpha",
+        command="python alpha.py",
+    )
+    token = multi_server.bind_server(server)
+    try:
+        assert app_route._proxy_prefix() == "/api/mcp/alpha/app"
+
+        class Headers(dict):
+            def get(self, key, default=None):
+                return super().get(key, default)
+
+        request = SimpleNamespace(
+            headers=Headers({"host": "bridge.example"}),
+            url=SimpleNamespace(scheme="https"),
+        )
+        monkeypatch.setattr(oauth_metadata, "MCP_OAUTH_RESOURCE_URL", None)
+        monkeypatch.setattr(oauth_metadata, "MCP_OAUTH_ISSUER", "https://issuer.example")
+
+        import asyncio
+
+        response = asyncio.run(oauth_metadata.get_protected_resource_metadata(request))
+        payload = json.loads(response.body)
+        assert payload["resource"] == "https://bridge.example/api/mcp/alpha"
+    finally:
+        multi_server.reset_server(token)
+
+
+def test_agent_cache_paths_are_server_local(monkeypatch, tmp_path):
+    from app.well_known import agent
+
+    monkeypatch.setattr(
+        agent, "AGENT_CARD_CACHE_FILE", str(tmp_path / "agent-card.json")
+    )
+    alpha = multi_server.ServerConfig(
+        id="alpha", base_path="/alpha", command="python alpha.py"
+    )
+    beta = multi_server.ServerConfig(
+        id="beta", base_path="/beta", command="python beta.py"
+    )
+
+    token = multi_server.bind_server(alpha)
+    try:
+        assert agent._agent_cache_path().endswith("agent-card.json.alpha")
+    finally:
+        multi_server.reset_server(token)
+
+    token = multi_server.bind_server(beta)
+    try:
+        assert agent._agent_cache_path().endswith("agent-card.json.beta")
+    finally:
+        multi_server.reset_server(token)
