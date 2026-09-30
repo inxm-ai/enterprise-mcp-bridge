@@ -44,6 +44,7 @@ class ServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
+    sessionless: Optional[bool] = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -74,6 +75,11 @@ class ServerConfig:
 
         include = raw.get("include_tools") or []
         exclude = raw.get("exclude_tools") or []
+        sessionless = raw.get("sessionless")
+        if sessionless is not None and not isinstance(sessionless, bool):
+            raise ValueError(
+                f"MCP server {server_id!r} sessionless must be a boolean"
+            )
         if not isinstance(include, list) or not isinstance(exclude, list):
             raise ValueError(
                 f"MCP server {server_id!r} include_tools/exclude_tools must be arrays"
@@ -87,6 +93,7 @@ class ServerConfig:
             env=env,
             include_tools=tuple(str(v) for v in include if str(v)),
             exclude_tools=tuple(str(v) for v in exclude if str(v)),
+            sessionless=sessionless,
         )
 
 
@@ -192,6 +199,13 @@ def current_tool_filters(
     if not server:
         return default_include, default_exclude
     return list(server.include_tools), list(server.exclude_tools)
+
+
+def current_sessionless(default: bool) -> bool:
+    server = current_server()
+    if not server or server.sessionless is None:
+        return default
+    return server.sessionless
 
 
 def session_storage_key(session_id: Optional[str]) -> Optional[str]:
