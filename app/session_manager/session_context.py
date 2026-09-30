@@ -39,6 +39,13 @@ from app.vars import (
     get_tool_output_schema,
 )
 from app import vars as app_vars
+from app.multi_server import (
+    current_base_path,
+    current_command,
+    current_remote_url,
+    current_tool_filters,
+    tools_cache_paths,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -54,6 +61,10 @@ TOOLS_CACHE_LOCK_FILE = Path(
     os.environ.get("MCP_TOOLS_CACHE_LOCK_FILE", str(TOOLS_CACHE_FILE) + ".lock")
 )
 CACHE_VERSION = 1
+
+
+def _tool_filters() -> tuple[list[str], list[str]]:
+    return current_tool_filters(INCLUDE_TOOLS, EXCLUDE_TOOLS)
 
 
 def _to_tool_list(tools: Any) -> list:
@@ -150,15 +161,16 @@ def tool_allowed(tool_name: Optional[str]) -> bool:
     """
     if not tool_name:
         return False
+    include_tools, exclude_tools = _tool_filters()
     include_match = any(
-        matches_pattern(tool_name, pattern) for pattern in INCLUDE_TOOLS if pattern
+        matches_pattern(tool_name, pattern) for pattern in include_tools if pattern
     )
     exclude_match = any(
-        matches_pattern(tool_name, pattern) for pattern in EXCLUDE_TOOLS if pattern
+        matches_pattern(tool_name, pattern) for pattern in exclude_tools if pattern
     )
-    if INCLUDE_TOOLS and any(INCLUDE_TOOLS) and not include_match:
+    if include_tools and any(include_tools) and not include_match:
         return False
-    if EXCLUDE_TOOLS and any(EXCLUDE_TOOLS) and exclude_match:
+    if exclude_tools and any(exclude_tools) and exclude_match:
         return False
     return True
 
@@ -207,8 +219,9 @@ def filter_tools(tools: Any) -> list:
         if not name:
             continue
         allowed = tool_allowed(name)
+        include_tools, exclude_tools = _tool_filters()
         logger.debug(
-            f"[Tools] Filter check -> Tool: {name}, Allowed: {allowed} - include={INCLUDE_TOOLS}, exclude={EXCLUDE_TOOLS}"
+            f"[Tools] Filter check -> Tool: {name}, Allowed: {allowed} - include={include_tools}, exclude={exclude_tools}"
         )
         if allowed:
             filtered.append(tool)
@@ -221,13 +234,14 @@ def _cache_signature() -> dict:
     server configuration or filtering changes. This prevents stale tool lists
     (e.g., from earlier tests) from being reused after configuration changes.
     """
+    include_tools, exclude_tools = _tool_filters()
     return {
-        "include": INCLUDE_TOOLS,
-        "exclude": EXCLUDE_TOOLS,
+        "include": include_tools,
+        "exclude": exclude_tools,
         "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
         "tool_output_schemas": TOOL_OUTPUT_SCHEMAS,
-        "server": os.environ.get("MCP_SERVER_COMMAND", "")
-        or os.environ.get("MCP_REMOTE_SERVER", ""),
+        "server": current_command(os.environ.get("MCP_SERVER_COMMAND", ""))
+        or current_remote_url(os.environ.get("MCP_REMOTE_SERVER", "")),
     }
 
 
@@ -308,7 +322,7 @@ def map_tools(tools):
                 "outputSchema": output_schema,
                 "annotations": annotations,
                 "meta": meta,
-                "url": f"{MCP_BASE_PATH}/tools/{name}",
+                "url": f"{current_base_path(MCP_BASE_PATH)}/tools/{name}",
             }
         )
 
@@ -320,8 +334,9 @@ def _read_tools_cache() -> list[dict[str, Any]] | None:
     if not TOOLS_CACHE_ENABLED:
         return None
 
+    cache_file_path, _ = tools_cache_paths(TOOLS_CACHE_FILE, TOOLS_CACHE_LOCK_FILE)
     try:
-        with TOOLS_CACHE_FILE.open("r") as cache_file:
+        with cache_file_path.open("r") as cache_file:
             data = json.load(cache_file)
             if not isinstance(data, dict):
                 return None
@@ -350,11 +365,14 @@ def _write_tools_cache(tools: list[dict[str, Any]]) -> bool:
     if not TOOLS_CACHE_ENABLED:
         return False
 
+    cache_file_path, lock_file_path = tools_cache_paths(
+        TOOLS_CACHE_FILE, TOOLS_CACHE_LOCK_FILE
+    )
     lock_fd = None
     lock_acquired = False
     try:
-        TOOLS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(TOOLS_CACHE_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
+        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(lock_file_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             lock_acquired = True
@@ -362,7 +380,7 @@ def _write_tools_cache(tools: list[dict[str, Any]]) -> bool:
             logger.debug("[ToolsCache] Cache lock busy; returning live result.")
             return False
 
-        tmp_path = TOOLS_CACHE_FILE.with_name(TOOLS_CACHE_FILE.name + ".tmp")
+        tmp_path = cache_file_path.with_name(cache_file_path.name + ".tmp")
         payload = {
             "__meta__": {"version": CACHE_VERSION, "signature": _cache_signature()},
             "tools": tools,
@@ -371,7 +389,7 @@ def _write_tools_cache(tools: list[dict[str, Any]]) -> bool:
             json.dump(payload, tmp_file)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
-        os.replace(tmp_path, TOOLS_CACHE_FILE)
+        os.replace(tmp_path, cache_file_path)
         return True
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(f"[ToolsCache] Unable to write cached tools: {exc}")
