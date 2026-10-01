@@ -23,9 +23,7 @@ from typing import (
 from fastapi import HTTPException
 
 from app.session import MCPSessionBase
-from app.multi_server import current_base_path
 from app.vars import (
-    MCP_BASE_PATH,
     GENERATED_UI_PROMPT_DUMP,
     APP_UI_SESSION_TTL_MINUTES,
     GENERATED_UI_FIX_CODE_FIRST,
@@ -118,13 +116,12 @@ def _fix_stage_attempt_budget(
 
 
 def _load_pfusch_prompt() -> str:
-    """Load the pfusch ui prompt from the markdown file and replace placeholders."""
+    """Load the pfusch ui prompt; it is path-free, generated UIs reach tools via McpService."""
     prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_ui_prompt.md")
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()
-        # Replace the MCP_BASE_PATH placeholder
-        return prompt_content.replace("{{MCP_BASE_PATH}}", current_base_path(MCP_BASE_PATH))
+        return prompt_content
     except Exception as e:
         logger.error(f"Error loading pfusch prompt: {e}")
         raise e

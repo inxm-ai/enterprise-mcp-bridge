@@ -360,7 +360,9 @@ def test_generated_ui_artifacts_use_request_local_base_path():
         prompt = _load_pfusch_prompt()
         assert "/api/mcp/alpha/tools" in service_source
         assert "/api/mcp/alpha/tgi/v1/chat/completions" in service_source
-        assert "/api/mcp/alpha" in prompt
+        # The prompt is path-free: generated UIs reach tools via McpService.
+        assert "{{MCP_BASE_PATH}}" not in prompt
+        assert "/api/mcp/alpha" not in prompt
     finally:
         multi_server.reset_server(token)
 
