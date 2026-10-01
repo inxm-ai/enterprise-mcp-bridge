@@ -16,6 +16,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Run black + pytest (Dockerfile testing stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: testing
+          push: false
+
       - name: Build Docker image, this will also run tests
         uses: docker/build-push-action@v6
         with:
