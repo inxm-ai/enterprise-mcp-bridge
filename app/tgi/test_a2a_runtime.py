@@ -52,6 +52,7 @@ async def test_executor_forwards_request_context_and_completes(monkeypatch):
         Role,
         SendMessageRequest,
         TaskArtifactUpdateEvent,
+        TaskState,
         TaskStatusUpdateEvent,
     )
 
@@ -136,7 +137,7 @@ async def test_executor_forwards_request_context_and_completes(monkeypatch):
 
     assert len(artifacts) == 1
     assert artifacts[0].artifact.parts[0].text == "hello from agent"
-    assert statuses[-1].status.state.name == "TASK_STATE_COMPLETED"
+    assert statuses[-1].status.state == TaskState.TASK_STATE_COMPLETED
 
 
 def test_agent_card_uses_forwarded_public_origin():
