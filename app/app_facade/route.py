@@ -56,6 +56,8 @@ def _proxy_prefix() -> str:
     if current_server() is None or "PROXY_PREFIX" in os.environ:
         return PROXY_PREFIX
     return f"{current_base_path(MCP_BASE_PATH)}/app"
+
+
 TARGET_SERVER_URL = os.environ.get("TARGET_SERVER_URL", "").rstrip("/")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip(
     "/"

@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -55,9 +54,7 @@ class ServerConfig:
 
         base_path = str(raw.get("base_path") or raw.get("path") or "").strip()
         if not base_path.startswith("/"):
-            raise ValueError(
-                f"MCP server {server_id!r} base_path must start with '/'"
-            )
+            raise ValueError(f"MCP server {server_id!r} base_path must start with '/'")
         base_path = base_path.rstrip("/") or "/"
         if base_path == "/":
             raise ValueError(
@@ -88,9 +85,7 @@ class ServerConfig:
             exclude = []
         sessionless = raw.get("sessionless")
         if sessionless is not None and not isinstance(sessionless, bool):
-            raise ValueError(
-                f"MCP server {server_id!r} sessionless must be a boolean"
-            )
+            raise ValueError(f"MCP server {server_id!r} sessionless must be a boolean")
         if not isinstance(include, list) or not isinstance(exclude, list):
             raise ValueError(
                 f"MCP server {server_id!r} include_tools/exclude_tools must be arrays"

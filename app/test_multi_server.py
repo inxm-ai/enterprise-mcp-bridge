@@ -298,7 +298,9 @@ def test_request_local_advertised_paths(monkeypatch):
             url=SimpleNamespace(scheme="https"),
         )
         monkeypatch.setattr(oauth_metadata, "MCP_OAUTH_RESOURCE_URL", None)
-        monkeypatch.setattr(oauth_metadata, "MCP_OAUTH_ISSUER", "https://issuer.example")
+        monkeypatch.setattr(
+            oauth_metadata, "MCP_OAUTH_ISSUER", "https://issuer.example"
+        )
 
         import asyncio
 
@@ -318,7 +320,6 @@ def test_a2a_routes_can_be_mounted_per_server():
     assert "/api/mcp/alpha/tgi/v1/a2a" in paths
     assert "/api/mcp/alpha/.well-known/agent-card.json" in paths
     assert "/api/mcp/alpha/.well-known/agent.json" in paths
-
 
 
 def test_overlapping_paths_use_server_specific_session_cookies():
@@ -389,7 +390,9 @@ def test_metadata_identity_uses_request_local_remote_url(monkeypatch):
     monkeypatch.setattr(token_exchange.requests, "get", fake_get)
     monkeypatch.setattr(token_exchange, "GCP_METADATA_IDENTITY_AUDIENCE", "")
     monkeypatch.setattr(token_exchange, "AZURE_METADATA_IDENTITY_RESOURCE", "")
-    monkeypatch.setattr(token_exchange, "MCP_REMOTE_SERVER", "https://legacy.invalid/mcp")
+    monkeypatch.setattr(
+        token_exchange, "MCP_REMOTE_SERVER", "https://legacy.invalid/mcp"
+    )
 
     server = multi_server.ServerConfig(
         id="remote",

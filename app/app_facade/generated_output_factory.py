@@ -68,6 +68,8 @@ RUNTIME_BRIDGE_SCRIPT = _load_script_template(
     "generated_ui_runtime_bridge.js",
     {"{{RUNTIME_BRIDGE_MARKER}}": RUNTIME_BRIDGE_MARKER},
 )
+
+
 def _mcp_service_class_source() -> str:
     return _load_script_template(
         "generated_mcp_service_class.js",
