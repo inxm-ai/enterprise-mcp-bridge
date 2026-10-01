@@ -296,7 +296,11 @@ def apply_patch_operations(
             continue
         if op == "append":
             base = current or ""
-            joined = f"{base}\n{content}" if base and not base.endswith("\n") else f"{base}{content}"
+            joined = (
+                f"{base}\n{content}"
+                if base and not base.endswith("\n")
+                else f"{base}{content}"
+            )
             _write_target(candidate, target, joined)
             continue
         if op in {"replace", "insert_before", "insert_after"}:

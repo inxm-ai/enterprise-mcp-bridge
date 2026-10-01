@@ -46,7 +46,14 @@ async def test_executor_forwards_request_context_and_completes(monkeypatch):
     from a2a.server.agent_execution import RequestContext
     from a2a.server.context import ServerCallContext
     from a2a.server.events import EventQueue
-    from a2a.types import Message, Part, Role, SendMessageRequest, TaskArtifactUpdateEvent, TaskStatusUpdateEvent
+    from a2a.types import (
+        Message,
+        Part,
+        Role,
+        SendMessageRequest,
+        TaskArtifactUpdateEvent,
+        TaskStatusUpdateEvent,
+    )
 
     from app.tgi import a2a_runtime
 
@@ -146,4 +153,6 @@ def test_agent_card_uses_forwarded_public_origin():
 
     assert response.status_code == 200
     card = response.json()
-    assert card["supportedInterfaces"][0]["url"] == "https://bridge.example.com/tgi/v1/a2a"
+    assert (
+        card["supportedInterfaces"][0]["url"] == "https://bridge.example.com/tgi/v1/a2a"
+    )

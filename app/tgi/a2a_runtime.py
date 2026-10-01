@@ -132,7 +132,9 @@ def _public_a2a_url(
             or request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
             or request.headers.get("host", "")
         )
-        forwarded_port = request.headers.get("x-forwarded-port", "").split(",", 1)[0].strip()
+        forwarded_port = (
+            request.headers.get("x-forwarded-port", "").split(",", 1)[0].strip()
+        )
         if forwarded_port and host and ":" not in host:
             default_port = (scheme == "https" and forwarded_port == "443") or (
                 scheme == "http" and forwarded_port == "80"
@@ -231,9 +233,7 @@ class BridgeA2AExecutor(A2AAgentExecutor):
         except Exception:
             logger.exception("[A2A] Agent execution failed")
             await updater.failed(
-                updater.new_agent_message(
-                    parts=[Part(text="Agent execution failed.")]
-                )
+                updater.new_agent_message(parts=[Part(text="Agent execution failed.")])
             )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:

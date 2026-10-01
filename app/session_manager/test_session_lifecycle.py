@@ -138,7 +138,9 @@ def session_routes(monkeypatch):
     monkeypatch.setattr(routes, "MCPLocalSessionTask", _Task)
     monkeypatch.setattr(routes, "build_mcp_client_strategy", lambda **kwargs: object())
     fastapi_app.dependency_overrides[routes.get_access_token] = lambda: None
-    yield types.SimpleNamespace(client=TestClient(fastapi_app), sessions=sessions, started=started)
+    yield types.SimpleNamespace(
+        client=TestClient(fastapi_app), sessions=sessions, started=started
+    )
     fastapi_app.dependency_overrides.pop(routes.get_access_token, None)
 
 

@@ -16,7 +16,6 @@ from app.app_facade.test_fix_tools import (
 )
 from app.tgi.models import Message, MessageRole
 
-
 PFUSCH_SHA256 = "052a2012b6bfd2f1ce5fffd67f312e78a609b0715ca1d8aa2177e722aceb2e92"
 
 
@@ -31,9 +30,7 @@ def test_vendored_pfusch_latest_runtime_contract():
     """Exercise behavior introduced by the current upstream pfusch runtime."""
     helpers_dir = os.path.join(os.path.dirname(__file__), "node_test_helpers")
     toolkit = IterativeTestFixer(helpers_dir)
-    test_script = (
-        Path(helpers_dir) / "pfusch.test.js"
-    ).read_text(encoding="utf-8")
+    test_script = (Path(helpers_dir) / "pfusch.test.js").read_text(encoding="utf-8")
 
     toolkit.setup_test_environment("", "", test_script)
     result = toolkit.run_tests()

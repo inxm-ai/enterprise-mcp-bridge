@@ -28,8 +28,7 @@ class SQLiteWorkflowStateBackend:
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                f"""
+            conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {WORKFLOW_TABLE} (
                     execution_id TEXT PRIMARY KEY,
                     flow_id TEXT NOT NULL,
@@ -42,8 +41,7 @@ class SQLiteWorkflowStateBackend:
                     created_at TEXT,
                     last_change TEXT
                 )
-                """
-            )
+                """)
             conn.commit()
         self._ensure_columns()
         self._backfill_missing_fields()

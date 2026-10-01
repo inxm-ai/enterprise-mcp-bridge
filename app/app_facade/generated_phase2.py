@@ -9,7 +9,6 @@ from app.app_facade.generated_schemas import (
     generation_response_format,
 )
 
-
 logger = logging.getLogger("uvicorn.error")
 
 

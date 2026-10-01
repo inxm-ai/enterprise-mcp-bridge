@@ -22,7 +22,6 @@ from app.vars import (
     MCP_BASE_PATH,
 )
 
-
 logger = logging.getLogger("uvicorn.error")
 
 SNIPPET_PLACEHOLDER = "<!-- include:snippet -->"

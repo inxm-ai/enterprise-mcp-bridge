@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional
 
-
 # JSON Schema describing the expected structure of the generated UI logic.
 generation_logic_schema = {
     "$schema": "http://json-schema.org/draft-07/schema#",

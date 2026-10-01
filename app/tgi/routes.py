@@ -53,7 +53,6 @@ tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("uvicorn.error")
 
 
-
 # --- Helper Functions ---
 def _resolve_user_token(
     incoming_headers: dict[str, str], access_token: Optional[str]
@@ -241,7 +240,6 @@ def _parse_timestamp(value: str) -> str:
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
-
 
 
 # --- Core Logic Abstraction ---

@@ -67,7 +67,6 @@ from app.app_facade.prompt_helpers import (
     scripts_from_history,
 )
 
-
 logger = logging.getLogger("uvicorn.error")
 
 DEFAULT_DESIGN_PROMPT = (

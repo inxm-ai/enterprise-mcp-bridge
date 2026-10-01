@@ -115,7 +115,9 @@ _sse_event = sse_event
 _assistant_status_event = assistant_status_event
 
 
-def _test_failure_signature(output: str) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+def _test_failure_signature(
+    output: str,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     """Return stable TAP failure details without paths, stacks, or timings."""
     _, failed, failure_names = _parse_tap_output(output)
     diagnostics = tuple(
@@ -512,7 +514,9 @@ class ConversationalService:
                     + json.dumps(
                         {
                             "html": (draft_payload.get("html") or {}),
-                            "components_script": components_script_raw[:_COMPONENTS_SCRIPT_CONTEXT_CHARS],
+                            "components_script": components_script_raw[
+                                :_COMPONENTS_SCRIPT_CONTEXT_CHARS
+                            ],
                             "metadata": (draft_payload.get("metadata") or {}),
                         },
                         ensure_ascii=False,
@@ -663,9 +667,7 @@ class ConversationalService:
             )
             payload = {
                 "user_message": user_message,
-                "assistant_message": assistant_message[
-                    :_PATCH_ASSISTANT_CONTEXT_CHARS
-                ],
+                "assistant_message": assistant_message[:_PATCH_ASSISTANT_CONTEXT_CHARS],
                 "current": {
                     "html": draft_payload.get("html"),
                     "service_script": draft_payload.get("service_script"),
@@ -815,9 +817,7 @@ class ConversationalService:
                     "; ".join(integrity_notes),
                 )
             if integrity_errors:
-                return _fail(
-                    "patch_integrity_failed", "; ".join(integrity_errors)
-                )
+                return _fail("patch_integrity_failed", "; ".join(integrity_errors))
 
             test_script = candidate.get("test_script") or draft_payload.get(
                 "test_script"
@@ -846,11 +846,13 @@ class ConversationalService:
                     ) != draft_payload.get("test_script")
                     baseline_failed_the_same_way = False
                     if not test_script_changed:
-                        baseline_success, baseline_test_output = self.service._run_tests(
-                            str(draft_payload.get("service_script") or ""),
-                            str(draft_payload.get("components_script") or ""),
-                            str(draft_payload.get("test_script") or ""),
-                            draft_payload.get("dummy_data"),
+                        baseline_success, baseline_test_output = (
+                            self.service._run_tests(
+                                str(draft_payload.get("service_script") or ""),
+                                str(draft_payload.get("components_script") or ""),
+                                str(draft_payload.get("test_script") or ""),
+                                draft_payload.get("dummy_data"),
+                            )
                         )
                         candidate_signature = _test_failure_signature(
                             candidate_test_output
@@ -941,8 +943,8 @@ class ConversationalService:
                             user_message,
                             previous,
                         )
-                        repair_notes, repair_errors = (
-                            enforce_runtime_script_integrity(candidate)
+                        repair_notes, repair_errors = enforce_runtime_script_integrity(
+                            candidate
                         )
                         if repair_notes:
                             logger.info(

@@ -121,9 +121,11 @@ async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
             except ValidationError:
                 logger.warning(
                     "[Tools] Dropping non-conforming tool %r",
-                    raw_tool.get("name", "<unknown>")
-                    if isinstance(raw_tool, dict)
-                    else "<unknown>",
+                    (
+                        raw_tool.get("name", "<unknown>")
+                        if isinstance(raw_tool, dict)
+                        else "<unknown>"
+                    ),
                 )
         recovered = mcp_types.ListToolsResult(tools=kept)
         absorb = getattr(session, "_absorb_tool_listing", None)

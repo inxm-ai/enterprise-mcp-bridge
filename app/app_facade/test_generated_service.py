@@ -2347,7 +2347,9 @@ def test_run_assistant_message_draft_context_includes_components_script():
     )
 
     draft_context_message = captured["messages"][1]
-    draft_context = json.loads(draft_context_message.content.split("Current draft context:\n", 1)[1])
+    draft_context = json.loads(
+        draft_context_message.content.split("Current draft context:\n", 1)[1]
+    )
     assert "pfusch" in draft_context["components_script"]
     assert "MyComp" in draft_context["components_script"]
 
@@ -2385,7 +2387,9 @@ def test_run_assistant_message_draft_context_trims_components_script_to_limit():
     )
 
     draft_context_message = captured["messages"][1]
-    draft_context = json.loads(draft_context_message.content.split("Current draft context:\n", 1)[1])
+    draft_context = json.loads(
+        draft_context_message.content.split("Current draft context:\n", 1)[1]
+    )
     assert len(draft_context["components_script"]) == 6000
 
 
@@ -3763,7 +3767,9 @@ async def test_iterative_test_fix_resets_attempts_on_progress(monkeypatch, caplo
     # via the logger's own handler chain, once via root propagation). That's
     # a capture artifact, not evidence the app logged the line extra times.
     fix_iteration_1_records = {
-        id(r) for r in caplog.records if r.getMessage() == "[iterative_test_fix] Fix iteration 1/2"
+        id(r)
+        for r in caplog.records
+        if r.getMessage() == "[iterative_test_fix] Fix iteration 1/2"
     }
     assert len(fix_iteration_1_records) == 2
 
