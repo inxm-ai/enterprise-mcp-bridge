@@ -33,7 +33,7 @@ class FastAPIWrapper:
         valid_jwt = (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
             "eyJzdWIiOiJ1c2VyMSIsImdyb3VwcyI6WyJhbGxvd2VkLWdyb3VwIl19."
-            "dummy-signature"
+            "ZHVtbXktc2lnbmF0dXJl"  # base64url("dummy-signature"): must parse as a JWT segment
         )
         r = self.client.post(
             f"{self.base_url}/session/start?group=forbidden-group",

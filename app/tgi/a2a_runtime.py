@@ -89,22 +89,26 @@ def _metadata_value(metadata: dict[str, Any], key: str) -> Any:
     return value if value not in ("", None) else None
 
 
-def _rpc_path() -> str:
-    base = "/" + MCP_BASE_PATH.strip("/") if MCP_BASE_PATH.strip("/") else ""
-    return f"{base}/tgi/v1/a2a"
+def _base_path(base_path: Optional[str] = None) -> str:
+    value = MCP_BASE_PATH if base_path is None else base_path
+    return "/" + value.strip("/") if value.strip("/") else ""
 
 
-def _card_path() -> str:
-    base = "/" + MCP_BASE_PATH.strip("/") if MCP_BASE_PATH.strip("/") else ""
-    return f"{base}/.well-known/agent-card.json"
+def _rpc_path(base_path: Optional[str] = None) -> str:
+    return f"{_base_path(base_path)}/tgi/v1/a2a"
 
 
-def _legacy_card_path() -> str:
-    base = "/" + MCP_BASE_PATH.strip("/") if MCP_BASE_PATH.strip("/") else ""
-    return f"{base}/.well-known/agent.json"
+def _card_path(base_path: Optional[str] = None) -> str:
+    return f"{_base_path(base_path)}/.well-known/agent-card.json"
 
 
-def _public_a2a_url(request: Optional[Request] = None) -> str:
+def _legacy_card_path(base_path: Optional[str] = None) -> str:
+    return f"{_base_path(base_path)}/.well-known/agent.json"
+
+
+def _public_a2a_url(
+    request: Optional[Request] = None, base_path: Optional[str] = None
+) -> str:
     explicit = os.getenv("A2A_PUBLIC_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -128,7 +132,9 @@ def _public_a2a_url(request: Optional[Request] = None) -> str:
             or request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
             or request.headers.get("host", "")
         )
-        forwarded_port = request.headers.get("x-forwarded-port", "").split(",", 1)[0].strip()
+        forwarded_port = (
+            request.headers.get("x-forwarded-port", "").split(",", 1)[0].strip()
+        )
         if forwarded_port and host and ":" not in host:
             default_port = (scheme == "https" and forwarded_port == "443") or (
                 scheme == "http" and forwarded_port == "80"
@@ -136,11 +142,11 @@ def _public_a2a_url(request: Optional[Request] = None) -> str:
             if not default_port:
                 host = f"{host}:{forwarded_port}"
         if host:
-            return f"{scheme}://{host}{_rpc_path()}"
+            return f"{scheme}://{host}{_rpc_path(base_path)}"
 
     # Internal placeholder used by the handler; discovery responses replace
     # this with a request-derived public URL when A2A_PUBLIC_URL is unset.
-    return f"http://localhost{_rpc_path()}"
+    return f"http://localhost{_rpc_path(base_path)}"
 
 
 class BridgeA2AExecutor(A2AAgentExecutor):
@@ -227,9 +233,7 @@ class BridgeA2AExecutor(A2AAgentExecutor):
         except Exception:
             logger.exception("[A2A] Agent execution failed")
             await updater.failed(
-                updater.new_agent_message(
-                    parts=[Part(text="Agent execution failed.")]
-                )
+                updater.new_agent_message(parts=[Part(text="Agent execution failed.")])
             )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -265,32 +269,39 @@ def _build_agent_card(agent: Agent, url: str) -> AgentCard:
     )
 
 
-def build_a2a_app(executor: Optional[A2AAgentExecutor] = None):
+def build_a2a_app(
+    executor: Optional[A2AAgentExecutor] = None,
+    base_path: Optional[str] = None,
+):
     """Build AG2's standards-compliant JSON-RPC A2A ASGI application."""
     agent = Agent(name=SERVICE_NAME)
     server = A2AServer(agent, executor=executor or BridgeA2AExecutor())
 
-    internal_card = _build_agent_card(agent, _public_a2a_url())
+    internal_card = _build_agent_card(agent, _public_a2a_url(base_path=base_path))
     app = server.build_jsonrpc(
-        url=_public_a2a_url(),
+        url=_public_a2a_url(base_path=base_path),
         card=internal_card,
-        rpc_url=_rpc_path(),
-        card_url=_card_path(),
-        legacy_card_url=_legacy_card_path(),
+        rpc_url=_rpc_path(base_path),
+        card_url=_card_path(base_path),
+        legacy_card_url=_legacy_card_path(base_path),
     )
 
     async def _serve_public_card(request: Request):
-        card = _build_agent_card(agent, _public_a2a_url(request))
+        card = _build_agent_card(agent, _public_a2a_url(request, base_path))
         return JSONResponse(agent_card_to_dict(card))
 
-    card_paths = {_card_path(), _legacy_card_path()}
+    card_paths = {_card_path(base_path), _legacy_card_path(base_path)}
     app.routes[:] = [
         route for route in app.routes if getattr(route, "path", None) not in card_paths
     ]
     app.routes.extend(
         [
-            Route(_card_path(), endpoint=_serve_public_card, methods=["GET"]),
-            Route(_legacy_card_path(), endpoint=_serve_public_card, methods=["GET"]),
+            Route(_card_path(base_path), endpoint=_serve_public_card, methods=["GET"]),
+            Route(
+                _legacy_card_path(base_path),
+                endpoint=_serve_public_card,
+                methods=["GET"],
+            ),
         ]
     )
     return app

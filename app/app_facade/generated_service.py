@@ -24,7 +24,6 @@ from fastapi import HTTPException
 
 from app.session import MCPSessionBase
 from app.vars import (
-    MCP_BASE_PATH,
     GENERATED_UI_PROMPT_DUMP,
     APP_UI_SESSION_TTL_MINUTES,
     GENERATED_UI_FIX_CODE_FIRST,
@@ -37,7 +36,7 @@ from app.tgi.models import (
 from app.tgi.services.proxied_tgi_service import ProxiedTGIService
 from app.app_facade.generated_output_factory import (
     GeneratedUIOutputFactory,
-    MCP_SERVICE_TEST_HELPER_SCRIPT,
+    _mcp_service_test_helper_script,
 )
 from app.app_facade.generated_dummy_data import (
     DummyDataGenerator,
@@ -67,7 +66,6 @@ from app.app_facade.prompt_helpers import (
     changed_scripts,
     scripts_from_history,
 )
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -117,13 +115,12 @@ def _fix_stage_attempt_budget(
 
 
 def _load_pfusch_prompt() -> str:
-    """Load the pfusch ui prompt from the markdown file and replace placeholders."""
+    """Load the pfusch ui prompt; it is path-free, generated UIs reach tools via McpService."""
     prompt_path = os.path.join(os.path.dirname(__file__), "pfusch_ui_prompt.md")
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()
-        # Replace the MCP_BASE_PATH placeholder
-        return prompt_content.replace("{{MCP_BASE_PATH}}", MCP_BASE_PATH)
+        return prompt_content
     except Exception as e:
         logger.error(f"Error loading pfusch prompt: {e}")
         raise e
@@ -222,7 +219,7 @@ class GeneratedUIService:
             resolved_service_code = service_code or ""
             # Always inject the global McpService/service safety prelude in tests.
             # It writes only to globalThis and avoids top-level symbol collisions.
-            service_prelude = MCP_SERVICE_TEST_HELPER_SCRIPT
+            service_prelude = _mcp_service_test_helper_script()
             combined_code = f"{service_prelude}\n\n{resolved_service_code}\n\n{mocked_components_code}"
 
             with open(os.path.join(tmpdir, "app.js"), "w", encoding="utf-8") as f:

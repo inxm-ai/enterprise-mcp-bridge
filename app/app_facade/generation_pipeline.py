@@ -346,7 +346,9 @@ class GenerationPipeline:
         )
         if self.storage.exists(scope, ui_id, name):
             logger.warning(f"[stream_generate_ui] UI already exists: {ui_id}/{name}")
-            yield _sse_event("error", {"error": "Ui already exists for this id and name"})
+            yield _sse_event(
+                "error", {"error": "Ui already exists for this id and name"}
+            )
             return
 
         if scope.kind == "user" and actor.user_id != scope.identifier:
@@ -520,7 +522,8 @@ class GenerationPipeline:
             )
             if dummy_reused:
                 yield _sse_event(
-                    "log", {"message": "Reusing existing test fixtures (unchanged tools)"}
+                    "log",
+                    {"message": "Reusing existing test fixtures (unchanged tools)"},
                 )
 
             messages.append(
@@ -582,7 +585,9 @@ class GenerationPipeline:
                                 or item.get("error")
                                 or "unknown phase 1 failure"
                             )
-                            phase1_failure_reasons.append(f"attempt {attempt}: {reason}")
+                            phase1_failure_reasons.append(
+                                f"attempt {attempt}: {reason}"
+                            )
                             logger.warning(
                                 "%s Phase 1 attempt %s failed: %s",
                                 log_tag,

@@ -25,6 +25,7 @@ from app.elicitation import (
     get_elicitation_coordinator,
 )
 from app.mcp_server.server_params import get_server_params
+from app.multi_server import current_command, current_remote_url
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
@@ -563,9 +564,9 @@ def build_mcp_client_strategy(
     incoming_headers: Optional[dict[str, str]] = None,
     session_key: Optional[str] = None,
 ) -> MCPClientStrategy:
-    remote_server = (MCP_REMOTE_SERVER or "").strip()
+    remote_server = current_remote_url(MCP_REMOTE_SERVER).strip()
     if remote_server:
-        mcp_command = os.environ.get("MCP_SERVER_COMMAND", "").strip()
+        mcp_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")).strip()
         if mcp_command:
             logger.error(
                 "[ClientStrategy] MCP_REMOTE_SERVER and MCP_SERVER_COMMAND are both set; cannot use both"

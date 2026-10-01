@@ -10,6 +10,11 @@ import prometheus_fastapi_instrumentator.routing as _pfi_routing
 from prometheus_client import Info
 
 from app.sse.mcp_proxy import get_sse_proxy_routes
+from app.multi_server import (
+    MultiServerContextMiddleware,
+    configured_servers,
+    is_multi_server_mode,
+)
 from app.utils.prometheus_routing import safe_route_name_resolver
 from app.tgi.a2a_runtime import build_a2a_app
 
@@ -70,6 +75,8 @@ def configure_logging() -> None:
 configure_logging()
 
 app = FastAPI()
+if is_multi_server_mode():
+    app.add_middleware(MultiServerContextMiddleware)
 
 # prometheus_fastapi_instrumentator 8.0.0 crashes on _IncludedRouter objects
 # (FastAPI 0.137+ includes them in the route tree). Skip routes with no 'path'.
@@ -173,12 +180,21 @@ if _OTEL_AVAILABLE:
 app_info = Info("fastapi_app_info", "Application Info")
 app_info.info({"app_name": SERVICE_NAME})
 
-app.include_router(router)
+if is_multi_server_mode():
+    for server_config in configured_servers():
+        app.include_router(router, prefix=server_config.base_path)
+else:
+    app.include_router(router)
 
 # Mount standards-compliant A2A JSON-RPC + agent-card routes provided by AG2.
 # The existing MCP bridge remains the execution backend.
-for _a2a_route in build_a2a_app().routes:
-    app.router.routes.insert(0, _a2a_route)
+if is_multi_server_mode():
+    for server_config in configured_servers():
+        for _a2a_route in build_a2a_app(base_path=server_config.base_path).routes:
+            app.router.routes.insert(0, _a2a_route)
+else:
+    for _a2a_route in build_a2a_app().routes:
+        app.router.routes.insert(0, _a2a_route)
 
 for route in get_sse_proxy_routes():
     app.router.routes.insert(0, route)

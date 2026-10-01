@@ -61,7 +61,10 @@ def test_gcp_retrieve_token_success(monkeypatch):
     }
     assert captured["headers"] == {"Metadata-Flavor": "Google"}
     assert captured["params"] == {"audience": "https://remote.example"}
-    assert "computeMetadata/v1/instance/service-accounts/default/identity" in captured["url"]
+    assert (
+        "computeMetadata/v1/instance/service-accounts/default/identity"
+        in captured["url"]
+    )
 
 
 def test_gcp_retrieve_token_explicit_audience_overrides_remote_server(monkeypatch):
@@ -180,9 +183,7 @@ def test_aws_retrieve_token_env_var_unset_fails_closed(monkeypatch):
 
 
 def test_aws_retrieve_token_missing_file_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setenv(
-        "AWS_WEB_IDENTITY_TOKEN_FILE", str(tmp_path / "does-not-exist")
-    )
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(tmp_path / "does-not-exist"))
 
     with pytest.raises(UserLoggedOutException):
         AwsWebIdentityTokenRetriever().retrieve_token("")

@@ -13,7 +13,6 @@ from app.tgi.routes import (
 from fastapi import HTTPException
 from starlette.requests import Request
 
-
 # Ensure TGI_URL is set for all tests except the one that checks missing value
 
 

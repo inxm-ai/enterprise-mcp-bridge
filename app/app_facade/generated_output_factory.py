@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 
 from app.app_facade.generated_types import Scope
+from app.multi_server import current_base_path
 from app.vars import (
     GENERATED_UI_GATEWAY_GET_TOOL,
     GENERATED_UI_GATEWAY_LIST_SERVERS,
@@ -20,7 +21,6 @@ from app.vars import (
     GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX,
     MCP_BASE_PATH,
 )
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -67,61 +67,83 @@ RUNTIME_BRIDGE_SCRIPT = _load_script_template(
     "generated_ui_runtime_bridge.js",
     {"{{RUNTIME_BRIDGE_MARKER}}": RUNTIME_BRIDGE_MARKER},
 )
-_MCP_SERVICE_CLASS_SOURCE = _load_script_template(
-    "generated_mcp_service_class.js",
-    {
-        "{{MCP_BASE_PATH}}": MCP_BASE_PATH,
-        "{{GENERATED_UI_GATEWAY_LIST_SERVERS}}": GENERATED_UI_GATEWAY_LIST_SERVERS,
-        "{{GENERATED_UI_GATEWAY_CALL_TOOL}}": GENERATED_UI_GATEWAY_CALL_TOOL,
-        "{{GENERATED_UI_GATEWAY_LIST_TOOLS}}": GENERATED_UI_GATEWAY_LIST_TOOLS,
-        "{{GENERATED_UI_GATEWAY_GET_TOOL}}": GENERATED_UI_GATEWAY_GET_TOOL,
-        "{{GENERATED_UI_GATEWAY_ROLE_ARGS_JSON}}": json.dumps(
-            GENERATED_UI_GATEWAY_ROLE_ARGS, ensure_ascii=False
-        ),
-        "{{GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS}}": str(
-            GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS
-        ),
-        "{{GENERATED_UI_GATEWAY_SERVER_ID_FIELDS_JSON}}": json.dumps(
-            GENERATED_UI_GATEWAY_SERVER_ID_FIELDS, ensure_ascii=False
-        ),
-        "{{GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX_JSON}}": json.dumps(
-            GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX, ensure_ascii=False
-        ),
-    },
-)
-MCP_SERVICE_HELPER_SCRIPT = (
-    f"/* {MCP_SERVICE_RUNTIME_MARKER} */\n"
-    "(() => {\n"
-    f"{_MCP_SERVICE_CLASS_SOURCE}\n"
-    "  const needsGeneratedClass =\n"
-    "    typeof globalThis.McpService !== 'function'\n"
-    "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
-    "  if (needsGeneratedClass) {\n"
-    "    globalThis.McpService = __GeneratedMcpService;\n"
-    "  }\n"
-    "  const needsServiceInstance =\n"
-    "    !globalThis.service || typeof globalThis.service.call !== 'function';\n"
-    "  if (needsServiceInstance) {\n"
-    "    globalThis.service = new globalThis.McpService();\n"
-    "  }\n"
-    "})();\n"
-)
-MCP_SERVICE_TEST_HELPER_SCRIPT = (
-    "/* generated-mcp-service-helper-test */\n"
-    "(() => {\n"
-    f"{_MCP_SERVICE_CLASS_SOURCE}\n"
-    "  const __needsGeneratedClassForTests =\n"
-    "    typeof globalThis.McpService !== 'function'\n"
-    "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
-    "  if (__needsGeneratedClassForTests) {\n"
-    "    globalThis.McpService = __GeneratedMcpService;\n"
-    "  }\n"
-    "  if (!globalThis.service || typeof globalThis.service.call !== 'function') {\n"
-    "    globalThis.service = new globalThis.McpService();\n"
-    "  }\n"
-    "})();\n"
-)
-RUNTIME_BOOTSTRAP_SCRIPT = f"{RUNTIME_BRIDGE_SCRIPT}{MCP_SERVICE_HELPER_SCRIPT}"
+
+
+def _mcp_service_class_source() -> str:
+    return _load_script_template(
+        "generated_mcp_service_class.js",
+        {
+            "{{MCP_BASE_PATH}}": current_base_path(MCP_BASE_PATH),
+            "{{GENERATED_UI_GATEWAY_LIST_SERVERS}}": GENERATED_UI_GATEWAY_LIST_SERVERS,
+            "{{GENERATED_UI_GATEWAY_CALL_TOOL}}": GENERATED_UI_GATEWAY_CALL_TOOL,
+            "{{GENERATED_UI_GATEWAY_LIST_TOOLS}}": GENERATED_UI_GATEWAY_LIST_TOOLS,
+            "{{GENERATED_UI_GATEWAY_GET_TOOL}}": GENERATED_UI_GATEWAY_GET_TOOL,
+            "{{GENERATED_UI_GATEWAY_ROLE_ARGS_JSON}}": json.dumps(
+                GENERATED_UI_GATEWAY_ROLE_ARGS, ensure_ascii=False
+            ),
+            "{{GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS}}": str(
+                GENERATED_UI_GATEWAY_PROMPT_ARG_MAX_CHARS
+            ),
+            "{{GENERATED_UI_GATEWAY_SERVER_ID_FIELDS_JSON}}": json.dumps(
+                GENERATED_UI_GATEWAY_SERVER_ID_FIELDS, ensure_ascii=False
+            ),
+            "{{GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX_JSON}}": json.dumps(
+                GENERATED_UI_GATEWAY_SERVER_ID_URL_REGEX, ensure_ascii=False
+            ),
+        },
+    )
+
+
+def _mcp_service_helper_script() -> str:
+    source = _mcp_service_class_source()
+    return (
+        f"/* {MCP_SERVICE_RUNTIME_MARKER} */\n"
+        "(() => {\n"
+        f"{source}\n"
+        "  const needsGeneratedClass =\n"
+        "    typeof globalThis.McpService !== 'function'\n"
+        "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
+        "  if (needsGeneratedClass) {\n"
+        "    globalThis.McpService = __GeneratedMcpService;\n"
+        "  }\n"
+        "  const needsServiceInstance =\n"
+        "    !globalThis.service || typeof globalThis.service.call !== 'function';\n"
+        "  if (needsServiceInstance) {\n"
+        "    globalThis.service = new globalThis.McpService();\n"
+        "  }\n"
+        "})();\n"
+    )
+
+
+def _mcp_service_test_helper_script() -> str:
+    source = _mcp_service_class_source()
+    return (
+        "/* generated-mcp-service-helper-test */\n"
+        "(() => {\n"
+        f"{source}\n"
+        "  const __needsGeneratedClassForTests =\n"
+        "    typeof globalThis.McpService !== 'function'\n"
+        "    || typeof globalThis.McpService.prototype?.call !== 'function';\n"
+        "  if (__needsGeneratedClassForTests) {\n"
+        "    globalThis.McpService = __GeneratedMcpService;\n"
+        "  }\n"
+        "  if (!globalThis.service || typeof globalThis.service.call !== 'function') {\n"
+        "    globalThis.service = new globalThis.McpService();\n"
+        "  }\n"
+        "})();\n"
+    )
+
+
+def _runtime_bootstrap_script() -> str:
+    return f"{RUNTIME_BRIDGE_SCRIPT}{_mcp_service_helper_script()}"
+
+
+# Legacy exports retain single-server import compatibility. Request paths use
+# the dynamic helpers above so multi-server artifacts resolve to their server.
+_MCP_SERVICE_CLASS_SOURCE = _mcp_service_class_source()
+MCP_SERVICE_HELPER_SCRIPT = _mcp_service_helper_script()
+MCP_SERVICE_TEST_HELPER_SCRIPT = _mcp_service_test_helper_script()
+RUNTIME_BOOTSTRAP_SCRIPT = _runtime_bootstrap_script()
 
 
 class GeneratedUIOutputFactory:
@@ -148,7 +170,7 @@ class GeneratedUIOutputFactory:
     ) -> str:
         return (
             '<script type="module">\n'
-            f"{RUNTIME_BOOTSTRAP_SCRIPT}"
+            f"{_runtime_bootstrap_script()}"
             f"{service_script or ''}\n\n"
             f"{components_script or ''}\n"
             "</script>"
@@ -233,7 +255,7 @@ class GeneratedUIOutputFactory:
                 page = page.replace(SNIPPET_PLACEHOLDER, page_snippet)
             page = page.replace(SERVICE_SCRIPT_PLACEHOLDER, service_script or "")
             page = page.replace(COMPONENTS_SCRIPT_PLACEHOLDER, components_script or "")
-            page = page.replace(RUNTIME_BRIDGE_PLACEHOLDER, RUNTIME_BOOTSTRAP_SCRIPT)
+            page = page.replace(RUNTIME_BRIDGE_PLACEHOLDER, _runtime_bootstrap_script())
 
             html_section["page"] = page
 
@@ -242,7 +264,7 @@ class GeneratedUIOutputFactory:
                 snippet_with_placeholders, service_script, components_script
             )
             html_section["snippet"] = snippet_expanded.replace(
-                RUNTIME_BRIDGE_PLACEHOLDER, RUNTIME_BOOTSTRAP_SCRIPT
+                RUNTIME_BRIDGE_PLACEHOLDER, _runtime_bootstrap_script()
             )
 
         return expanded

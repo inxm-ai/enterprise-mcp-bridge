@@ -27,6 +27,11 @@ from mcp.server.lowlevel.server import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
 from app.elicitation import ElicitationRequiredError, get_elicitation_coordinator
+from app.multi_server import (
+    configured_servers,
+    is_multi_server_mode,
+    session_storage_key,
+)
 from app.oauth.decorator import decorate_args_with_oauth_token
 from app.oauth.user_info import (
     CallerNotAuthorizedError,
@@ -67,17 +72,18 @@ logger = logging.getLogger("uvicorn.error")
 
 
 # ---------------------------------------------------------------------------
-# Transport setup
+# Legacy transport compatibility
 # ---------------------------------------------------------------------------
 
 
 def _message_endpoint_path() -> str:
-    """Full relative path for the SSE messages POST endpoint."""
+    """Full relative path for the legacy single-server SSE messages endpoint."""
     base = (MCP_BASE_PATH or "").rstrip("/")
     return f"{base}/sse/messages"
 
 
-# Single transport instance – manages per-connection session IDs internally
+# Keep these module-level symbols for existing callers/tests. Multi-server routes
+# still create one dedicated transport per configured server.
 sse_transport = SseServerTransport(_message_endpoint_path())
 
 
@@ -300,6 +306,9 @@ def _build_proxy_server(
 class _SSEConnectionApp:
     """``GET /sse`` – establish SSE connection and run proxy MCP server."""
 
+    def __init__(self, transport: Optional[SseServerTransport] = None):
+        self.transport = transport or sse_transport
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return
@@ -341,8 +350,8 @@ class _SSEConnectionApp:
         logger.info(f"[MCP-SSE] New SSE connection. Group: {group}")
 
         try:
-            session_key = f"sse-proxy:{time.time_ns()}"
-            async with sse_transport.connect_sse(scope, receive, send) as (
+            session_key = session_storage_key(f"sse-proxy:{time.time_ns()}")
+            async with self.transport.connect_sse(scope, receive, send) as (
                 read_stream,
                 write_stream,
             ):
@@ -368,13 +377,11 @@ class _SSEConnectionApp:
 class _SSEMessagesApp:
     """``POST /sse/messages`` – JSON-RPC message channel."""
 
+    def __init__(self, transport: Optional[SseServerTransport] = None):
+        self.transport = transport or sse_transport
+
     async def __call__(self, scope, receive, send):
-        await sse_transport.handle_post_message(scope, receive, send)
-
-
-# Singleton instances
-_sse_connection_app = _SSEConnectionApp()
-_sse_messages_app = _SSEMessagesApp()
+        await self.transport.handle_post_message(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -382,14 +389,24 @@ _sse_messages_app = _SSEMessagesApp()
 # ---------------------------------------------------------------------------
 
 
-def get_sse_proxy_routes() -> list[Route]:
-    """Return Starlette routes for the MCP SSE proxy.
-
-    These must be added to the FastAPI app's route list directly
-    (not via an APIRouter) because they use raw ASGI apps.
-    """
-    base = (MCP_BASE_PATH or "").rstrip("/")
+def _routes_for_base(base: str) -> list[Route]:
+    base = (base or "").rstrip("/")
+    transport = SseServerTransport(f"{base}/sse/messages")
     return [
-        Route(f"{base}/sse", endpoint=_sse_connection_app),
-        Route(f"{base}/sse/messages", endpoint=_sse_messages_app, methods=["POST"]),
+        Route(f"{base}/sse", endpoint=_SSEConnectionApp(transport)),
+        Route(
+            f"{base}/sse/messages",
+            endpoint=_SSEMessagesApp(transport),
+            methods=["POST"],
+        ),
     ]
+
+
+def get_sse_proxy_routes() -> list[Route]:
+    """Return Starlette routes for the MCP SSE proxy."""
+    if is_multi_server_mode():
+        routes: list[Route] = []
+        for server in configured_servers():
+            routes.extend(_routes_for_base(server.base_path))
+        return routes
+    return _routes_for_base(MCP_BASE_PATH)

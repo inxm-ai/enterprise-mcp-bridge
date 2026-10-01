@@ -22,6 +22,7 @@ from app.session import session_id, try_get_session_id
 from app.session_manager import mcp_session_context, session_manager
 from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
+from app.multi_server import current_base_path, current_server
 
 from .generated_service import (
     Actor,
@@ -48,6 +49,15 @@ _generated_service: Optional[GeneratedUIService] = None
 
 # Configuration from environment
 PROXY_PREFIX = os.environ.get("PROXY_PREFIX", MCP_BASE_PATH + "/app")
+
+
+def _proxy_prefix() -> str:
+    """Return the request-local app proxy prefix in multi-server mode."""
+    if current_server() is None or "PROXY_PREFIX" in os.environ:
+        return PROXY_PREFIX
+    return f"{current_base_path(MCP_BASE_PATH)}/app"
+
+
 TARGET_SERVER_URL = os.environ.get("TARGET_SERVER_URL", "").rstrip("/")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip(
     "/"
@@ -915,7 +925,7 @@ async def get_generated_ui_start(
     owner_id = validate_identifier(actor.user_id, "user id")
     html = _load_html_template("generated_ui_start.html")
     html = html.replace("{{TARGET}}", f"user={owner_id}")
-    html = html.replace("{{APP_PREFIX}}", f"{MCP_BASE_PATH}/app")
+    html = html.replace("{{APP_PREFIX}}", f"{current_base_path(MCP_BASE_PATH)}/app")
     return HTMLResponse(content=html, media_type="text/html")
 
 
@@ -930,16 +940,17 @@ async def get_generated_ui_container(
     validate_identifier(ui_id, "ui id")
     validate_identifier(name, "ui name")
     html = _load_html_template("generated_ui_container.html")
-    html = html.replace("{{APP_PREFIX}}", f"{MCP_BASE_PATH}/app")
+    html = html.replace("{{APP_PREFIX}}", f"{current_base_path(MCP_BASE_PATH)}/app")
     return HTMLResponse(content=html, media_type="text/html")
 
 
 def get_target_url(request: Request) -> str:
     """Construct the target URL from the request path."""
+    proxy_prefix = _proxy_prefix()
     # Remove the proxy prefix from the path
     path = request.url.path
-    if path.startswith(PROXY_PREFIX):
-        path = path[len(PROXY_PREFIX) :]
+    if path.startswith(proxy_prefix):
+        path = path[len(proxy_prefix) :]
 
     # Ensure path starts with /
     if not path.startswith("/"):
@@ -958,6 +969,7 @@ def prepare_headers(request: Request) -> Dict[str, str]:
     Prepare headers for forwarding to target server.
     Removes hop-by-hop headers and adds proxy headers.
     """
+    proxy_prefix = _proxy_prefix()
     headers = {}
 
     # Copy headers, excluding hop-by-hop headers
@@ -979,7 +991,7 @@ def prepare_headers(request: Request) -> Dict[str, str]:
     headers["x-forwarded-proto"] = request.url.scheme
 
     # X-Forwarded-Prefix: proxy prefix for apps that need to know their base path
-    headers["x-forwarded-prefix"] = PROXY_PREFIX
+    headers["x-forwarded-prefix"] = proxy_prefix
 
     # X-Real-IP: client IP (for single client identification)
     headers["x-real-ip"] = client_ip
@@ -995,6 +1007,8 @@ def rewrite_location_header(location: str, request: Request) -> str:
     if not location:
         return location
 
+    proxy_prefix = _proxy_prefix()
+
     # Parse the location URL
     parsed = urlparse(location)
 
@@ -1002,14 +1016,14 @@ def rewrite_location_header(location: str, request: Request) -> str:
     if not parsed.scheme and not parsed.netloc:
         # Relative URL - prepend proxy prefix
         if location.startswith("/"):
-            return f"{PROXY_PREFIX}{location}"
+            return f"{proxy_prefix}{location}"
         else:
             # Relative to current path
             current_path = request.url.path
-            if current_path.startswith(PROXY_PREFIX):
-                current_path = current_path[len(PROXY_PREFIX) :]
+            if current_path.startswith(proxy_prefix):
+                current_path = current_path[len(proxy_prefix) :]
             base_path = "/".join(current_path.split("/")[:-1])
-            return f"{PROXY_PREFIX}{base_path}/{location}"
+            return f"{proxy_prefix}{base_path}/{location}"
 
     # If it's an absolute URL pointing to target server, rewrite to proxy
     if parsed.netloc == urlparse(TARGET_SERVER_URL).netloc:
@@ -1024,7 +1038,7 @@ def rewrite_location_header(location: str, request: Request) -> str:
         else:
             base = f"{request.url.scheme}://{request.headers.get('host', request.client.host)}"
 
-        return f"{base}{PROXY_PREFIX}{path}{query}{fragment}"
+        return f"{base}{proxy_prefix}{path}{query}{fragment}"
 
     # Otherwise, return as-is (external redirect)
     return location
@@ -1034,6 +1048,7 @@ def rewrite_cookie_path(set_cookie: str) -> str:
     """
     Rewrite the Path attribute in Set-Cookie header to use proxy prefix.
     """
+    proxy_prefix = _proxy_prefix()
     cookie = SimpleCookie()
     try:
         cookie.load(set_cookie)
@@ -1046,10 +1061,10 @@ def rewrite_cookie_path(set_cookie: str) -> str:
         path = morsel.get("path", "/")
         # If path is /, set it to proxy prefix
         if path == "/":
-            morsel["path"] = PROXY_PREFIX or "/"
+            morsel["path"] = proxy_prefix or "/"
         # If path doesn't start with proxy prefix, prepend it
-        elif not path.startswith(PROXY_PREFIX):
-            morsel["path"] = f"{PROXY_PREFIX}{path}"
+        elif not path.startswith(proxy_prefix):
+            morsel["path"] = f"{proxy_prefix}{path}"
 
     # Return the rewritten Set-Cookie header
     result = []
@@ -1063,6 +1078,8 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
     Rewrite URLs in HTML/CSS/JS/JSON content to use proxy prefix.
     This is best-effort and may not catch all cases.
     """
+    proxy_prefix = _proxy_prefix()
+
     # Only rewrite if configured and content type is appropriate
     if not content:
         return content
@@ -1077,18 +1094,18 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
         return content
 
     target_pattern = re.escape(TARGET_SERVER_URL)
-    proxy_prefix_pattern = re.escape(PROXY_PREFIX) if PROXY_PREFIX else ""
+    proxy_prefix_pattern = re.escape(proxy_prefix) if proxy_prefix else ""
 
     # HTML URL rewriting
     if REWRITE_HTML_URLS and "text/html" in content_type:
         # Rewrite href and src attributes pointing to target
         # Replace absolute URLs
         text = re.sub(
-            f'(href|src)="({target_pattern})(/[^"]*)"', f'\\1="{PROXY_PREFIX}\\3"', text
+            f'(href|src)="({target_pattern})(/[^"]*)"', f'\\1="{proxy_prefix}\\3"', text
         )
         # Replace absolute URLs with single quotes
         text = re.sub(
-            f"(href|src)='({target_pattern})(/[^']*)'", f"\\1='{PROXY_PREFIX}\\3'", text
+            f"(href|src)='({target_pattern})(/[^']*)'", f"\\1='{proxy_prefix}\\3'", text
         )
         # Rewrite root-relative URLs (href="/path") but NOT if already prefixed
         # The negative lookahead ensures we don't rewrite URLs that already start with the prefix
@@ -1096,17 +1113,17 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
             # Protect against double-prefixing by checking if URL already starts with prefix
             text = re.sub(
                 f'(href|src)="(?!{proxy_prefix_pattern})(/[^"]*)"',
-                f'\\1="{PROXY_PREFIX}\\2"',
+                f'\\1="{proxy_prefix}\\2"',
                 text,
             )
             text = re.sub(
                 f"(href|src)='(?!{proxy_prefix_pattern})(/[^']*)'",
-                f"\\1='{PROXY_PREFIX}\\2'",
+                f"\\1='{proxy_prefix}\\2'",
                 text,
             )
         else:
-            text = re.sub(r'(href|src)="(/[^"]*)"', f'\\1="{PROXY_PREFIX}\\2"', text)
-            text = re.sub(r"(href|src)='(/[^']*)'", f"\\1='{PROXY_PREFIX}\\2'", text)
+            text = re.sub(r'(href|src)="(/[^"]*)"', f'\\1="{proxy_prefix}\\2"', text)
+            text = re.sub(r"(href|src)='(/[^']*)'", f"\\1='{proxy_prefix}\\2'", text)
 
     # CSS URL rewriting
     if REWRITE_CSS_URLS and (
@@ -1115,36 +1132,36 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
         # Rewrite url() functions with absolute URLs
         text = re.sub(
             f"url\\([\"']?({target_pattern})(/[^)\"'\\ ]+)[\"']?\\)",
-            f'url("{PROXY_PREFIX}\\2")',
+            f'url("{proxy_prefix}\\2")',
             text,
         )
         # Rewrite url() functions with root-relative URLs (but not if already prefixed)
         if proxy_prefix_pattern:
             text = re.sub(
                 f"url\\([\"']?(?!{proxy_prefix_pattern})(/[^)\"'\\ ]+)[\"']?\\)",
-                f'url("{PROXY_PREFIX}\\1")',
+                f'url("{proxy_prefix}\\1")',
                 text,
             )
         else:
             text = re.sub(
-                r'url\(["\']?(/[^)"\'\\ ]+)["\']?\)', f'url("{PROXY_PREFIX}\\1")', text
+                r'url\(["\']?(/[^)"\'\\ ]+)["\']?\)', f'url("{proxy_prefix}\\1")', text
             )
         # Rewrite @import statements with absolute URLs
         text = re.sub(
             f"@import\\s+[\"']({target_pattern})(/[^\"']+)[\"']",
-            f'@import "{PROXY_PREFIX}\\2"',
+            f'@import "{proxy_prefix}\\2"',
             text,
         )
         # Rewrite @import statements with root-relative URLs (but not if already prefixed)
         if proxy_prefix_pattern:
             text = re.sub(
                 f"@import\\s+[\"']?(?!{proxy_prefix_pattern})(/[^\"']+)[\"']?",
-                f'@import "{PROXY_PREFIX}\\1"',
+                f'@import "{proxy_prefix}\\1"',
                 text,
             )
         else:
             text = re.sub(
-                r'@import\s+["\'](/[^"\']+)["\']', f'@import "{PROXY_PREFIX}\\1"', text
+                r'@import\s+["\'](/[^"\']+)["\']', f'@import "{proxy_prefix}\\1"', text
             )
 
     # JavaScript URL rewriting
@@ -1159,34 +1176,34 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
             # Matches: someVar.p = "/" or someVar.p = "/_next/"
             text = re.sub(
                 f"(\\b\\w+\\.p\\s*=\\s*[\"'])(?!{proxy_prefix_pattern})(/[^\"']*?)([\"'])",
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
             # Rewrite webpack chunk URL functions like: return "/" + chunkId + ".js"
             # or: __webpack_require__.u = function(chunkId) { return "/_next/static/..." }
             text = re.sub(
                 f"(return\\s+[\"'])(?!{proxy_prefix_pattern})(/[^\"']+?)([\"'])",
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
         else:
             # Without proxy_prefix_pattern - match any .p assignments
             text = re.sub(
                 r'(\b\w+\.p\s*=\s*["\'])(/[^"\']*?)(["\'"])',
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
             # Rewrite webpack chunk URL return statements
             text = re.sub(
                 r'(return\s+["\'])(/[^"\']+?)(["\'"])',
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
 
         # Rewrite absolute URLs in strings (both single and double quotes)
         text = re.sub(
             f"([\"'])({target_pattern})(/[^\"']+)([\"'])",
-            f"\\1{PROXY_PREFIX}\\3\\4",
+            f"\\1{proxy_prefix}\\3\\4",
             text,
         )
         # Rewrite root-relative URLs in strings that look like file paths
@@ -1197,28 +1214,28 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
             # Enhanced pattern to better handle Next.js _next paths and webpack chunks
             text = re.sub(
                 f"([\"'])(?!{proxy_prefix_pattern})(/(?:_next|static|api|v\\d+)/[^\"']+)([\"'])",
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
             # Also match general file paths with extensions
             text = re.sub(
                 f"([\"'])(?!{proxy_prefix_pattern})(/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*(?:\\.[a-zA-Z0-9]+)?)([\"'])",
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
         else:
             # Without proxy_prefix_pattern, match Next.js paths and general file paths
             text = re.sub(
                 r'(["\'])(/(?:_next|static|api|v\d+)/[^"\']+)(["\'])',
-                f"\\1{PROXY_PREFIX}\\2\\3",
+                f"\\1{proxy_prefix}\\2\\3",
                 text,
             )
             text = re.sub(
                 r'(["\'](/(?:[a-zA-Z0-9_.-]+/)*[a-zA-Z0-9_.-]*\.[a-zA-Z0-9]+)["\'])',
                 lambda m: (
-                    f'"{PROXY_PREFIX}{m.group(2)}"'
+                    f'"{proxy_prefix}{m.group(2)}"'
                     if m.group(0)[0] == '"'
-                    else f"'{PROXY_PREFIX}{m.group(2)}'"
+                    else f"'{proxy_prefix}{m.group(2)}'"
                 ),
                 text,
             )
@@ -1226,17 +1243,17 @@ def rewrite_content_urls(content: bytes, content_type: str) -> bytes:
     # JSON URL rewriting (for API responses)
     if REWRITE_JSON_URLS and "application/json" in content_type:
         # Replace URLs in JSON strings with absolute target URLs
-        text = re.sub(f'"{target_pattern}(/[^"]*)"', f'"{PROXY_PREFIX}\\1"', text)
+        text = re.sub(f'"{target_pattern}(/[^"]*)"', f'"{proxy_prefix}\\1"', text)
         # Replace root-relative URLs that look like API paths (but not if already prefixed)
         if proxy_prefix_pattern:
             text = re.sub(
                 f'"(?!{proxy_prefix_pattern})(/(?:api|v\\d+|_next|static)/[^"]+)"',
-                f'"{PROXY_PREFIX}\\1"',
+                f'"{proxy_prefix}\\1"',
                 text,
             )
         else:
             text = re.sub(
-                r'"(/(?:api|v\d+|_next|static)/[^"]+)"', f'"{PROXY_PREFIX}\\1"', text
+                r'"(/(?:api|v\d+|_next|static)/[^"]+)"', f'"{proxy_prefix}\\1"', text
             )
 
     return text.encode("utf-8")

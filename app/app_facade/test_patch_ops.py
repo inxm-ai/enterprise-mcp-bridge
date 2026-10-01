@@ -26,7 +26,10 @@ class DummyTGIService:
 
 
 DRAFT = {
-    "html": {"page": "<html><body><div>old</div></body></html>", "snippet": "<div>old</div>"},
+    "html": {
+        "page": "<html><body><div>old</div></body></html>",
+        "snippet": "<div>old</div>",
+    },
     "service_script": "export function getItems() { return svc.call('list_items'); }",
     "components_script": "pfusch('app-root', {}, (state) => [html.div('hello')]);",
     "test_script": "test('renders', () => {});",
@@ -99,7 +102,13 @@ def test_apply_patch_operations_replace_all_and_html_targets():
     candidate, errors = apply_patch_operations(
         {"html": {"page": "a b a", "snippet": "x"}},
         [
-            {"target": "html_page", "op": "replace", "search": "a", "content": "c", "replace_all": True},
+            {
+                "target": "html_page",
+                "op": "replace",
+                "search": "a",
+                "content": "c",
+                "replace_all": True,
+            },
             {"target": "html_snippet", "op": "set", "content": "<div>new</div>"},
         ],
     )
@@ -159,7 +168,9 @@ def test_apply_patch_operations_rejects_ambiguous_search_without_replace_all():
     assert "ambiguous search text matches 2 times" in errors[0]
     assert "components_script" in errors[0]
     # payload itself must remain untouched — no silent first-match patch
-    assert payload["components_script"] == "html.div('x'); html.div('x'); html.div('y');"
+    assert (
+        payload["components_script"] == "html.div('x'); html.div('x'); html.div('y');"
+    )
 
 
 def test_apply_patch_operations_ambiguous_search_allowed_with_replace_all():
@@ -177,7 +188,9 @@ def test_apply_patch_operations_ambiguous_search_allowed_with_replace_all():
         ],
     )
     assert errors == []
-    assert candidate["components_script"] == "html.div('z'); html.div('z'); html.div('y');"
+    assert (
+        candidate["components_script"] == "html.div('z'); html.div('z'); html.div('y');"
+    )
 
 
 def test_apply_patch_operations_accepts_unique_whitespace_only_difference():
@@ -196,8 +209,7 @@ def test_apply_patch_operations_accepts_unique_whitespace_only_difference():
                 "target": "components_script",
                 "op": "replace",
                 "search": (
-                    ".events-table { width: 100%; "
-                    "border-collapse: collapse; }"
+                    ".events-table { width: 100%; " "border-collapse: collapse; }"
                 ),
                 "content": ".graph-wrap { overflow-x: auto; }",
             }
@@ -233,9 +245,7 @@ def test_apply_patch_operations_inserts_around_exact_anchor():
     assert errors == []
     assert candidate is not None
     assert "before\ninserted\n" in candidate["components_script"]
-    assert ".graph-wrap { overflow-x: auto; }\n  `," in candidate[
-        "components_script"
-    ]
+    assert ".graph-wrap { overflow-x: auto; }\n  `," in candidate["components_script"]
 
 
 def test_apply_patch_operations_rebases_missing_css_block_on_shared_suffix():
@@ -296,8 +306,7 @@ def test_apply_patch_operations_does_not_rebase_ambiguous_shared_suffix():
 def test_apply_patch_operations_rejects_ambiguous_whitespace_match():
     payload = {
         "components_script": (
-            ".item {\n  color: red;\n}\n"
-            ".item {\n    color: red;\n}\n"
+            ".item {\n  color: red;\n}\n" ".item {\n    color: red;\n}\n"
         )
     }
     candidate, errors = apply_patch_operations(
@@ -498,12 +507,14 @@ async def test_attempt_patch_update_applies_operations_and_passes_feedback():
     # operations vocabulary must be in the system prompt
     assert "'replace'" in captured["request"].messages[0].content
     assert "'insert_before'" in captured["request"].messages[0].content
-    assert "Never use replace to add new code by inventing old text" in captured[
-        "request"
-    ].messages[0].content
-    assert "Never wrap the response in a 'patch' property" in captured[
-        "request"
-    ].messages[0].content
+    assert (
+        "Never use replace to add new code by inventing old text"
+        in captured["request"].messages[0].content
+    )
+    assert (
+        "Never wrap the response in a 'patch' property"
+        in captured["request"].messages[0].content
+    )
     assert "DOM test stubs do not parse SVG" in captured["request"].messages[0].content
     assert "container's innerHTML/markup" in captured["request"].messages[0].content
 
@@ -513,8 +524,7 @@ async def test_attempt_patch_update_does_not_append_stale_template_component():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     original = (
-        f"{PFUSCH_IMPORT}\n\n"
-        "pfusch('saga-details', {}, () => [html.div('events')]);"
+        f"{PFUSCH_IMPORT}\n\n" "pfusch('saga-details', {}, () => [html.div('events')]);"
     )
     draft = {
         **DRAFT,
@@ -687,8 +697,7 @@ async def test_attempt_patch_update_targeted_rewrite_replaces_complete_files():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
     original_components = (
-        f"{PFUSCH_IMPORT}\n"
-        "pfusch('saga-details', {}, () => [html.table([])]);"
+        f"{PFUSCH_IMPORT}\n" "pfusch('saga-details', {}, () => [html.table([])]);"
     )
     rewritten_components = (
         f"{PFUSCH_IMPORT}\n"
@@ -1016,8 +1025,8 @@ def test_sanitize_runtime_imports_drops_exact_duplicate():
 def test_sanitize_runtime_imports_across_service_and_components():
     service = f"{PFUSCH_IMPORT}\nexport function x() {{}}"
     components = f"{PFUSCH_IMPORT}\npfusch('a-b', {{}}, () => []);"
-    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
-        service, components
+    sanitized_service, sanitized_components, notes, conflicts = (
+        sanitize_runtime_imports(service, components)
     )
     assert sanitized_service == service
     assert "import" not in sanitized_components.split("\n")[0]
@@ -1055,8 +1064,8 @@ def test_sanitize_runtime_imports_does_not_drop_same_name_different_source():
     # `format` keeps resolving to its own module.
     service = "import { format } from './dates.js';"
     components = "import { format, parse } from './numbers.js';\nparse(format(1));"
-    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
-        service, components
+    sanitized_service, sanitized_components, notes, conflicts = (
+        sanitize_runtime_imports(service, components)
     )
     assert sanitized_service == service
     assert sanitized_components == components  # left completely untouched
@@ -1070,8 +1079,8 @@ def test_sanitize_runtime_imports_drops_duplicate_default_in_mixed_import():
     # must be removed too, not just the named-import portion.
     service = "import React from 'react';"
     components = "import React, { useMemo } from 'react';\nuseMemo(() => React.createElement('div'));"
-    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
-        service, components
+    sanitized_service, sanitized_components, notes, conflicts = (
+        sanitize_runtime_imports(service, components)
     )
     assert sanitized_service == service
     first_line = sanitized_components.split("\n")[0]
@@ -1083,8 +1092,8 @@ def test_sanitize_runtime_imports_drops_duplicate_default_in_mixed_import():
 def test_sanitize_runtime_imports_drops_exact_duplicate_default_only():
     service = "import Foo from './foo.js';"
     components = "import Foo from './foo.js';\nFoo();"
-    sanitized_service, sanitized_components, notes, conflicts = sanitize_runtime_imports(
-        service, components
+    sanitized_service, sanitized_components, notes, conflicts = (
+        sanitize_runtime_imports(service, components)
     )
     assert sanitized_service == service
     assert "import" not in sanitized_components.split("\n")[0]
@@ -1137,9 +1146,7 @@ async def test_attempt_patch_update_rejects_duplicate_component_registration():
     storage = GeneratedUIStorage(os.getcwd())
     service = GeneratedUIService(storage=storage, tgi_service=DummyTGIService())
 
-    duplicate_component = (
-        "\npfusch('app-root', {}, (state) => [html.div('copy')]);"
-    )
+    duplicate_component = "\npfusch('app-root', {}, (state) => [html.div('copy')]);"
 
     async def fake_non_stream_completion(_request, _token, _span):
         return {

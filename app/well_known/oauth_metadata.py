@@ -25,6 +25,7 @@ from app.vars import (
     KEYCLOAK_REALM,
     MCP_BASE_PATH,
 )
+from app.multi_server import current_base_path
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -102,7 +103,7 @@ async def get_protected_resource_metadata(request: Request):
         host = request.headers.get("x-forwarded-host") or request.headers.get(
             "host", "localhost"
         )
-        base = (MCP_BASE_PATH or "").rstrip("/")
+        base = current_base_path(MCP_BASE_PATH).rstrip("/")
         resource_url = f"{scheme}://{host}{base}"
 
     metadata = {

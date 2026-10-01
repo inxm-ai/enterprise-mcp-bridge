@@ -22,8 +22,7 @@ class PostgresWorkflowStateBackend:
     def ensure_schema(self) -> None:
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
+                cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {WORKFLOW_TABLE} (
                         execution_id TEXT PRIMARY KEY,
                         flow_id TEXT NOT NULL,
@@ -36,8 +35,7 @@ class PostgresWorkflowStateBackend:
                         created_at TEXT,
                         last_change TEXT
                     )
-                    """
-                )
+                    """)
                 cur.execute(
                     f"ALTER TABLE {WORKFLOW_TABLE} ADD COLUMN IF NOT EXISTS owner_id TEXT"
                 )

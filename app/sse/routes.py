@@ -17,6 +17,7 @@ from app.oauth.token_dependency import get_access_token
 from app.oauth.token_exchange import UserLoggedOutException
 from app.session import try_get_session_id, session_id
 from app.session_manager import mcp_session_context, session_manager
+from app.multi_server import session_storage_key
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -147,7 +148,9 @@ async def run_tool_with_progress(
                     },
                 )
             coordinator = get_elicitation_coordinator()
-            if not coordinator.submit_feedback(x_inxm_mcp_session, user_feedback):
+            if not coordinator.submit_feedback(
+                session_storage_key(x_inxm_mcp_session), user_feedback
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail={

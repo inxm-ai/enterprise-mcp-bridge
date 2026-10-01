@@ -155,9 +155,7 @@ async def test_stream_chat_update_persists_real_validated_patch_before_success(
     session_id = service.create_draft_session(
         scope=scope, actor=actor, ui_id="dash1", name="overview", tools=[]
     )["session_id"]
-    initial_session = storage.read_session(
-        scope, "dash1", "overview", session_id
-    )
+    initial_session = storage.read_session(scope, "dash1", "overview", session_id)
 
     async def fake_select_tools(_session, _requested_tools, _prompt):
         return []
@@ -188,9 +186,7 @@ async def test_stream_chat_update_persists_real_validated_patch_before_success(
         }
 
     async def fake_queue_tests(**_kwargs):
-        persisted = storage.read_session(
-            scope, "dash1", "overview", session_id
-        )
+        persisted = storage.read_session(scope, "dash1", "overview", session_id)
         assert persisted["draft_payload"]["components_script"] == (
             "export const init = () => 'patched';"
         )

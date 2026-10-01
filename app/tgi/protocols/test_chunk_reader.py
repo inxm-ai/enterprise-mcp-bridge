@@ -21,7 +21,6 @@ from app.tgi.protocols.chunk_reader import (
     collect_parsed_chunks,
 )
 
-
 # Test fixtures - async generators for different formats
 
 

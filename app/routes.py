@@ -47,6 +47,13 @@ from app.session import (
 )
 from app.session_manager import mcp_session_context, session_manager
 from app import vars as app_vars
+from app.multi_server import (
+    current_base_path,
+    current_sessionless,
+    is_multi_server_mode,
+    session_cookie_name,
+    session_storage_key,
+)
 from app.session_manager.session_context import (
     close_idle_sessions,
     ResponseTooLargeError,
@@ -99,9 +106,11 @@ RETRY_AFTER_SECONDS = "5"
 
 tracer = trace.get_tracer(__name__)
 
-if MCP_BASE_PATH:
+if MCP_BASE_PATH and not is_multi_server_mode():
     router.prefix = MCP_BASE_PATH
     logger.info(f"Using MCP_BASE_PATH: {MCP_BASE_PATH}")
+elif is_multi_server_mode():
+    logger.info("Using MCP_SERVERS multi-server routing")
 else:
     logger.info("No MCP_BASE_PATH set, using root path")
 
@@ -526,7 +535,9 @@ async def run_tool(
                     },
                 )
             coordinator = get_elicitation_coordinator()
-            if not coordinator.submit_feedback(x_inxm_mcp_session, user_feedback):
+            if not coordinator.submit_feedback(
+                session_storage_key(x_inxm_mcp_session), user_feedback
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -807,13 +818,13 @@ async def start_session(
                 strategy = build_mcp_client_strategy(
                     access_token=access_token,
                     requested_group=group,
-                    session_key=x_inxm_mcp_session,
+                    session_key=session_storage_key(x_inxm_mcp_session),
                 )
             except ValueError as exc:
                 logger.error(f"[Session] Invalid MCP configuration: {exc}")
                 raise HTTPException(status_code=400, detail=str(exc))
 
-            if app_vars.MCP_SESSIONLESS:
+            if current_sessionless(app_vars.MCP_SESSIONLESS):
                 # Every call opens its own transient downstream session; the id is
                 # only returned so clients that always start a session keep working.
                 logger.debug("[Session] Sessionless mode: no session task started")
@@ -821,7 +832,7 @@ async def start_session(
                 await close_idle_sessions(sessions)
                 mcp_task = MCPLocalSessionTask(strategy)
                 mcp_task.start()
-                sessions.set(x_inxm_mcp_session, mcp_task)
+                sessions.set(session_storage_key(x_inxm_mcp_session), mcp_task)
 
             session_info = {SESSION_FIELD_NAME: x_inxm_mcp_session}
             if group:
@@ -833,9 +844,11 @@ async def start_session(
                 group,
             )
             response = JSONResponse(content=session_info)
+            cookie_path = current_base_path("/") if is_multi_server_mode() else "/"
             response.set_cookie(
-                key=SESSION_FIELD_NAME,
+                key=session_cookie_name(SESSION_FIELD_NAME),
                 value=x_inxm_mcp_session,
+                path=cookie_path,
                 httponly=True,
                 samesite="lax",
                 secure=(
@@ -877,9 +890,9 @@ async def close_session(
             if x_inxm_mcp_session is None:
                 logger.warning("[Session] Session header missing on close.")
                 raise HTTPException(status_code=400, detail="Session header missing")
-            if app_vars.MCP_SESSIONLESS:
+            if current_sessionless(app_vars.MCP_SESSIONLESS):
                 return {"status": "closed"}
-            mcp_task = sessions.pop(x_inxm_mcp_session, None)
+            mcp_task = sessions.pop(session_storage_key(x_inxm_mcp_session), None)
             if not mcp_task:
                 logger.warning(
                     mask_token(

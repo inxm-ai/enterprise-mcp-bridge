@@ -82,6 +82,55 @@ MCP_BASE_PATH="/api/v1/mcp"
 # API available at: http://host:port/api/v1/mcp/docs
 ```
 
+### Multi-server mode
+
+#### MCP_SERVERS
+
+Optional JSON array defining multiple MCP backends hosted by one bridge process.
+When unset, the existing single-server variables such as `MCP_SERVER_COMMAND`,
+`MCP_REMOTE_SERVER`, `MCP_BASE_PATH`, `INCLUDE_TOOLS`, and `EXCLUDE_TOOLS`
+keep their current behavior.
+
+Each entry requires:
+
+- `id`: unique server identifier
+- `base_path`: existing public path to preserve
+- exactly one of `command` (local stdio) or `url` (remote MCP)
+
+Optional entry fields:
+
+- `env`: environment variables added to a local stdio server
+- `include_tools`: glob patterns for allowed tools
+- `exclude_tools`: glob patterns for hidden/blocked tools
+- `sessionless`: override the global `MCP_SESSIONLESS` value for this server
+
+Example:
+
+```bash
+MCP_SERVERS='[
+  {
+    "id": "files",
+    "base_path": "/api/mcp/files",
+    "command": "python /servers/files.py",
+    "env": {"FILES_ROOT": "/data"},
+    "include_tools": ["read_*"],
+    "sessionless": true
+  },
+  {
+    "id": "remote",
+    "base_path": "/api/mcp/remote",
+    "url": "https://mcp.example.com/mcp",
+    "exclude_tools": ["admin_*"]
+  }
+]'
+```
+
+Session state, SSE transport state, tool filtering, and tool-cache files are
+isolated by server. Overlapping base paths are supported; the most specific
+matching base path selects the server context. In sessionless mode,
+`/session/start` remains available
+for client compatibility but does not create a persistent downstream session.
+
 ### LLM Configuration
 
 #### TGI_CONVERSATION_MODE

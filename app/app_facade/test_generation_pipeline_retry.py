@@ -73,7 +73,14 @@ async def test_retry_carries_prior_failure_reason_into_next_attempt(
     captured_messages_by_attempt = {}
 
     async def fake_phase_1_attempt(
-        self, *, attempt, max_attempts, messages, allowed_tools, dummy_data, access_token
+        self,
+        *,
+        attempt,
+        max_attempts,
+        messages,
+        allowed_tools,
+        dummy_data,
+        access_token
     ):
         captured_messages_by_attempt[attempt] = list(messages)
         if attempt == 1:
@@ -124,9 +131,9 @@ async def test_retry_carries_prior_failure_reason_into_next_attempt(
     # the failed first attempt's own messages must not leak into attempt 2
     # beyond the compact summary — i.e. attempt 2 starts from the pristine
     # base messages plus exactly one extra feedback message.
-    assert len(captured_messages_by_attempt[2]) == len(
-        captured_messages_by_attempt[1]
-    ) + 1
+    assert (
+        len(captured_messages_by_attempt[2]) == len(captured_messages_by_attempt[1]) + 1
+    )
 
 
 @pytest.mark.asyncio
@@ -135,7 +142,14 @@ async def test_fatal_llm_error_aborts_without_further_retries(tmp_path, monkeypa
     call_count = {"n": 0}
 
     async def fake_phase_1_attempt_fatal(
-        self, *, attempt, max_attempts, messages, allowed_tools, dummy_data, access_token
+        self,
+        *,
+        attempt,
+        max_attempts,
+        messages,
+        allowed_tools,
+        dummy_data,
+        access_token
     ):
         call_count["n"] += 1
         yield {
@@ -165,7 +179,9 @@ async def test_fatal_llm_error_aborts_without_further_retries(tmp_path, monkeypa
 
     assert call_count["n"] == 1  # no retries after a fatal error
     assert any(b"error" in e for e in events)
-    assert not service.storage.exists(Scope(kind="user", identifier="u2"), "fatal1", "n")
+    assert not service.storage.exists(
+        Scope(kind="user", identifier="u2"), "fatal1", "n"
+    )
 
 
 @pytest.mark.asyncio
@@ -176,7 +192,14 @@ async def test_create_and_update_use_distinct_phase2_instructions_and_merge_corr
     instructions = []
 
     async def fake_phase_1_attempt(
-        self, *, attempt, max_attempts, messages, allowed_tools, dummy_data, access_token
+        self,
+        *,
+        attempt,
+        max_attempts,
+        messages,
+        allowed_tools,
+        dummy_data,
+        access_token
     ):
         yield {
             "type": "result",

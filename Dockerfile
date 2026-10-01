@@ -9,11 +9,15 @@ RUN apt-get update && apt-get install -y \
     musl-dev \
     curl \
     libsecret-1-0 \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- Test MCP REST wrapper ---
 WORKDIR /app
 COPY app /app
+# Default stdio MCP server the tests exercise when MCP_SERVER_COMMAND is unset.
+COPY mcp /mcp
 RUN pip install --upgrade pip && pip install --no-cache-dir .[dev]
 RUN pip install black && black --check .
 RUN pytest
