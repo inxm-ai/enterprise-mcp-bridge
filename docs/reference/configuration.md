@@ -115,6 +115,23 @@ Optional entry fields:
   `[]` means no effect tools for this server. The entry `"auto"` enables
   [automatic effect classification](#automatic-effect-classification) and can
   be combined with explicit globs.
+- `forward_access_token` (boolean, default `true`): whether the caller's access
+  token may reach this server. When `false`, the bridge never sends it
+  upstream: no token exchange (including `user-api-key` lookups), no fallback
+  to the incoming token, no `oauth_token` tool argument, and no credential
+  headers (`Authorization`, `Cookie`, `TOKEN_NAME`/`X-Auth-Request-Access-Token`,
+  `X-Forwarded-Access-Token`, or any header containing the caller's token) via
+  `MCP_REMOTE_SERVER_FORWARD_HEADERS` or `MCP_MAP_HEADER_TO_INPUT`, even if
+  allowed globally. Only explicitly configured credentials are sent
+  (`MCP_REMOTE_BEARER_TOKEN`, `MCP_REMOTE_ANON_BEARER_TOKEN`,
+  `MCP_REMOTE_HEADER_*`, ambient cloud identity); with none configured there is
+  no `Authorization` header. The bridge still authenticates its own callers as
+  usual.
+
+> **Security:** an orchestrator should set `"forward_access_token": false` for
+> every remote that does not use a `keycloak_provider_alias` (e.g. a public
+> third-party MCP such as DeepWiki). Otherwise the default sends the caller's
+> own platform token to that third party.
 
 Fields that are absent fall back to the global environment variables, and
 unknown fields are ignored.
@@ -168,6 +185,14 @@ MCP_SERVERS='[
     "sessionless": true,
     "auth_provider": "keycloak",
     "keycloak_provider_alias": "notion",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-deepwiki-server",
+    "base_path": "/api/mcp-deepwiki-server",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "sessionless": true,
+    "forward_access_token": false,
     "effect_tools": ["auto"]
   }
 ]'

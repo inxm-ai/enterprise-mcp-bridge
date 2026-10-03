@@ -29,6 +29,12 @@ absent the global environment variable applies):
 - ``effect_tools`` (array of strings): overrides ``EFFECT_TOOLS``. The entry
   ``"auto"`` classifies tools automatically (see ``app.utils.effect_tools``)
   and may be combined with explicit globs.
+- ``forward_access_token`` (boolean, default true): when false, the caller's
+  access token never reaches this server: no token exchange, no fallback to
+  the incoming token, no forwarded credential headers and no ``oauth_token``
+  tool argument. Only explicitly configured credentials are sent. Set it to
+  false for every remote that does not use a provider alias (e.g. a public
+  third-party MCP), or the caller's platform token leaks to that third party.
 
 Central remote host proxying several remote MCP servers, each exchanging the
 caller's token through its own Keycloak identity provider:
@@ -49,6 +55,14 @@ caller's token through its own Keycloak identity provider:
     "sessionless": true,
     "auth_provider": "keycloak",
     "keycloak_provider_alias": "notion",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-deepwiki-server",
+    "base_path": "/api/mcp-deepwiki-server",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "sessionless": true,
+    "forward_access_token": false,
     "effect_tools": ["auto"]
   }
 ]
@@ -81,6 +95,7 @@ class ServerConfig:
     auth_provider: Optional[str] = None
     keycloak_provider_alias: Optional[str] = None
     effect_tools: Optional[tuple[str, ...]] = None
+    forward_access_token: Optional[bool] = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -159,6 +174,14 @@ class ServerConfig:
                 pattern.strip() for pattern in effect_tools if pattern.strip()
             )
 
+        forward_access_token = raw.get("forward_access_token")
+        if forward_access_token is not None and not isinstance(
+            forward_access_token, bool
+        ):
+            raise ValueError(
+                f"MCP server {server_id!r} forward_access_token must be a boolean"
+            )
+
         return cls(
             id=server_id,
             base_path=base_path,
@@ -171,6 +194,7 @@ class ServerConfig:
             auth_provider=auth_provider,
             keycloak_provider_alias=provider_alias,
             effect_tools=effect_tools,
+            forward_access_token=forward_access_token,
         )
 
 
@@ -295,6 +319,13 @@ def current_keycloak_provider_alias(default: str) -> str:
     if not server or server.keycloak_provider_alias is None:
         return default
     return server.keycloak_provider_alias
+
+
+def current_forward_access_token(default: bool = True) -> bool:
+    server = current_server()
+    if not server or server.forward_access_token is None:
+        return default
+    return server.forward_access_token
 
 
 def current_effect_tools(default: list[str]) -> list[str]:
