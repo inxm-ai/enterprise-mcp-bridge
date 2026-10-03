@@ -4,7 +4,9 @@ import re
 from fnmatch import fnmatchcase
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from app.utils.effect_tools import is_effect_tool
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
@@ -15,7 +17,9 @@ DRY_RUN_HEADER_NAME = "X-Inxm-Dry-Run"
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
-# Tools that are modifying or notifying or similar
+# Tools that are modifying or notifying or similar. The entry "auto" enables
+# automatic classification (see app.utils.effect_tools). In multi-server mode a
+# server's "effect_tools" overrides this; read it via current_effect_tools().
 EFFECT_TOOLS = [
     pattern.strip()
     for pattern in os.environ.get("EFFECT_TOOLS", "").split(",")
@@ -30,16 +34,25 @@ def tool_matches_patterns(tool_name: str, patterns: list[str]) -> bool:
     return any(fnmatchcase(tool_name, pattern) for pattern in patterns)
 
 
+def is_dry_run_requested(dry_run_header: Optional[str]) -> bool:
+    return bool(dry_run_header) and dry_run_header.lower() == "true"
+
+
 def is_dry_run_effect_call(
-    dry_run_header: Optional[str], tool_name: str, effect_tools: list[str]
+    dry_run_header: Optional[str],
+    tool_name: str,
+    effect_tools: list[str],
+    tool_def: Any = None,
 ) -> bool:
     """Return whether a tool call must be answered with a dry-run response.
 
     The contract is per tool name, so every transport must use this decision.
+    ``tool_def`` (the MCP tool definition) only matters when ``effect_tools``
+    contains "auto"; without it, auto classification falls back to the name.
     """
-    if not dry_run_header or dry_run_header.lower() != "true":
+    if not is_dry_run_requested(dry_run_header):
         return False
-    return tool_matches_patterns(tool_name, effect_tools)
+    return is_effect_tool(tool_name, tool_def, effect_tools)
 
 
 TGI_ENABLED = os.environ.get("TGI_URL", None) is not None

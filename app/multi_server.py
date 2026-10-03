@@ -19,6 +19,53 @@ Example:
     "exclude_tools": ["admin_*"]
   }
 ]
+
+Per-server overrides of process-wide settings (all optional; when a field is
+absent the global environment variable applies):
+
+- ``auth_provider`` (string): overrides ``AUTH_PROVIDER``.
+- ``keycloak_provider_alias`` (string): overrides ``KEYCLOAK_PROVIDER_ALIAS``;
+  ``""`` means no alias, i.e. the Keycloak token is passed through.
+- ``effect_tools`` (array of strings): overrides ``EFFECT_TOOLS``. The entry
+  ``"auto"`` classifies tools automatically (see ``app.utils.effect_tools``)
+  and may be combined with explicit globs.
+- ``forward_access_token`` (boolean, default true): when false, the caller's
+  access token never reaches this server: no token exchange, no fallback to
+  the incoming token, no forwarded credential headers and no ``oauth_token``
+  tool argument. Only explicitly configured credentials are sent. Set it to
+  false for every remote that does not use a provider alias (e.g. a public
+  third-party MCP), or the caller's platform token leaks to that third party.
+
+Central remote host proxying several remote MCP servers, each exchanging the
+caller's token through its own Keycloak identity provider:
+[
+  {
+    "id": "mcp-cloudflare-server",
+    "base_path": "/api/mcp-cloudflare-server",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "cloudflare",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-notion-server",
+    "base_path": "/api/mcp-notion-server",
+    "url": "https://mcp.notion.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "notion",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-deepwiki-server",
+    "base_path": "/api/mcp-deepwiki-server",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "sessionless": true,
+    "forward_access_token": false,
+    "effect_tools": ["auto"]
+  }
+]
 """
 
 from __future__ import annotations
@@ -45,6 +92,10 @@ class ServerConfig:
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
     sessionless: Optional[bool] = None
+    auth_provider: Optional[str] = None
+    keycloak_provider_alias: Optional[str] = None
+    effect_tools: Optional[tuple[str, ...]] = None
+    forward_access_token: Optional[bool] = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -91,6 +142,46 @@ class ServerConfig:
                 f"MCP server {server_id!r} include_tools/exclude_tools must be arrays"
             )
 
+        auth_provider = raw.get("auth_provider")
+        if auth_provider is not None:
+            if not isinstance(auth_provider, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} auth_provider must be a string"
+                )
+            # Same normalization as the global AUTH_PROVIDER; empty means
+            # "not overridden".
+            auth_provider = auth_provider.strip().lower() or None
+
+        provider_alias = raw.get("keycloak_provider_alias")
+        if provider_alias is not None:
+            if not isinstance(provider_alias, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} keycloak_provider_alias must be a string"
+                )
+            # Unlike auth_provider, "" is a real override: no alias, pass the
+            # Keycloak token through.
+            provider_alias = provider_alias.strip()
+
+        effect_tools = raw.get("effect_tools")
+        if effect_tools is not None:
+            if not isinstance(effect_tools, list) or not all(
+                isinstance(pattern, str) for pattern in effect_tools
+            ):
+                raise ValueError(
+                    f"MCP server {server_id!r} effect_tools must be an array of strings"
+                )
+            effect_tools = tuple(
+                pattern.strip() for pattern in effect_tools if pattern.strip()
+            )
+
+        forward_access_token = raw.get("forward_access_token")
+        if forward_access_token is not None and not isinstance(
+            forward_access_token, bool
+        ):
+            raise ValueError(
+                f"MCP server {server_id!r} forward_access_token must be a boolean"
+            )
+
         return cls(
             id=server_id,
             base_path=base_path,
@@ -100,6 +191,10 @@ class ServerConfig:
             include_tools=tuple(str(v) for v in include if str(v)),
             exclude_tools=tuple(str(v) for v in exclude if str(v)),
             sessionless=sessionless,
+            auth_provider=auth_provider,
+            keycloak_provider_alias=provider_alias,
+            effect_tools=effect_tools,
+            forward_access_token=forward_access_token,
         )
 
 
@@ -210,6 +305,34 @@ def current_sessionless(default: bool) -> bool:
     if not server or server.sessionless is None:
         return default
     return server.sessionless
+
+
+def current_auth_provider(default: str) -> str:
+    server = current_server()
+    if not server or server.auth_provider is None:
+        return default
+    return server.auth_provider
+
+
+def current_keycloak_provider_alias(default: str) -> str:
+    server = current_server()
+    if not server or server.keycloak_provider_alias is None:
+        return default
+    return server.keycloak_provider_alias
+
+
+def current_forward_access_token(default: bool = True) -> bool:
+    server = current_server()
+    if not server or server.forward_access_token is None:
+        return default
+    return server.forward_access_token
+
+
+def current_effect_tools(default: list[str]) -> list[str]:
+    server = current_server()
+    if not server or server.effect_tools is None:
+        return default
+    return list(server.effect_tools)
 
 
 def session_cookie_name(default_name: str) -> str:

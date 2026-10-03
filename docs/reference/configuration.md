@@ -103,6 +103,38 @@ Optional entry fields:
 - `include_tools`: glob patterns for allowed tools
 - `exclude_tools`: glob patterns for hidden/blocked tools
 - `sessionless`: override the global `MCP_SESSIONLESS` value for this server
+- `auth_provider` (string): override the global `AUTH_PROVIDER` for requests
+  to this server (e.g. `keycloak`, `user-api-key`, `gcp-metadata`). Accepts the
+  same values as `AUTH_PROVIDER`; an empty string means "not overridden".
+- `keycloak_provider_alias` (string): override the global
+  `KEYCLOAK_PROVIDER_ALIAS`, i.e. the Keycloak identity provider whose stored
+  token is exchanged for the caller's token. An empty string means "no alias":
+  the Keycloak token is passed through, as with an empty global.
+- `effect_tools` (array of strings): override the global `EFFECT_TOOLS` glob
+  list used for dry runs (`X-Inxm-Dry-Run: true`) and generated-UI sampling.
+  `[]` means no effect tools for this server. The entry `"auto"` enables
+  [automatic effect classification](#automatic-effect-classification) and can
+  be combined with explicit globs.
+- `forward_access_token` (boolean, default `true`): whether the caller's access
+  token may reach this server. When `false`, the bridge never sends it
+  upstream: no token exchange (including `user-api-key` lookups), no fallback
+  to the incoming token, no `oauth_token` tool argument, and no credential
+  headers (`Authorization`, `Cookie`, `TOKEN_NAME`/`X-Auth-Request-Access-Token`,
+  `X-Forwarded-Access-Token`, or any header containing the caller's token) via
+  `MCP_REMOTE_SERVER_FORWARD_HEADERS` or `MCP_MAP_HEADER_TO_INPUT`, even if
+  allowed globally. Only explicitly configured credentials are sent
+  (`MCP_REMOTE_BEARER_TOKEN`, `MCP_REMOTE_ANON_BEARER_TOKEN`,
+  `MCP_REMOTE_HEADER_*`, ambient cloud identity); with none configured there is
+  no `Authorization` header. The bridge still authenticates its own callers as
+  usual.
+
+> **Security:** an orchestrator should set `"forward_access_token": false` for
+> every remote that does not use a `keycloak_provider_alias` (e.g. a public
+> third-party MCP such as DeepWiki). Otherwise the default sends the caller's
+> own platform token to that third party.
+
+Fields that are absent fall back to the global environment variables, and
+unknown fields are ignored.
 
 Example:
 
@@ -130,6 +162,61 @@ isolated by server. Overlapping base paths are supported; the most specific
 matching base path selects the server context. In sessionless mode,
 `/session/start` remains available
 for client compatibility but does not create a persistent downstream session.
+
+Central remote host proxying several remote MCP servers, each exchanging the
+caller's Keycloak token through its own identity provider and classifying tool
+effects automatically:
+
+```bash
+MCP_SERVERS='[
+  {
+    "id": "mcp-cloudflare-server",
+    "base_path": "/api/mcp-cloudflare-server",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "cloudflare",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-notion-server",
+    "base_path": "/api/mcp-notion-server",
+    "url": "https://mcp.notion.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "notion",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-deepwiki-server",
+    "base_path": "/api/mcp-deepwiki-server",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "sessionless": true,
+    "forward_access_token": false,
+    "effect_tools": ["auto"]
+  }
+]'
+```
+
+#### Automatic effect classification
+
+When the effective effect-tool list contains `"auto"` (a server's
+`effect_tools`, or the global `EFFECT_TOOLS=auto`), every tool is an effect
+tool unless it is confidently read-only:
+
+1. MCP tool annotations win: `readOnlyHint: true` means read-only;
+   `readOnlyHint: false` or `destructiveHint: true` means effect.
+2. Without a usable annotation, a tool is read-only only if its name — compared
+   case-insensitively, after stripping a namespace prefix up to the last `.` or
+   `/` — starts with a read verb followed by `_`, `-`, the end of the name, or a
+   camelCase boundary (`getUser`). Read verbs: `get`, `list`, `search`, `read`,
+   `fetch`, `find`, `describe`, `query`, `lookup`, `show`, `view`, `count`,
+   `check`, `validate`, `preview`, `explain`, `summarize`, `whoami`.
+3. Everything else is an effect, so a misclassified write tool never runs for
+   real during a dry run.
+
+A tool matching an explicit glob is always an effect. Tool definitions are only
+listed for classification when a dry run is actually requested.
 
 ### LLM Configuration
 

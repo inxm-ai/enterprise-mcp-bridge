@@ -21,6 +21,7 @@ from app.session_manager.session_manager import SessionManagerBase
 from app.models import RunPromptResult, RunToolsResult
 from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
+from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.user_info import (
     CallerNotAuthorizedError,
     ensure_caller_in_required_groups,
@@ -42,6 +43,7 @@ from app import vars as app_vars
 from app.multi_server import (
     current_base_path,
     current_command,
+    current_forward_access_token,
     current_remote_url,
     current_tool_filters,
     tools_cache_paths,
@@ -473,7 +475,16 @@ def inject_headers_into_args(
     )
 
     out_args = dict(args or {})
+    forward_credentials = current_forward_access_token(True)
     for input_prop, header_name in MCP_MAP_HEADER_TO_INPUT.items():
+        if not forward_credentials and is_caller_credential_header(header_name):
+            logger.info(
+                "[HeaderMapping] Not mapping credential header %s into %s "
+                "(forward_access_token is disabled)",
+                header_name,
+                input_prop,
+            )
+            continue
         # Only consider if tool declares this property
         if input_prop not in props:
             continue
