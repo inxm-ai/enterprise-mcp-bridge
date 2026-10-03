@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +76,22 @@ def test_parse_servers_supports_local_and_remote_entries():
             }
         ],
         [{"id": "x", "base_path": "/x", "command": "x", "effect_tools": "auto"}],
+        [
+            {
+                "id": "x",
+                "base_path": "/x",
+                "command": "x",
+                "forward_access_token": "false",
+            }
+        ],
+        [
+            {
+                "id": "x",
+                "base_path": "/x",
+                "command": "x",
+                "forward_access_token": 0,
+            }
+        ],
         [{"id": "x", "base_path": "/x", "command": "x", "effect_tools": {}}],
         [{"id": "x", "base_path": "/x", "command": "x", "effect_tools": [1]}],
         [
@@ -387,6 +404,306 @@ def test_remote_strategy_exchanges_token_with_server_alias(monkeypatch):
             assert strategy.headers["Authorization"] == f"Bearer {alias}-token"
         finally:
             multi_server.reset_server(token)
+
+
+def _forwarding_servers():
+    """A public third-party remote (no provider) next to a default remote."""
+    return multi_server.parse_servers(
+        json.dumps(
+            [
+                {
+                    "id": "mcp-deepwiki-server",
+                    "base_path": "/api/mcp-deepwiki-server",
+                    "url": "https://mcp.deepwiki.com/mcp",
+                    "sessionless": True,
+                    "auth_provider": "keycloak",
+                    "keycloak_provider_alias": "",
+                    "forward_access_token": False,
+                },
+                {
+                    "id": "default",
+                    "base_path": "/api/default",
+                    "url": "https://default.example/mcp",
+                    "sessionless": True,
+                    "auth_provider": "keycloak",
+                    "keycloak_provider_alias": "",
+                },
+                {
+                    "id": "explicit-true",
+                    "base_path": "/api/explicit-true",
+                    "url": "https://explicit.example/mcp",
+                    "forward_access_token": True,
+                },
+            ]
+        )
+    )
+
+
+def test_forward_access_token_parsing_and_helper(monkeypatch):
+    deepwiki, default, explicit_true = _forwarding_servers()
+
+    assert deepwiki.forward_access_token is False
+    assert default.forward_access_token is None
+    assert explicit_true.forward_access_token is True
+
+    monkeypatch.setattr(multi_server, "SERVERS", ())
+    assert multi_server.current_forward_access_token() is True
+    for server, expected in (
+        (deepwiki, False),
+        (default, True),
+        (explicit_true, True),
+    ):
+        token = multi_server.bind_server(server)
+        try:
+            assert multi_server.current_forward_access_token() is expected
+            assert multi_server.current_forward_access_token(True) is expected
+        finally:
+            multi_server.reset_server(token)
+
+
+CALLER_TOKEN = "caller-platform-token"
+INCOMING_HEADERS = {
+    "authorization": f"Bearer {CALLER_TOKEN}",
+    "x-auth-request-access-token": CALLER_TOKEN,
+    "cookie": "_oauth2_proxy=session-cookie",
+    "x-forwarded-access-token": CALLER_TOKEN,
+    "x-custom-token": f"wrapped:{CALLER_TOKEN}",
+    "x-request-id": "req-1",
+}
+
+
+@pytest.fixture
+def remote_strategy_env(monkeypatch):
+    from app import vars as app_vars
+    from app.oauth import token_exchange
+    from app.session import client_strategy
+
+    exchanged = []
+
+    class RecordingRetriever:
+        def retrieve_token(self, access_token):
+            exchanged.append(access_token)
+            return {"access_token": access_token, "token_type": "Bearer"}
+
+    class RecordingFactory:
+        def get(self):
+            return RecordingRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", RecordingFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", "keycloak")
+    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_ALIAS", "")
+    for name in (
+        "MCP_REMOTE_SCOPE",
+        "MCP_REMOTE_REDIRECT_URI",
+        "MCP_REMOTE_CLIENT_ID",
+        "MCP_REMOTE_CLIENT_SECRET",
+        "MCP_REMOTE_BEARER_TOKEN",
+        "MCP_REMOTE_ANON_BEARER_TOKEN",
+    ):
+        monkeypatch.setattr(client_strategy, name, "")
+    monkeypatch.setattr(app_vars, "MCP_REMOTE_SERVER_FORWARD_HEADERS", ["*"])
+
+    def build(server, *, anon=False, access_token=CALLER_TOKEN):
+        token = multi_server.bind_server(server)
+        try:
+            return client_strategy.build_mcp_client_strategy(
+                access_token=access_token,
+                requested_group=None,
+                anon=anon,
+                incoming_headers=dict(INCOMING_HEADERS),
+            )
+        finally:
+            multi_server.reset_server(token)
+
+    return SimpleNamespace(
+        build=build,
+        exchanged=exchanged,
+        client_strategy=client_strategy,
+        app_vars=app_vars,
+    )
+
+
+def _assert_no_caller_credentials(headers):
+    lowered = {key.lower(): value for key, value in headers.items()}
+    assert "authorization" not in lowered
+    for name in (
+        "x-auth-request-access-token",
+        "cookie",
+        "x-forwarded-access-token",
+        "x-custom-token",
+    ):
+        assert name not in lowered
+    assert all(CALLER_TOKEN not in value for value in headers.values())
+
+
+def test_disabled_forwarding_sends_no_caller_credentials(remote_strategy_env):
+    deepwiki, *_ = _forwarding_servers()
+
+    for anon in (False, True):
+        strategy = remote_strategy_env.build(deepwiki, anon=anon)
+        _assert_no_caller_credentials(strategy.headers)
+        # Non-credential headers are still forwarded.
+        assert strategy.headers["x-request-id"] == "req-1"
+    assert remote_strategy_env.exchanged == []
+
+
+def test_disabled_forwarding_strips_explicitly_allowed_credential_headers(
+    remote_strategy_env, monkeypatch
+):
+    deepwiki, *_ = _forwarding_servers()
+    monkeypatch.setattr(
+        remote_strategy_env.app_vars,
+        "MCP_REMOTE_SERVER_FORWARD_HEADERS",
+        ["Authorization", "X-Auth-Request-Access-Token", "Cookie", "X-Request-Id"],
+    )
+
+    strategy = remote_strategy_env.build(deepwiki)
+
+    _assert_no_caller_credentials(strategy.headers)
+    assert strategy.headers == {"X-Request-Id": "req-1"}
+
+
+def test_disabled_forwarding_still_sends_configured_credentials(
+    remote_strategy_env, monkeypatch
+):
+    client_strategy = remote_strategy_env.client_strategy
+    deepwiki, *_ = _forwarding_servers()
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "configured")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_ANON_BEARER_TOKEN", "anon-cfg")
+    monkeypatch.setenv("MCP_REMOTE_HEADER_X_API_KEY", "api-key")
+
+    strategy = remote_strategy_env.build(deepwiki)
+    assert strategy.headers["Authorization"] == "Bearer configured"
+    assert strategy.headers["X-API-KEY"] == "api-key"
+
+    anon_strategy = remote_strategy_env.build(deepwiki, anon=True)
+    assert anon_strategy.headers["Authorization"] == "Bearer anon-cfg"
+    assert remote_strategy_env.exchanged == []
+
+
+def test_disabled_forwarding_skips_user_api_key_exchange(
+    remote_strategy_env, monkeypatch
+):
+    client_strategy = remote_strategy_env.client_strategy
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", "user-api-key")
+    server = multi_server.ServerConfig(
+        id="public",
+        base_path="/api/public",
+        remote_url="https://public.example/mcp",
+        forward_access_token=False,
+    )
+
+    strategy = remote_strategy_env.build(server)
+
+    _assert_no_caller_credentials(strategy.headers)
+    assert remote_strategy_env.exchanged == []
+
+
+def test_default_forwarding_keeps_current_behavior(remote_strategy_env, monkeypatch):
+    _deepwiki, default, explicit_true = _forwarding_servers()
+
+    for server in (default, explicit_true):
+        strategy = remote_strategy_env.build(server)
+        assert strategy.headers["Authorization"] == f"Bearer {CALLER_TOKEN}"
+        assert strategy.headers["x-auth-request-access-token"] == CALLER_TOKEN
+        assert strategy.headers["cookie"] == "_oauth2_proxy=session-cookie"
+    assert remote_strategy_env.exchanged == [CALLER_TOKEN, CALLER_TOKEN]
+
+    # The incoming-token fallback is unchanged too.
+    remote_strategy_env.exchanged.clear()
+
+    class EmptyFactory:
+        def get(self):
+            return SimpleNamespace(retrieve_token=lambda token: None)
+
+    monkeypatch.setattr(
+        remote_strategy_env.client_strategy, "TokenRetrieverFactory", EmptyFactory
+    )
+    strategy = remote_strategy_env.build(default)
+    assert strategy.headers["Authorization"] == f"Bearer {CALLER_TOKEN}"
+
+
+def test_single_server_forwarding_unchanged(remote_strategy_env, monkeypatch):
+    client_strategy = remote_strategy_env.client_strategy
+    monkeypatch.setattr(multi_server, "SERVERS", ())
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://legacy/mcp")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token=CALLER_TOKEN,
+        requested_group=None,
+        incoming_headers=dict(INCOMING_HEADERS),
+    )
+
+    assert strategy.forward_access_token is True
+    assert strategy.headers["Authorization"] == f"Bearer {CALLER_TOKEN}"
+    assert strategy.headers["x-auth-request-access-token"] == CALLER_TOKEN
+
+
+def test_disabled_forwarding_injects_no_oauth_token_argument(monkeypatch):
+    import asyncio
+
+    from app.oauth import decorator
+
+    def fail_factory():
+        raise AssertionError("token exchange must not run")
+
+    monkeypatch.setattr(decorator, "TokenRetrieverFactory", fail_factory)
+    monkeypatch.setattr(decorator, "AUTH_PROVIDER", "keycloak")
+    monkeypatch.setattr(decorator, "KEYCLOAK_PROVIDER_ALIAS", "")
+    tools = SimpleNamespace(
+        tools=[
+            SimpleNamespace(
+                name="ask",
+                inputSchema={"properties": {"oauth_token": {}, "q": {}}},
+            )
+        ]
+    )
+    deepwiki, default, _ = _forwarding_servers()
+
+    def decorate(server):
+        token = multi_server.bind_server(server)
+        try:
+            return asyncio.run(
+                decorator.decorate_args_with_oauth_token(
+                    tools, "ask", {"q": "x"}, CALLER_TOKEN
+                )
+            )
+        finally:
+            multi_server.reset_server(token)
+
+    assert decorate(deepwiki) == {"q": "x"}
+    # Default: keycloak without alias passes the caller token through.
+    assert decorate(default) == {"q": "x", "oauth_token": CALLER_TOKEN}
+
+
+def test_disabled_forwarding_skips_credential_header_mapping(monkeypatch):
+    from app.session_manager import session_context
+
+    monkeypatch.setattr(
+        session_context,
+        "MCP_MAP_HEADER_TO_INPUT",
+        {"token": "X-Auth-Request-Access-Token", "request_id": "x-request-id"},
+    )
+    tools = [
+        {
+            "name": "ask",
+            "inputSchema": {"properties": {"token": {}, "request_id": {}}},
+        }
+    ]
+    deepwiki, default, _ = _forwarding_servers()
+
+    def inject(server):
+        token = multi_server.bind_server(server)
+        try:
+            return session_context.inject_headers_into_args(
+                tools, "ask", {}, dict(INCOMING_HEADERS)
+            )
+        finally:
+            multi_server.reset_server(token)
+
+    assert inject(deepwiki) == {"request_id": "req-1"}
+    assert inject(default) == {"token": CALLER_TOKEN, "request_id": "req-1"}
 
 
 def test_match_server_uses_longest_base_path(monkeypatch):

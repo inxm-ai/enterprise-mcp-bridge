@@ -1,5 +1,9 @@
 from app.utils.mcp_fields import input_schema
-from app.multi_server import current_auth_provider, current_keycloak_provider_alias
+from app.multi_server import (
+    current_auth_provider,
+    current_forward_access_token,
+    current_keycloak_provider_alias,
+)
 from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
@@ -14,6 +18,16 @@ async def decorate_args_with_oauth_token(
     tools, tool_name, args: Optional[Dict], access_token: Optional[str]
 ) -> Dict:
     tool_info = next((tool for tool in tools.tools if tool.name == tool_name), None)
+
+    if args is None:
+        args = {}
+    if access_token and not current_forward_access_token(True):
+        # The caller's token (exchanged or not) must never reach this server.
+        logger.info(
+            f"[Tool-Call] forward_access_token is disabled; no oauth_token "
+            f"is injected for tool {tool_name}."
+        )
+        return args
 
     oauth_token = None
     if access_token:
@@ -34,8 +48,6 @@ async def decorate_args_with_oauth_token(
                 )
             oauth_token = token_result["access_token"]
 
-    if args is None:
-        args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
     schema = input_schema(tool_info) if tool_info else None
     if schema:
