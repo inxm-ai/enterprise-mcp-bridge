@@ -9,7 +9,6 @@ from app.vars import (
     TGI_ENABLED,
     APP_CONVERSATIONAL_UI_ENABLED,
     DRY_RUN_HEADER_NAME,
-    is_dry_run_effect_call,
 )
 from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
 from fastapi.responses import (
@@ -49,6 +48,7 @@ from app.session_manager import mcp_session_context, session_manager
 from app import vars as app_vars
 from app.multi_server import (
     current_base_path,
+    current_effect_tools,
     current_sessionless,
     is_multi_server_mode,
     session_cookie_name,
@@ -80,7 +80,10 @@ from .utils.exception_logging import (
     log_exception_with_details,
 )
 from .tgi.routes import router as tgi_router
-from .tgi.tool_dry_run.tool_response import dry_run_tool_result
+from .tgi.tool_dry_run.tool_response import (
+    dry_run_tool_result,
+    resolve_dry_run_effect_call,
+)
 from .app_facade.route import router as app_facade_router
 from app.well_known.oauth_metadata import router as oauth_metadata_router
 from app.sse.routes import router as sse_router
@@ -565,8 +568,16 @@ async def run_tool(
             async with mcp_session_context(
                 sessions, x_inxm_mcp_session, access_token, group, incoming_headers
             ) as session:
-                if is_dry_run_effect_call(x_inxm_dry_run, tool_name, EFFECT_TOOLS):
-                    result = await dry_run_tool_result(session, tool_name, args or {})
+                dry_run, listed_tools = await resolve_dry_run_effect_call(
+                    session,
+                    x_inxm_dry_run,
+                    tool_name,
+                    current_effect_tools(EFFECT_TOOLS),
+                )
+                if dry_run:
+                    result = await dry_run_tool_result(
+                        session, tool_name, args or {}, tools=listed_tools
+                    )
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 

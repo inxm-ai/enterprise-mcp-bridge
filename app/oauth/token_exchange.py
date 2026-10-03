@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from json import JSONDecodeError
 from urllib.parse import parse_qsl
 
@@ -34,7 +34,11 @@ from jwt import DecodeError, InvalidTokenError
 import requests
 
 from app.utils import mask_token, token_fingerprint
-from app.multi_server import current_remote_url
+from app.multi_server import (
+    current_auth_provider,
+    current_keycloak_provider_alias,
+    current_remote_url,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -49,7 +53,7 @@ class TokenRetrieverFactory:
         """
         Factory method to retrieve the appropriate token retriever based on environment variables.
         """
-        provider: str = AUTH_PROVIDER
+        provider: str = current_auth_provider(AUTH_PROVIDER)
         if provider == "keycloak":
             return KeyCloakTokenRetriever()
         elif provider == "user-api-key":
@@ -371,12 +375,27 @@ class AwsWebIdentityTokenRetriever(AmbientIdentityTokenRetriever):
 
 
 class KeyCloakTokenRetriever(TokenRetriever):
-    def __init__(self):
+    def __init__(self, provider_alias: Optional[str] = None):
         self.keycloak_base_url = AUTH_BASE_URL
         self.realm = KEYCLOAK_REALM
-        self.provider_alias = KEYCLOAK_PROVIDER_ALIAS
+        self._provider_alias = provider_alias
         self.allow_unsafe_cert = AUTH_ALLOW_UNSAFE_CERT
         self.logger = logger
+
+    @property
+    def provider_alias(self) -> str:
+        """The identity-provider alias, resolved per request unless pinned.
+
+        Resolved at use rather than construction so a retriever built outside
+        a request (or reused across servers) follows the current server.
+        """
+        if self._provider_alias is not None:
+            return self._provider_alias
+        return current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
+
+    @provider_alias.setter
+    def provider_alias(self, value: Optional[str]) -> None:
+        self._provider_alias = value
 
     def retrieve_token(self, keycloak_token: str) -> Dict[str, Any]:
         """

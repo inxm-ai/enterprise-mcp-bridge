@@ -29,6 +29,18 @@ def test_dry_run_applies_only_to_effect_tools_with_true_header():
     assert not is_dry_run_effect_call("true", "create_ticket", [])
 
 
+def test_dry_run_auto_effect_tools_use_tool_definition():
+    from app.vars import is_dry_run_effect_call
+
+    read_only = {"name": "purge", "annotations": {"readOnlyHint": True}}
+
+    assert is_dry_run_effect_call("true", "delete_zone", ["auto"])
+    assert not is_dry_run_effect_call("true", "list_zones", ["auto"])
+    assert not is_dry_run_effect_call("true", "purge", ["auto"], read_only)
+    assert is_dry_run_effect_call("true", "purge", ["auto"])
+    assert not is_dry_run_effect_call(None, "delete_zone", ["auto"])
+
+
 def test_mcp_map_header_to_input_parsing(monkeypatch):
     monkeypatch.setenv(
         "MCP_MAP_HEADER_TO_INPUT", "userId=x-auth-user-id,email=x-auth-user-email"
