@@ -1,4 +1,5 @@
 from app.utils.mcp_fields import input_schema
+from app.multi_server import current_auth_provider, current_keycloak_provider_alias
 from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
@@ -20,7 +21,9 @@ async def decorate_args_with_oauth_token(
         # every other provider (e.g. user-api-key) must go through its
         # retriever — short-circuiting here would silently forward the
         # Keycloak token instead of the per-user credential.
-        if AUTH_PROVIDER == "keycloak" and not KEYCLOAK_PROVIDER_ALIAS:
+        auth_provider = current_auth_provider(AUTH_PROVIDER)
+        provider_alias = current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
+        if auth_provider == "keycloak" and not provider_alias:
             oauth_token = access_token
         else:
             retriever = TokenRetrieverFactory().get()

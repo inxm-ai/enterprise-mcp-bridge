@@ -4,7 +4,7 @@ import os
 import json
 import re
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 from app.json.schema_validation import validate_schema
 from app.session.session import MCPSessionBase
@@ -13,6 +13,8 @@ from app.tgi.clients.llm_client import LLMClient
 from app.tgi.models.models import ChatCompletionRequest
 from app.tgi.services.prompt_service import PromptService
 from app.tgi.protocols.chunk_reader import chunk_reader
+from app.utils.effect_tools import auto_effect_enabled
+from app.vars import is_dry_run_effect_call, is_dry_run_requested
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -165,11 +167,43 @@ async def get_tool_dry_run_response(
     )
 
 
+async def resolve_dry_run_effect_call(
+    session: MCPSessionBase,
+    dry_run_header: Optional[str],
+    tool_name: str,
+    effect_tools: list[str],
+) -> tuple[bool, Optional[list[dict]]]:
+    """Decide whether a tool call is answered with a dry-run result.
+
+    Returns the decision and, when the session's tools had to be listed for
+    auto classification, the mapped listing so the caller can reuse it. Tools
+    are listed only when a dry run is requested and "auto" is enabled.
+    """
+    if not is_dry_run_requested(dry_run_header):
+        return False, None
+    tools: Optional[list[dict]] = None
+    tool_def = None
+    if auto_effect_enabled(effect_tools):
+        tools = map_tools(await session.list_tools())
+        tool_def = next((tool for tool in tools if tool.get("name") == tool_name), None)
+    return (
+        is_dry_run_effect_call(dry_run_header, tool_name, effect_tools, tool_def),
+        tools,
+    )
+
+
 async def dry_run_tool_result(
-    session: MCPSessionBase, tool_name: str, tool_input: dict
+    session: MCPSessionBase,
+    tool_name: str,
+    tool_input: dict,
+    tools: Optional[list[dict]] = None,
 ) -> Any:
-    """Answer a tool call with a simulated result instead of executing the tool."""
-    tools = map_tools(await session.list_tools())
+    """Answer a tool call with a simulated result instead of executing the tool.
+
+    ``tools`` is an already mapped tool listing to reuse instead of listing.
+    """
+    if tools is None:
+        tools = map_tools(await session.list_tools())
     tool = next((tool for tool in tools if tool.get("name") == tool_name), None)
     # Tests and other callsites may patch get_tool_dry_run_response with a
     # sync function, so await only when a coroutine comes back.

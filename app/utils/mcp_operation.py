@@ -25,6 +25,7 @@ from opentelemetry import baggage, trace
 from opentelemetry.propagate import inject
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from app.multi_server import current_auth_provider
 from app.utils import token_fingerprint
 from app.vars import (
     AUTH_PROVIDER,
@@ -418,7 +419,7 @@ def mcp_operation_span(
         recorder.set_attribute("enterprise_mcp_bridge.group.id", group)
         recorder.set_attribute(
             "enterprise_mcp_bridge.auth.mode",
-            AUTH_PROVIDER if access_token else "anonymous",
+            current_auth_provider(AUTH_PROVIDER) if access_token else "anonymous",
         )
         if arg_keys is not None:
             keys = list(arg_keys)

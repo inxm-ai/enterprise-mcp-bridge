@@ -25,7 +25,11 @@ from app.elicitation import (
     get_elicitation_coordinator,
 )
 from app.mcp_server.server_params import get_server_params
-from app.multi_server import current_command, current_remote_url
+from app.multi_server import (
+    current_auth_provider,
+    current_command,
+    current_remote_url,
+)
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
@@ -282,7 +286,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         )
 
     def _prepare_auth(self) -> None:
-        if AUTH_PROVIDER in AMBIENT_IDENTITY_PROVIDERS:
+        auth_provider = current_auth_provider(AUTH_PROVIDER)
+        if auth_provider in AMBIENT_IDENTITY_PROVIDERS:
             self._prepare_ambient_identity_auth()
             return
 
@@ -320,7 +325,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             # shared bearer token or the incoming Keycloak token would
             # silently replace the user's identity with a shared one and
             # defeat per-user isolation.
-            if AUTH_PROVIDER == "user-api-key" and self.access_token:
+            if auth_provider == "user-api-key" and self.access_token:
                 raise UserLoggedOutException(
                     "Per-user API key retrieval failed; refusing to fall "
                     "back to a shared credential"
