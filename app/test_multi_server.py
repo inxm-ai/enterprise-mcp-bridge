@@ -103,6 +103,15 @@ def test_parse_servers_supports_local_and_remote_entries():
             }
         ],
         [
+            {
+                "id": "x",
+                "base_path": "/x",
+                "command": "x",
+                "tool_output_schemas": {"t": "/schemas/t.json"},
+            }
+        ],
+        [{"id": "x", "base_path": "/x", "command": "x", "tool_output_schemas": []}],
+        [
             {"id": "x", "base_path": "/x", "command": "x"},
             {"id": "x", "base_path": "/y", "command": "y"},
         ],
@@ -221,6 +230,45 @@ def test_auth_and_effect_helpers_prefer_server_overrides():
             assert multi_server.current_effect_tools(["global_*"]) == effect_tools
         finally:
             multi_server.reset_server(token)
+
+
+def test_tool_output_schemas_are_per_server(monkeypatch):
+    from app import vars as app_vars
+
+    chat_schema = {"type": "object", "properties": {"value": {"type": "array"}}}
+    chat, mail = multi_server.parse_servers(
+        json.dumps(
+            [
+                {
+                    "id": "chat",
+                    "base_path": "/api/chat",
+                    "command": "npx -y m365",
+                    "tool_output_schemas": {"list-chats": chat_schema},
+                },
+                {"id": "mail", "base_path": "/api/mail", "command": "npx -y m365"},
+            ]
+        )
+    )
+    global_schema = {"type": "object"}
+    monkeypatch.setattr(
+        app_vars, "TOOL_OUTPUT_SCHEMAS", {"list-chats": global_schema, "g": {}}
+    )
+
+    token = multi_server.bind_server(chat)
+    try:
+        assert app_vars.get_tool_output_schema("list-chats") == chat_schema
+        # Canonical alias matching applies to server schemas too.
+        assert app_vars.get_tool_output_schema("list_chat") == chat_schema
+        assert app_vars.get_tool_output_schema("g") == {}
+    finally:
+        multi_server.reset_server(token)
+
+    token = multi_server.bind_server(mail)
+    try:
+        assert app_vars.get_tool_output_schema("list-chats") == global_schema
+    finally:
+        multi_server.reset_server(token)
+    assert app_vars.get_tool_output_schema("list-chats") == global_schema
 
 
 def test_auth_and_effect_helpers_default_outside_server_context(monkeypatch):

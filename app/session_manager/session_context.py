@@ -44,6 +44,7 @@ from app.multi_server import (
     current_base_path,
     current_command,
     current_forward_access_token,
+    current_tool_output_schemas,
     current_remote_url,
     current_tool_filters,
     tools_cache_paths,
@@ -245,7 +246,7 @@ def _cache_signature() -> dict:
         "include": include_tools,
         "exclude": exclude_tools,
         "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
-        "tool_output_schemas": TOOL_OUTPUT_SCHEMAS,
+        "tool_output_schemas": current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS),
         "server": current_command(os.environ.get("MCP_SERVER_COMMAND", ""))
         or current_remote_url(os.environ.get("MCP_REMOTE_SERVER", "")),
     }

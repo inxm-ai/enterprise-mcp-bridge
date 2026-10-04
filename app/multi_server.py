@@ -35,6 +35,9 @@ absent the global environment variable applies):
   tool argument. Only explicitly configured credentials are sent. Set it to
   false for every remote that does not use a provider alias (e.g. a public
   third-party MCP), or the caller's platform token leaks to that third party.
+- ``tool_output_schemas`` (object): tool name -> output JSON schema, layered
+  over ``TOOL_OUTPUT_SCHEMAS`` for this server only. Inline schemas only, no
+  file paths.
 
 Central remote host proxying several remote MCP servers, each exchanging the
 caller's token through its own Keycloak identity provider:
@@ -96,6 +99,7 @@ class ServerConfig:
     keycloak_provider_alias: Optional[str] = None
     effect_tools: Optional[tuple[str, ...]] = None
     forward_access_token: Optional[bool] = None
+    tool_output_schemas: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -182,6 +186,16 @@ class ServerConfig:
                 f"MCP server {server_id!r} forward_access_token must be a boolean"
             )
 
+        tool_output_schemas = raw.get("tool_output_schemas")
+        if tool_output_schemas is not None and not (
+            isinstance(tool_output_schemas, dict)
+            and all(isinstance(v, dict) for v in tool_output_schemas.values())
+        ):
+            raise ValueError(
+                f"MCP server {server_id!r} tool_output_schemas must map tool "
+                "names to schema objects"
+            )
+
         return cls(
             id=server_id,
             base_path=base_path,
@@ -195,6 +209,7 @@ class ServerConfig:
             keycloak_provider_alias=provider_alias,
             effect_tools=effect_tools,
             forward_access_token=forward_access_token,
+            tool_output_schemas=tool_output_schemas,
         )
 
 
@@ -319,6 +334,15 @@ def current_keycloak_provider_alias(default: str) -> str:
     if not server or server.keycloak_provider_alias is None:
         return default
     return server.keycloak_provider_alias
+
+
+def current_tool_output_schemas(base: dict[str, Any]) -> dict[str, Any]:
+    server = current_server()
+    if not server or not server.tool_output_schemas:
+        return base
+    merged = dict(base)
+    merged.update(server.tool_output_schemas)
+    return merged
 
 
 def current_forward_access_token(default: bool = True) -> bool:

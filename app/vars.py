@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from app.multi_server import current_tool_output_schemas
 from app.utils.effect_tools import is_effect_tool
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
@@ -109,11 +110,15 @@ def _canonicalize_tool_name(tool_name: str) -> str:
 
 
 def get_tool_output_schema(tool_name: str):
-    """Get output schema by exact match first, then canonicalized alias match."""
+    """Get output schema by exact match first, then canonicalized alias match.
+
+    In multi-server mode the current server's own schemas take precedence.
+    """
     if not isinstance(tool_name, str) or not tool_name:
         return None
 
-    exact = TOOL_OUTPUT_SCHEMAS.get(tool_name)
+    schemas = current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS)
+    exact = schemas.get(tool_name)
     if exact is not None:
         return exact
 
@@ -122,7 +127,7 @@ def get_tool_output_schema(tool_name: str):
         return None
 
     matched_schema = None
-    for name, schema in TOOL_OUTPUT_SCHEMAS.items():
+    for name, schema in schemas.items():
         if _canonicalize_tool_name(name) != canonical_name:
             continue
         if matched_schema is not None and matched_schema != schema:
