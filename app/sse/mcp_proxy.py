@@ -187,7 +187,9 @@ def _build_proxy_handlers(
             args = await decorate_args_with_oauth_token(
                 tools, name, arguments, access_token
             )
-            args = inject_headers_into_args(tools, name, args, incoming_headers)
+            args = inject_headers_into_args(
+                tools, name, args, incoming_headers, access_token
+            )
             for _ in range(3):
                 try:
                     result = await downstream.call_tool(

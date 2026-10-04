@@ -453,11 +453,17 @@ async def _cached_mapped_tools(
 
 
 def inject_headers_into_args(
-    tools, tool_name: str, args: Optional[Dict], incoming_headers: Optional[dict]
+    tools,
+    tool_name: str,
+    args: Optional[Dict],
+    incoming_headers: Optional[dict],
+    access_token: Optional[str] = None,
 ) -> Dict:
     """
     Fill missing args for tool_name from incoming_headers according to
     MCP_MAP_HEADER_TO_INPUT mapping. Header matching is case-insensitive.
+    With forward_access_token disabled, a header that is a credential by
+    name, or whose value carries the caller's access_token, is not mapped.
     """
     mapping = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
     if not mapping or not incoming_headers:
@@ -496,7 +502,9 @@ def inject_headers_into_args(
     out_args = dict(args or {})
     forward_credentials = current_forward_access_token(True)
     for input_prop, header_name in mapping.items():
-        if not forward_credentials and is_caller_credential_header(header_name):
+        if not forward_credentials and is_caller_credential_header(
+            header_name, headers_lc.get(header_name.lower()), access_token
+        ):
             logger.info(
                 "[HeaderMapping] Not mapping credential header %s into %s "
                 "(forward_access_token is disabled)",
@@ -622,7 +630,11 @@ async def mcp_session_context(
                         )
                         # Inject header-mapped inputs if available
                         decorated_args = inject_headers_into_args(
-                            tools, tool_name, decorated_args, incoming_headers
+                            tools,
+                            tool_name,
+                            decorated_args,
+                            incoming_headers,
+                            access_token_inner,
                         )
                         result = await session.call_tool(
                             tool_name,
@@ -663,7 +675,11 @@ async def mcp_session_context(
                         )
                         # Inject header-mapped inputs if available
                         decorated_args = inject_headers_into_args(
-                            tools, tool_name, decorated_args, incoming_headers
+                            tools,
+                            tool_name,
+                            decorated_args,
+                            incoming_headers,
+                            access_token_inner,
                         )
 
                         call_fn = getattr(session, "call_tool_with_progress", None)
@@ -843,7 +859,7 @@ async def mcp_session_context(
             )
             # Inject header-mapped inputs if available
             decorated_args = inject_headers_into_args(
-                tools, tool_name, decorated_args, incoming_headers
+                tools, tool_name, decorated_args, incoming_headers, access_token_inner
             )
             result = await mcp_task.request(
                 {
@@ -897,7 +913,7 @@ async def mcp_session_context(
                 tools, tool_name, args, access_token_inner
             )
             decorated_args = inject_headers_into_args(
-                tools, tool_name, decorated_args, incoming_headers
+                tools, tool_name, decorated_args, incoming_headers, access_token_inner
             )
             result = await mcp_task.request(
                 {

@@ -10,6 +10,7 @@ from app.isolation import enabled_globally, isolate, uid_for
 from app.multi_server import (
     current_command,
     current_env,
+    current_forward_access_token,
     current_isolate,
     current_server_id,
 )
@@ -108,8 +109,15 @@ def get_server_params(
     anon: bool = False,
 ) -> StdioServerParameters:
     env_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")) or None
+    # forward_access_token=false: no exchange and no caller credential in the
+    # child's environment (OAUTH_ENV). Templates still resolve the caller's
+    # identity ({user_id}, {data_path}); they never emit the token itself.
+    forward = current_forward_access_token(True)
     env, _token_result = defined_env(
-        current_env(os.environ.copy()), access_token, requested_group, anon
+        current_env(os.environ.copy()),
+        access_token,
+        requested_group,
+        anon or not forward,
     )
 
     # Process command template with dynamic data path (caller identity)

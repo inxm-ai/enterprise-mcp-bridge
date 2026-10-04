@@ -21,8 +21,10 @@ async def decorate_args_with_oauth_token(
 
     if args is None:
         args = {}
-    if access_token and not current_forward_access_token(True):
-        # The caller's token (exchanged or not) must never reach this server.
+    if not current_forward_access_token(True):
+        # The caller's token (exchanged or not) must never reach this server,
+        # and a tool declaring oauth_token runs without one rather than
+        # failing for a missing caller token.
         logger.info(
             f"[Tool-Call] forward_access_token is disabled; no oauth_token "
             f"is injected for tool {tool_name}."

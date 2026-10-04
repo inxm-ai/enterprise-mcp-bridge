@@ -16,10 +16,11 @@ _CREDENTIAL_HEADERS = frozenset(
         "cookie",
         "x-auth-request-access-token",
         "x-forwarded-access-token",
-        "x-amzn-oidc-accesstoken",
-        "x-amzn-oidc-data",
     }
 )
+# AWS ALB's OIDC headers (access token, identity, data) all describe the
+# caller's session.
+_CREDENTIAL_HEADER_PREFIXES = ("x-amzn-oidc-",)
 
 
 def is_caller_credential_header(
@@ -31,6 +32,10 @@ def is_caller_credential_header(
     header whose value contains the caller's access token.
     """
     lowered = (name or "").lower()
-    if lowered in _CREDENTIAL_HEADERS or lowered == TOKEN_NAME.lower():
+    if (
+        lowered in _CREDENTIAL_HEADERS
+        or lowered.startswith(_CREDENTIAL_HEADER_PREFIXES)
+        or lowered == TOKEN_NAME.lower()
+    ):
         return True
     return bool(access_token and value and access_token in value)

@@ -1368,3 +1368,102 @@ def test_bad_secrets_or_settings_are_refused(entry):
         multi_server.parse_servers(
             json.dumps([{"id": "x", "base_path": "/x", "command": "x", **entry}])
         )
+
+
+def test_disabled_forwarding_maps_no_header_carrying_the_caller_token(monkeypatch):
+    from app.session_manager import session_context
+
+    monkeypatch.setattr(
+        session_context,
+        "MCP_MAP_HEADER_TO_INPUT",
+        {"token": "X-Custom-Token", "request_id": "x-request-id"},
+    )
+    tools = [
+        {
+            "name": "ask",
+            "inputSchema": {"properties": {"token": {}, "request_id": {}}},
+        }
+    ]
+    deepwiki, default, _ = _forwarding_servers()
+
+    def inject(server):
+        token = multi_server.bind_server(server)
+        try:
+            return session_context.inject_headers_into_args(
+                tools, "ask", {}, dict(INCOMING_HEADERS), CALLER_TOKEN
+            )
+        finally:
+            multi_server.reset_server(token)
+
+    # Not a credential header by name, but its value wraps the caller token.
+    assert inject(deepwiki) == {"request_id": "req-1"}
+    assert inject(default)["token"] == f"wrapped:{CALLER_TOKEN}"
+
+
+def test_disabled_forwarding_needs_no_caller_token_for_oauth_token_tools(
+    monkeypatch,
+):
+    import asyncio
+
+    from app.oauth import decorator
+
+    tools = SimpleNamespace(
+        tools=[
+            SimpleNamespace(
+                name="ask",
+                inputSchema={
+                    "properties": {"oauth_token": {}, "q": {}},
+                    "required": ["oauth_token", "q"],
+                },
+            )
+        ]
+    )
+    deepwiki, _, _ = _forwarding_servers()
+    token = multi_server.bind_server(deepwiki)
+    try:
+        args = asyncio.run(
+            decorator.decorate_args_with_oauth_token(tools, "ask", {"q": "x"}, None)
+        )
+    finally:
+        multi_server.reset_server(token)
+    assert args == {"q": "x"}
+
+
+def test_every_aws_oidc_header_is_a_credential():
+    from app.oauth.credential_headers import is_caller_credential_header
+
+    for name in ("X-Amzn-Oidc-Identity", "x-amzn-oidc-data", "X-Amzn-Oidc-AccessToken"):
+        assert is_caller_credential_header(name)
+    assert not is_caller_credential_header("x-request-id", "req-1", CALLER_TOKEN)
+
+
+def test_disabled_forwarding_puts_no_caller_credential_in_a_local_child(monkeypatch):
+    from app.mcp_server import server_params
+
+    class FailingFactory:
+        def get(self):
+            raise AssertionError("token exchange must not run")
+
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", FailingFactory)
+    monkeypatch.setattr(server_params, "process_template", lambda v, *_: v)
+    (local,) = multi_server.parse_servers(
+        json.dumps(
+            [
+                {
+                    "id": "package",
+                    "base_path": "/api/package",
+                    "command": "npx -y some-package@1.0.0",
+                    "env": {"OAUTH_ENV": "PACKAGE_TOKEN"},
+                    "forward_access_token": False,
+                }
+            ]
+        )
+    )
+    token = multi_server.bind_server(local)
+    try:
+        params = server_params.get_server_params(access_token=CALLER_TOKEN)
+    finally:
+        multi_server.reset_server(token)
+    assert "PACKAGE_TOKEN" not in params.env
+    assert "MCP_BEARER_TOKEN" not in params.env
+    assert CALLER_TOKEN not in json.dumps(params.env)
