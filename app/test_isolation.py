@@ -127,6 +127,28 @@ def test_an_isolated_server_is_spawned_through_setpriv(monkeypatch, as_root):
         multi_server.reset_server(token)
 
 
+def test_the_bridge_starts_with_isolated_servers_configured():
+    """MCP_SERVERS is parsed at import time: the whole module must load."""
+    servers = [
+        {"id": "a", "base_path": "/a", "command": "a", "isolate": True},
+        {"id": "b", "base_path": "/b", "url": "https://b.example/mcp"},
+    ]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from app import multi_server; print(len(multi_server.SERVERS))",
+        ],
+        env={**os.environ, "MCP_SERVERS": json.dumps(servers)},
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "2"
+
+
 @pytest.mark.skipif(
     os.geteuid() != 0 or not shutil.which("setpriv"),
     reason="needs root and setpriv (runs in the Docker testing stage)",

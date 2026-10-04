@@ -224,6 +224,10 @@ class ServerConfig:
         )
 
 
+def current_isolate_for(server: ServerConfig, default: bool) -> bool:
+    return default if server.isolate is None else server.isolate
+
+
 def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
     raw = raw.strip()
     if not raw:
@@ -359,10 +363,6 @@ def current_tool_output_schemas(base: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     merged.update(server.tool_output_schemas)
     return merged
-
-
-def current_isolate_for(server: ServerConfig, default: bool) -> bool:
-    return default if server.isolate is None else server.isolate
 
 
 def current_isolate(default: bool) -> bool:
