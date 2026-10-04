@@ -167,6 +167,9 @@ def _extract_completion_content(result: Any) -> str:
     if result is None:
         return ""
 
+    if hasattr(result, "model_dump"):
+        result = result.model_dump(mode="json")
+
     if isinstance(result, str):
         return result
 
@@ -611,6 +614,8 @@ async def chat_completions(
                     )
                 else:
                     # Dict result path: passthrough
+                    if hasattr(result, "model_dump"):
+                        result = result.model_dump(mode="json")
                     return JSONResponse(content=result)
 
     except HTTPException as e:

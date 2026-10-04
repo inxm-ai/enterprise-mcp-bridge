@@ -6,8 +6,9 @@ responsibility for authentication, MCP sessions, workflows, and tool execution.
 
 import logging
 import os
+import re
 from http.cookies import SimpleCookie
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from ag2 import Agent
 from ag2.a2a import A2AServer, build_card
@@ -24,7 +25,7 @@ from starlette.routing import Route
 from app.session import session_id, try_get_session_id
 from app.session_manager import mcp_session_context
 from app.tgi.models import ChatCompletionRequest
-from app.tgi.protocols.chunk_reader import accumulate_content
+from app.tgi.protocols.chunk_reader import chunk_reader
 from app.tgi.routes import (
     _extract_completion_content,
     _is_async_iterable,
@@ -42,6 +43,92 @@ from app.vars import (
 )
 
 logger = logging.getLogger("uvicorn.error")
+
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+_MAX_PROGRESS_CHARS = 500
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+class _ThinkSplitter:
+    """Separate ``<think>…</think>`` progress notes from the answer.
+
+    The streamed chat completion interleaves the planner's progress (todos,
+    tool calls) as think blocks with the answer text. Chunks may split a tag,
+    so a possible tag prefix at the end of the buffer is held back.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._in_think = False
+        self._answer: list[str] = []
+        self.last_note: Optional[str] = None
+
+    @staticmethod
+    def _held_back(text: str, tag: str) -> int:
+        for size in range(min(len(tag) - 1, len(text)), 0, -1):
+            if text.endswith(tag[:size]):
+                return size
+        return 0
+
+    @staticmethod
+    def _note(raw: str) -> Optional[str]:
+        note = _HTML_TAG.sub("", raw).strip()
+        if not note:
+            return None
+        if len(note) > _MAX_PROGRESS_CHARS:
+            note = note[:_MAX_PROGRESS_CHARS].rstrip() + "…"
+        return note
+
+    def feed(self, piece: str) -> list[str]:
+        """Add streamed content; return the progress notes it completed."""
+        self._buffer += piece
+        notes: list[str] = []
+        while True:
+            if self._in_think:
+                end = self._buffer.find(_THINK_CLOSE)
+                if end < 0:
+                    break
+                note = self._note(self._buffer[:end])
+                if note:
+                    notes.append(note)
+                    self.last_note = note
+                self._buffer = self._buffer[end + len(_THINK_CLOSE) :]
+                self._in_think = False
+            else:
+                start = self._buffer.find(_THINK_OPEN)
+                if start < 0:
+                    keep = self._held_back(self._buffer, _THINK_OPEN)
+                    cut = len(self._buffer) - keep
+                    self._answer.append(self._buffer[:cut])
+                    self._buffer = self._buffer[cut:]
+                    break
+                self._answer.append(self._buffer[:start])
+                self._buffer = self._buffer[start + len(_THINK_OPEN) :]
+                self._in_think = True
+        return notes
+
+    def finish(self) -> str:
+        """The answer text; an unterminated think block is dropped."""
+        if not self._in_think:
+            self._answer.append(self._buffer)
+        self._buffer = ""
+        return "".join(self._answer).strip()
+
+
+async def _stream_with_progress(
+    stream: AsyncGenerator[Any, None], updater: TaskUpdater
+) -> str:
+    """Consume a streamed completion, reporting think notes as progress."""
+    splitter = _ThinkSplitter()
+    async with chunk_reader(stream) as reader:
+        async for piece in reader.as_str():
+            for note in splitter.feed(piece):
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(parts=[Part(text=note)]),
+                )
+    return splitter.finish() or splitter.last_note or ""
 
 
 def _cookie_values(headers: dict[str, str]) -> dict[str, str]:
@@ -199,7 +286,9 @@ class BridgeA2AExecutor(A2AAgentExecutor):
         chat_request = ChatCompletionRequest(
             messages=[{"role": "user", "content": context.get_user_input()}],
             model=DEFAULT_MODEL,
-            stream=False,
+            # The streaming path is the one that plans and runs MCP tools; the
+            # non-streaming one answers without them.
+            stream=True,
             use_workflow=use_workflow,
             workflow_execution_id=workflow_execution_id,
         )
@@ -220,7 +309,7 @@ class BridgeA2AExecutor(A2AAgentExecutor):
                     prompt,
                 )
                 if _is_async_iterable(result):
-                    response_text = await accumulate_content(result)
+                    response_text = await _stream_with_progress(result, updater)
                 else:
                     response_text = _extract_completion_content(result)
 

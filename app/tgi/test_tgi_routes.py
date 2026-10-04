@@ -374,6 +374,43 @@ class TestTGIRoutesEdgyCases:
 class TestTGIRoutes:
     """Test cases for TGI routes."""
 
+    def test_chat_completions_non_streaming_serializes_a_response_model(
+        self,
+        client,
+        mock_session_manager,
+        mock_mcp_session_context,
+        sample_chat_request,
+    ):
+        """The service returns a pydantic model, not a dict, without streaming."""
+        from app.tgi.models import ChatCompletionResponse
+
+        with patch("app.tgi.routes.tgi_service") as mock_service:
+            mock_service.chat_completion = AsyncMock(
+                return_value=ChatCompletionResponse.model_validate(
+                    {
+                        "id": "chatcmpl-model",
+                        "created": 1234567890,
+                        "model": "test-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                )
+            )
+
+            response = client.post(
+                "/tgi/v1/chat/completions",
+                json=sample_chat_request,
+                headers={"X-Auth-Request-Access-Token": "test-token"},
+            )
+
+            assert response.status_code == 200
+            assert response.json()["choices"][0]["message"]["content"] == "Hi"
+
     def test_chat_completions_non_streaming(
         self,
         client,

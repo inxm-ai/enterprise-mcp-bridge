@@ -157,3 +157,130 @@ def test_agent_card_uses_forwarded_public_origin():
     assert (
         card["supportedInterfaces"][0]["url"] == "https://bridge.example.com/tgi/v1/a2a"
     )
+
+
+def test_think_splitter_separates_progress_from_the_answer_across_chunks():
+    from app.tgi.a2a_runtime import _ThinkSplitter
+
+    splitter = _ThinkSplitter()
+    notes = []
+    for piece in [
+        "<thi",
+        "nk>1. I will run <code>search_repositories</code></th",
+        "ink>Two repos:",
+        " **a** and <",
+        "b><think>done</think>",
+    ]:
+        notes.extend(splitter.feed(piece))
+
+    assert notes == ["1. I will run search_repositories", "done"]
+    assert splitter.finish() == "Two repos: **a** and <b>"
+
+
+def test_think_splitter_falls_back_to_the_last_note_without_an_answer():
+    from app.tgi.a2a_runtime import _ThinkSplitter
+
+    splitter = _ThinkSplitter()
+    splitter.feed("<think>only progress</think><think>unterminated")
+    assert splitter.finish() == ""
+    assert splitter.last_note == "only progress"
+
+
+@pytest.mark.asyncio
+async def test_executor_streams_the_completion_and_reports_progress(monkeypatch):
+    import json
+    from contextlib import asynccontextmanager
+
+    from a2a.server.agent_execution import RequestContext
+    from a2a.server.context import ServerCallContext
+    from a2a.server.events import EventQueue
+    from a2a.types import (
+        Message,
+        Part,
+        Role,
+        SendMessageRequest,
+        TaskArtifactUpdateEvent,
+        TaskState,
+        TaskStatusUpdateEvent,
+    )
+
+    from app.tgi import a2a_runtime
+
+    captured = {}
+
+    class CaptureQueue(EventQueue):
+        def __init__(self):
+            self.events = []
+
+        async def enqueue_event(self, event):
+            self.events.append(event)
+
+    @asynccontextmanager
+    async def fake_mcp_context(
+        sessions, session_key, access_token, group, incoming_headers=None
+    ):
+        yield object()
+
+    def sse(content):
+        payload = {"choices": [{"index": 0, "delta": {"content": content}}]}
+        return f"data: {json.dumps(payload)}\n\n"
+
+    class StreamingService:
+        async def chat_completion(
+            self, session, request, user_token, access_token, prompt
+        ):
+            captured["stream"] = request.stream
+
+            async def stream():
+                yield sse("<think>Executing search_repositories</think>")
+                yield sse("Found **2** repos.")
+                yield "data: [DONE]\n\n"
+
+            return stream()
+
+    monkeypatch.setattr(a2a_runtime, "DEFAULT_MODEL", "test-model")
+    monkeypatch.setattr(a2a_runtime, "mcp_session_context", fake_mcp_context)
+    monkeypatch.setattr(a2a_runtime, "tgi_service", StreamingService())
+
+    request = SendMessageRequest(
+        message=Message(
+            message_id="msg-1", role=Role.ROLE_USER, parts=[Part(text="repos?")]
+        )
+    )
+    context = RequestContext(
+        call_context=ServerCallContext(state={"headers": {}}), request=request
+    )
+    queue = CaptureQueue()
+
+    await a2a_runtime.BridgeA2AExecutor().execute(context, queue)
+
+    assert captured["stream"] is True
+    statuses = [e for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
+    progress = [
+        s.status.message.parts[0].text
+        for s in statuses
+        if s.status.state == TaskState.TASK_STATE_WORKING and s.status.message.parts
+    ]
+    assert progress == ["Executing search_repositories"]
+    artifacts = [e for e in queue.events if isinstance(e, TaskArtifactUpdateEvent)]
+    assert [a.artifact.parts[0].text for a in artifacts] == ["Found **2** repos."]
+    assert statuses[-1].status.state == TaskState.TASK_STATE_COMPLETED
+
+
+def test_completion_content_is_read_from_a_response_model():
+    from app.tgi.models import ChatCompletionResponse, Choice, Message, MessageRole
+    from app.tgi.routes import _extract_completion_content
+
+    response = ChatCompletionResponse(
+        id="chatcmpl-1",
+        created=0,
+        model="tgi",
+        choices=[
+            Choice(
+                index=0,
+                message=Message(role=MessageRole.ASSISTANT, content="It's two repos."),
+                finish_reason="stop",
+            )
+        ],
+    )
+    assert _extract_completion_content(response) == "It's two repos."
