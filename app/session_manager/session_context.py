@@ -222,7 +222,9 @@ def enforce_response_ceiling(result: Any) -> Any:
     bridge enforces its own named byte ceiling. The oversized content is
     dropped, never partially relayed.
     """
-    limit = app_vars.MCP_MAX_RESPONSE_BYTES
+    limit = app_vars.per_server_int(
+        "MCP_MAX_RESPONSE_BYTES", app_vars.MCP_MAX_RESPONSE_BYTES
+    )
     if limit <= 0:
         return result
     size = encoded_result_size(result)
@@ -259,7 +261,7 @@ def _cache_signature() -> dict:
     return {
         "include": include_tools,
         "exclude": exclude_tools,
-        "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
+        "map_header_to_input": app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT),
         "tool_output_schemas": current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS),
         "server": current_command(os.environ.get("MCP_SERVER_COMMAND", ""))
         or current_remote_url(os.environ.get("MCP_REMOTE_SERVER", "")),
@@ -323,8 +325,9 @@ def map_tools(tools):
 
         if isinstance(input_schema_copy, dict) and input_schema_copy.get("properties"):
             props = input_schema_copy.get("properties", {})
+            mapped = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
             for input_prop in list(props.keys()):
-                if input_prop in MCP_MAP_HEADER_TO_INPUT:
+                if input_prop in mapped:
                     props.pop(input_prop, None)
                     required = input_schema_copy.get("required")
                     if isinstance(required, list) and input_prop in required:
@@ -456,7 +459,8 @@ def inject_headers_into_args(
     Fill missing args for tool_name from incoming_headers according to
     MCP_MAP_HEADER_TO_INPUT mapping. Header matching is case-insensitive.
     """
-    if not MCP_MAP_HEADER_TO_INPUT or not incoming_headers:
+    mapping = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
+    if not mapping or not incoming_headers:
         return args or {}
 
     # normalize incoming headers to lowercase keys for case-insensitive lookup
@@ -491,7 +495,7 @@ def inject_headers_into_args(
 
     out_args = dict(args or {})
     forward_credentials = current_forward_access_token(True)
-    for input_prop, header_name in MCP_MAP_HEADER_TO_INPUT.items():
+    for input_prop, header_name in mapping.items():
         if not forward_credentials and is_caller_credential_header(header_name):
             logger.info(
                 "[HeaderMapping] Not mapping credential header %s into %s "

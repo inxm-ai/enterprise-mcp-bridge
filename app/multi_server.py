@@ -38,6 +38,15 @@ absent the global environment variable applies):
 - ``tool_output_schemas`` (object): tool name -> output JSON schema, layered
   over ``TOOL_OUTPUT_SCHEMAS`` for this server only. Inline schemas only, no
   file paths.
+- ``env_from`` (object): child variable -> bridge variable. The child gets
+  the bridge variable's value under its own name, e.g. a Kubernetes
+  Secret mounted on the bridge for this server only. With ``isolate`` no
+  other child sees it.
+- ``settings`` (object of strings): per-server values of bridge settings
+  that are otherwise process-wide; only the keys in ``SETTINGS`` are
+  accepted.
+- ``settings_from`` (object): setting -> bridge variable, for settings that
+  are secrets (e.g. ``MCP_REMOTE_ANON_BEARER_TOKEN``).
 - ``isolate`` (boolean): overrides ``MCP_ISOLATE_CHILDREN``; when true the
   local server runs as its own unprivileged user (see
   ``app.isolation``).
@@ -88,6 +97,39 @@ from typing import Any, Optional
 from app.isolation import check_unique_uids, enabled_globally
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _json_list(raw: str) -> None:
+    if not isinstance(json.loads(raw), list):
+        raise ValueError("expected a JSON array")
+
+
+# Bridge settings a server may set for itself, with a check of the value.
+SETTINGS = {
+    "SYSTEM_DEFINED_PROMPTS": _json_list,
+    "MCP_MAP_HEADER_TO_INPUT": str,
+    "MCP_TOOL_TIMEOUT_SECONDS": float,
+    "MCP_MAX_RESPONSE_BYTES": int,
+    "BRIDGE_REQUIRED_GROUPS": str,
+    "MCP_REMOTE_ANON_BEARER_TOKEN": str,
+    "MCP_REMOTE_SERVER_FORWARD_HEADERS": str,
+}
+
+
+def _env_mapping(server_id: str, field_name: str, raw: Any, keys: str) -> dict:
+    """A {name: bridge variable} mapping; ``keys`` is 'env' or 'settings'."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"MCP server {server_id!r} {field_name} must be an object")
+    for name, source in raw.items():
+        valid_name = name in SETTINGS if keys == "settings" else _ENV_RE.match(name)
+        if not valid_name or not isinstance(source, str) or not _ENV_RE.match(source):
+            raise ValueError(
+                f"MCP server {server_id!r} {field_name} has an invalid entry {name!r}"
+            )
+    return dict(raw)
 
 
 @dataclass(frozen=True)
@@ -106,6 +148,9 @@ class ServerConfig:
     forward_access_token: Optional[bool] = None
     tool_output_schemas: Optional[dict[str, Any]] = None
     isolate: Optional[bool] = None
+    env_from: dict[str, str] = field(default_factory=dict)
+    settings: dict[str, str] = field(default_factory=dict)
+    settings_from: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -202,6 +247,22 @@ class ServerConfig:
                 "names to schema objects"
             )
 
+        settings = raw.get("settings") or {}
+        if not isinstance(settings, dict):
+            raise ValueError(f"MCP server {server_id!r} settings must be an object")
+        for name, value in settings.items():
+            check = SETTINGS.get(name)
+            if check is None or not isinstance(value, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} has unknown setting {name!r}"
+                )
+            try:
+                check(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"MCP server {server_id!r} setting {name} is invalid: {exc}"
+                ) from exc
+
         isolate = raw.get("isolate")
         if isolate is not None and not isinstance(isolate, bool):
             raise ValueError(f"MCP server {server_id!r} isolate must be a boolean")
@@ -221,6 +282,11 @@ class ServerConfig:
             forward_access_token=forward_access_token,
             tool_output_schemas=tool_output_schemas,
             isolate=isolate,
+            env_from=_env_mapping(server_id, "env_from", raw.get("env_from"), "env"),
+            settings=dict(settings),
+            settings_from=_env_mapping(
+                server_id, "settings_from", raw.get("settings_from"), "settings"
+            ),
         )
 
 
@@ -323,7 +389,21 @@ def current_env(base: dict[str, str]) -> dict[str, str]:
         return base
     merged = dict(base)
     merged.update(server.env)
+    for name, source in server.env_from.items():
+        if source in base:
+            merged[name] = base[source]
     return merged
+
+
+def current_setting(name: str) -> Optional[str]:
+    """This server's own value of a bridge setting, or None for the global."""
+    server = current_server()
+    if not server:
+        return None
+    source = server.settings_from.get(name)
+    if source is not None and source in os.environ:
+        return os.environ[source]
+    return server.settings.get(name)
 
 
 def current_tool_filters(

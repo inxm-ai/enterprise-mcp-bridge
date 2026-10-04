@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from app.multi_server import current_setting
 from app.utils.mcp_operation import is_mcp_error
 from app.models import RunPromptResult
 from app.utils.mcp_operation import safe_arg_keys
@@ -46,7 +47,10 @@ def default_prompt_list_result(prompts: list[Prompt]) -> dict[str, list[dict]]:
 def system_defined_prompts() -> list[Prompt]:
     # System defined prompt looks like this:
     # { "name": "greeting", "title": "Hello You", "description": "Get a personalized greeting.", "arguments": [{ "name": "name" }], "template": "Hello, {name}!" }
-    prompts = json.loads(os.environ.get("SYSTEM_DEFINED_PROMPTS", "[]"))
+    raw = current_setting("SYSTEM_DEFINED_PROMPTS")
+    if raw is None:
+        raw = os.environ.get("SYSTEM_DEFINED_PROMPTS", "[]")
+    prompts = json.loads(raw)
     return [Prompt(**p) for p in prompts]
 
 

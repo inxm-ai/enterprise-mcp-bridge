@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from app.multi_server import current_tool_output_schemas
+from app.multi_server import current_setting, current_tool_output_schemas
 from app.utils.effect_tools import is_effect_tool
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
@@ -351,6 +351,33 @@ def _parse_map_header_to_input(raw: str) -> dict:
 MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
     os.getenv("MCP_MAP_HEADER_TO_INPUT", "")
 )
+
+
+def per_server_float(name: str, default: float) -> float:
+    raw = current_setting(name)
+    return default if raw is None else float(raw)
+
+
+def per_server_int(name: str, default: int) -> int:
+    raw = current_setting(name)
+    return default if raw is None else int(raw)
+
+
+def per_server_str(name: str, default: str) -> str:
+    raw = current_setting(name)
+    return default if raw is None else raw
+
+
+def per_server_list(name: str, default: list) -> list:
+    raw = current_setting(name)
+    if raw is None:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def per_server_header_map(default: dict) -> dict:
+    raw = current_setting("MCP_MAP_HEADER_TO_INPUT")
+    return default if raw is None else _parse_map_header_to_input(raw)
 
 
 def _load_generated_ui_gateway_role_args() -> dict:

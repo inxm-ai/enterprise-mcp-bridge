@@ -1273,3 +1273,98 @@ def test_metadata_identity_uses_request_local_remote_url(monkeypatch):
         assert captured["params"]["resource"] == "https://remote.example/mcp"
     finally:
         multi_server.reset_server(token)
+
+
+def test_servers_carry_their_own_secrets_and_settings(monkeypatch):
+    from app import vars as app_vars
+    from app.session_manager import prompt_helper
+
+    monkeypatch.setenv("MCPS_TAVILY__KEY", "tavily-secret")
+    monkeypatch.setenv("MCPS_TIMESHEET__ANON", "anon-secret")
+    tavily, timesheet = multi_server.parse_servers(
+        json.dumps(
+            [
+                {
+                    "id": "tavily",
+                    "base_path": "/api/tavily",
+                    "command": "tavily-mcp",
+                    "env_from": {"TAVILY_API_KEY": "MCPS_TAVILY__KEY"},
+                    "settings": {
+                        "MCP_TOOL_TIMEOUT_SECONDS": "90",
+                        "BRIDGE_REQUIRED_GROUPS": "staff, ops",
+                        "SYSTEM_DEFINED_PROMPTS": json.dumps(
+                            [
+                                {
+                                    "name": "p",
+                                    "title": "P",
+                                    "description": "d",
+                                    "arguments": [],
+                                    "template": "t",
+                                }
+                            ]
+                        ),
+                    },
+                },
+                {
+                    "id": "timesheet",
+                    "base_path": "/api/timesheet",
+                    "url": "https://timesheet.example/mcp",
+                    "settings_from": {
+                        "MCP_REMOTE_ANON_BEARER_TOKEN": "MCPS_TIMESHEET__ANON"
+                    },
+                    "settings": {"MCP_MAP_HEADER_TO_INPUT": "userId=x-user-id"},
+                },
+            ]
+        )
+    )
+    monkeypatch.setattr(app_vars, "MCP_TOOL_TIMEOUT_SECONDS", 5.0)
+    token = multi_server.bind_server(tavily)
+    try:
+        env = multi_server.current_env(
+            {"PATH": "/bin", "MCPS_TAVILY__KEY": "tavily-secret"}
+        )
+        assert env["TAVILY_API_KEY"] == "tavily-secret"
+        assert app_vars.per_server_float("MCP_TOOL_TIMEOUT_SECONDS", 5.0) == 90.0
+        assert app_vars.per_server_list("BRIDGE_REQUIRED_GROUPS", []) == [
+            "staff",
+            "ops",
+        ]
+        assert [p.name for p in prompt_helper.system_defined_prompts()] == ["p"]
+        assert (
+            app_vars.per_server_str("MCP_REMOTE_ANON_BEARER_TOKEN", "global")
+            == "global"
+        )
+    finally:
+        multi_server.reset_server(token)
+    token = multi_server.bind_server(timesheet)
+    try:
+        assert (
+            app_vars.per_server_str("MCP_REMOTE_ANON_BEARER_TOKEN", "global")
+            == "anon-secret"
+        )
+        assert app_vars.per_server_header_map({}) == {"userId": "x-user-id"}
+        assert app_vars.per_server_float("MCP_TOOL_TIMEOUT_SECONDS", 5.0) == 5.0
+    finally:
+        multi_server.reset_server(token)
+    # Outside any server, the globals apply.
+    assert app_vars.per_server_float("MCP_TOOL_TIMEOUT_SECONDS", 5.0) == 5.0
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"settings": {"UNKNOWN_SETTING": "x"}},
+        {"settings": {"MCP_TOOL_TIMEOUT_SECONDS": "soon"}},
+        {"settings": {"SYSTEM_DEFINED_PROMPTS": "{}"}},
+        {"settings": {"MCP_MAX_RESPONSE_BYTES": 10}},
+        {"settings_from": {"UNKNOWN_SETTING": "X"}},
+        {"env_from": {"BAD NAME": "X"}},
+        {"env_from": {"X": "not-an-env-name"}},
+        {"env_from": ["X"]},
+    ],
+)
+def test_bad_secrets_or_settings_are_refused(entry):
+    with pytest.raises(ValueError):
+        multi_server.parse_servers(
+            json.dumps([{"id": "x", "base_path": "/x", "command": "x", **entry}])
+        )

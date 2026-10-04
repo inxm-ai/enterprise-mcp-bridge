@@ -207,7 +207,12 @@ def map_tools(tools, include_output_schema=False):
             del processed_schema["$defs"]
 
         # Remove any input properties that are mapped to headers
-        mapping = getattr(vars_module, "MCP_MAP_HEADER_TO_INPUT", {}) or {}
+        mapping = (
+            vars_module.per_server_header_map(
+                getattr(vars_module, "MCP_MAP_HEADER_TO_INPUT", {}) or {}
+            )
+            or {}
+        )
         if isinstance(processed_schema, dict) and processed_schema.get("properties"):
             props = processed_schema.get("properties", {})
             for input_prop in list(props.keys()):

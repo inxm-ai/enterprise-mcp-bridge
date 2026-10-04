@@ -276,12 +276,13 @@ def downstream_call_kwargs(
         meta = trace_meta if trace_meta is not None else build_trace_meta()
         if meta:
             kwargs["meta"] = meta
-    if app_vars.MCP_TOOL_TIMEOUT_SECONDS > 0 and (
-        "read_timeout_seconds" in params or has_var_kw
-    ):
+    timeout = app_vars.per_server_float(
+        "MCP_TOOL_TIMEOUT_SECONDS", app_vars.MCP_TOOL_TIMEOUT_SECONDS
+    )
+    if timeout > 0 and ("read_timeout_seconds" in params or has_var_kw):
         # A float: SDK v2 hands it straight to anyio.fail_after (1.x accepted a
         # timedelta as well).
-        kwargs["read_timeout_seconds"] = float(app_vars.MCP_TOOL_TIMEOUT_SECONDS)
+        kwargs["read_timeout_seconds"] = float(timeout)
     return kwargs
 
 

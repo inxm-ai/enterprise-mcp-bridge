@@ -435,12 +435,16 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     def _forward_allowed_headers(self) -> None:
         """Forward allowed incoming headers to the remote MCP server."""
-        from app.vars import MCP_REMOTE_SERVER_FORWARD_HEADERS
+        from app import vars as app_vars
 
-        if not MCP_REMOTE_SERVER_FORWARD_HEADERS:
+        forward_headers = app_vars.per_server_list(
+            "MCP_REMOTE_SERVER_FORWARD_HEADERS",
+            app_vars.MCP_REMOTE_SERVER_FORWARD_HEADERS,
+        )
+        if not forward_headers:
             return
 
-        if any(h == "*" for h in MCP_REMOTE_SERVER_FORWARD_HEADERS):
+        if any(h == "*" for h in forward_headers):
             ignored = {
                 "content-length",
                 "connection",
@@ -464,7 +468,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 logger.info(f"[RemoteMCP] Forwarding incoming header: {key}")
             return
 
-        for header_name in MCP_REMOTE_SERVER_FORWARD_HEADERS:
+        for header_name in forward_headers:
             # Case-insensitive header lookup
             for key, value in self.incoming_headers.items():
                 if key.lower() == header_name.lower() and value:
@@ -478,10 +482,13 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     def _prepare_fallback_headers(self, *, anon: bool = False) -> None:
         header_name = MCP_REMOTE_AUTH_HEADER_NAME
-        if anon and MCP_REMOTE_ANON_BEARER_TOKEN and header_name not in self.headers:
-            self.headers[header_name] = self._format_auth_header_value(
-                MCP_REMOTE_ANON_BEARER_TOKEN
-            )
+        from app import vars as app_vars
+
+        anon_token = app_vars.per_server_str(
+            "MCP_REMOTE_ANON_BEARER_TOKEN", MCP_REMOTE_ANON_BEARER_TOKEN
+        )
+        if anon and anon_token and header_name not in self.headers:
+            self.headers[header_name] = self._format_auth_header_value(anon_token)
             logger.info(
                 f"[RemoteMCP] Using MCP_REMOTE_ANON_BEARER_TOKEN for {header_name} header"
             )
