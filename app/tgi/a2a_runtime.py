@@ -47,6 +47,10 @@ logger = logging.getLogger("uvicorn.error")
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _MAX_PROGRESS_CHARS = 500
+# The planner appends the step's raw result to its "completed" note; that is
+# context for the model, not progress for a person.
+_RESULT_SUMMARY = " Result summary:"
+_NO_ANSWER = "The agent finished without an answer."
 _HTML_TAG = re.compile(r"<[^>]+>")
 
 
@@ -62,7 +66,6 @@ class _ThinkSplitter:
         self._buffer = ""
         self._in_think = False
         self._answer: list[str] = []
-        self.last_note: Optional[str] = None
 
     @staticmethod
     def _held_back(text: str, tag: str) -> int:
@@ -73,7 +76,7 @@ class _ThinkSplitter:
 
     @staticmethod
     def _note(raw: str) -> Optional[str]:
-        note = _HTML_TAG.sub("", raw).strip()
+        note = _HTML_TAG.sub("", raw).split(_RESULT_SUMMARY, 1)[0].strip()
         if not note:
             return None
         if len(note) > _MAX_PROGRESS_CHARS:
@@ -92,7 +95,6 @@ class _ThinkSplitter:
                 note = self._note(self._buffer[:end])
                 if note:
                     notes.append(note)
-                    self.last_note = note
                 self._buffer = self._buffer[end + len(_THINK_CLOSE) :]
                 self._in_think = False
             else:
@@ -128,7 +130,7 @@ async def _stream_with_progress(
                     TaskState.TASK_STATE_WORKING,
                     message=updater.new_agent_message(parts=[Part(text=note)]),
                 )
-    return splitter.finish() or splitter.last_note or ""
+    return splitter.finish()
 
 
 def _cookie_values(headers: dict[str, str]) -> dict[str, str]:
@@ -312,6 +314,13 @@ class BridgeA2AExecutor(A2AAgentExecutor):
                     response_text = await _stream_with_progress(result, updater)
                 else:
                     response_text = _extract_completion_content(result)
+
+            if not response_text:
+                # Never pass progress notes off as the answer.
+                await updater.failed(
+                    updater.new_agent_message(parts=[Part(text=_NO_ANSWER)])
+                )
+                return
 
             await updater.add_artifact(
                 parts=[Part(text=response_text)],

@@ -1480,12 +1480,12 @@ class WellPlannedOrchestrator:
 
                     async for parsed in read_todo_stream(stream_gen):
                         if parsed.accumulated_tool_calls:
-                            for idx, call in parsed.accumulated_tool_calls.items():
-                                if idx not in tool_call_meta:
-                                    tool_call_meta[idx] = dict(call)
-                                    tool_call_order.append(idx)
+                            for call_idx, call in parsed.accumulated_tool_calls.items():
+                                if call_idx not in tool_call_meta:
+                                    tool_call_meta[call_idx] = dict(call)
+                                    tool_call_order.append(call_idx)
                                 else:
-                                    tool_call_meta[idx].update(call)
+                                    tool_call_meta[call_idx].update(call)
                         think_chunk = think_extractor.feed(parsed.content or "")
                         if think_chunk and think_chunk.strip():
                             yield self._attach_metadata_to_chunk(

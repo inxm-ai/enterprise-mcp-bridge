@@ -177,13 +177,16 @@ def test_think_splitter_separates_progress_from_the_answer_across_chunks():
     assert splitter.finish() == "Two repos: **a** and <b>"
 
 
-def test_think_splitter_falls_back_to_the_last_note_without_an_answer():
+def test_think_splitter_has_no_answer_from_progress_alone():
     from app.tgi.a2a_runtime import _ThinkSplitter
 
     splitter = _ThinkSplitter()
-    splitter.feed("<think>only progress</think><think>unterminated")
+    notes = splitter.feed(
+        "<think>I have completed the todo 'Explore'. Result summary: "
+        '{"response": "…"}</think><think>unterminated'
+    )
+    assert notes == ["I have completed the todo 'Explore'."]
     assert splitter.finish() == ""
-    assert splitter.last_note == "only progress"
 
 
 @pytest.mark.asyncio
@@ -284,3 +287,79 @@ def test_completion_content_is_read_from_a_response_model():
         ],
     )
     assert _extract_completion_content(response) == "It's two repos."
+
+
+@pytest.mark.asyncio
+async def test_executor_fails_a_task_that_ends_without_an_answer(monkeypatch):
+    import json
+    from contextlib import asynccontextmanager
+
+    from a2a.server.agent_execution import RequestContext
+    from a2a.server.context import ServerCallContext
+    from a2a.server.events import EventQueue
+    from a2a.types import (
+        Message,
+        Part,
+        Role,
+        SendMessageRequest,
+        TaskArtifactUpdateEvent,
+        TaskState,
+        TaskStatusUpdateEvent,
+    )
+
+    from app.tgi import a2a_runtime
+
+    class CaptureQueue(EventQueue):
+        def __init__(self):
+            self.events = []
+
+        async def enqueue_event(self, event):
+            self.events.append(event)
+
+    @asynccontextmanager
+    async def fake_mcp_context(
+        sessions, session_key, access_token, group, incoming_headers=None
+    ):
+        yield object()
+
+    class ProgressOnlyService:
+        async def chat_completion(
+            self, session, request, user_token, access_token, prompt
+        ):
+            async def stream():
+                payload = {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": "<think>I have completed the todo "
+                                "'Explore'. Result summary: {}</think>"
+                            },
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return stream()
+
+    monkeypatch.setattr(a2a_runtime, "DEFAULT_MODEL", "test-model")
+    monkeypatch.setattr(a2a_runtime, "mcp_session_context", fake_mcp_context)
+    monkeypatch.setattr(a2a_runtime, "tgi_service", ProgressOnlyService())
+
+    request = SendMessageRequest(
+        message=Message(
+            message_id="msg-1", role=Role.ROLE_USER, parts=[Part(text="hi")]
+        )
+    )
+    context = RequestContext(
+        call_context=ServerCallContext(state={"headers": {}}), request=request
+    )
+    queue = CaptureQueue()
+
+    await a2a_runtime.BridgeA2AExecutor().execute(context, queue)
+
+    assert not [e for e in queue.events if isinstance(e, TaskArtifactUpdateEvent)]
+    final = [e for e in queue.events if isinstance(e, TaskStatusUpdateEvent)][-1]
+    assert final.status.state == TaskState.TASK_STATE_FAILED
+    assert final.status.message.parts[0].text == a2a_runtime._NO_ANSWER

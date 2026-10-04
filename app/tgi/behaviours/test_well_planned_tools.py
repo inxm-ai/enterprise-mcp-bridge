@@ -155,3 +155,83 @@ async def test_tool_selection_matching():
 
     assert len(filtered_tools_arg) == 1
     assert filtered_tools_arg[0].function.name == "toolA"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_indices_do_not_skip_the_remaining_todos():
+    """
+    A todo whose stream carries tool calls with a high index must not move
+    the todo cursor: every todo runs and the final answer is streamed.
+    """
+    import json
+
+    calls = []
+
+    def stream_chat(session, messages, tools, request, access_token, span):
+        step = len(calls)
+        calls.append(step)
+
+        async def gen():
+            if step == 0:
+                tool_call = {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 5,
+                                        "id": "call-5",
+                                        "function": {
+                                            "name": "toolA",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(tool_call)}\n\n"
+            content = f"result of step {step}"
+            chunk = {"choices": [{"index": 0, "delta": {"content": content}}]}
+            yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return gen()
+
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=AsyncMock(),
+        prompt_service=AsyncMock(),
+        tool_service=AsyncMock(),
+        non_stream_chat_with_tools_callable=AsyncMock(),
+        stream_chat_with_tools_callable=stream_chat,
+        tool_resolution=MagicMock(),
+        logger_obj=MagicMock(),
+    )
+
+    tool_a = MagicMock()
+    tool_a.function.name = "toolA"
+    todo_manager = TodoManager()
+    todo_manager.add_todos(
+        [
+            TodoItem(id="1", name="explore", goal="g1", tools=["toolA"]),
+            TodoItem(id="2", name="inspect", goal="g2", tools=["toolA"]),
+            TodoItem(id="3", name="final-answer", goal="g3", tools=[]),
+        ]
+    )
+    request = ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        model="test",
+        stream=True,
+    )
+
+    out = ""
+    async for chunk in orchestrator._well_planned_streaming(
+        todo_manager, None, request, [tool_a], None, None
+    ):
+        out += chunk
+
+    assert calls == [0, 1, 2]
+    assert "result of step 2" in out
+    assert all(t.state.value == "DONE" for t in todo_manager.list_todos())
