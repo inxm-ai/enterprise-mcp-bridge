@@ -157,6 +157,22 @@ MCP_SERVERS='[
 ]'
 ```
 
+#### MCP_ISOLATE_CHILDREN
+
+Run local stdio servers as their own unprivileged users (default `false`;
+an `MCP_SERVERS` entry's `isolate` overrides it per server). Each server gets
+a stable uid derived from its id, a private 0700 `HOME`/`TMPDIR` under
+`MCP_CHILD_ROOT` (default `/var/lib/mcp-children`, also the npm and uv
+caches), no capabilities, `no_new_privs`, and only its own environment
+(`PATH`, locale/CA/proxy variables, its `env`, its token variable). Siblings
+then cannot read each other's `/proc/<pid>/environ` (where `OAUTH_ENV`
+tokens live) or ptrace each other. The tools cache moves to the root-only
+`MCP_BRIDGE_PRIVATE_DIR` (default `/var/lib/mcp-bridge`).
+
+Requires the bridge to run as root with `setpriv` (util-linux) and the
+`SETUID`, `SETGID`, `CHOWN` and `KILL` capabilities; isolation that cannot be
+applied fails the request rather than running the child unisolated.
+
 Session state, SSE transport state, tool filtering, and tool-cache files are
 isolated by server. Overlapping base paths are supported; the most specific
 matching base path selects the server context. In sessionless mode,

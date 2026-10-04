@@ -40,6 +40,7 @@ from app.vars import (
     get_tool_output_schema,
 )
 from app import vars as app_vars
+from app.isolation import PRIVATE_DIR
 from app.multi_server import (
     current_base_path,
     current_command,
@@ -50,6 +51,7 @@ from app.multi_server import (
     tools_cache_paths,
     session_storage_key,
     current_sessionless,
+    isolation_requested,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -59,8 +61,20 @@ EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 TOOLS_CACHE_ENABLED = (
     os.environ.get("MCP_TOOLS_CACHE_ENABLED", "true").lower() == "true"
 )
+
+
+def _default_tools_cache_file() -> str:
+    # Isolated children share /tmp with the bridge: keep the cache where
+    # they cannot plant or rewrite it (it feeds tool descriptions to agents).
+    if isolation_requested():
+        PRIVATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(PRIVATE_DIR, 0o700)
+        return str(PRIVATE_DIR / "mcp_tools_cache.json")
+    return "/tmp/mcp_tools_cache.json"
+
+
 TOOLS_CACHE_FILE = Path(
-    os.environ.get("MCP_TOOLS_CACHE_FILE", "/tmp/mcp_tools_cache.json")
+    os.environ.get("MCP_TOOLS_CACHE_FILE") or _default_tools_cache_file()
 )
 TOOLS_CACHE_LOCK_FILE = Path(
     os.environ.get("MCP_TOOLS_CACHE_LOCK_FILE", str(TOOLS_CACHE_FILE) + ".lock")

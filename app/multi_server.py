@@ -38,6 +38,9 @@ absent the global environment variable applies):
 - ``tool_output_schemas`` (object): tool name -> output JSON schema, layered
   over ``TOOL_OUTPUT_SCHEMAS`` for this server only. Inline schemas only, no
   file paths.
+- ``isolate`` (boolean): overrides ``MCP_ISOLATE_CHILDREN``; when true the
+  local server runs as its own unprivileged user (see
+  ``app.isolation``).
 
 Central remote host proxying several remote MCP servers, each exchanging the
 caller's token through its own Keycloak identity provider:
@@ -82,6 +85,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from app.isolation import check_unique_uids, enabled_globally
+
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -100,6 +105,7 @@ class ServerConfig:
     effect_tools: Optional[tuple[str, ...]] = None
     forward_access_token: Optional[bool] = None
     tool_output_schemas: Optional[dict[str, Any]] = None
+    isolate: Optional[bool] = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -196,6 +202,10 @@ class ServerConfig:
                 "names to schema objects"
             )
 
+        isolate = raw.get("isolate")
+        if isolate is not None and not isinstance(isolate, bool):
+            raise ValueError(f"MCP server {server_id!r} isolate must be a boolean")
+
         return cls(
             id=server_id,
             base_path=base_path,
@@ -210,6 +220,7 @@ class ServerConfig:
             effect_tools=effect_tools,
             forward_access_token=forward_access_token,
             tool_output_schemas=tool_output_schemas,
+            isolate=isolate,
         )
 
 
@@ -233,6 +244,11 @@ def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
         raise ValueError("MCP_SERVERS contains duplicate server ids")
     if len(paths) != len(set(paths)):
         raise ValueError("MCP_SERVERS contains duplicate base paths")
+    check_unique_uids(
+        server.id
+        for server in servers
+        if server.command and current_isolate_for(server, enabled_globally())
+    )
     return servers
 
 
@@ -343,6 +359,27 @@ def current_tool_output_schemas(base: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     merged.update(server.tool_output_schemas)
     return merged
+
+
+def current_isolate_for(server: ServerConfig, default: bool) -> bool:
+    return default if server.isolate is None else server.isolate
+
+
+def current_isolate(default: bool) -> bool:
+    server = current_server()
+    if not server:
+        return default
+    return current_isolate_for(server, default)
+
+
+def isolation_requested() -> bool:
+    """Whether any local child of this bridge runs isolated."""
+    if not SERVERS:
+        return enabled_globally()
+    return any(
+        server.command and current_isolate_for(server, enabled_globally())
+        for server in SERVERS
+    )
 
 
 def current_forward_access_token(default: bool = True) -> bool:
