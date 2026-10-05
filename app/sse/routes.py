@@ -45,7 +45,22 @@ from opentelemetry import trace
 router = APIRouter()
 sessions = session_manager()
 
+from app.admission import ADMISSION_HEADER
+
 logger = logging.getLogger("uvicorn.error")
+
+
+def http_error_details(exc: HTTPException) -> dict:
+    """What an HTTP client would read from status and headers."""
+    details: dict = {"status": exc.status_code}
+    headers = exc.headers or {}
+    if "Retry-After" in headers:
+        details["retry_after"] = headers["Retry-After"]
+    if ADMISSION_HEADER in headers:
+        details["admission"] = headers[ADMISSION_HEADER]
+    return details
+
+
 tracer = trace.get_tracer(__name__)
 _USER_FEEDBACK_KEY_RE = re.compile(r"^_?user_feedback$", re.IGNORECASE)
 
@@ -234,8 +249,12 @@ async def run_tool_with_progress(
             except HTTPException as e:
                 from app.sse import SSEEvent
 
+                # The stream has already answered 200: status and retry hints
+                # (e.g. a host out of memory for the server, 503 with
+                # Retry-After) travel in the error event instead.
                 yield SSEEvent.error_event(
-                    e.detail if hasattr(e, "detail") else str(e)
+                    e.detail if hasattr(e, "detail") else str(e),
+                    details=http_error_details(e),
                 ).to_sse_string()
             except UserLoggedOutException as e:
                 from app.sse import SSEEvent

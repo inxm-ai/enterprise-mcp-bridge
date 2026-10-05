@@ -173,6 +173,29 @@ Requires the bridge to run as root with `setpriv` (util-linux) and the
 `SETUID`, `SETGID`, `CHOWN` and `KILL` capabilities; isolation that cannot be
 applied fails the request rather than running the child unisolated.
 
+#### MCP_CHILD_MEMORY_RESERVE_MB / MCP_CHILD_ADMISSION_TIMEOUT / MCP_ADMISSION_DIR
+
+Every request to a local stdio server starts its own child process, so a
+bridge serving many local servers can be asked to start dozens at once (a
+client listing every server's tools) and exceed its memory limit. With
+`MCP_CHILD_MEMORY_RESERVE_MB` set (default `0`, off), a child only starts
+while the container's cgroup memory leaves that many MiB for it and for every
+child still initializing. Otherwise the request waits for room for up to
+`MCP_CHILD_ADMISSION_TIMEOUT` seconds (default `30`) and then fails with
+`503`, `Retry-After: 5` and `X-MCP-Admission: refused`. That header means the
+server never ran, so clients may retry even a tool call. Memory in use is the
+working set (droppable page cache excluded); one child may always run; without
+a cgroup memory limit nothing waits. Set the reserve to roughly the largest
+local server's memory.
+
+Children are counted across all worker processes of the container through
+lock files in `MCP_ADMISSION_DIR` (default `/tmp/mcp-admission`); a crashed
+worker's children stop counting. Streaming tool calls (`/tools/{name}/stream`)
+have already answered `200` when a refusal happens, so their `error` event
+carries `details: {"status": 503, "retry_after": "5", "admission": "refused"}`.
+`/session/start` returns only once the session's server is up, so a refused
+start is answered with the `503` itself.
+
 Session state, SSE transport state, tool filtering, and tool-cache files are
 isolated by server. Overlapping base paths are supported; the most specific
 matching base path selects the server context. In sessionless mode,

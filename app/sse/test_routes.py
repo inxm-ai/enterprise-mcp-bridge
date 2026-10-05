@@ -206,6 +206,34 @@ class TestSSEStreamEndpoint:
             assert len(error_events) >= 1
             assert "Tool execution failed" in error_events[0]["data"]["message"]
 
+    def test_a_refused_server_start_carries_its_retry_hints(self, client):
+        """The stream already answered 200, so the 503 travels in the event."""
+        from fastapi import HTTPException
+
+        with patch("app.sse.routes.mcp_session_context") as mock_context:
+            mock_context.return_value.__aenter__ = AsyncMock(
+                side_effect=HTTPException(
+                    status_code=503,
+                    detail="The MCP host is at capacity; retry shortly.",
+                    headers={"Retry-After": "5", "X-MCP-Admission": "refused"},
+                )
+            )
+            mock_context.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            response = client.post("/tools/send/stream", json={})
+
+        events = [
+            json.loads(line[6:])
+            for line in response.content.decode("utf-8").split("\n")
+            if line.startswith("data: ")
+        ]
+        (error,) = [e for e in events if e.get("type") == "error"]
+        assert error["data"]["details"] == {
+            "status": 503,
+            "retry_after": "5",
+            "admission": "refused",
+        }
+
 
 class TestSSERouteHeaders:
     """Tests for SSE route header handling."""

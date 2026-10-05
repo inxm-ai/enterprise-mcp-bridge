@@ -102,3 +102,32 @@ async def test_mcplocalsessiontask():
     assert response == {"error": "tool not found"}
 
     await task.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_session_whose_server_never_started_is_not_handed_out():
+    from fastapi import HTTPException
+
+    class RefusedStrategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            raise HTTPException(
+                status_code=503, headers={"Retry-After": "5"}, detail="full"
+            )
+            yield  # pragma: no cover
+
+    task = MCPLocalSessionTask(RefusedStrategy())
+    task.start()
+    with pytest.raises(HTTPException) as refused:
+        await task.wait_started()
+    assert refused.value.status_code == 503
+
+    class UpStrategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            yield AsyncMock()
+
+    task = MCPLocalSessionTask(UpStrategy())
+    task.start()
+    await task.wait_started()
+    await task.stop()

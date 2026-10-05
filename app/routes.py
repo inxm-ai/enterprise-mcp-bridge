@@ -843,6 +843,9 @@ async def start_session(
                 await close_idle_sessions(sessions)
                 mcp_task = MCPLocalSessionTask(strategy)
                 mcp_task.start()
+                # Only a session whose server is up is handed out; a refused
+                # start (503 + Retry-After) reaches the client as such.
+                await mcp_task.wait_started()
                 sessions.set(session_storage_key(x_inxm_mcp_session), mcp_task)
 
             session_info = {SESSION_FIELD_NAME: x_inxm_mcp_session}
