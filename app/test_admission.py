@@ -1,3 +1,9 @@
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
 import anyio
 import pytest
 from fastapi import HTTPException
@@ -12,8 +18,7 @@ def cgroup(monkeypatch, tmp_path):
     """A memory-limited cgroup the test sets the usage of."""
     monkeypatch.setattr(admission, "CGROUP", tmp_path)
     monkeypatch.setattr(admission, "POLL_SECONDS", 0.01)
-    monkeypatch.setattr(admission, "_starting", 0)
-    monkeypatch.setattr(admission, "_running", 0)
+    monkeypatch.setenv("MCP_ADMISSION_DIR", str(tmp_path / "slots"))
     monkeypatch.setenv("MCP_CHILD_MEMORY_RESERVE_MB", "400")
     monkeypatch.setenv("MCP_CHILD_ADMISSION_TIMEOUT", "2")
 
@@ -28,6 +33,12 @@ def cgroup(monkeypatch, tmp_path):
 
     use(1000, 0)
     return use
+
+
+def counts():
+    """(starting, all) children as admission sees them."""
+    directory = admission.admission_dir()
+    return admission._live_slots(directory) if directory.exists() else (0, 0)
 
 
 def test_droppable_page_cache_does_not_count_as_used(cgroup):
@@ -46,7 +57,7 @@ async def test_disabled_admission_starts_children_at_once(cgroup, monkeypatch):
     cgroup(1000, 1000)
     async with admission.child_slot("a"):
         async with admission.child_slot("b"):
-            assert admission._running == 0, "nothing is tracked"
+            assert counts() == (0, 0), "nothing is tracked"
 
 
 @pytest.mark.asyncio
@@ -54,8 +65,8 @@ async def test_a_lone_child_always_starts_even_without_room(cgroup):
     cgroup(1000, 950)
     async with admission.child_slot("a") as ready:
         ready()
-        assert admission._running == 1
-    assert (admission._running, admission._starting) == (0, 0)
+        assert counts() == (0, 1)
+    assert counts() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -86,7 +97,7 @@ async def test_children_still_starting_keep_their_reservation(cgroup):
         assert order == ["first", "second", "third"]
         second.set()
         third.set()
-    assert (admission._running, admission._starting) == (0, 0)
+    assert counts() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -102,7 +113,7 @@ async def test_a_full_host_refuses_with_retry_after(cgroup):
         "Retry-After": "5",
         "X-MCP-Admission": "refused",
     }
-    assert (admission._running, admission._starting) == (0, 0)
+    assert counts() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -130,4 +141,37 @@ async def test_a_child_that_fails_to_start_releases_its_slot(cgroup):
     with pytest.raises(RuntimeError):
         async with admission.child_slot("a"):
             raise RuntimeError("spawn failed")
-    assert (admission._running, admission._starting) == (0, 0)
+    assert counts() == (0, 0)
+
+
+def test_children_of_other_worker_processes_count_and_dead_ones_do_not(cgroup):
+    """Workers share the container's memory, so they share the slots."""
+    holder = textwrap.dedent("""
+        import asyncio, sys
+        from app import admission
+
+        async def main():
+            async with admission.child_slot("other-worker"):
+                print("admitted", flush=True)
+                sys.stdin.readline()
+
+        asyncio.run(main())
+        """)
+    worker = subprocess.Popen(
+        [sys.executable, "-c", holder],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    try:
+        assert worker.stdout.readline().strip() == "admitted"
+        assert counts() == (1, 1), "the other worker's starting child counts"
+        # 0 used + 400 MiB for its starting child + 400 for a new one <= 1000.
+        assert admission._try_admit(400 * MIB) is not None
+    finally:
+        worker.kill()
+        worker.wait()
+    time.sleep(0.05)
+    slots = counts()
+    assert slots[1] == 1, f"only this process's slot is left: {slots}"

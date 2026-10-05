@@ -131,6 +131,9 @@ def session_routes(monkeypatch):
         def start(self):
             started.append(self)
 
+        async def wait_started(self):
+            return None
+
         async def stop(self):
             return None
 

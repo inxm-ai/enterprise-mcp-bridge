@@ -91,6 +91,9 @@ class MCPSessionBase(ABC):
         self._task = None
         self._ping_task = None  # Reference to the ping task
         self._stop_event = asyncio.Event()  # Added stop event
+        # Set once the downstream session is up, or startup failed.
+        self._started = asyncio.Event()
+        self._start_error: Optional[BaseException] = None
 
     @abstractmethod
     async def run(self):
@@ -109,6 +112,16 @@ class MCPSessionBase(ABC):
                 await self.request_queue.put("ping")
 
         self._ping_task = asyncio.create_task(ping_task())  # Store the ping task
+
+    async def wait_started(self):
+        """Wait until the downstream session is up; raise why it is not.
+
+        A session whose server never started (e.g. refused for lack of
+        memory) must not be handed out: its requests would wait forever.
+        """
+        await self._started.wait()
+        if self._start_error is not None:
+            raise self._start_error
 
     async def stop(self):
         logger.debug("[{}] Stopping session task.".format(self.__class__.__name__))
@@ -152,6 +165,7 @@ class MCPLocalSessionTask(MCPSessionBase):
         try:
             async with self.client_strategy.session() as session:
                 logger.info("[MCPLocalSessionTask] MCP session established.")
+                self._started.set()
                 while True:
                     req = await self.request_queue.get()
                     logger.debug(
@@ -327,5 +341,8 @@ class MCPLocalSessionTask(MCPSessionBase):
         except Exception as e:
             # Handle TaskGroup exceptions with multiple sub-exceptions
             log_exception_with_details(logger, "[MCPLocalSessionTask]", e)
+            if not self._started.is_set():
+                self._start_error = e
         finally:
+            self._started.set()
             logger.info("[MCPLocalSessionTask] Session task stopped.")

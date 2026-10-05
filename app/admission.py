@@ -11,8 +11,16 @@ memory leaves that much room for it and for every child still starting
 room, up to MCP_CHILD_ADMISSION_TIMEOUT seconds, and then fails with 503 and
 Retry-After instead of taking the pod down. Unset, or outside a memory
 limited cgroup, every child starts at once as before.
+
+The memory limit is the container's, shared by every worker process, so the
+children are counted across processes: each admitted child is a slot file
+in MCP_ADMISSION_DIR, locked (flock) by the process that owns it. A slot
+whose lock can be taken belongs to a process that died and is dropped.
 """
 
+import errno
+import fcntl
+import itertools
 import logging
 import os
 import threading
@@ -32,12 +40,16 @@ MIB = 1024 * 1024
 # retry even a tool call (a plain 503 could come after the tool ran).
 ADMISSION_HEADER = "X-MCP-Admission"
 POLL_SECONDS = 0.2
+# Slot file prefixes: admitted and still initializing, or initialized.
+STARTING = "s-"
+RUNNING = "r-"
 
-_lock = threading.Lock()
-# Children admitted and not yet initialized: their memory is still to come.
-_starting = 0
-# Children admitted and not yet exited.
-_running = 0
+_thread_lock = threading.Lock()
+_sequence = itertools.count()
+
+
+def admission_dir() -> Path:
+    return Path(os.environ.get("MCP_ADMISSION_DIR", "/tmp/mcp-admission"))
 
 
 def reserve_bytes() -> int:
@@ -76,15 +88,77 @@ def memory() -> Optional[tuple[int, int]]:
         return None
 
 
-def _admit(reserve: int) -> bool:
+def _live_slots(directory: Path) -> tuple[int, int]:
+    """(starting, all) children across processes; drops dead owners' slots.
+
+    Called with the directory lock held.
+    """
+    starting = total = 0
+    for slot in directory.iterdir():
+        if not slot.name.startswith((STARTING, RUNNING)):
+            continue
+        try:
+            fd = os.open(slot, os.O_RDONLY)
+        except FileNotFoundError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+            total += 1
+            starting += slot.name.startswith(STARTING)
+        else:
+            slot.unlink(missing_ok=True)  # its owner died
+        finally:
+            os.close(fd)
+    return starting, total
+
+
+def _admit(reserve: int, starting: int, total: int) -> bool:
     # One child may always run: a lone request never waits on itself.
-    if _running == 0:
+    if total == 0:
         return True
     mem = memory()
     if mem is None:
         return True
     limit, used = mem
-    return used + reserve * (_starting + 1) <= limit
+    return used + reserve * (starting + 1) <= limit
+
+
+class _Slot:
+    """One admitted child: a slot file this process holds locked."""
+
+    def __init__(self, directory: Path):
+        self.path = directory / f"{STARTING}{os.getpid()}-{next(_sequence)}"
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+
+    def ready(self) -> None:
+        """The child initialized: its memory now shows in the cgroup."""
+        if self.path.name.startswith(STARTING):
+            running = self.path.with_name(RUNNING + self.path.name[len(STARTING) :])
+            os.rename(self.path, running)
+            self.path = running
+
+    def release(self) -> None:
+        self.path.unlink(missing_ok=True)
+        os.close(self.fd)
+
+
+def _try_admit(reserve: int) -> Optional[_Slot]:
+    directory = admission_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with _thread_lock:
+        lock_fd = os.open(directory / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            starting, total = _live_slots(directory)
+            if not _admit(reserve, starting, total):
+                return None
+            return _Slot(directory)
+        finally:
+            os.close(lock_fd)
 
 
 @asynccontextmanager
@@ -94,7 +168,6 @@ async def child_slot(server: str) -> AsyncIterator[Callable[[], None]]:
     Yields a callback to call once the child has initialized: from then on
     its memory shows in the cgroup and its reservation is released.
     """
-    global _starting, _running
     reserve = reserve_bytes()
     if reserve <= 0:
         yield lambda: None
@@ -104,11 +177,9 @@ async def child_slot(server: str) -> AsyncIterator[Callable[[], None]]:
     deadline = time.monotonic() + timeout
     waited = False
     while True:
-        with _lock:
-            if _admit(reserve):
-                _starting += 1
-                _running += 1
-                break
+        slot = _try_admit(reserve)
+        if slot is not None:
+            break
         if time.monotonic() >= deadline:
             logger.warning(
                 "[Admission] No memory to start %s after %.0fs; refusing",
@@ -125,20 +196,7 @@ async def child_slot(server: str) -> AsyncIterator[Callable[[], None]]:
             waited = True
         await anyio.sleep(POLL_SECONDS)
 
-    initialized = False
-
-    def ready() -> None:
-        global _starting
-        nonlocal initialized
-        if not initialized:
-            initialized = True
-            with _lock:
-                _starting -= 1
-
     try:
-        yield ready
+        yield slot.ready
     finally:
-        with _lock:
-            if not initialized:
-                _starting -= 1
-            _running -= 1
+        slot.release()
