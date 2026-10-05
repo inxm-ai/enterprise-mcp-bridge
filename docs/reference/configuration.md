@@ -173,6 +173,19 @@ Requires the bridge to run as root with `setpriv` (util-linux) and the
 `SETUID`, `SETGID`, `CHOWN` and `KILL` capabilities; isolation that cannot be
 applied fails the request rather than running the child unisolated.
 
+#### MCP_CHILD_MEMORY_RESERVE_MB / MCP_CHILD_ADMISSION_TIMEOUT
+
+Every request to a local stdio server starts its own child process, so a
+bridge serving many local servers can be asked to start dozens at once (a
+client listing every server's tools) and exceed its memory limit. With
+`MCP_CHILD_MEMORY_RESERVE_MB` set (default `0`, off), a child only starts
+while the container's cgroup memory leaves that many MiB for it and for every
+child still initializing. Otherwise the request waits for room for up to
+`MCP_CHILD_ADMISSION_TIMEOUT` seconds (default `30`) and then fails with
+`503` and `Retry-After: 5`. Memory in use is the working set (droppable page
+cache excluded); one child may always run; without a cgroup memory limit
+nothing waits. Set the reserve to roughly the largest local server's memory.
+
 Session state, SSE transport state, tool filtering, and tool-cache files are
 isolated by server. Overlapping base paths are supported; the most specific
 matching base path selects the server context. In sessionless mode,

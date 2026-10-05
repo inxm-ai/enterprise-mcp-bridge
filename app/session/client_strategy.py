@@ -17,6 +17,7 @@ from mcp.client.sse import sse_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
+from app.admission import child_slot
 from app.utils import mcp_fields
 from app.elicitation import (
     ElicitationRequiredError,
@@ -30,6 +31,7 @@ from app.multi_server import (
     current_command,
     current_forward_access_token,
     current_remote_url,
+    current_server_id,
 )
 from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
@@ -195,18 +197,22 @@ class LocalMCPClientStrategy(MCPClientStrategy):
         write_file = os.fdopen(write_fd, "w")
 
         try:
-            async with stdio_client(self.server_params, errlog=write_file) as (
-                read,
-                write,
-            ):
-                async with ClientSession(
+            async with child_slot(current_server_id() or "the MCP server") as ready:
+                async with stdio_client(self.server_params, errlog=write_file) as (
                     read,
                     write,
-                    logging_callback=_log_mcp_notification,
-                    elicitation_callback=_make_elicitation_callback(self.session_key),
-                ) as session:
-                    await _negotiate(session)
-                    yield session
+                ):
+                    async with ClientSession(
+                        read,
+                        write,
+                        logging_callback=_log_mcp_notification,
+                        elicitation_callback=_make_elicitation_callback(
+                            self.session_key
+                        ),
+                    ) as session:
+                        await _negotiate(session)
+                        ready()
+                        yield session
         finally:
             try:
                 write_file.close()
