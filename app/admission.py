@@ -28,6 +28,9 @@ logger = logging.getLogger("uvicorn.error")
 
 CGROUP = Path("/sys/fs/cgroup")
 MIB = 1024 * 1024
+# Marks a 503 as an admission refusal: the server never ran, so a client may
+# retry even a tool call (a plain 503 could come after the tool ran).
+ADMISSION_HEADER = "X-MCP-Admission"
 POLL_SECONDS = 0.2
 
 _lock = threading.Lock()
@@ -115,7 +118,7 @@ async def child_slot(server: str) -> AsyncIterator[Callable[[], None]]:
             raise HTTPException(
                 status_code=503,
                 detail="The MCP host is at capacity; retry shortly.",
-                headers={"Retry-After": "5"},
+                headers={"Retry-After": "5", ADMISSION_HEADER: "refused"},
             )
         if not waited:
             logger.info("[Admission] Waiting for memory to start %s", server)

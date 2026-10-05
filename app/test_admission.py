@@ -98,7 +98,10 @@ async def test_a_full_host_refuses_with_retry_after(cgroup):
             async with admission.child_slot("b"):
                 pass
     assert refused.value.status_code == 503
-    assert refused.value.headers == {"Retry-After": "5"}
+    assert refused.value.headers == {
+        "Retry-After": "5",
+        "X-MCP-Admission": "refused",
+    }
     assert (admission._running, admission._starting) == (0, 0)
 
 

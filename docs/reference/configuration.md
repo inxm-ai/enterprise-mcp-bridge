@@ -182,7 +182,8 @@ client listing every server's tools) and exceed its memory limit. With
 while the container's cgroup memory leaves that many MiB for it and for every
 child still initializing. Otherwise the request waits for room for up to
 `MCP_CHILD_ADMISSION_TIMEOUT` seconds (default `30`) and then fails with
-`503` and `Retry-After: 5`. Memory in use is the working set (droppable page
+`503` with `Retry-After: 5` and `X-MCP-Admission: refused`. That header means
+the server never ran, so clients may retry even a tool call. Memory in use is the working set (droppable page
 cache excluded); one child may always run; without a cgroup memory limit
 nothing waits. Set the reserve to roughly the largest local server's memory.
 
