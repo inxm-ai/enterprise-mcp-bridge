@@ -19,6 +19,68 @@ Example:
     "exclude_tools": ["admin_*"]
   }
 ]
+
+Per-server overrides of process-wide settings (all optional; when a field is
+absent the global environment variable applies):
+
+- ``auth_provider`` (string): overrides ``AUTH_PROVIDER``.
+- ``keycloak_provider_alias`` (string): overrides ``KEYCLOAK_PROVIDER_ALIAS``;
+  ``""`` means no alias, i.e. the Keycloak token is passed through.
+- ``effect_tools`` (array of strings): overrides ``EFFECT_TOOLS``. The entry
+  ``"auto"`` classifies tools automatically (see ``app.utils.effect_tools``)
+  and may be combined with explicit globs.
+- ``forward_access_token`` (boolean, default true): when false, the caller's
+  access token never reaches this server: no token exchange, no fallback to
+  the incoming token, no forwarded credential headers and no ``oauth_token``
+  tool argument. Only explicitly configured credentials are sent. Set it to
+  false for every remote that does not use a provider alias (e.g. a public
+  third-party MCP), or the caller's platform token leaks to that third party.
+- ``tool_output_schemas`` (object): tool name -> output JSON schema, layered
+  over ``TOOL_OUTPUT_SCHEMAS`` for this server only. Inline schemas only, no
+  file paths.
+- ``env_from`` (object): child variable -> bridge variable. The child gets
+  the bridge variable's value under its own name, e.g. a Kubernetes
+  Secret mounted on the bridge for this server only. With ``isolate`` no
+  other child sees it.
+- ``settings`` (object of strings): per-server values of bridge settings
+  that are otherwise process-wide; only the keys in ``SETTINGS`` are
+  accepted.
+- ``settings_from`` (object): setting -> bridge variable, for settings that
+  are secrets (e.g. ``MCP_REMOTE_ANON_BEARER_TOKEN``).
+- ``isolate`` (boolean): overrides ``MCP_ISOLATE_CHILDREN``; when true the
+  local server runs as its own unprivileged user (see
+  ``app.isolation``).
+
+Central remote host proxying several remote MCP servers, each exchanging the
+caller's token through its own Keycloak identity provider:
+[
+  {
+    "id": "mcp-cloudflare-server",
+    "base_path": "/api/mcp-cloudflare-server",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "cloudflare",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-notion-server",
+    "base_path": "/api/mcp-notion-server",
+    "url": "https://mcp.notion.com/mcp",
+    "sessionless": true,
+    "auth_provider": "keycloak",
+    "keycloak_provider_alias": "notion",
+    "effect_tools": ["auto"]
+  },
+  {
+    "id": "mcp-deepwiki-server",
+    "base_path": "/api/mcp-deepwiki-server",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "sessionless": true,
+    "forward_access_token": false,
+    "effect_tools": ["auto"]
+  }
+]
 """
 
 from __future__ import annotations
@@ -32,7 +94,42 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from app.isolation import check_unique_uids, enabled_globally
+
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _json_list(raw: str) -> None:
+    if not isinstance(json.loads(raw), list):
+        raise ValueError("expected a JSON array")
+
+
+# Bridge settings a server may set for itself, with a check of the value.
+SETTINGS = {
+    "SYSTEM_DEFINED_PROMPTS": _json_list,
+    "MCP_MAP_HEADER_TO_INPUT": str,
+    "MCP_TOOL_TIMEOUT_SECONDS": float,
+    "MCP_MAX_RESPONSE_BYTES": int,
+    "BRIDGE_REQUIRED_GROUPS": str,
+    "MCP_REMOTE_ANON_BEARER_TOKEN": str,
+    "MCP_REMOTE_SERVER_FORWARD_HEADERS": str,
+}
+
+
+def _env_mapping(server_id: str, field_name: str, raw: Any, keys: str) -> dict:
+    """A {name: bridge variable} mapping; ``keys`` is 'env' or 'settings'."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"MCP server {server_id!r} {field_name} must be an object")
+    for name, source in raw.items():
+        valid_name = name in SETTINGS if keys == "settings" else _ENV_RE.match(name)
+        if not valid_name or not isinstance(source, str) or not _ENV_RE.match(source):
+            raise ValueError(
+                f"MCP server {server_id!r} {field_name} has an invalid entry {name!r}"
+            )
+    return dict(raw)
 
 
 @dataclass(frozen=True)
@@ -45,6 +142,15 @@ class ServerConfig:
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
     sessionless: Optional[bool] = None
+    auth_provider: Optional[str] = None
+    keycloak_provider_alias: Optional[str] = None
+    effect_tools: Optional[tuple[str, ...]] = None
+    forward_access_token: Optional[bool] = None
+    tool_output_schemas: Optional[dict[str, Any]] = None
+    isolate: Optional[bool] = None
+    env_from: dict[str, str] = field(default_factory=dict)
+    settings: dict[str, str] = field(default_factory=dict)
+    settings_from: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ServerConfig":
@@ -91,6 +197,76 @@ class ServerConfig:
                 f"MCP server {server_id!r} include_tools/exclude_tools must be arrays"
             )
 
+        auth_provider = raw.get("auth_provider")
+        if auth_provider is not None:
+            if not isinstance(auth_provider, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} auth_provider must be a string"
+                )
+            # Same normalization as the global AUTH_PROVIDER; empty means
+            # "not overridden".
+            auth_provider = auth_provider.strip().lower() or None
+
+        provider_alias = raw.get("keycloak_provider_alias")
+        if provider_alias is not None:
+            if not isinstance(provider_alias, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} keycloak_provider_alias must be a string"
+                )
+            # Unlike auth_provider, "" is a real override: no alias, pass the
+            # Keycloak token through.
+            provider_alias = provider_alias.strip()
+
+        effect_tools = raw.get("effect_tools")
+        if effect_tools is not None:
+            if not isinstance(effect_tools, list) or not all(
+                isinstance(pattern, str) for pattern in effect_tools
+            ):
+                raise ValueError(
+                    f"MCP server {server_id!r} effect_tools must be an array of strings"
+                )
+            effect_tools = tuple(
+                pattern.strip() for pattern in effect_tools if pattern.strip()
+            )
+
+        forward_access_token = raw.get("forward_access_token")
+        if forward_access_token is not None and not isinstance(
+            forward_access_token, bool
+        ):
+            raise ValueError(
+                f"MCP server {server_id!r} forward_access_token must be a boolean"
+            )
+
+        tool_output_schemas = raw.get("tool_output_schemas")
+        if tool_output_schemas is not None and not (
+            isinstance(tool_output_schemas, dict)
+            and all(isinstance(v, dict) for v in tool_output_schemas.values())
+        ):
+            raise ValueError(
+                f"MCP server {server_id!r} tool_output_schemas must map tool "
+                "names to schema objects"
+            )
+
+        settings = raw.get("settings") or {}
+        if not isinstance(settings, dict):
+            raise ValueError(f"MCP server {server_id!r} settings must be an object")
+        for name, value in settings.items():
+            check = SETTINGS.get(name)
+            if check is None or not isinstance(value, str):
+                raise ValueError(
+                    f"MCP server {server_id!r} has unknown setting {name!r}"
+                )
+            try:
+                check(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"MCP server {server_id!r} setting {name} is invalid: {exc}"
+                ) from exc
+
+        isolate = raw.get("isolate")
+        if isolate is not None and not isinstance(isolate, bool):
+            raise ValueError(f"MCP server {server_id!r} isolate must be a boolean")
+
         return cls(
             id=server_id,
             base_path=base_path,
@@ -100,7 +276,22 @@ class ServerConfig:
             include_tools=tuple(str(v) for v in include if str(v)),
             exclude_tools=tuple(str(v) for v in exclude if str(v)),
             sessionless=sessionless,
+            auth_provider=auth_provider,
+            keycloak_provider_alias=provider_alias,
+            effect_tools=effect_tools,
+            forward_access_token=forward_access_token,
+            tool_output_schemas=tool_output_schemas,
+            isolate=isolate,
+            env_from=_env_mapping(server_id, "env_from", raw.get("env_from"), "env"),
+            settings=dict(settings),
+            settings_from=_env_mapping(
+                server_id, "settings_from", raw.get("settings_from"), "settings"
+            ),
         )
+
+
+def current_isolate_for(server: ServerConfig, default: bool) -> bool:
+    return default if server.isolate is None else server.isolate
 
 
 def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
@@ -123,6 +314,11 @@ def parse_servers(raw: str) -> tuple[ServerConfig, ...]:
         raise ValueError("MCP_SERVERS contains duplicate server ids")
     if len(paths) != len(set(paths)):
         raise ValueError("MCP_SERVERS contains duplicate base paths")
+    check_unique_uids(
+        server.id
+        for server in servers
+        if server.command and current_isolate_for(server, enabled_globally())
+    )
     return servers
 
 
@@ -193,7 +389,21 @@ def current_env(base: dict[str, str]) -> dict[str, str]:
         return base
     merged = dict(base)
     merged.update(server.env)
+    for name, source in server.env_from.items():
+        if source in base:
+            merged[name] = base[source]
     return merged
+
+
+def current_setting(name: str) -> Optional[str]:
+    """This server's own value of a bridge setting, or None for the global."""
+    server = current_server()
+    if not server:
+        return None
+    source = server.settings_from.get(name)
+    if source is not None and source in os.environ:
+        return os.environ[source]
+    return server.settings.get(name)
 
 
 def current_tool_filters(
@@ -210,6 +420,60 @@ def current_sessionless(default: bool) -> bool:
     if not server or server.sessionless is None:
         return default
     return server.sessionless
+
+
+def current_auth_provider(default: str) -> str:
+    server = current_server()
+    if not server or server.auth_provider is None:
+        return default
+    return server.auth_provider
+
+
+def current_keycloak_provider_alias(default: str) -> str:
+    server = current_server()
+    if not server or server.keycloak_provider_alias is None:
+        return default
+    return server.keycloak_provider_alias
+
+
+def current_tool_output_schemas(base: dict[str, Any]) -> dict[str, Any]:
+    server = current_server()
+    if not server or not server.tool_output_schemas:
+        return base
+    merged = dict(base)
+    merged.update(server.tool_output_schemas)
+    return merged
+
+
+def current_isolate(default: bool) -> bool:
+    server = current_server()
+    if not server:
+        return default
+    return current_isolate_for(server, default)
+
+
+def isolation_requested() -> bool:
+    """Whether any local child of this bridge runs isolated."""
+    if not SERVERS:
+        return enabled_globally()
+    return any(
+        server.command and current_isolate_for(server, enabled_globally())
+        for server in SERVERS
+    )
+
+
+def current_forward_access_token(default: bool = True) -> bool:
+    server = current_server()
+    if not server or server.forward_access_token is None:
+        return default
+    return server.forward_access_token
+
+
+def current_effect_tools(default: list[str]) -> list[str]:
+    server = current_server()
+    if not server or server.effect_tools is None:
+        return default
+    return list(server.effect_tools)
 
 
 def session_cookie_name(default_name: str) -> str:

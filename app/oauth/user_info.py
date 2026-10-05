@@ -315,7 +315,9 @@ def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
         verified_caller_claims,
     )
 
-    required = app_vars.BRIDGE_REQUIRED_GROUPS
+    required = app_vars.per_server_list(
+        "BRIDGE_REQUIRED_GROUPS", app_vars.BRIDGE_REQUIRED_GROUPS
+    )
     if not required:
         return
     if not access_token:

@@ -17,7 +17,7 @@ from app.oauth.token_dependency import get_access_token
 from app.oauth.token_exchange import UserLoggedOutException
 from app.session import try_get_session_id, session_id
 from app.session_manager import mcp_session_context, session_manager
-from app.multi_server import session_storage_key
+from app.multi_server import current_effect_tools, session_storage_key
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -30,12 +30,14 @@ from app.utils.mcp_operation import (
     mcp_operation_span,
     safe_arg_keys,
 )
-from app.tgi.tool_dry_run.tool_response import dry_run_tool_result
+from app.tgi.tool_dry_run.tool_response import (
+    dry_run_tool_result,
+    resolve_dry_run_effect_call,
+)
 from app.vars import (
     DRY_RUN_HEADER_NAME,
     EFFECT_TOOLS,
     SESSION_FIELD_NAME,
-    is_dry_run_effect_call,
 )
 from app.sse import stream_tool_call, create_sse_response
 from opentelemetry import trace
@@ -117,7 +119,8 @@ async def run_tool_with_progress(
         request: FastAPI request object
         x_inxm_mcp_session_header: Session ID from header
         x_inxm_mcp_session_cookie: Session ID from cookie
-        x_inxm_dry_run: "true" answers EFFECT_TOOLS calls with a dry-run result
+        x_inxm_dry_run: "true" answers effect-tool calls (EFFECT_TOOLS or the
+            server's effect_tools) with a dry-run result
         access_token: OAuth access token
         args: Tool arguments
         group: Group name for group-specific data access
@@ -190,11 +193,18 @@ async def run_tool_with_progress(
                             group=group,
                             arg_keys=safe_arg_keys(tool_args),
                         ) as op:
-                            if is_dry_run_effect_call(
-                                x_inxm_dry_run, name, EFFECT_TOOLS
-                            ):
+                            dry_run, listed_tools = await resolve_dry_run_effect_call(
+                                session,
+                                x_inxm_dry_run,
+                                name,
+                                current_effect_tools(EFFECT_TOOLS),
+                            )
+                            if dry_run:
                                 result = await dry_run_tool_result(
-                                    session, name, tool_args or {}
+                                    session,
+                                    name,
+                                    tool_args or {},
+                                    tools=listed_tools,
                                 )
                             else:
                                 result = await session.call_tool_with_progress(

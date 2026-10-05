@@ -21,6 +21,7 @@ from app.session_manager.session_manager import SessionManagerBase
 from app.models import RunPromptResult, RunToolsResult
 from fnmatch import fnmatch
 from app.oauth.decorator import decorate_args_with_oauth_token
+from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.user_info import (
     CallerNotAuthorizedError,
     ensure_caller_in_required_groups,
@@ -39,14 +40,18 @@ from app.vars import (
     get_tool_output_schema,
 )
 from app import vars as app_vars
+from app.isolation import PRIVATE_DIR
 from app.multi_server import (
     current_base_path,
     current_command,
+    current_forward_access_token,
+    current_tool_output_schemas,
     current_remote_url,
     current_tool_filters,
     tools_cache_paths,
     session_storage_key,
     current_sessionless,
+    isolation_requested,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -56,8 +61,20 @@ EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
 TOOLS_CACHE_ENABLED = (
     os.environ.get("MCP_TOOLS_CACHE_ENABLED", "true").lower() == "true"
 )
+
+
+def _default_tools_cache_file() -> str:
+    # Isolated children share /tmp with the bridge: keep the cache where
+    # they cannot plant or rewrite it (it feeds tool descriptions to agents).
+    if isolation_requested():
+        PRIVATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(PRIVATE_DIR, 0o700)
+        return str(PRIVATE_DIR / "mcp_tools_cache.json")
+    return "/tmp/mcp_tools_cache.json"
+
+
 TOOLS_CACHE_FILE = Path(
-    os.environ.get("MCP_TOOLS_CACHE_FILE", "/tmp/mcp_tools_cache.json")
+    os.environ.get("MCP_TOOLS_CACHE_FILE") or _default_tools_cache_file()
 )
 TOOLS_CACHE_LOCK_FILE = Path(
     os.environ.get("MCP_TOOLS_CACHE_LOCK_FILE", str(TOOLS_CACHE_FILE) + ".lock")
@@ -205,7 +222,9 @@ def enforce_response_ceiling(result: Any) -> Any:
     bridge enforces its own named byte ceiling. The oversized content is
     dropped, never partially relayed.
     """
-    limit = app_vars.MCP_MAX_RESPONSE_BYTES
+    limit = app_vars.per_server_int(
+        "MCP_MAX_RESPONSE_BYTES", app_vars.MCP_MAX_RESPONSE_BYTES
+    )
     if limit <= 0:
         return result
     size = encoded_result_size(result)
@@ -242,8 +261,8 @@ def _cache_signature() -> dict:
     return {
         "include": include_tools,
         "exclude": exclude_tools,
-        "map_header_to_input": MCP_MAP_HEADER_TO_INPUT,
-        "tool_output_schemas": TOOL_OUTPUT_SCHEMAS,
+        "map_header_to_input": app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT),
+        "tool_output_schemas": current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS),
         "server": current_command(os.environ.get("MCP_SERVER_COMMAND", ""))
         or current_remote_url(os.environ.get("MCP_REMOTE_SERVER", "")),
     }
@@ -306,8 +325,9 @@ def map_tools(tools):
 
         if isinstance(input_schema_copy, dict) and input_schema_copy.get("properties"):
             props = input_schema_copy.get("properties", {})
+            mapped = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
             for input_prop in list(props.keys()):
-                if input_prop in MCP_MAP_HEADER_TO_INPUT:
+                if input_prop in mapped:
                     props.pop(input_prop, None)
                     required = input_schema_copy.get("required")
                     if isinstance(required, list) and input_prop in required:
@@ -433,13 +453,20 @@ async def _cached_mapped_tools(
 
 
 def inject_headers_into_args(
-    tools, tool_name: str, args: Optional[Dict], incoming_headers: Optional[dict]
+    tools,
+    tool_name: str,
+    args: Optional[Dict],
+    incoming_headers: Optional[dict],
+    access_token: Optional[str] = None,
 ) -> Dict:
     """
     Fill missing args for tool_name from incoming_headers according to
     MCP_MAP_HEADER_TO_INPUT mapping. Header matching is case-insensitive.
+    With forward_access_token disabled, a header that is a credential by
+    name, or whose value carries the caller's access_token, is not mapped.
     """
-    if not MCP_MAP_HEADER_TO_INPUT or not incoming_headers:
+    mapping = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
+    if not mapping or not incoming_headers:
         return args or {}
 
     # normalize incoming headers to lowercase keys for case-insensitive lookup
@@ -473,7 +500,18 @@ def inject_headers_into_args(
     )
 
     out_args = dict(args or {})
-    for input_prop, header_name in MCP_MAP_HEADER_TO_INPUT.items():
+    forward_credentials = current_forward_access_token(True)
+    for input_prop, header_name in mapping.items():
+        if not forward_credentials and is_caller_credential_header(
+            header_name, headers_lc.get(header_name.lower()), access_token
+        ):
+            logger.info(
+                "[HeaderMapping] Not mapping credential header %s into %s "
+                "(forward_access_token is disabled)",
+                header_name,
+                input_prop,
+            )
+            continue
         # Only consider if tool declares this property
         if input_prop not in props:
             continue
@@ -592,7 +630,11 @@ async def mcp_session_context(
                         )
                         # Inject header-mapped inputs if available
                         decorated_args = inject_headers_into_args(
-                            tools, tool_name, decorated_args, incoming_headers
+                            tools,
+                            tool_name,
+                            decorated_args,
+                            incoming_headers,
+                            access_token_inner,
                         )
                         result = await session.call_tool(
                             tool_name,
@@ -633,7 +675,11 @@ async def mcp_session_context(
                         )
                         # Inject header-mapped inputs if available
                         decorated_args = inject_headers_into_args(
-                            tools, tool_name, decorated_args, incoming_headers
+                            tools,
+                            tool_name,
+                            decorated_args,
+                            incoming_headers,
+                            access_token_inner,
                         )
 
                         call_fn = getattr(session, "call_tool_with_progress", None)
@@ -813,7 +859,7 @@ async def mcp_session_context(
             )
             # Inject header-mapped inputs if available
             decorated_args = inject_headers_into_args(
-                tools, tool_name, decorated_args, incoming_headers
+                tools, tool_name, decorated_args, incoming_headers, access_token_inner
             )
             result = await mcp_task.request(
                 {
@@ -867,7 +913,7 @@ async def mcp_session_context(
                 tools, tool_name, args, access_token_inner
             )
             decorated_args = inject_headers_into_args(
-                tools, tool_name, decorated_args, incoming_headers
+                tools, tool_name, decorated_args, incoming_headers, access_token_inner
             )
             result = await mcp_task.request(
                 {

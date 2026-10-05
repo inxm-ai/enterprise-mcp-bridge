@@ -360,7 +360,9 @@ async def test_sessionless_progress_and_logs_forwarded(monkeypatch):
         AsyncMock(side_effect=lambda *a, **k: a[2]),
     )
     monkeypatch.setattr(
-        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+        sc,
+        "inject_headers_into_args",
+        lambda tools, tool, args, headers, token=None: args,
     )
 
     async def _progress_cb(progress, total=None, message=None):
@@ -441,7 +443,9 @@ async def test_sessionful_progress_and_logs_forwarded(monkeypatch):
         AsyncMock(side_effect=lambda *a, **k: a[2]),
     )
     monkeypatch.setattr(
-        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+        sc,
+        "inject_headers_into_args",
+        lambda tools, tool, args, headers, token=None: args,
     )
 
     async def _progress_cb(progress, total=None, message=None):
@@ -509,7 +513,9 @@ async def test_sessionless_call_tool_streaming_emits_progress_log_result(monkeyp
         AsyncMock(side_effect=lambda *a, **k: a[2]),
     )
     monkeypatch.setattr(
-        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+        sc,
+        "inject_headers_into_args",
+        lambda tools, tool, args, headers, token=None: args,
     )
 
     async with sc.mcp_session_context(
@@ -571,7 +577,9 @@ async def test_sessionful_call_tool_streaming_emits_progress_log_result(monkeypa
         AsyncMock(side_effect=lambda *a, **k: a[2]),
     )
     monkeypatch.setattr(
-        sc, "inject_headers_into_args", lambda tools, tool, args, headers: args
+        sc,
+        "inject_headers_into_args",
+        lambda tools, tool, args, headers, token=None: args,
     )
 
     async with sc.mcp_session_context(

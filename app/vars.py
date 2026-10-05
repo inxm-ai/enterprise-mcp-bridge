@@ -4,7 +4,10 @@ import re
 from fnmatch import fnmatchcase
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from app.multi_server import current_setting, current_tool_output_schemas
+from app.utils.effect_tools import is_effect_tool
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
 TOKEN_NAME = os.environ.get("TOKEN_NAME", "X-Auth-Request-Access-Token")
@@ -15,7 +18,9 @@ DRY_RUN_HEADER_NAME = "X-Inxm-Dry-Run"
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]
-# Tools that are modifying or notifying or similar
+# Tools that are modifying or notifying or similar. The entry "auto" enables
+# automatic classification (see app.utils.effect_tools). In multi-server mode a
+# server's "effect_tools" overrides this; read it via current_effect_tools().
 EFFECT_TOOLS = [
     pattern.strip()
     for pattern in os.environ.get("EFFECT_TOOLS", "").split(",")
@@ -30,16 +35,25 @@ def tool_matches_patterns(tool_name: str, patterns: list[str]) -> bool:
     return any(fnmatchcase(tool_name, pattern) for pattern in patterns)
 
 
+def is_dry_run_requested(dry_run_header: Optional[str]) -> bool:
+    return bool(dry_run_header) and dry_run_header.lower() == "true"
+
+
 def is_dry_run_effect_call(
-    dry_run_header: Optional[str], tool_name: str, effect_tools: list[str]
+    dry_run_header: Optional[str],
+    tool_name: str,
+    effect_tools: list[str],
+    tool_def: Any = None,
 ) -> bool:
     """Return whether a tool call must be answered with a dry-run response.
 
     The contract is per tool name, so every transport must use this decision.
+    ``tool_def`` (the MCP tool definition) only matters when ``effect_tools``
+    contains "auto"; without it, auto classification falls back to the name.
     """
-    if not dry_run_header or dry_run_header.lower() != "true":
+    if not is_dry_run_requested(dry_run_header):
         return False
-    return tool_matches_patterns(tool_name, effect_tools)
+    return is_effect_tool(tool_name, tool_def, effect_tools)
 
 
 TGI_ENABLED = os.environ.get("TGI_URL", None) is not None
@@ -96,11 +110,15 @@ def _canonicalize_tool_name(tool_name: str) -> str:
 
 
 def get_tool_output_schema(tool_name: str):
-    """Get output schema by exact match first, then canonicalized alias match."""
+    """Get output schema by exact match first, then canonicalized alias match.
+
+    In multi-server mode the current server's own schemas take precedence.
+    """
     if not isinstance(tool_name, str) or not tool_name:
         return None
 
-    exact = TOOL_OUTPUT_SCHEMAS.get(tool_name)
+    schemas = current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS)
+    exact = schemas.get(tool_name)
     if exact is not None:
         return exact
 
@@ -109,7 +127,7 @@ def get_tool_output_schema(tool_name: str):
         return None
 
     matched_schema = None
-    for name, schema in TOOL_OUTPUT_SCHEMAS.items():
+    for name, schema in schemas.items():
         if _canonicalize_tool_name(name) != canonical_name:
             continue
         if matched_schema is not None and matched_schema != schema:
@@ -333,6 +351,33 @@ def _parse_map_header_to_input(raw: str) -> dict:
 MCP_MAP_HEADER_TO_INPUT = _parse_map_header_to_input(
     os.getenv("MCP_MAP_HEADER_TO_INPUT", "")
 )
+
+
+def per_server_float(name: str, default: float) -> float:
+    raw = current_setting(name)
+    return default if raw is None else float(raw)
+
+
+def per_server_int(name: str, default: int) -> int:
+    raw = current_setting(name)
+    return default if raw is None else int(raw)
+
+
+def per_server_str(name: str, default: str) -> str:
+    raw = current_setting(name)
+    return default if raw is None else raw
+
+
+def per_server_list(name: str, default: list) -> list:
+    raw = current_setting(name)
+    if raw is None:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def per_server_header_map(default: dict) -> dict:
+    raw = current_setting("MCP_MAP_HEADER_TO_INPUT")
+    return default if raw is None else _parse_map_header_to_input(raw)
 
 
 def _load_generated_ui_gateway_role_args() -> dict:

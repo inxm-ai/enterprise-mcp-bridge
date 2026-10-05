@@ -35,6 +35,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# uvx runs PyPI-packaged MCP servers by command, as npx does for npm ones.
+RUN pip install --no-cache-dir uv
+
 # --- MCP Python server (optional) ---
 COPY mcp /mcp
 WORKDIR /mcp

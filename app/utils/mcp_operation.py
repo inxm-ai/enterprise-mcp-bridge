@@ -25,6 +25,7 @@ from opentelemetry import baggage, trace
 from opentelemetry.propagate import inject
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from app.multi_server import current_auth_provider
 from app.utils import token_fingerprint
 from app.vars import (
     AUTH_PROVIDER,
@@ -275,12 +276,13 @@ def downstream_call_kwargs(
         meta = trace_meta if trace_meta is not None else build_trace_meta()
         if meta:
             kwargs["meta"] = meta
-    if app_vars.MCP_TOOL_TIMEOUT_SECONDS > 0 and (
-        "read_timeout_seconds" in params or has_var_kw
-    ):
+    timeout = app_vars.per_server_float(
+        "MCP_TOOL_TIMEOUT_SECONDS", app_vars.MCP_TOOL_TIMEOUT_SECONDS
+    )
+    if timeout > 0 and ("read_timeout_seconds" in params or has_var_kw):
         # A float: SDK v2 hands it straight to anyio.fail_after (1.x accepted a
         # timedelta as well).
-        kwargs["read_timeout_seconds"] = float(app_vars.MCP_TOOL_TIMEOUT_SECONDS)
+        kwargs["read_timeout_seconds"] = float(timeout)
     return kwargs
 
 
@@ -418,7 +420,7 @@ def mcp_operation_span(
         recorder.set_attribute("enterprise_mcp_bridge.group.id", group)
         recorder.set_attribute(
             "enterprise_mcp_bridge.auth.mode",
-            AUTH_PROVIDER if access_token else "anonymous",
+            current_auth_provider(AUTH_PROVIDER) if access_token else "anonymous",
         )
         if arg_keys is not None:
             keys = list(arg_keys)

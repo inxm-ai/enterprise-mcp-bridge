@@ -6,7 +6,14 @@ from mcp import StdioServerParameters
 from app.oauth.token_exchange import TokenRetrieverFactory
 from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
-from app.multi_server import current_command, current_env
+from app.isolation import enabled_globally, isolate, uid_for
+from app.multi_server import (
+    current_command,
+    current_env,
+    current_forward_access_token,
+    current_isolate,
+    current_server_id,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -102,8 +109,15 @@ def get_server_params(
     anon: bool = False,
 ) -> StdioServerParameters:
     env_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")) or None
+    # forward_access_token=false: no exchange and no caller credential in the
+    # child's environment (OAUTH_ENV). Templates still resolve the caller's
+    # identity ({user_id}, {data_path}); they never emit the token itself.
+    forward = current_forward_access_token(True)
     env, _token_result = defined_env(
-        current_env(os.environ.copy()), access_token, requested_group, anon
+        current_env(os.environ.copy()),
+        access_token,
+        requested_group,
+        anon or not forward,
     )
 
     # Process command template with dynamic data path (caller identity)
@@ -126,7 +140,7 @@ def get_server_params(
             command,
             len(cmd_args),
         )
-        return StdioServerParameters(command=command, args=cmd_args, env=env)
+        return _stdio_params(command, cmd_args, env)
 
     # Fallback: parse sys.argv for --
     args = {}
@@ -139,13 +153,29 @@ def get_server_params(
             os.path.join(os.path.dirname(__file__), "../..", "mcp", "server.py")
         ]
         logger.info(f"Server-Params from sys.argv: command={command}, args={cmd_args}")
-        return StdioServerParameters(command=command, args=cmd_args, env=env)
+        return _stdio_params(command, cmd_args, env)
 
     # Default
     command = _default_python_command()
     cmd_args = [os.path.join(os.path.dirname(__file__), "../..", "mcp", "server.py")]
     logger.info(f"Server-Params default: command={command}, args={cmd_args}")
-    return StdioServerParameters(command=command, args=cmd_args, env=env)
+    return _stdio_params(command, cmd_args, env)
+
+
+def _stdio_params(
+    command: str, cmd_args: list[str], env: dict[str, str]
+) -> StdioServerParameters:
+    """Stdio parameters, run as the server's own user when it is isolated."""
+    if not current_isolate(enabled_globally()):
+        return StdioServerParameters(command=command, args=cmd_args, env=env)
+    server_id = current_server_id() or os.environ.get("SERVICE_NAME") or "mcp-server"
+    command, cmd_args, env, home = isolate(server_id, command, cmd_args, env)
+    logger.info(
+        "Server-Params isolated: server=%s uid=%s",
+        server_id,
+        uid_for(server_id),
+    )
+    return StdioServerParameters(command=command, args=cmd_args, env=env, cwd=home)
 
 
 def process_template(

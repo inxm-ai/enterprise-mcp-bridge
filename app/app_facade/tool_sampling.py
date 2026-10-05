@@ -41,8 +41,9 @@ from app.vars import (
     DUMMY_DATA_ERROR_CONTEXT_MAX_BYTES,
     DUMMY_DATA_TOOL_SAMPLE_TIMEOUT_SECONDS,
     EFFECT_TOOLS,
-    tool_matches_patterns,
 )
+from app.multi_server import current_effect_tools
+from app.utils.effect_tools import is_effect_tool
 from app.app_facade.generated_types import Scope
 
 logger = logging.getLogger("uvicorn.error")
@@ -529,7 +530,7 @@ class ToolSampler:
         sample_args: Dict[str, Any],
         access_token: Optional[str],
     ) -> Any:
-        if tool_matches_patterns(tool_name, EFFECT_TOOLS):
+        if is_effect_tool(tool_name, tool_def, current_effect_tools(EFFECT_TOOLS)):
             maybe_result = get_tool_dry_run_response(session, tool_def, sample_args)
             return (
                 await maybe_result

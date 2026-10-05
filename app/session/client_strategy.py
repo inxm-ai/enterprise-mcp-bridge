@@ -25,7 +25,13 @@ from app.elicitation import (
     get_elicitation_coordinator,
 )
 from app.mcp_server.server_params import get_server_params
-from app.multi_server import current_command, current_remote_url
+from app.multi_server import (
+    current_auth_provider,
+    current_command,
+    current_forward_access_token,
+    current_remote_url,
+)
+from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
@@ -255,6 +261,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         self._auth_provider: Optional[OAuthClientProvider] = None
         self._token_storage: Optional[_EphemeralTokenStorage] = None
         self._client_metadata = self._build_client_metadata()
+        # Resolved here, inside the request, for the server being connected.
+        self.forward_access_token = current_forward_access_token(True)
         self._prepare_auth()
 
     def _build_client_metadata(self) -> OAuthClientMetadata:
@@ -282,7 +290,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         )
 
     def _prepare_auth(self) -> None:
-        if AUTH_PROVIDER in AMBIENT_IDENTITY_PROVIDERS:
+        auth_provider = current_auth_provider(AUTH_PROVIDER)
+        if auth_provider in AMBIENT_IDENTITY_PROVIDERS:
             self._prepare_ambient_identity_auth()
             return
 
@@ -299,7 +308,12 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         token_result: Optional[dict[str, object]] = None
         authorization_value: Optional[str] = None
 
-        if self.access_token:
+        if self.access_token and not self.forward_access_token:
+            logger.info(
+                "[RemoteMCP] forward_access_token is disabled; the caller's "
+                "token is neither exchanged nor forwarded"
+            )
+        elif self.access_token:
             try:
                 retriever = TokenRetrieverFactory().get()
                 token_result = retriever.retrieve_token(self.access_token)
@@ -320,7 +334,11 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             # shared bearer token or the incoming Keycloak token would
             # silently replace the user's identity with a shared one and
             # defeat per-user isolation.
-            if AUTH_PROVIDER == "user-api-key" and self.access_token:
+            if (
+                auth_provider == "user-api-key"
+                and self.access_token
+                and self.forward_access_token
+            ):
                 raise UserLoggedOutException(
                     "Per-user API key retrieval failed; refusing to fall "
                     "back to a shared credential"
@@ -328,7 +346,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             if MCP_REMOTE_BEARER_TOKEN:
                 token_value = MCP_REMOTE_BEARER_TOKEN
                 logger.info("[RemoteMCP] Falling back to MCP_REMOTE_BEARER_TOKEN")
-            elif self.access_token:
+            elif self.access_token and self.forward_access_token:
                 token_value = self.access_token
                 logger.info("[RemoteMCP] Falling back to incoming access token")
 
@@ -363,7 +381,8 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         failure here is fail-closed and propagates as UserLoggedOutException.
         """
         retriever = TokenRetrieverFactory().get()
-        token_result = retriever.retrieve_token(self.access_token or "")
+        caller_token = (self.access_token or "") if self.forward_access_token else ""
+        token_result = retriever.retrieve_token(caller_token)
         token_value = token_result.get("access_token") if token_result else None
         if not token_value:
             raise UserLoggedOutException(
@@ -402,14 +421,30 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                         f"[RemoteMCP] Adding custom header from environment: {header_name}"
                     )
 
+    def _may_forward_header(self, name: str, value: str) -> bool:
+        if self.forward_access_token:
+            return True
+        if is_caller_credential_header(name, value, self.access_token):
+            logger.info(
+                "[RemoteMCP] Not forwarding credential header %s "
+                "(forward_access_token is disabled)",
+                name,
+            )
+            return False
+        return True
+
     def _forward_allowed_headers(self) -> None:
         """Forward allowed incoming headers to the remote MCP server."""
-        from app.vars import MCP_REMOTE_SERVER_FORWARD_HEADERS
+        from app import vars as app_vars
 
-        if not MCP_REMOTE_SERVER_FORWARD_HEADERS:
+        forward_headers = app_vars.per_server_list(
+            "MCP_REMOTE_SERVER_FORWARD_HEADERS",
+            app_vars.MCP_REMOTE_SERVER_FORWARD_HEADERS,
+        )
+        if not forward_headers:
             return
 
-        if any(h == "*" for h in MCP_REMOTE_SERVER_FORWARD_HEADERS):
+        if any(h == "*" for h in forward_headers):
             ignored = {
                 "content-length",
                 "connection",
@@ -427,14 +462,18 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     continue
                 if key.lower() in ignored:
                     continue
+                if not self._may_forward_header(key, value):
+                    continue
                 self.headers[key] = value
                 logger.info(f"[RemoteMCP] Forwarding incoming header: {key}")
             return
 
-        for header_name in MCP_REMOTE_SERVER_FORWARD_HEADERS:
+        for header_name in forward_headers:
             # Case-insensitive header lookup
             for key, value in self.incoming_headers.items():
                 if key.lower() == header_name.lower() and value:
+                    if not self._may_forward_header(key, value):
+                        break
                     self.headers[header_name] = value
                     logger.info(
                         f"[RemoteMCP] Forwarding incoming header: {header_name}"
@@ -443,10 +482,13 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     def _prepare_fallback_headers(self, *, anon: bool = False) -> None:
         header_name = MCP_REMOTE_AUTH_HEADER_NAME
-        if anon and MCP_REMOTE_ANON_BEARER_TOKEN and header_name not in self.headers:
-            self.headers[header_name] = self._format_auth_header_value(
-                MCP_REMOTE_ANON_BEARER_TOKEN
-            )
+        from app import vars as app_vars
+
+        anon_token = app_vars.per_server_str(
+            "MCP_REMOTE_ANON_BEARER_TOKEN", MCP_REMOTE_ANON_BEARER_TOKEN
+        )
+        if anon and anon_token and header_name not in self.headers:
+            self.headers[header_name] = self._format_auth_header_value(anon_token)
             logger.info(
                 f"[RemoteMCP] Using MCP_REMOTE_ANON_BEARER_TOKEN for {header_name} header"
             )
@@ -459,7 +501,11 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
             logger.info(
                 f"[RemoteMCP] Using MCP_REMOTE_BEARER_TOKEN for {header_name} header"
             )
-        elif self.access_token and header_name not in self.headers:
+        elif (
+            self.access_token
+            and self.forward_access_token
+            and header_name not in self.headers
+        ):
             self.headers[header_name] = self._format_auth_header_value(
                 self.access_token
             )

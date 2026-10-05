@@ -1,4 +1,9 @@
 from app.utils.mcp_fields import input_schema
+from app.multi_server import (
+    current_auth_provider,
+    current_forward_access_token,
+    current_keycloak_provider_alias,
+)
 from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 from fastapi import HTTPException
 import logging
@@ -14,13 +19,27 @@ async def decorate_args_with_oauth_token(
 ) -> Dict:
     tool_info = next((tool for tool in tools.tools if tool.name == tool_name), None)
 
+    if args is None:
+        args = {}
+    if not current_forward_access_token(True):
+        # The caller's token (exchanged or not) must never reach this server,
+        # and a tool declaring oauth_token runs without one rather than
+        # failing for a missing caller token.
+        logger.info(
+            f"[Tool-Call] forward_access_token is disabled; no oauth_token "
+            f"is injected for tool {tool_name}."
+        )
+        return args
+
     oauth_token = None
     if access_token:
         # Keycloak mode without a provider alias passes the token through;
         # every other provider (e.g. user-api-key) must go through its
         # retriever — short-circuiting here would silently forward the
         # Keycloak token instead of the per-user credential.
-        if AUTH_PROVIDER == "keycloak" and not KEYCLOAK_PROVIDER_ALIAS:
+        auth_provider = current_auth_provider(AUTH_PROVIDER)
+        provider_alias = current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
+        if auth_provider == "keycloak" and not provider_alias:
             oauth_token = access_token
         else:
             retriever = TokenRetrieverFactory().get()
@@ -31,8 +50,6 @@ async def decorate_args_with_oauth_token(
                 )
             oauth_token = token_result["access_token"]
 
-    if args is None:
-        args = {}
     # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
     schema = input_schema(tool_info) if tool_info else None
     if schema:
