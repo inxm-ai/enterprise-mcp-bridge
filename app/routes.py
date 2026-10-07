@@ -502,6 +502,12 @@ async def get_tool_details(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _require_memory_scope(request: Request) -> None:
+    if not request.headers.get("x-inxm-memory-scope"):
+        raise HTTPException(400, "Scoped memory endpoint requires a scope assertion")
+
+
+@router.post("/memory/tools/{tool_name}", dependencies=[Depends(_require_memory_scope)])
 @router.post("/tools/{tool_name}")
 async def run_tool(
     tool_name: str,
@@ -784,6 +790,7 @@ async def run_prompt(
 
 @router.post("/session/start")
 async def start_session(
+    request: Request,
     access_token: Optional[str] = Depends(get_access_token),
     group: Optional[str] = Query(
         None, description="Group name for group-specific data access"
@@ -830,6 +837,7 @@ async def start_session(
                     access_token=access_token,
                     requested_group=group,
                     session_key=session_storage_key(x_inxm_mcp_session),
+                    incoming_headers=_extract_request_headers(request),
                 )
             except ValueError as exc:
                 logger.error(f"[Session] Invalid MCP configuration: {exc}")

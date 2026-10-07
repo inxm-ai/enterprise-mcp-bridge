@@ -206,9 +206,14 @@ async def test_tool_output_schema_parsing_pluralized_name_alias():
         "required": ["value"],
     }
 
-    with patch.dict(
-        app.vars.TOOL_OUTPUT_SCHEMAS, {"list-teams-channels": test_schema}, clear=True
-    ), patch("app.routes.mcp_session_context") as mock_ctx:
+    with (
+        patch.dict(
+            app.vars.TOOL_OUTPUT_SCHEMAS,
+            {"list-teams-channels": test_schema},
+            clear=True,
+        ),
+        patch("app.routes.mcp_session_context") as mock_ctx,
+    ):
         tool_response_content = MockContent(text=json.dumps({"value": []}))
         tool_result = MockResult(content=[tool_response_content])
         mock_session = AsyncMock()

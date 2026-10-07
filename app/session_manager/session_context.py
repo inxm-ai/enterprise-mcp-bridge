@@ -577,6 +577,14 @@ async def mcp_session_context(
     incoming_headers: Optional[dict[str, str]] = None,
 ):
     """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes."""
+    from app.memory_scope import memory_tenant
+
+    memory_tenant(
+        incoming_headers,
+        access_token,
+        group,
+        persistent=x_inxm_mcp_session is not None,
+    )
     # Bridge-level authorization boundary: when BRIDGE_REQUIRED_GROUPS is set,
     # every request through this seam is gated before any downstream contact.
     try:

@@ -242,7 +242,7 @@ class DataAccessManager:
         user_roles = user_info.get("roles", [])
 
         # Check direct group membership
-        if group_name in user_groups:
+        if group_name.lstrip("/") in [group.lstrip("/") for group in user_groups]:
             return True
 
         # Check role-based access

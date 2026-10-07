@@ -616,8 +616,20 @@ def build_mcp_client_strategy(
     incoming_headers: Optional[dict[str, str]] = None,
     session_key: Optional[str] = None,
 ) -> MCPClientStrategy:
+    from app.memory_scope import memory_tenant
+
+    tenant = memory_tenant(
+        incoming_headers,
+        access_token,
+        requested_group,
+        persistent=session_key is not None,
+    )
     remote_server = current_remote_url(MCP_REMOTE_SERVER).strip()
     if remote_server:
+        if tenant is not None:
+            from fastapi import HTTPException
+
+            raise HTTPException(400, "Scoped memory requires a local memory child")
         mcp_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")).strip()
         if mcp_command:
             logger.error(
@@ -636,9 +648,8 @@ def build_mcp_client_strategy(
             session_key=session_key,
         )
 
-    server_params = get_server_params(
-        access_token=access_token,
-        requested_group=requested_group,
-        anon=anon,
-    )
+    params = dict(access_token=access_token, requested_group=requested_group, anon=anon)
+    if tenant is not None:
+        params["memory_tenant"] = tenant
+    server_params = get_server_params(**params)
     return LocalMCPClientStrategy(server_params, session_key=session_key)
