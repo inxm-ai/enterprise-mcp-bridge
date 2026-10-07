@@ -36,8 +36,9 @@ def mock_tools():
 
 
 def test_works_without_filters(mock_tools):
-    with patch("app.session_manager.session_context.INCLUDE_TOOLS", []), patch(
-        "app.session_manager.session_context.EXCLUDE_TOOLS", []
+    with (
+        patch("app.session_manager.session_context.INCLUDE_TOOLS", []),
+        patch("app.session_manager.session_context.EXCLUDE_TOOLS", []),
     ):
         result = map_tools(mock_tools)
         assert len(result) == 3
@@ -47,8 +48,9 @@ def test_works_without_filters(mock_tools):
 
 
 def test_include_tools(mock_tools):
-    with patch("app.session_manager.session_context.INCLUDE_TOOLS", ["tool*"]), patch(
-        "app.session_manager.session_context.EXCLUDE_TOOLS", []
+    with (
+        patch("app.session_manager.session_context.INCLUDE_TOOLS", ["tool*"]),
+        patch("app.session_manager.session_context.EXCLUDE_TOOLS", []),
     ):
         result = map_tools(mock_tools)
         assert len(result) == 2
@@ -56,8 +58,9 @@ def test_include_tools(mock_tools):
 
 
 def test_exclude_tools(mock_tools):
-    with patch("app.session_manager.session_context.INCLUDE_TOOLS", []), patch(
-        "app.session_manager.session_context.EXCLUDE_TOOLS", ["tool*"]
+    with (
+        patch("app.session_manager.session_context.INCLUDE_TOOLS", []),
+        patch("app.session_manager.session_context.EXCLUDE_TOOLS", ["tool*"]),
     ):
         result = map_tools(mock_tools)
         assert len(result) == 1
@@ -65,8 +68,9 @@ def test_exclude_tools(mock_tools):
 
 
 def test_include_and_exclude_tools(mock_tools):
-    with patch("app.session_manager.session_context.INCLUDE_TOOLS", ["*"]), patch(
-        "app.session_manager.session_context.EXCLUDE_TOOLS", ["special*"]
+    with (
+        patch("app.session_manager.session_context.INCLUDE_TOOLS", ["*"]),
+        patch("app.session_manager.session_context.EXCLUDE_TOOLS", ["special*"]),
     ):
         result = map_tools(mock_tools)
         assert len(result) == 2

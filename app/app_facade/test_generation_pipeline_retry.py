@@ -80,7 +80,7 @@ async def test_retry_carries_prior_failure_reason_into_next_attempt(
         messages,
         allowed_tools,
         dummy_data,
-        access_token
+        access_token,
     ):
         captured_messages_by_attempt[attempt] = list(messages)
         if attempt == 1:
@@ -149,7 +149,7 @@ async def test_fatal_llm_error_aborts_without_further_retries(tmp_path, monkeypa
         messages,
         allowed_tools,
         dummy_data,
-        access_token
+        access_token,
     ):
         call_count["n"] += 1
         yield {
@@ -199,7 +199,7 @@ async def test_create_and_update_use_distinct_phase2_instructions_and_merge_corr
         messages,
         allowed_tools,
         dummy_data,
-        access_token
+        access_token,
     ):
         yield {
             "type": "result",
