@@ -502,6 +502,12 @@ async def get_tool_details(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _require_memory_scope(request: Request) -> None:
+    if not request.headers.get("x-inxm-memory-scope"):
+        raise HTTPException(400, "Scoped memory endpoint requires a scope assertion")
+
+
+@router.post("/memory/tools/{tool_name}", dependencies=[Depends(_require_memory_scope)])
 @router.post("/tools/{tool_name}")
 async def run_tool(
     tool_name: str,

@@ -13,6 +13,7 @@ from app.multi_server import (
     current_forward_access_token,
     current_isolate,
     current_server_id,
+    current_server,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -107,6 +108,7 @@ def get_server_params(
     access_token: Optional[str] = None,
     requested_group: Optional[str] = None,
     anon: bool = False,
+    memory_tenant: Optional[str] = None,
 ) -> StdioServerParameters:
     env_command = current_command(os.environ.get("MCP_SERVER_COMMAND", "")) or None
     # forward_access_token=false: no exchange and no caller credential in the
@@ -119,6 +121,14 @@ def get_server_params(
         requested_group,
         anon or not forward,
     )
+    if memory_tenant is not None:
+        # Only a validated, hub-authenticated memory assertion reaches here.
+        env["MEMORY_TENANT"] = memory_tenant
+    # The memory scope assertion authenticates the bridge, never the child.
+    env.pop("INTERNAL_API_SECRET", None)
+    server = current_server()
+    if server and (source := server.settings_from.get("INTERNAL_API_SECRET")):
+        env.pop(source, None)
 
     # Process command template with dynamic data path (caller identity)
     if env_command and access_token:

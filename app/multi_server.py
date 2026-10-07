@@ -107,6 +107,7 @@ def _json_list(raw: str) -> None:
 
 # Bridge settings a server may set for itself, with a check of the value.
 SETTINGS = {
+    "INTERNAL_API_SECRET": str,
     "SYSTEM_DEFINED_PROMPTS": _json_list,
     "MCP_MAP_HEADER_TO_INPUT": str,
     "MCP_TOOL_TIMEOUT_SECONDS": float,

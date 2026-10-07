@@ -1212,3 +1212,28 @@ This reference covers all configuration options for the Enterprise MCP Bridge. U
 - [Environment Variables Guide](environment-variables.md)
 - [Deploy to Production](../how-to/deploy-production.md)
 - [Examples](examples.md)
+
+## Hub memory scopes
+
+`X-INXM-Memory-Scope` selects a `c/<canonical conversation UUID>` graph asserted
+by the agent hub, or a `p/<form-URL-encoded Keycloak group>` project graph with a
+matching `?group=`. Both require the caller's bearer credential and
+`X-Internal-Secret` matching the nonempty `INTERNAL_API_SECRET`. The hub is
+responsible for checking chat membership on each call; projects additionally
+pass the bridge's existing Keycloak group access check.
+
+The override applies only to `MEMORY_TENANT`, only for a local child configured
+with `MCP_ENV_MEMORY_TENANT={data_path}`, and only on sessionless REST calls.
+Invalid scopes, groups or secrets fail closed before starting a child. They
+never resolve to the caller's personal graph. Requests without the header retain
+their existing user/group template behavior. The scope header does not support
+remote MCP backends or persistent sessions.
+
+The hub uses `POST /memory/tools/{tool}` for scoped calls. This endpoint requires
+a scope assertion; older bridges do not implement it and therefore fail closed
+instead of ignoring the header and reaching a personal graph. Existing
+`POST /tools/{tool}` calls may also present a validated scope header.
+
+In multi-server mode, `INTERNAL_API_SECRET` can be a per-server bridge setting
+(including `settings_from`) so the hosted memory definition can reference a
+Secret without exposing it to the child. Otherwise the global env is used.
