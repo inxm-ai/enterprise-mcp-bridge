@@ -1237,3 +1237,9 @@ instead of ignoring the header and reaching a personal graph. Existing
 In multi-server mode, `INTERNAL_API_SECRET` can be a per-server bridge setting
 (including `settings_from`) so the hosted memory definition can reference a
 Secret without exposing it to the child. Otherwise the global env is used.
+Secret sources are stripped before environment merging and `MCP_ENV_*`
+expansion, including their expanded aliases. In multi-server mode each bound
+server must explicitly declare `MCP_ENV_MEMORY_TENANT={data_path}` in `env` or
+reference it in `env_from`; an inherited process-wide template cannot enable
+scoping on other servers. `/session/start` forwards scope headers to validation
+and rejects them before starting a persistent personal/group child.

@@ -115,8 +115,25 @@ def get_server_params(
     # child's environment (OAUTH_ENV). Templates still resolve the caller's
     # identity ({user_id}, {data_path}); they never emit the token itself.
     forward = current_forward_access_token(True)
+    server = current_server()
+    source = server.settings_from.get("INTERNAL_API_SECRET") if server else None
+    bridge_only = {"INTERNAL_API_SECRET", "MCP_ENV_INTERNAL_API_SECRET"}
+    if source:
+        bridge_only.add(source)
+        if source.startswith("MCP_ENV_"):
+            bridge_only.add(source[len("MCP_ENV_") :])
+    # Remove sources before merging (env_from may alias them) and before
+    # MCP_ENV_* expansion can copy a bridge-only secret into a child variable.
+    base_env = {
+        key: value for key, value in os.environ.items() if key not in bridge_only
+    }
+    child_env = {
+        key: value
+        for key, value in current_env(base_env).items()
+        if key not in bridge_only
+    }
     env, _token_result = defined_env(
-        current_env(os.environ.copy()),
+        child_env,
         access_token,
         requested_group,
         anon or not forward,
@@ -125,10 +142,8 @@ def get_server_params(
         # Only a validated, hub-authenticated memory assertion reaches here.
         env["MEMORY_TENANT"] = memory_tenant
     # The memory scope assertion authenticates the bridge, never the child.
-    env.pop("INTERNAL_API_SECRET", None)
-    server = current_server()
-    if server and (source := server.settings_from.get("INTERNAL_API_SECRET")):
-        env.pop(source, None)
+    for key in bridge_only:
+        env.pop(key, None)
 
     # Process command template with dynamic data path (caller identity)
     if env_command and access_token:

@@ -141,20 +141,24 @@ def test_scoped_endpoint_rejects_missing_or_bad_assertions_before_downstream_con
     start.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "source", ["MEMORY_SCOPE_SECRET", "MCP_ENV_MEMORY_SCOPE_SECRET"]
+)
 def test_hosted_scope_uses_its_server_secret_setting_without_sending_it_to_the_child(
-    configured, monkeypatch
+    configured, monkeypatch, source
 ):
     from app.multi_server import ServerConfig, bind_server, reset_server
 
     monkeypatch.delenv("INTERNAL_API_SECRET")
-    monkeypatch.setenv("MEMORY_SCOPE_SECRET", "hub-secret")
+    monkeypatch.setenv(source, "hub-secret")
     server = ServerConfig.from_mapping(
         {
             "id": "mcp-memory-server",
             "base_path": "/api/mcp-memory-server",
             "command": "node memory.js",
             "env": {"MCP_ENV_MEMORY_TENANT": "{data_path}"},
-            "settings_from": {"INTERNAL_API_SECRET": "MEMORY_SCOPE_SECRET"},
+            "settings_from": {"INTERNAL_API_SECRET": source},
+            "env_from": {"ALIASED_SCOPE_SECRET": source},
             "isolate": False,
         }
     )
@@ -166,5 +170,85 @@ def test_hosted_scope_uses_its_server_secret_setting_without_sending_it_to_the_c
         assert strategy.server_params.env["MEMORY_TENANT"] == CHAT
         assert "INTERNAL_API_SECRET" not in strategy.server_params.env
         assert "MEMORY_SCOPE_SECRET" not in strategy.server_params.env
+        assert "MCP_ENV_MEMORY_SCOPE_SECRET" not in strategy.server_params.env
+        assert "ALIASED_SCOPE_SECRET" not in strategy.server_params.env
+        assert "hub-secret" not in strategy.server_params.env.values()
     finally:
         reset_server(binding)
+
+
+@pytest.mark.parametrize(
+    "declaration", [{}, {"env": {"MCP_ENV_MEMORY_TENANT": "fixed"}}]
+)
+def test_global_memory_template_does_not_enable_scopes_on_other_bound_servers(
+    configured, monkeypatch, declaration
+):
+    from app.multi_server import ServerConfig, bind_server, reset_server
+
+    server = ServerConfig.from_mapping(
+        {
+            "id": "other-server",
+            "base_path": "/api/other-server",
+            "command": "node other.js",
+            **declaration,
+        }
+    )
+    binding = bind_server(server)
+    start = Mock()
+    monkeypatch.setattr("app.session.client_strategy.get_server_params", start)
+    try:
+        with pytest.raises(HTTPException) as error:
+            build_mcp_client_strategy(
+                access_token=configured,
+                requested_group=None,
+                incoming_headers=headers(),
+            )
+        assert error.value.status_code == 400
+        start.assert_not_called()
+    finally:
+        reset_server(binding)
+
+
+def test_a_bound_server_can_explicitly_reference_its_memory_template(
+    configured, monkeypatch
+):
+    from app.multi_server import ServerConfig, bind_server, reset_server
+
+    monkeypatch.setenv("MEMORY_TEMPLATE", "{data_path}")
+    server = ServerConfig.from_mapping(
+        {
+            "id": "memory",
+            "base_path": "/api/memory",
+            "command": "node memory.js",
+            "env_from": {"MCP_ENV_MEMORY_TENANT": "MEMORY_TEMPLATE"},
+            "isolate": False,
+        }
+    )
+    binding = bind_server(server)
+    try:
+        strategy = build_mcp_client_strategy(
+            access_token=configured, requested_group=None, incoming_headers=headers()
+        )
+        assert strategy.server_params.env["MEMORY_TENANT"] == CHAT
+    finally:
+        reset_server(binding)
+
+
+def test_start_session_rejects_scope_headers_before_starting_a_personal_child(
+    configured, monkeypatch
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routes import router
+
+    start = Mock()
+    monkeypatch.setattr("app.session.client_strategy.get_server_params", start)
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    response = client.post(
+        "/session/start", headers={"authorization": f"Bearer {configured}", **headers()}
+    )
+    assert response.status_code == 400, response.text
+    assert "sessionless" in response.text
+    start.assert_not_called()

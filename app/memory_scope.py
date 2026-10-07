@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
-from app.multi_server import current_env, current_setting
+from app.multi_server import current_server, current_setting, is_multi_server_mode
 from app.oauth.user_info import get_data_access_manager
 
 SCOPE_HEADER = "x-inxm-memory-scope"
@@ -47,7 +47,17 @@ def memory_tenant(
         raise HTTPException(400, "Scoped memory requires sessionless calls")
     # Do not expose a data_path override to other MCP children in multi-server
     # mode. The memory server's tenant env must be configured explicitly.
-    if current_env(os.environ.copy()).get("MCP_ENV_MEMORY_TENANT") != "{data_path}":
+    server = current_server()
+    if server:
+        template = server.env.get("MCP_ENV_MEMORY_TENANT")
+        source = server.env_from.get("MCP_ENV_MEMORY_TENANT")
+        if source:
+            template = os.environ.get(source)
+    else:
+        template = (
+            None if is_multi_server_mode() else os.environ.get("MCP_ENV_MEMORY_TENANT")
+        )
+    if template != "{data_path}":
         raise HTTPException(400, "Memory scope is only supported by the memory server")
     if scope.startswith("c/"):
         try:
