@@ -826,6 +826,50 @@ class TestLLMClient:
         assert all(m.role != MessageRole.ASSISTANT for m in captured["messages"][1:])
 
 
+def _traced_request(extra_headers=None):
+    return ChatCompletionRequest(
+        messages=[Message(role=MessageRole.USER, content="Hello")],
+        model="test-model",
+        stream=False,
+        extra_headers=extra_headers,
+    )
+
+
+def test_model_requests_carry_the_trace_context_when_traces_are_exported(
+    llm_client, monkeypatch
+):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    monkeypatch.setattr(llm, "OTLP_ENDPOINT", "http://collector:4317")
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("agent-turn") as span:
+        context = span.get_span_context()
+        expected = (
+            f"00-{context.trace_id:032x}-{context.span_id:016x}"
+            f"-{int(context.trace_flags):02x}"
+        )
+        chat = llm_client._build_request_params(_traced_request({"x-caller": "1"}))
+        responses = llm_client._build_responses_request_params(_traced_request())
+
+    assert chat["extra_headers"] == {"traceparent": expected, "x-caller": "1"}
+    assert responses["extra_headers"] == {"traceparent": expected}
+
+
+def test_model_requests_are_unchanged_when_traces_are_not_exported(
+    llm_client, monkeypatch
+):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    monkeypatch.setattr(llm, "OTLP_ENDPOINT", None)
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("agent-turn"):
+        chat = llm_client._build_request_params(_traced_request({"x-caller": "1"}))
+        responses = llm_client._build_responses_request_params(_traced_request())
+
+    assert chat["extra_headers"] == {"x-caller": "1"}
+    assert "extra_headers" not in responses
+
+
 def test_model_parameter_required_not_empty_string():
     pass
 

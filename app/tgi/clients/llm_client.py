@@ -21,10 +21,12 @@ from openai import (
 )
 from app.vars import (
     LLM_MAX_PAYLOAD_BYTES,
+    OTLP_ENDPOINT,
     TGI_MODEL_NAME,
     normalize_tgi_conversation_mode,
 )
 from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from app.tgi.models import (
     ChatCompletionRequest,
@@ -48,6 +50,25 @@ logger = logging.getLogger("uvicorn.error")
 tracer = trace.get_tracer(__name__)
 _WARNED_INVALID_CONVERSATION_MODES: set[str] = set()
 _RESPONSES_JSON_OBJECT_ONLY_SCHEMAS: set[str] = set()
+
+
+_TRACE_CONTEXT_HEADERS = ("traceparent", "tracestate")
+
+
+def _with_trace_context(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Adds the current W3C trace context to model request headers, but only when
+    this bridge exports traces (OTLP_ENDPOINT); otherwise the headers pass through
+    unchanged. The caller's own headers always win."""
+    if not OTLP_ENDPOINT:
+        return headers
+    carrier: Dict[str, str] = {}
+    inject(carrier)
+    trace_headers = {
+        key: value for key, value in carrier.items() if key in _TRACE_CONTEXT_HEADERS
+    }
+    if not trace_headers:
+        return headers
+    return {**trace_headers, **(headers or {})}
 
 
 class LLMClient:
@@ -170,6 +191,9 @@ class LLMClient:
             params.pop("tool_choice", None)
             params.pop("tools", None)
         params.pop("persist_inner_thinking", None)
+        extra_headers = _with_trace_context(params.get("extra_headers"))
+        if extra_headers:
+            params["extra_headers"] = extra_headers
         return params
 
     @staticmethod
@@ -838,8 +862,9 @@ class LLMClient:
             params["max_output_tokens"] = request.max_tokens
         if request.top_p is not None:
             params["top_p"] = request.top_p
-        if request.extra_headers:
-            params["extra_headers"] = request.extra_headers
+        extra_headers = _with_trace_context(request.extra_headers)
+        if extra_headers:
+            params["extra_headers"] = extra_headers
         if request.stop:
             self.logger.debug(
                 "[LLMClient] 'stop' is not mapped in responses mode. Ignoring stop tokens."
