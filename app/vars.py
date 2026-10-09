@@ -255,6 +255,8 @@ MCP_SHARED_DATA_ACCESS_TEMPLATE = os.getenv(
 )
 
 MCP_REMOTE_SERVER = os.getenv("MCP_REMOTE_SERVER", "")
+# Internal Jaeger query base for the group-gated paginated span overlay only.
+JAEGER_QUERY_URL = os.getenv("JAEGER_QUERY_URL", "")
 MCP_REMOTE_SCOPE = os.getenv("MCP_REMOTE_SCOPE", "")
 MCP_REMOTE_REDIRECT_URI = os.getenv(
     "MCP_REMOTE_REDIRECT_URI", "https://localhost/unused-callback"
