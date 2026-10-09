@@ -217,3 +217,25 @@ def test_sdk_v2_error_detail_uses_the_wire_names(client, mock_session_context):
     assert detail["isError"] is True
     assert detail["structuredContent"]["result"]["error"]["code"] == "busy"
     assert "is_error" not in detail
+
+
+def test_oversized_trace_pages_keep_their_typed_code_at_the_http_boundary(
+    client, mock_session_context
+):
+    """CLI page reduction must distinguish a size ceiling from other tool failures."""
+    from app.session_manager.jaeger_trace_tools import RESPONSE_TOO_LARGE_CODE
+
+    mock_session_context.call_tool.return_value = types.CallToolResult(
+        content=[types.TextContent(type="text", text="page exceeds response ceiling")],
+        structured_content={
+            "error": {"code": RESPONSE_TOO_LARGE_CODE, "retryable": False}
+        },
+        is_error=True,
+    )
+    response = client.post("/tools/get_trace_spans", json={"trace_id": "1" * 32})
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+    assert (
+        response.json()["detail"]["structuredContent"]["error"]["code"]
+        == RESPONSE_TOO_LARGE_CODE
+    )
+    assert "Retry-After" not in response.headers
