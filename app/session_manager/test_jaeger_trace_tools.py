@@ -75,6 +75,87 @@ def test_normalizes_parent_error_attributes_events_and_cross_trace_links():
     assert detail["links"][0]["trace_id"] == "3" * 32
 
 
+def test_resource_metadata_is_kept_separate_from_span_attributes():
+    """Versions and environments must survive full-span discovery without collisions."""
+    payload = trace_payload(1)
+    payload["data"][0]["processes"]["p"]["tags"] = [
+        {"key": "service.version", "value": "revision-123"},
+        {"key": "deployment.environment.name", "value": "qa"},
+        {"key": "shared", "value": "resource"},
+    ]
+    payload["data"][0]["spans"][0]["tags"] = [{"key": "shared", "value": "span"}]
+    detail = trace_tools.span_page(payload, TRACE, 0, 20)["spans"][0]
+    assert detail["resource_attributes"] == {
+        "service.version": "revision-123",
+        "deployment.environment.name": "qa",
+        "shared": "resource",
+    }
+    assert detail["attributes"] == {"shared": "span"}
+
+
+def test_wide_pages_have_a_typed_size_error_and_smaller_pages_keep_all_spans(
+    monkeypatch,
+):
+    """A response ceiling must be recoverable by lowering limit at the same offset."""
+    from app.session_manager import session_context
+    from app.utils.mcp_operation import encoded_result_size
+    from app.routes import _error_detail
+
+    ceiling = 1_000_000
+    span_content_bytes = 60_000
+    payload = trace_payload(20)
+    for span in payload["data"][0]["spans"]:
+        span["tags"] = [
+            {"key": "synthetic_metadata", "value": "x" * span_content_bytes}
+        ]
+    monkeypatch.setattr(
+        session_context.app_vars, "per_server_int", lambda *args: ceiling
+    )
+    monkeypatch.setattr(session_context, "ensure_tool_allowed", lambda name: None)
+
+    async def fetch(base_url, args):
+        page = trace_tools.span_page(payload, TRACE, args["offset"], args["limit"])
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=trace_tools.json.dumps(page))],
+            structured_content=page,
+        )
+
+    monkeypatch.setattr(trace_tools, "get_trace_spans", fetch)
+    overlay = trace_tools.JaegerTraceDelegate(object(), "http://jaeger")
+    for limit in [20, 10]:
+        result = asyncio.run(
+            overlay.call_tool(
+                trace_tools.TOOL_NAME, {"trace_id": TRACE, "offset": 0, "limit": limit}
+            )
+        )
+        assert result.is_error
+        error = result.structured_content["error"]
+        assert error["code"] == trace_tools.RESPONSE_TOO_LARGE_CODE
+        assert error["response_bytes"] > error["limit_bytes"] == ceiling
+        assert encoded_result_size(result) < ceiling
+        assert "synthetic_metadata" not in result.model_dump_json()
+        assert (
+            _error_detail(result)["structuredContent"]["error"]["code"]
+            == trace_tools.RESPONSE_TOO_LARGE_CODE
+        )
+
+    results = [
+        asyncio.run(
+            overlay.call_tool(
+                trace_tools.TOOL_NAME, {"trace_id": TRACE, "offset": offset, "limit": 5}
+            )
+        )
+        for offset in range(0, 20, 5)
+    ]
+    assert all(
+        not result.is_error and encoded_result_size(result) < ceiling
+        for result in results
+    )
+    spans = [span for result in results for span in result.structured_content["spans"]]
+    assert len({span["span_id"] for span in spans}) == 20
+    assert len({result.structured_content["snapshot_id"] for result in results}) == 1
+
+
 def test_rejects_duplicate_or_mismatched_trace_identity():
     payload = trace_payload(2)
     payload["data"][0]["spans"][1]["spanID"] = payload["data"][0]["spans"][0]["spanID"]

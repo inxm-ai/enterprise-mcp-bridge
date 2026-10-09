@@ -20,6 +20,7 @@ TOOL_NAME = "get_trace_spans"
 MAX_QUERY_BYTES = 32 * 1024 * 1024
 MAX_PAGE_SIZE = 20
 QUERY_TIMEOUT_SECONDS = 30
+RESPONSE_TOO_LARGE_CODE = "response_too_large"
 
 
 class Delegate(Protocol):
@@ -123,6 +124,7 @@ def span_page(
                 "duration_us": span.get("duration", 0),
                 "status": {"code": "Error" if error else "Unset"},
                 "attributes": attributes,
+                "resource_attributes": _attributes(process.get("tags", [])),
                 "events": events,
                 "links": [
                     {
@@ -241,6 +243,7 @@ class JaegerTraceDelegate:
         if name != TOOL_NAME:
             return await self.delegate.call_tool(name, args, *positional, **kwargs)
         from app.session_manager.session_context import (
+            ResponseTooLargeError,
             ensure_tool_allowed,
             enforce_response_ceiling,
         )
@@ -249,6 +252,21 @@ class JaegerTraceDelegate:
         try:
             return enforce_response_ceiling(
                 await get_trace_spans(self.base_url, args or {})
+            )
+        except ResponseTooLargeError as error:
+            # Retrying the same page cannot help; callers must reduce its limit.
+            # Keep the typed error small and omit the rejected span content.
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(error))],
+                structured_content={
+                    "error": {
+                        "code": RESPONSE_TOO_LARGE_CODE,
+                        "response_bytes": error.size,
+                        "limit_bytes": error.limit,
+                        "retryable": False,
+                    }
+                },
+                is_error=True,
             )
         except (ValueError, httpx.HTTPError, json.JSONDecodeError) as error:
             message = (
