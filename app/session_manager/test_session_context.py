@@ -28,6 +28,31 @@ def dict_to_obj(d):
 
 
 @pytest.mark.asyncio
+async def test_sessionful_overlay_configuration_errors_are_client_errors(monkeypatch):
+    from fastapi import HTTPException
+    from app.session_manager import jaeger_trace_tools
+
+    class Sessions:
+        def get(self, session_id):
+            return object()
+
+    def invalid(delegate):
+        raise ValueError("Jaeger overlay requires a group boundary")
+
+    monkeypatch.setattr(jaeger_trace_tools, "with_jaeger_trace_tools", invalid)
+    with pytest.raises(HTTPException) as error:
+        async with sc.mcp_session_context(
+            sessions=Sessions(),
+            x_inxm_mcp_session="test-session",
+            access_token=None,
+            group=None,
+            incoming_headers={},
+        ):
+            pytest.fail("invalid configuration yielded a session")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_sessionless_call_tool_injects_headers(monkeypatch):
     # Prepare fake tools: toolA expects userId
     tools_list = [

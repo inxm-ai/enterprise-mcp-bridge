@@ -1,4 +1,5 @@
 import asyncio
+import copy
 
 import pytest
 from mcp import types
@@ -6,6 +7,76 @@ from mcp import types
 from app.session_manager import jaeger_trace_tools as trace_tools
 
 TRACE = "1" * 32
+
+
+@pytest.mark.parametrize(
+    "field", ["tags", "startTime", "duration", "logs", "references", "processes"]
+)
+def test_snapshot_detects_content_changes_with_unchanged_span_ids(field):
+    payload = trace_payload(2)
+    initial = trace_tools.span_page(payload, TRACE, 0, 1)["snapshot_id"]
+    changed = copy.deepcopy(payload)
+    span = changed["data"][0]["spans"][1]
+    if field == "processes":
+        changed["data"][0]["processes"]["p"]["serviceName"] = "changed"
+    elif field in {"startTime", "duration"}:
+        span[field] += 1
+    elif field == "tags":
+        span[field] = [{"key": "changed", "value": True}]
+    elif field == "logs":
+        span[field] = [{"timestamp": 1, "fields": []}]
+    else:
+        span[field] = [
+            {"refType": "FOLLOWS_FROM", "traceID": TRACE, "spanID": "2" * 16}
+        ]
+    assert trace_tools.span_page(changed, TRACE, 0, 1)["snapshot_id"] != initial
+    payload["data"][0]["spans"].reverse()
+    assert trace_tools.span_page(payload, TRACE, 0, 1)["snapshot_id"] == initial
+
+
+def test_progress_and_streaming_calls_route_overlay_and_preserve_native_callbacks(
+    monkeypatch,
+):
+    from app.session_manager import session_context
+
+    monkeypatch.setattr(session_context, "ensure_tool_allowed", lambda name: None)
+    monkeypatch.setattr(
+        session_context, "enforce_response_ceiling", lambda result: result
+    )
+
+    async def fetch(base_url, args):
+        return types.CallToolResult(content=[], structured_content={"trace_id": TRACE})
+
+    monkeypatch.setattr(trace_tools, "get_trace_spans", fetch)
+
+    class Native:
+        async def call_tool_with_progress(self, *args, **kwargs):
+            return args, kwargs
+
+        async def call_tool_streaming(self, *args, **kwargs):
+            return args, kwargs
+
+    async def exercise():
+        overlay = trace_tools.JaegerTraceDelegate(Native(), "http://jaeger")
+        callback = object()
+        options = {"progress_callback": callback, "log_callback": callback}
+        assert await overlay.call_tool_with_progress(
+            "native", {}, "token", **options
+        ) == (("native", {}, "token"), options)
+        assert await overlay.call_tool_streaming("native", {}, "token") == (
+            ("native", {}, "token"),
+            {},
+        )
+        result = await overlay.call_tool_with_progress(
+            trace_tools.TOOL_NAME, {}, "token", **options
+        )
+        assert result.structured_content == {"trace_id": TRACE}
+        stream = await overlay.call_tool_streaming(trace_tools.TOOL_NAME, {}, "token")
+        assert [event async for event in stream] == [
+            {"type": "result", "data": {"trace_id": TRACE}}
+        ]
+
+    asyncio.run(exercise())
 
 
 def trace_payload(count=344):

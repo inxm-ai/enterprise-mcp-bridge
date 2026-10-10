@@ -1089,7 +1089,12 @@ async def mcp_session_context(
     try:
         from app.session_manager.jaeger_trace_tools import with_jaeger_trace_tools
 
-        yield with_jaeger_trace_tools(TaskDelegate())
+        overlay = with_jaeger_trace_tools(TaskDelegate())
+    except ValueError as exc:
+        logger.error(f"[MCP] Failed to create session: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        yield overlay
     finally:
         # No-op: persistent session remains managed elsewhere
         pass
