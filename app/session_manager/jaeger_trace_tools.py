@@ -32,6 +32,20 @@ class Delegate(Protocol):
         *positional: object,
         **kwargs: object,
     ) -> object: ...
+    async def call_tool_with_progress(
+        self,
+        name: str,
+        args: dict[str, object] | None,
+        *positional: object,
+        **kwargs: object,
+    ) -> object: ...
+    async def call_tool_streaming(
+        self,
+        name: str,
+        args: dict[str, object] | None,
+        *positional: object,
+        **kwargs: object,
+    ) -> object: ...
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -143,7 +157,11 @@ def span_page(
         "spans": page,
         "total_count": len(spans),
         "next_offset": next_offset if next_offset < len(spans) else None,
-        "snapshot_id": hashlib.sha256("|".join(ids).encode()).hexdigest(),
+        "snapshot_id": hashlib.sha256(
+            json.dumps(
+                {**trace, "spans": spans}, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
     }
 
 
@@ -278,6 +296,41 @@ class JaegerTraceDelegate:
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=message)], is_error=True
             )
+
+    async def call_tool_with_progress(
+        self,
+        name: str,
+        args: dict[str, object] | None = None,
+        *positional: object,
+        **kwargs: object,
+    ) -> object:
+        if name == TOOL_NAME:
+            return await self.call_tool(name, args)
+        return await self.delegate.call_tool_with_progress(
+            name, args, *positional, **kwargs
+        )
+
+    async def call_tool_streaming(
+        self,
+        name: str,
+        args: dict[str, object] | None = None,
+        *positional: object,
+        **kwargs: object,
+    ) -> object:
+        if name != TOOL_NAME:
+            return await self.delegate.call_tool_streaming(
+                name, args, *positional, **kwargs
+            )
+        result = await self.call_tool(name, args)
+
+        async def stream():
+            yield {
+                "type": "result",
+                "data": result.structured_content
+                or result.model_dump(by_alias=True, exclude_none=True),
+            }
+
+        return stream()
 
 
 def with_jaeger_trace_tools(delegate: Delegate) -> Delegate | JaegerTraceDelegate:
