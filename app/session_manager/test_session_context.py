@@ -28,19 +28,20 @@ def dict_to_obj(d):
 
 
 @pytest.mark.asyncio
-async def test_sessionful_overlay_configuration_errors_are_client_errors(monkeypatch):
+async def test_sessionful_overlay_misconfiguration_is_not_a_client_error(monkeypatch):
+    """A broken deployment contract is a bridge fault, never a 4xx for the caller."""
     from fastapi import HTTPException
-    from app.session_manager import jaeger_trace_tools
+    from app.session_manager import trace_query_tools
 
     class Sessions:
         def get(self, session_id):
             return object()
 
     def invalid(delegate):
-        raise ValueError("Jaeger overlay requires a group boundary")
+        raise trace_query_tools.TraceQueryMisconfigured("group boundary missing")
 
-    monkeypatch.setattr(jaeger_trace_tools, "with_jaeger_trace_tools", invalid)
-    with pytest.raises(HTTPException) as error:
+    monkeypatch.setattr(trace_query_tools, "with_trace_query_tools", invalid)
+    with pytest.raises(trace_query_tools.TraceQueryMisconfigured):
         async with sc.mcp_session_context(
             sessions=Sessions(),
             x_inxm_mcp_session="test-session",
@@ -49,7 +50,7 @@ async def test_sessionful_overlay_configuration_errors_are_client_errors(monkeyp
             incoming_headers={},
         ):
             pytest.fail("invalid configuration yielded a session")
-    assert error.value.status_code == 400
+    assert not issubclass(trace_query_tools.TraceQueryMisconfigured, HTTPException)
 
 
 @pytest.mark.asyncio

@@ -827,11 +827,11 @@ async def mcp_session_context(
                         )
                         return enforce_response_ceiling(RunPromptResult(result))
 
-                from app.session_manager.jaeger_trace_tools import (
-                    with_jaeger_trace_tools,
+                from app.session_manager.trace_query_tools import (
+                    with_trace_query_tools,
                 )
 
-                yield with_jaeger_trace_tools(SessionDelegate())
+                yield with_trace_query_tools(SessionDelegate())
         except ValueError as exc:
             logger.error(f"[MCP] Failed to create session: {exc}")
             raise HTTPException(status_code=400, detail=str(exc))
@@ -1086,15 +1086,10 @@ async def mcp_session_context(
                 RunPromptResult(await call_prompt(request, prompt_name, args))
             )
 
-    try:
-        from app.session_manager.jaeger_trace_tools import with_jaeger_trace_tools
+    from app.session_manager.trace_query_tools import with_trace_query_tools
 
-        overlay = with_jaeger_trace_tools(TaskDelegate())
-    except ValueError as exc:
-        logger.error(f"[MCP] Failed to create session: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc))
     try:
-        yield overlay
+        yield with_trace_query_tools(TaskDelegate())
     finally:
         # No-op: persistent session remains managed elsewhere
         pass

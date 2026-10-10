@@ -556,6 +556,30 @@ Sent as HTTP headers:
 - `X-API-KEY: secret-key-123`
 - `X-Client-Version: 1.0.0`
 
+### Trace query overlay
+
+#### TRACE_QUERY_URL
+
+URL template of a tracing backend's query API that returns one trace as
+OTLP JSON (`resourceSpans`). When set, the bridge adds a first-party
+`get_trace_spans` tool that lists every span of a trace in pages of at most
+20, independent of any span cap in the proxied tracing MCP server.
+
+- **Type:** String (URL template, must contain `{trace_id}`)
+- **Default:** None (overlay disabled)
+- **Required:** No
+- **Requires:** `BRIDGE_REQUIRED_GROUPS`, because full span data may carry
+  sensitive attributes. A template without the placeholder fails startup.
+
+```bash
+# Jaeger v2 query API v3 serves OTLP JSON
+TRACE_QUERY_URL="http://jaeger-query:16686/api/v3/traces/{trace_id}"
+```
+
+The URL is never caller-supplied, redirects are refused, and a trace larger
+than 32 MiB is rejected whole. Each page re-reads the full trace, so cost grows
+with pages times trace size.
+
 ### OAuth Configuration
 
 #### OAUTH_ISSUER_URL
