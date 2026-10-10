@@ -148,9 +148,9 @@ def _build_proxy_handlers(
     passes the dict straight to ``Server``. Kept apart so a test can call one.
     """
     coordinator = get_elicitation_coordinator()
-    from app.session_manager.jaeger_trace_tools import with_jaeger_trace_tools
+    from app.session_manager.trace_query_tools import with_trace_query_tools
 
-    downstream = with_jaeger_trace_tools(downstream)
+    downstream = with_trace_query_tools(downstream)
 
     async def list_tools(ctx, params) -> types.ListToolsResult:
         tools = await downstream.list_tools()

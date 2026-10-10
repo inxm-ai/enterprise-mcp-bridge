@@ -105,6 +105,16 @@ def _json_list(raw: str) -> None:
         raise ValueError("expected a JSON array")
 
 
+TRACE_ID_PLACEHOLDER = "{trace_id}"
+
+
+def trace_query_url(value: str) -> str:
+    """Validate the OTLP trace query URL template; empty disables the overlay."""
+    if value and TRACE_ID_PLACEHOLDER not in value:
+        raise ValueError(f"TRACE_QUERY_URL must contain {TRACE_ID_PLACEHOLDER}")
+    return value
+
+
 # Bridge settings a server may set for itself, with a check of the value.
 SETTINGS = {
     "INTERNAL_API_SECRET": str,
@@ -112,7 +122,7 @@ SETTINGS = {
     "MCP_MAP_HEADER_TO_INPUT": str,
     "MCP_TOOL_TIMEOUT_SECONDS": float,
     "MCP_MAX_RESPONSE_BYTES": int,
-    "JAEGER_QUERY_URL": str,
+    "TRACE_QUERY_URL": trace_query_url,
     "BRIDGE_REQUIRED_GROUPS": str,
     "MCP_REMOTE_ANON_BEARER_TOKEN": str,
     "MCP_REMOTE_SERVER_FORWARD_HEADERS": str,

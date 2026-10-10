@@ -223,7 +223,7 @@ def test_oversized_trace_pages_keep_their_typed_code_at_the_http_boundary(
     client, mock_session_context
 ):
     """CLI page reduction must distinguish a size ceiling from other tool failures."""
-    from app.session_manager.jaeger_trace_tools import RESPONSE_TOO_LARGE_CODE
+    from app.session_manager.trace_query_tools import RESPONSE_TOO_LARGE_CODE
 
     mock_session_context.call_tool.return_value = types.CallToolResult(
         content=[types.TextContent(type="text", text="page exceeds response ceiling")],

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from app.multi_server import current_setting, current_tool_output_schemas
+from app.multi_server import (
+    current_setting,
+    current_tool_output_schemas,
+    trace_query_url,
+)
 from app.utils.effect_tools import is_effect_tool
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "enterprise-mcp-bridge")
@@ -255,8 +259,10 @@ MCP_SHARED_DATA_ACCESS_TEMPLATE = os.getenv(
 )
 
 MCP_REMOTE_SERVER = os.getenv("MCP_REMOTE_SERVER", "")
-# Internal Jaeger query base for the group-gated paginated span overlay only.
-JAEGER_QUERY_URL = os.getenv("JAEGER_QUERY_URL", "")
+# OTLP JSON trace query URL template ("{trace_id}" placeholder) for the
+# group-gated paginated span overlay only. Validated here so a bad template
+# fails startup, not the first request.
+TRACE_QUERY_URL = trace_query_url(os.getenv("TRACE_QUERY_URL", ""))
 MCP_REMOTE_SCOPE = os.getenv("MCP_REMOTE_SCOPE", "")
 MCP_REMOTE_REDIRECT_URI = os.getenv(
     "MCP_REMOTE_REDIRECT_URI", "https://localhost/unused-callback"
