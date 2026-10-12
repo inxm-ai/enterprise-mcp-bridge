@@ -35,6 +35,7 @@ absent the global environment variable applies):
   tool argument. Only explicitly configured credentials are sent. Set it to
   false for every remote that does not use a provider alias (e.g. a public
   third-party MCP), or the caller's platform token leaks to that third party.
+  Absent, it falls back to ``MCP_FORWARD_ACCESS_TOKEN`` (default true).
 - ``tool_output_schemas`` (object): tool name -> output JSON schema, layered
   over ``TOOL_OUTPUT_SCHEMAS`` for this server only. Inline schemas only, no
   file paths.
@@ -477,7 +478,11 @@ def isolation_requested() -> bool:
 def current_forward_access_token(default: bool = True) -> bool:
     server = current_server()
     if not server or server.forward_access_token is None:
-        return default
+        # MCP_FORWARD_ACCESS_TOKEN is the same switch for a standalone bridge.
+        # Read here, not in app.vars: app.vars imports this module.
+        return default and (
+            os.getenv("MCP_FORWARD_ACCESS_TOKEN", "true").lower() == "true"
+        )
     return server.forward_access_token
 
 

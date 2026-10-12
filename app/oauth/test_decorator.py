@@ -75,3 +75,18 @@ async def test_args_none_initializes_dict(mock_token_retriever_factory):
     result = await decorate_args_with_oauth_token(tools, "test_tool", None, "token123")
     assert result["oauth_token"] == "token123"
     assert isinstance(result, dict)
+
+
+@pytest.mark.asyncio
+async def test_no_oauth_token_when_forwarding_disabled_by_env(monkeypatch):
+    """A standalone bridge with MCP_FORWARD_ACCESS_TOKEN=false never injects
+    the caller's token, and doesn't fail on the tool's oauth_token either."""
+    monkeypatch.setenv("MCP_FORWARD_ACCESS_TOKEN", "false")
+    input_schema = {"properties": {"oauth_token": {"type": "string"}}}
+    tools = DummyTools([DummyTool("test_tool", input_schema)])
+
+    result = await decorate_args_with_oauth_token(
+        tools, "test_tool", {"foo": "bar"}, "token123"
+    )
+
+    assert result == {"foo": "bar"}

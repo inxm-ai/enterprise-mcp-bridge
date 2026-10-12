@@ -1467,3 +1467,26 @@ def test_disabled_forwarding_puts_no_caller_credential_in_a_local_child(monkeypa
     assert "PACKAGE_TOKEN" not in params.env
     assert "MCP_BEARER_TOKEN" not in params.env
     assert CALLER_TOKEN not in json.dumps(params.env)
+
+
+def test_forward_access_token_env_is_the_standalone_default(monkeypatch):
+    """MCP_FORWARD_ACCESS_TOKEN sets the switch for a standalone bridge; a
+    per-server value still wins over it."""
+    deepwiki, default, explicit_true = _forwarding_servers()
+    monkeypatch.setattr(multi_server, "SERVERS", ())
+    monkeypatch.setenv("MCP_FORWARD_ACCESS_TOKEN", "false")
+
+    assert multi_server.current_forward_access_token() is False
+    for server, expected in (
+        (deepwiki, False),
+        (default, False),
+        (explicit_true, True),
+    ):
+        token = multi_server.bind_server(server)
+        try:
+            assert multi_server.current_forward_access_token(True) is expected
+        finally:
+            multi_server.reset_server(token)
+
+    monkeypatch.setenv("MCP_FORWARD_ACCESS_TOKEN", "TRUE")
+    assert multi_server.current_forward_access_token() is True
