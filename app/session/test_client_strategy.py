@@ -760,3 +760,26 @@ def test_forwarding_disabled_by_env_never_sends_caller_token(
 
     assert strategy.headers.get("Authorization") == expected_authorization
     assert all("caller-jwt" not in value for value in strategy.headers.values())
+
+
+def test_provider_alias_fails_closed_when_exchange_returns_no_token(monkeypatch):
+    """With a provider alias, an exchange that returns no token must not fall
+    back to the caller's own token."""
+
+    class EmptyRetriever:
+        def retrieve_token(self, token):
+            return {"success": False, "error": "no stored provider token"}
+
+    class EmptyFactory:
+        def get(self):
+            return EmptyRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", EmptyFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", "keycloak")
+    monkeypatch.setattr(client_strategy, "KEYCLOAK_PROVIDER_ALIAS", "github")
+    _remote_without_oauth(monkeypatch, "")
+
+    with pytest.raises(client_strategy.UserLoggedOutException):
+        client_strategy.build_mcp_client_strategy(
+            access_token="caller-jwt", requested_group=None
+        )

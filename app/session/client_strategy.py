@@ -30,6 +30,7 @@ from app.multi_server import (
     current_auth_provider,
     current_command,
     current_forward_access_token,
+    current_keycloak_provider_alias,
     current_remote_url,
     current_server_id,
 )
@@ -38,6 +39,7 @@ from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutExcepti
 from app.utils.exception_logging import log_exception_with_details
 from app.vars import (
     AUTH_PROVIDER,
+    KEYCLOAK_PROVIDER_ALIAS,
     MCP_REMOTE_ANON_BEARER_TOKEN,
     MCP_REMOTE_AUTH_HEADER_NAME,
     MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE,
@@ -353,6 +355,16 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                 token_value = MCP_REMOTE_BEARER_TOKEN
                 logger.info("[RemoteMCP] Falling back to MCP_REMOTE_BEARER_TOKEN")
             elif self.access_token and self.forward_access_token:
+                # With a provider alias the remote expects the provider's
+                # token; the caller's platform token must not stand in for it.
+                if (
+                    auth_provider == "keycloak"
+                    and current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS).strip()
+                ):
+                    raise UserLoggedOutException(
+                        "Provider token exchange returned no token; refusing "
+                        "to fall back to the caller's token"
+                    )
                 token_value = self.access_token
                 logger.info("[RemoteMCP] Falling back to incoming access token")
 
