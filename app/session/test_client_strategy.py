@@ -724,3 +724,39 @@ def test_ambient_identity_providers_fail_closed_on_empty_token(monkeypatch, prov
         client_strategy.build_mcp_client_strategy(
             access_token=None, requested_group=None
         )
+
+
+def _remote_without_oauth(monkeypatch, bearer_token):
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", bearer_token)
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+
+class _ExplodingFactory:
+    def get(self):
+        raise AssertionError("no token exchange with forwarding disabled")
+
+
+@pytest.mark.parametrize(
+    "bearer_token, expected_authorization",
+    [("static-api-key", "Bearer static-api-key"), ("", None)],
+)
+def test_forwarding_disabled_by_env_never_sends_caller_token(
+    monkeypatch, bearer_token, expected_authorization
+):
+    """MCP_FORWARD_ACCESS_TOKEN=false on a standalone bridge: an API-key
+    remote gets only its key, a no-auth remote gets no Authorization."""
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", _ExplodingFactory)
+    monkeypatch.setenv("MCP_FORWARD_ACCESS_TOKEN", "false")
+    _remote_without_oauth(monkeypatch, bearer_token)
+
+    strategy = client_strategy.build_mcp_client_strategy(
+        access_token="caller-jwt", requested_group=None
+    )
+
+    assert strategy.headers.get("Authorization") == expected_authorization
+    assert all("caller-jwt" not in value for value in strategy.headers.values())

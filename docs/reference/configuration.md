@@ -893,6 +893,28 @@ Allowed host headers.
 ALLOWED_HOSTS="mcp.example.com,bridge.example.com"
 ```
 
+#### MCP_FORWARD_ACCESS_TOKEN
+
+Whether the caller's access token may reach the MCP server. The same switch as
+the per-server [`forward_access_token`](#multi-server-mode), for a bridge
+serving one server; a per-server value wins over it. When `false`, the bridge
+never sends the caller's token on: no token exchange, no fallback to the
+incoming token, no `oauth_token` tool argument and no forwarded credential
+headers. Only explicitly configured credentials are sent, such as
+`MCP_REMOTE_BEARER_TOKEN`.
+
+- **Type:** Boolean
+- **Values:** `true`, `false`
+- **Default:** `true`
+- **Required:** No
+
+Set it to `false` for a server that authenticates with a static API key or not
+at all.
+
+```bash
+MCP_FORWARD_ACCESS_TOKEN=false
+```
+
 ### Advanced
 
 #### MCP_ENV_*
