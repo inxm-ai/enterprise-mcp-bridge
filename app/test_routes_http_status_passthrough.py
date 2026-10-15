@@ -50,7 +50,9 @@ async def test_list_resources_passes_through_upstream_http_status_code():
             )
 
     assert exc_info.value.status_code == 401
-    assert "401 Unauthorized" in str(exc_info.value.detail)
+    # Only sanitized metadata leaves the bridge, never the upstream message.
+    assert exc_info.value.detail["upstream_status"] == 401
+    assert "Unauthorized" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -103,4 +105,6 @@ async def test_list_tools_passes_through_upstream_http_status_code():
             )
 
     assert exc_info.value.status_code == 401
-    assert "401 Unauthorized" in str(exc_info.value.detail)
+    # Only sanitized metadata leaves the bridge, never the upstream message.
+    assert exc_info.value.detail["upstream_status"] == 401
+    assert "Unauthorized" not in str(exc_info.value.detail)
