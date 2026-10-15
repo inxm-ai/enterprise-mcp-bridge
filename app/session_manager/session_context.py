@@ -14,6 +14,7 @@ from mcp import types as mcp_types
 
 from app.utils.mcp_operation import is_mcp_error
 from app.utils import mcp_fields
+from app.utils.exception_logging import upstream_phase
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from app.session import mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
@@ -123,7 +124,8 @@ async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
     already warm by the time ``call_tool()`` checks it.
     """
     try:
-        return await session.list_tools()
+        with upstream_phase("discovery"):
+            return await session.list_tools()
     except ValidationError as exc:
         logger.warning(
             "[Tools] list_tools() failed downstream schema validation; "
@@ -531,7 +533,9 @@ async def list_resources(list_resources: any):
         resources = await list_resources()
         resources.resources += system_resources
     except Exception as e:
-        logger.warning(f"[ResourcesHelper] Error listing resources: {str(e)}")
+        logger.warning(
+            "[ResourcesHelper] Error listing resources: type=%s", type(e).__name__
+        )
         # Not every MCP has list_resources, so deal with it friendly
         if is_mcp_error(e) and "Method not found" in str(e):
             if len(system_resources) < 1:
@@ -542,6 +546,10 @@ async def list_resources(list_resources: any):
                 logger.debug(f"[ResourcesHelper] System resources: {system_resources}")
                 resources = {"resources": system_resources}
         else:
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            if find_exception_in_exception_groups(e, HTTPException) is not None:
+                raise
             raise HTTPException(status_code=500, detail="Loading resources failed")
     return resources
 

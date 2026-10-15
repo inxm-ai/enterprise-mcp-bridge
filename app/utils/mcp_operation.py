@@ -55,6 +55,8 @@ ERROR_TYPE_UPSTREAM_TIMEOUT = "upstream_timeout"
 ERROR_TYPE_DOWNSTREAM_EXECUTION = "downstream_execution_error"
 ERROR_TYPE_RESPONSE_TOO_LARGE = "response_too_large"
 ERROR_TYPE_BRIDGE_INTERNAL = "bridge_internal_error"
+ERROR_TYPE_UPSTREAM_RATE_LIMIT = "upstream_rate_limit"
+MCP_INTERNAL_ERROR_CODE = -32603
 
 RESULT_STATUS_SUCCESS = "success"
 RESULT_STATUS_ERROR = "error"
@@ -67,6 +69,7 @@ _HTTP_STATUS_TO_ERROR_TYPE = {
     401: ERROR_TYPE_AUTHORIZATION,
     403: ERROR_TYPE_AUTHORIZATION,
     504: ERROR_TYPE_UPSTREAM_TIMEOUT,
+    429: ERROR_TYPE_UPSTREAM_RATE_LIMIT,
 }
 
 
@@ -102,7 +105,11 @@ def downstream_server_label() -> Optional[str]:
     import os
     from urllib.parse import urlparse
 
-    remote = (MCP_REMOTE_SERVER or "").strip()
+    from app.multi_server import current_server_id, current_remote_url
+
+    if current_server_id():
+        return current_server_id()
+    remote = current_remote_url(MCP_REMOTE_SERVER).strip()
     if remote:
         try:
             parsed = urlparse(remote)
@@ -175,6 +182,11 @@ def classify_exception(exc: BaseException) -> str:
         mapped = _HTTP_STATUS_TO_ERROR_TYPE.get(status)
         if mapped:
             return mapped
+        if (
+            isinstance(exc.detail, dict)
+            and exc.detail.get("error") == "upstream_failure"
+        ):
+            return ERROR_TYPE_DOWNSTREAM_EXECUTION
         if 400 <= status < 500:
             return ERROR_TYPE_VALIDATION
         return ERROR_TYPE_BRIDGE_INTERNAL
@@ -205,8 +217,23 @@ def classify_exception(exc: BaseException) -> str:
         return ERROR_TYPE_AUTHORIZATION
     if isinstance(exc, TimeoutError):
         return ERROR_TYPE_UPSTREAM_TIMEOUT
-    if is_mcp_error(exc) and "timed out" in str(exc).lower():
+    if (
+        is_mcp_error(exc)
+        and getattr(exc, "code", None) != MCP_INTERNAL_ERROR_CODE
+        and "timed out" in str(exc).lower()
+    ):
         return ERROR_TYPE_UPSTREAM_TIMEOUT
+    from app.utils.exception_logging import find_exception_in_exception_groups
+
+    upstream = find_exception_in_exception_groups(exc, HTTPException)
+    if (
+        upstream
+        and isinstance(upstream.detail, dict)
+        and upstream.detail.get("error") == "upstream_failure"
+    ):
+        return _HTTP_STATUS_TO_ERROR_TYPE.get(
+            upstream.status_code, ERROR_TYPE_DOWNSTREAM_EXECUTION
+        )
     return ERROR_TYPE_BRIDGE_INTERNAL
 
 
@@ -361,6 +388,19 @@ class MCPOperationRecorder:
         """
         self._finalized = True
         error_type = classify_exception(exc)
+        from fastapi import HTTPException
+        from app.utils.exception_logging import find_exception_in_exception_groups
+
+        upstream = find_exception_in_exception_groups(exc, HTTPException)
+        if (
+            upstream
+            and isinstance(upstream.detail, dict)
+            and upstream.detail.get("error") == "upstream_failure"
+        ):
+            for key in ("phase", "upstream_status", "protocol_code"):
+                value = upstream.detail.get(key)
+                if value is not None:
+                    self.set_attribute("enterprise_mcp_bridge." + key, value)
         self.set_attribute("enterprise_mcp_bridge.result.status", RESULT_STATUS_ERROR)
         self.set_attribute("error.type", error_type)
         self.span.add_event(
@@ -395,7 +435,12 @@ def mcp_operation_span(
     token. Exceptions are classified, sanitized and re-raised.
     """
     span_name = f"{method} {target}" if target else method
-    with _tracer.start_as_current_span(span_name, kind=SpanKind.SERVER) as span:
+    with _tracer.start_as_current_span(
+        span_name,
+        kind=SpanKind.SERVER,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
         recorder = MCPOperationRecorder(span)
         recorder.set_attribute("mcp.method.name", method)
         gen_ai_operation = _GEN_AI_OPERATION_BY_METHOD.get(method)

@@ -29,7 +29,7 @@ class _FakeTracer:
     def __init__(self):
         self.span = _FakeSpan()
 
-    def start_as_current_span(self, name):
+    def start_as_current_span(self, name, **kwargs):
         return self
 
     def __enter__(self):

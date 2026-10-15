@@ -259,6 +259,12 @@ MCP_SHARED_DATA_ACCESS_TEMPLATE = os.getenv(
 )
 
 MCP_REMOTE_SERVER = os.getenv("MCP_REMOTE_SERVER", "")
+MCP_REMOTE_MAX_CONCURRENT_SESSIONS = int(
+    os.getenv("MCP_REMOTE_MAX_CONCURRENT_SESSIONS", "0")
+)
+MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS = float(
+    os.getenv("MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS", "30")
+)
 # OTLP JSON trace query URL template ("{trace_id}" placeholder) for the
 # group-gated paginated span overlay only. Validated here so a bad template
 # fails startup, not the first request.

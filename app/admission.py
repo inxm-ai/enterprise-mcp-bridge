@@ -20,8 +20,10 @@ whose lock can be taken belongs to a process that died and is dropped.
 
 import errno
 import fcntl
+import hashlib
 import itertools
 import logging
+import math
 import os
 import threading
 import time
@@ -198,5 +200,79 @@ async def child_slot(server: str) -> AsyncIterator[Callable[[], None]]:
 
     try:
         yield slot.ready
+    finally:
+        slot.release()
+
+
+def remote_identity(url: str) -> str:
+    """Stable identity without exposing URL credentials or query parameters."""
+    from app.multi_server import current_server_id
+
+    return current_server_id() or hashlib.sha256(url.encode()).hexdigest()
+
+
+def _try_remote_admit(server: str, limit: int) -> Optional[_Slot]:
+    # Separate namespaces keep remote sessions out of local memory admission.
+    key = hashlib.sha256(server.encode()).hexdigest()
+    directory = admission_dir() / f"remote-{key}"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with _thread_lock:
+        lock_fd = os.open(directory / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _, total = _live_slots(directory)
+            return _Slot(directory) if total < limit else None
+        finally:
+            os.close(lock_fd)
+
+
+@asynccontextmanager
+async def remote_slot(url: str) -> AsyncIterator[None]:
+    """Hold a cross-worker, per-server slot through remote transport teardown."""
+    from app import vars as app_vars
+    from opentelemetry import trace
+
+    limit = app_vars.per_server_int(
+        "MCP_REMOTE_MAX_CONCURRENT_SESSIONS",
+        app_vars.MCP_REMOTE_MAX_CONCURRENT_SESSIONS,
+    )
+    if limit <= 0:
+        yield
+        return
+    timeout = app_vars.per_server_float(
+        "MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS",
+        app_vars.MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS,
+    )
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("Remote admission timeout must be finite and nonnegative")
+    server = remote_identity(url)
+    started = time.monotonic()
+    deadline = started + timeout
+    span = trace.get_current_span()
+    span.set_attribute("enterprise_mcp_bridge.downstream.server", server)
+    while True:
+        slot = _try_remote_admit(server, limit)
+        waited = time.monotonic() - started
+        if slot is not None:
+            break
+        if time.monotonic() >= deadline:
+            span.set_attribute("enterprise_mcp_bridge.admission.wait_seconds", waited)
+            logger.warning(
+                "[Admission] Remote capacity refused server=%s wait_seconds=%.3f",
+                server,
+                waited,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The remote MCP server is at capacity; retry shortly.",
+                headers={"Retry-After": "5", ADMISSION_HEADER: "refused"},
+            )
+        await anyio.sleep(min(POLL_SECONDS, max(0, deadline - time.monotonic())))
+    span.set_attribute("enterprise_mcp_bridge.admission.wait_seconds", waited)
+    logger.info(
+        "[Admission] Remote admitted server=%s wait_seconds=%.3f", server, waited
+    )
+    try:
+        yield
     finally:
         slot.release()

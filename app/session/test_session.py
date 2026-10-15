@@ -131,3 +131,37 @@ async def test_a_session_whose_server_never_started_is_not_handed_out():
     task.start()
     await task.wait_started()
     await task.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action", ["list_tools", {"action": "run_tool", "tool_name": "read_pr", "args": {}}]
+)
+async def test_persistent_session_preserves_typed_upstream_error(action):
+    from contextlib import asynccontextmanager
+    from mcp.shared.exceptions import MCPError
+    from app.session.client_strategy import MCPClientStrategy
+    from app.session.session import MCPLocalSessionTask
+    from unittest.mock import AsyncMock
+
+    error = MCPError(-32603, "upstream canary-secret")
+    session = AsyncMock()
+    session.list_tools.side_effect = error
+    session.call_tool.side_effect = error
+
+    class Strategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            yield session
+
+    task = MCPLocalSessionTask(Strategy())
+    task.start()
+    await task.wait_started()
+    try:
+        with pytest.raises(MCPError) as original:
+            await task.request(action)
+        assert original.value is error
+        if action == "list_tools":
+            assert error._mcp_failure_phase == "discovery"
+    finally:
+        await task.stop()
