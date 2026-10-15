@@ -51,6 +51,8 @@ def _safe_get_exceptions(exception_group) -> list:
 # Only bounded metadata is safe to send to clients or telemetry. Remote error
 # messages, URLs, bodies and MCP error.data can all contain credentials.
 UPSTREAM_BAD_GATEWAY = 502
+# JSON-RPC errors caused by the caller's request, not by the upstream server.
+CLIENT_PROTOCOL_ERROR_STATUS = {-32600: 400, -32602: 400}
 FAILURE_PHASES = {"transport", "initialization", "discovery", "execution"}
 
 
@@ -121,7 +123,9 @@ def find_exception_in_exception_groups(exception: Exception, target_type: Any):
             )
         if isinstance(node, MCPError):
             return HTTPException(
-                status_code=UPSTREAM_BAD_GATEWAY,
+                status_code=CLIENT_PROTOCOL_ERROR_STATUS.get(
+                    node.code, UPSTREAM_BAD_GATEWAY
+                ),
                 detail=_failure_detail(node, protocol_code=node.code),
             )
     if target_type is HTTPException:
