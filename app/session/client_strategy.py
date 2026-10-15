@@ -642,7 +642,9 @@ def build_mcp_client_strategy(
             raise ValueError(
                 "MCP_REMOTE_SERVER cannot be used together with MCP_SERVER_COMMAND"
             )
-        logger.info("Using remote MCP server identity=%s", remote_identity(remote_server))
+        logger.info(
+            "Using remote MCP server identity=%s", remote_identity(remote_server)
+        )
         return RemoteMCPClientStrategy(
             remote_server,
             access_token=access_token,

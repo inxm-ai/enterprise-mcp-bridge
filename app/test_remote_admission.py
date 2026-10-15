@@ -174,7 +174,19 @@ asyncio.run(main())
         ],
         stdout=subprocess.PIPE,
         text=True,
-        env=os.environ.copy(),
+        # The worker must import the same `app` package as this test process.
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(
+                    None,
+                    [
+                        os.path.dirname(os.path.dirname(admission.__file__)),
+                        os.environ.get("PYTHONPATH"),
+                    ],
+                )
+            ),
+        },
     )
     try:
         assert worker.stdout.readline().strip() == "ready"
