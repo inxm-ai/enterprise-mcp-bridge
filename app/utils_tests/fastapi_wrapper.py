@@ -410,3 +410,15 @@ class FastAPIWrapper:
         assert (
             body.get("structuredContent", {}).get("result") == 5
         ), f"Unexpected result: {body}"
+
+        # A caller-supplied value for the mapped input is replaced by the header.
+        r = self.client.post(
+            f"{self.base_url}/tools/add",
+            headers={"x-mapped-a": "3"},
+            json={"a": 100, "b": 2},
+        )
+        assert r.status_code == 200, f"Expected 200, got {r.status_code}, {r.text}"
+        body = r.json()
+        assert (
+            body.get("structuredContent", {}).get("result") == 5
+        ), f"Caller-supplied mapped input was used: {body}"

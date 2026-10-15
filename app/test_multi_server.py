@@ -754,6 +754,28 @@ def test_disabled_forwarding_skips_credential_header_mapping(monkeypatch):
     assert inject(default) == {"token": CALLER_TOKEN, "request_id": "req-1"}
 
 
+def test_disabled_forwarding_drops_a_caller_supplied_credential_input(monkeypatch):
+    from app.session_manager import session_context
+
+    monkeypatch.setattr(
+        session_context,
+        "MCP_MAP_HEADER_TO_INPUT",
+        {"token": "X-Auth-Request-Access-Token"},
+    )
+    tools = [{"name": "ask", "inputSchema": {"properties": {"token": {}, "q": {}}}}]
+    deepwiki, _, _ = _forwarding_servers()
+
+    token = multi_server.bind_server(deepwiki)
+    try:
+        out = session_context.inject_headers_into_args(
+            tools, "ask", {"q": "x", "token": "caller-chosen"}, dict(INCOMING_HEADERS)
+        )
+    finally:
+        multi_server.reset_server(token)
+
+    assert out == {"q": "x"}
+
+
 def test_match_server_uses_longest_base_path(monkeypatch):
     servers = _servers()
     monkeypatch.setattr(multi_server, "SERVERS", servers)
