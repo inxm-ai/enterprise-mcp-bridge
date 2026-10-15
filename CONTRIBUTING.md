@@ -175,9 +175,11 @@ Pushing a `vX.Y.Z` tag builds and pushes the Docker images
 2. Create the release at
    [Releases → Draft a new release](https://github.com/inxm-ai/enterprise-mcp-bridge/releases/new):
    create the tag `vX.Y.Z` on `main` (the merged version bump), and write the
-   notes — what changed per merged PR, new settings and their defaults, and links
-   to both Docker images.
-3. Wait for the "Docker Image CI" run on the tag, then read the image digest:
+   notes — what changed per merged PR, new settings and their defaults.
+3. Wait for the "Docker Image CI" run on the tag. It keeps your notes and only
+   appends links to the Docker images that the notes don't already mention (a
+   tag pushed without a release gets a release with generated notes instead).
+   Then read the image digest:
    `docker buildx imagetools inspect ghcr.io/inxm-ai/enterprise-mcp-bridge:vX.Y.Z-3.11`.
 4. Downstream projects pin the image by digest (`<tag>@sha256:<digest>`); ask the
    maintainer before raising their pins.
