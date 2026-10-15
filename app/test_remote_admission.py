@@ -337,3 +337,48 @@ async def test_100_requests_against_controlled_http_mcp_server(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_idle_persistent_session_closes_and_releases_its_slot(
+    remote_limit, monkeypatch
+):
+    from app.session.session import MCPLocalSessionTask
+
+    monkeypatch.setattr(app_vars, "MCP_REMOTE_MAX_CONCURRENT_SESSIONS", 1)
+    monkeypatch.setattr(app_vars, "MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(app_vars, "MCP_REMOTE_ADMISSION_IDLE_SECONDS", 0.05)
+
+    @asynccontextmanager
+    async def transport(*args, **kwargs):
+        yield object(), object()
+
+    class ControlledSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def initialize(self):
+            pass
+
+    monkeypatch.setattr(strategy_module, "_streamable_client", transport)
+    monkeypatch.setattr(strategy_module, "ClientSession", ControlledSession)
+    task = MCPLocalSessionTask(strategy())
+    task.start()
+    await task.wait_started()
+    # While the session is open, the only slot is taken.
+    with pytest.raises(HTTPException):
+        async with admission.remote_slot("https://remote.invalid/mcp"):
+            pass
+    await asyncio.wait_for(task._task, 1)
+    assert task.expired()
+    async with admission.remote_slot("https://remote.invalid/mcp"):
+        pass
+    with pytest.raises(HTTPException) as expired:
+        await asyncio.wait_for(task.request("list_tools"), 1)
+    assert expired.value.status_code == 404

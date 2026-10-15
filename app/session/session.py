@@ -11,6 +11,7 @@ from mcp import StdioServerParameters
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from ..utils.exception_logging import upstream_phase, find_exception_in_exception_groups
 from fastapi import HTTPException
+from ..admission import remote_session_idle_seconds
 from ..utils.mcp_operation import log_sanitized_exception
 from ..utils.mcp_operation import downstream_call_kwargs, safe_arg_keys
 from .client_strategy import (
@@ -148,14 +149,35 @@ class MCPSessionBase(ABC):
         else:
             await self.response_queue.put({"error": str(exc)})
 
+    def expired(self) -> bool:
+        """True once the session task has ended (closed, idle or failed)."""
+        return self._task is not None and self._task.done()
+
+    async def _next_response(self):
+        # A task that ended (e.g. idle-closed to free its remote admission
+        # slot) never answers; fail the request instead of waiting forever.
+        if self._task is None:
+            return await self.response_queue.get()
+        getter = asyncio.ensure_future(self.response_queue.get())
+        await asyncio.wait({getter, self._task}, return_when=asyncio.FIRST_COMPLETED)
+        if getter.done():
+            return getter.result()
+        getter.cancel()
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found. It might have expired, please start a new.",
+        )
+
     async def request(self, req):
         # Requests carry decorated arguments (including injected credentials)
         # and responses carry tool results — neither may be logged raw.
         logger.debug(
             f"[{self.__class__.__name__}] Received request: {_summarize_request(req)}"
         )
+        if self.expired():
+            await self._next_response()
         await self.request_queue.put(req)
-        response = await self.response_queue.get()
+        response = await self._next_response()
         logger.debug(
             f"[{self.__class__.__name__}] Response type: {type(response).__name__}"
         )
@@ -177,12 +199,27 @@ class MCPLocalSessionTask(MCPSessionBase):
     async def run(self):
         logger.info("[MCPLocalSessionTask] Session task started.")
         last_trigger = datetime.datetime.now()
+        idle_seconds = (
+            remote_session_idle_seconds()
+            if isinstance(self.client_strategy, RemoteMCPClientStrategy)
+            else None
+        )
         try:
             async with self.client_strategy.session() as session:
                 logger.info("[MCPLocalSessionTask] MCP session established.")
                 self._started.set()
                 while True:
-                    req = await self.request_queue.get()
+                    try:
+                        req = await asyncio.wait_for(
+                            self.request_queue.get(), idle_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(
+                            "[MCPLocalSessionTask] Idle for %.0fs; closing to "
+                            "release its remote admission slot.",
+                            idle_seconds,
+                        )
+                        break
                     logger.debug(
                         f"[MCPLocalSessionTask] Processing: {_summarize_request(req)}"
                     )

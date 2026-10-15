@@ -16,7 +16,7 @@ from app.utils.mcp_operation import is_mcp_error
 from app.utils import mcp_fields
 from app.utils.exception_logging import upstream_phase
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
-from app.session import mcp_session
+from app.session import MCPSessionBase, mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
 from app.session_manager.session_manager import SessionManagerBase
 from app.models import RunPromptResult, RunToolsResult
@@ -849,6 +849,9 @@ async def mcp_session_context(
     await close_idle_sessions(sessions)
     storage_key = session_storage_key(x_inxm_mcp_session)
     mcp_task = sessions.get(storage_key)
+    if isinstance(mcp_task, MCPSessionBase) and mcp_task.expired():
+        sessions.pop(storage_key)
+        mcp_task = None
     if not mcp_task:
         logger.warning(
             mask_token(
