@@ -165,11 +165,27 @@ Contributors welcome to add a lightweight GitHub Actions workflow.
 ---
 ## 📦 Releasing
 (Maintainers)
-1. Update version in `pyproject.toml`
-2. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
-3. Push tag: `git push origin vX.Y.Z`
-4. (Future) Build & publish to PyPI / build & push Docker image
-5. Draft release notes (aggregate Conventional Commits if available)
+
+Pushing a `vX.Y.Z` tag builds and pushes the Docker images
+`ghcr.io/inxm-ai/enterprise-mcp-bridge:vX.Y.Z-3.11` and `:vX.Y.Z-3.12`.
+
+1. Bump `version` to `X.Y.Z` in **both** `pyproject.toml` (installed by consumers
+   from a git tag) and `app/pyproject.toml` (installed by the Docker image), and
+   merge that change to `main` through a pull request.
+2. Create the release at
+   [Releases → Draft a new release](https://github.com/inxm-ai/enterprise-mcp-bridge/releases/new):
+   create the tag `vX.Y.Z` on `main` (the merged version bump), and write the
+   notes — what changed per merged PR, new settings and their defaults, and links
+   to both Docker images.
+3. Wait for the "Docker Image CI" run on the tag, then read the image digest:
+   `docker buildx imagetools inspect ghcr.io/inxm-ai/enterprise-mcp-bridge:vX.Y.Z-3.11`.
+4. Downstream projects pin the image by digest (`<tag>@sha256:<digest>`); ask the
+   maintainer before raising their pins.
+
+With push access to `main`, `./release.sh` does steps 1–2 in one go: it runs the
+tests, bumps both versions, commits to `main` and pushes the tag. Run it with the
+virtual env active (`pip install -e "./app[dev]"` and `pip install -e ".[testing]"`)
+so `pytest` is the env's, not a system one.
 
 ---
 ## 📜 License

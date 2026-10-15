@@ -1,4 +1,6 @@
 #!/bin/bash
+# Bumps both pyproject versions, commits to main and pushes the release tag.
+# Needs push access to main; otherwise follow "Releasing" in CONTRIBUTING.md.
 set -e
 
 git pull origin main
@@ -38,11 +40,11 @@ esac
 new_version="$major.$minor.$patch"
 echo "New version: $new_version"
 
-# Update the version in pyproject.toml
-sed -i "s/version = \"$current_version\"/version = \"$new_version\"/" ./app/pyproject.toml
+# Update the version in both pyproject files (the root one is what consumers install)
+sed -i "s/^version = \"$current_version\"/version = \"$new_version\"/" ./pyproject.toml ./app/pyproject.toml
 
 # Commit the changes and create a tag
-git add ./app/pyproject.toml
+git add ./pyproject.toml ./app/pyproject.toml
 git commit -m "Releasing $new_version"
 git tag "v$new_version"
 
