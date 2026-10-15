@@ -462,13 +462,16 @@ def inject_headers_into_args(
     access_token: Optional[str] = None,
 ) -> Dict:
     """
-    Fill missing args for tool_name from incoming_headers according to
+    Set args for tool_name from incoming_headers according to the
     MCP_MAP_HEADER_TO_INPUT mapping. Header matching is case-insensitive.
-    With forward_access_token disabled, a header that is a credential by
-    name, or whose value carries the caller's access_token, is not mapped.
+    Mapped inputs come only from headers: a value the caller sent for one is
+    replaced, or dropped when the header is absent, since mapped inputs carry
+    identity the caller must not choose. With forward_access_token disabled,
+    a header that is a credential by name, or whose value carries the
+    caller's access_token, is not mapped.
     """
     mapping = app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT)
-    if not mapping or not incoming_headers:
+    if not mapping:
         return args or {}
 
     # normalize incoming headers to lowercase keys for case-insensitive lookup
@@ -503,9 +506,17 @@ def inject_headers_into_args(
 
     out_args = dict(args or {})
     forward_credentials = current_forward_access_token(True)
+    dropped_caller_inputs = []
     for input_prop, header_name in mapping.items():
+        # Only consider if tool declares this property
+        if input_prop not in props:
+            continue
+        if input_prop in out_args:
+            out_args.pop(input_prop)
+            dropped_caller_inputs.append(input_prop)
+        header_val = headers_lc.get(header_name.lower())
         if not forward_credentials and is_caller_credential_header(
-            header_name, headers_lc.get(header_name.lower()), access_token
+            header_name, header_val, access_token
         ):
             logger.info(
                 "[HeaderMapping] Not mapping credential header %s into %s "
@@ -514,16 +525,16 @@ def inject_headers_into_args(
                 input_prop,
             )
             continue
-        # Only consider if tool declares this property
-        if input_prop not in props:
-            continue
-        # Do not overwrite explicit args
-        if input_prop in out_args:
-            continue
-        header_val = headers_lc.get(header_name.lower())
         if header_val is not None:
             out_args[input_prop] = header_val
 
+    if dropped_caller_inputs:
+        # Names only: the values may be identities or credentials.
+        logger.warning(
+            "[HeaderMapping] Ignored caller-supplied header-mapped inputs %s for %s",
+            sorted(dropped_caller_inputs),
+            tool_name,
+        )
     return out_args
 
 

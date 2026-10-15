@@ -37,17 +37,56 @@ def test_inject_headers_fills_missing_args(monkeypatch):
     assert out.get("keep") == "value"
 
 
-def test_inject_headers_does_not_overwrite_existing(monkeypatch):
+def test_inject_headers_replaces_caller_supplied_mapped_input(monkeypatch):
     monkeypatch.setattr(
         session_context, "MCP_MAP_HEADER_TO_INPUT", {"userId": "x-auth-user-id"}
     )
     tools = _make_tools_list()
-    incoming_headers = {"x-auth-user-id": "should-not-be-used"}
-    args = {"userId": "explicit"}
+    incoming_headers = {"x-auth-user-id": "authenticated-user"}
+    args = {"userId": "someone-else", "keep": "value"}
     out = session_context.inject_headers_into_args(
         tools, "toolA", args, incoming_headers
     )
-    assert out["userId"] == "explicit"
+    assert out == {"userId": "authenticated-user", "keep": "value"}
+
+
+def test_inject_headers_drops_caller_supplied_mapped_input_without_header(
+    monkeypatch,
+):
+    # e.g. a user without groups: the groups header is absent, and the caller
+    # must not be able to supply groups instead.
+    monkeypatch.setattr(
+        session_context, "MCP_MAP_HEADER_TO_INPUT", {"userId": "x-auth-user-id"}
+    )
+    tools = _make_tools_list()
+    args = {"userId": "someone-else", "keep": "value"}
+    out = session_context.inject_headers_into_args(
+        tools, "toolA", args, {"x-other": "1"}
+    )
+    assert out == {"keep": "value"}
+
+
+def test_inject_headers_drops_caller_supplied_mapped_input_with_no_headers(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        session_context, "MCP_MAP_HEADER_TO_INPUT", {"userId": "x-auth-user-id"}
+    )
+    tools = _make_tools_list()
+    args = {"userId": "someone-else", "keep": "value"}
+    out = session_context.inject_headers_into_args(tools, "toolA", args, None)
+    assert out == {"keep": "value"}
+
+
+def test_inject_headers_leaves_args_alone_for_tools_without_the_input(monkeypatch):
+    monkeypatch.setattr(
+        session_context, "MCP_MAP_HEADER_TO_INPUT", {"userId": "x-auth-user-id"}
+    )
+    tools = _make_tools_list()
+    out = session_context.inject_headers_into_args(
+        tools, "toolB", {"email": "e@example.com"}, {"x-auth-user-id": "u"}
+    )
+    assert out == {"email": "e@example.com"}
 
 
 def test_inject_headers_tool_not_found_returns_args(monkeypatch):
