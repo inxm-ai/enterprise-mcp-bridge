@@ -90,7 +90,7 @@ jobs:
           PREV_TAG=$(echo "$TAGS" | grep -v "^$CURRENT_TAG$" | head -n 1)
           echo "Current tag: $CURRENT_TAG"
           echo "Previous tag: $PREV_TAG"
-          echo "PREV_TAG=$PREV_TAG" >> $GITHUB_ENV
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
 
       - name: Get commits since last tag
         id: commits
@@ -103,10 +103,10 @@ jobs:
             echo "Getting all commits"
             git log --oneline > commits.txt
           fi
-          echo "COMMITS=$(jq -R -s -c 'split("\n") | map(select(. != ""))' commits.txt)" >> $GITHUB_ENV
+          echo "COMMITS=$(jq -R -s -c 'split("\n") | map(select(. != ""))' commits.txt)" >> "$GITHUB_ENV"
 
-      - name: Create Release
-        uses: actions/github-script@v6
+      - name: Create or update Release
+        uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -114,16 +114,48 @@ jobs:
             const commits = JSON.parse(process.env.COMMITS);
             const versions = JSON.parse(process.env.PYTHON_VERSIONS);
             const imageBase = `ghcr.io/${context.repo.owner}/${process.env.IMAGE_NAME}`;
-            const dockerImageLinks = versions.map((version) => {
-              const imageRef = `${imageBase}:${tagName}-${version}`;
-              return `- [${imageRef}](https://${imageRef})`;
-            });
+            const imageRefs = versions.map((version) => `${imageBase}:${tagName}-${version}`);
+            const imageLink = (imageRef) => `- [${imageRef}](https://${imageRef})`;
+            console.log('Docker images:', imageRefs);
+
+            // A release created from the GitHub release page pushes the tag
+            // that triggers this run, so the release may already exist. Its
+            // notes are written by hand: keep them and only add missing
+            // Docker image links.
+            let existing = null;
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tagName
+              });
+              existing = data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            if (existing) {
+              const body = existing.body || '';
+              const missing = imageRefs.filter((imageRef) => !body.includes(imageRef));
+              if (missing.length === 0) {
+                console.log(`Release ${tagName} already exists and links every Docker image; leaving it unchanged.`);
+                return;
+              }
+              console.log(`Release ${tagName} already exists; appending missing Docker image links:`, missing);
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: existing.id,
+                body: [body.trimEnd(), '', '### Docker images', ...missing.map(imageLink)].join('\n').trimStart()
+              });
+              return;
+            }
+
             console.log('Creating release for tag:', tagName);
-            console.log('Docker image links:', dockerImageLinks);
             console.log('Commits since last tag:', commits);
             const releaseBody = [
               `### Docker images`,
-              ...dockerImageLinks,
+              ...imageRefs.map(imageLink),
               '',
               '### Commits since last tag',
               ...commits
