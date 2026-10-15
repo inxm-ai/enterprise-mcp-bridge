@@ -298,6 +298,17 @@ In `dev` mode:
 ENV=dev
 ```
 
+### Remote session admission
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MCP_REMOTE_MAX_CONCURRENT_SESSIONS` | `0` | Per-server session ceiling across workers in one pod; 0 disables admission |
+| `MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS` | `30` | Maximum wait for a remote slot; 0 refuses immediately when full |
+
+Both support per-server `settings` overrides. Slot files use
+`MCP_ADMISSION_DIR` in a separate namespace from local child admission.
+See [remote admission behavior](../how-to/remote-mcp-servers.md#bound-concurrent-remote-sessions).
+
 ### Remote MCP Server
 
 #### MCP_REMOTE_SERVER

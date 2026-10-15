@@ -239,3 +239,43 @@ def test_oversized_trace_pages_keep_their_typed_code_at_the_http_boundary(
         == RESPONSE_TOO_LARGE_CODE
     )
     assert "Retry-After" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "path,method,action",
+    [("/tools", "get", "list_tools"), ("/tools/test_tool", "post", "call_tool")],
+)
+@pytest.mark.parametrize("failure", ["http", "protocol"])
+def test_remote_discovery_and_tool_failures_keep_sanitized_diagnostics(
+    client, mock_session_context, path, method, action, failure
+):
+    import httpx
+    from mcp.shared.exceptions import MCPError
+
+    request = httpx.Request(
+        "GET", "https://user:canary-secret@remote.invalid/?token=canary-secret"
+    )
+    if failure == "http":
+        error = httpx.HTTPStatusError(
+            "canary-secret",
+            request=request,
+            response=httpx.Response(429, request=request, headers={"Retry-After": "9"}),
+        )
+    else:
+        error = MCPError(-32603, "canary-secret 429", data={"token": "canary-secret"})
+    getattr(mock_session_context, action).side_effect = ExceptionGroup(
+        "canary-secret wrapper", [error]
+    )
+    response = getattr(client, method)(
+        path,
+        headers={"x-inxm-mcp-session": "test-session"},
+        **({"json": {}} if method == "post" else {}),
+    )
+    assert response.status_code == (429 if failure == "http" else 502)
+    assert "canary-secret" not in response.text
+    if failure == "http":
+        assert response.headers["Retry-After"] == "9"
+    else:
+        assert response.json()["detail"]["protocol_code"] == -32603
+        assert "Retry-After" not in response.headers
+    assert getattr(mock_session_context, action).await_count == 1

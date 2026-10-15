@@ -17,7 +17,7 @@ from mcp.client.sse import sse_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
-from app.admission import child_slot
+from app.admission import child_slot, remote_slot, remote_identity
 from app.utils import mcp_fields
 from app.elicitation import (
     ElicitationRequiredError,
@@ -35,7 +35,7 @@ from app.multi_server import (
 )
 from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
-from app.utils.exception_logging import log_exception_with_details
+from app.utils.exception_logging import log_exception_with_details, upstream_phase
 from app.vars import (
     AUTH_PROVIDER,
     MCP_REMOTE_ANON_BEARER_TOKEN,
@@ -535,8 +535,14 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
+        async with remote_slot(self.url):
+            async with self._remote_session() as session:
+                yield session
+
+    @asynccontextmanager
+    async def _remote_session(self) -> AsyncIterator[ClientSession]:
         headers = self.headers or None
-        logger.info(f"[RemoteMCP] Creating session with URL: {self.url}")
+        logger.info("[RemoteMCP] Creating session server=%s", remote_identity(self.url))
         logger.info(
             f"[RemoteMCP] Headers keys: {list(headers.keys()) if headers else 'None'}"
         )
@@ -548,25 +554,28 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         use_sse_only = self.url.endswith("/sse")
         stack = AsyncExitStack()
         try:
-            if use_sse_only:
-                logger.info(
-                    "[RemoteMCP] Using SSE-only client (detected /sse endpoint)"
-                )
-                read, write = await stack.enter_async_context(
-                    sse_client(
-                        self.url,
-                        headers=headers,
+            with upstream_phase("transport"):
+                if use_sse_only:
+                    logger.info(
+                        "[RemoteMCP] Using SSE-only client (detected /sse endpoint)"
                     )
-                )
-            else:
-                logger.info("[RemoteMCP] Using StreamableHTTP client (full protocol)")
-                read, write = await stack.enter_async_context(
-                    _streamable_client(
-                        self.url,
-                        headers=headers,
-                        auth=self._auth_provider,
+                    read, write = await stack.enter_async_context(
+                        sse_client(
+                            self.url,
+                            headers=headers,
+                        )
                     )
-                )
+                else:
+                    logger.info(
+                        "[RemoteMCP] Using StreamableHTTP client (full protocol)"
+                    )
+                    read, write = await stack.enter_async_context(
+                        _streamable_client(
+                            self.url,
+                            headers=headers,
+                            auth=self._auth_provider,
+                        )
+                    )
 
             session = await stack.enter_async_context(
                 ClientSession(
@@ -576,18 +585,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     elicitation_callback=_make_elicitation_callback(self.session_key),
                 )
             )
-            try:
+            with upstream_phase("initialization"):
                 await _negotiate(session)
-            except Exception as e:
-                logger.error(
-                    f"[RemoteMCP] Session initialization failed: {type(e).__name__}: {e}"
-                )
-                logger.error(f"[RemoteMCP] URL: {self.url}")
-                logger.error(
-                    f"[RemoteMCP] Headers: {list(headers.keys()) if headers else 'None'}"
-                )
-                raise
-            yield session
+            with upstream_phase("execution"):
+                yield session
         finally:
             # Close under an anyio shield, never asyncio.shield: the transports
             # are anyio task groups, and an uncancellable asyncio future inside
@@ -605,7 +606,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                         f"{MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS}s; abandoning close"
                     )
             except Exception as exc:
-                logger.debug(f"[RemoteMCP] Error while closing transport: {exc}")
+                logger.debug(
+                    "[RemoteMCP] Error while closing transport: type=%s",
+                    type(exc).__name__,
+                )
 
 
 def build_mcp_client_strategy(
@@ -638,7 +642,7 @@ def build_mcp_client_strategy(
             raise ValueError(
                 "MCP_REMOTE_SERVER cannot be used together with MCP_SERVER_COMMAND"
             )
-        logger.info(f"Using remote MCP server at {remote_server}")
+        logger.info("Using remote MCP server identity=%s", remote_identity(remote_server))
         return RemoteMCPClientStrategy(
             remote_server,
             access_token=access_token,

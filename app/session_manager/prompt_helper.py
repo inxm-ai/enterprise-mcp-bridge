@@ -60,7 +60,9 @@ async def list_prompts(list_prompts: any):
         prompts = await list_prompts()
         prompts.prompts += [prompt.to_dict() for prompt in system_prompts]
     except Exception as e:
-        logger.warning(f"[PromptHelper] Error listing prompts: {str(e)}")
+        logger.warning(
+            "[PromptHelper] Error listing prompts: type=%s", type(e).__name__
+        )
         # Not every MCP has list_prompts, so deal with it friendly
         if is_mcp_error(e) and "Method not found" in str(e):
             if len(system_prompts) < 1:
@@ -71,6 +73,10 @@ async def list_prompts(list_prompts: any):
                 logger.debug(f"[PromptHelper] System prompts: {system_prompts}")
                 prompts = default_prompt_list_result(system_prompts)
         else:
+            from app.utils.exception_logging import find_exception_in_exception_groups
+
+            if find_exception_in_exception_groups(e, HTTPException) is not None:
+                raise
             raise HTTPException(status_code=500, detail="Loading prompts failed")
     return prompts
 

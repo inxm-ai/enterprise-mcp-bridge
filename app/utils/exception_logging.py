@@ -5,10 +5,9 @@ Utility functions for enhanced exception logging, particularly for TaskGroup exc
 import logging
 import re
 from typing import Any
+from contextlib import contextmanager
 
 CLIENT_ERROR_STATUS_CODE_PATTERN = re.compile(r"\b(4\d{2})\b")
-CLIENT_ERROR_STATUS_MIN = 400
-CLIENT_ERROR_STATUS_MAX = 499
 
 
 def _safe_str(obj) -> str:
@@ -49,102 +48,135 @@ def _safe_get_exceptions(exception_group) -> list:
         return []
 
 
+# Only bounded metadata is safe to send to clients or telemetry. Remote error
+# messages, URLs, bodies and MCP error.data can all contain credentials.
+UPSTREAM_BAD_GATEWAY = 502
+FAILURE_PHASES = {"transport", "initialization", "discovery", "execution"}
+
+
+def _exception_nodes(exception):
+    pending = [exception]
+    seen = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend(_safe_get_exceptions(current))
+        cause = getattr(current, "__cause__", None)
+        if cause is not None:
+            pending.append(cause)
+
+
+def _failure_detail(exception, **metadata):
+    phase = getattr(exception, "_mcp_failure_phase", "execution")
+    return {
+        "error": "upstream_failure",
+        "phase": phase if phase in FAILURE_PHASES else "execution",
+        "exception_type": type(exception).__name__,
+        **metadata,
+    }
+
+
+def _retry_after(value):
+    from email.utils import parsedate_to_datetime
+
+    if not value or len(value) > 128 or "\r" in value or "\n" in value:
+        return None
+    if re.fullmatch(r"[0-9]+", value):
+        return value
+    try:
+        if parsedate_to_datetime(value).tzinfo is not None:
+            return value
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
 def find_exception_in_exception_groups(exception: Exception, target_type: Any):
-    """
-    Recursively search through an exception and its sub-exceptions to find
-    if any exception is of the target type.
+    """Find typed failures before attempting legacy text-only status recovery.
 
-    Args:
-        exception: The exception to search through
-        target_type: The exception type to look for
-
-    Returns:
-        The first exception matching the target type, or None if not found
+    Searching leaves first prevents a group's string (which may contain a
+    random 4xx number) from hiding a real HTTP or MCP protocol failure.
     """
+    from fastapi import HTTPException
+    from mcp.shared.exceptions import MCPError
+    import httpx
+    import httpx2
+
+    nodes = list(_exception_nodes(exception))
+    for node in nodes:
+        if isinstance(node, target_type):
+            return node
+        if target_type is not HTTPException:
+            continue
+        if isinstance(node, (httpx.HTTPStatusError, httpx2.HTTPStatusError)):
+            status = node.response.status_code
+            retry_after = _retry_after(node.response.headers.get("Retry-After"))
+            return HTTPException(
+                status_code=status,
+                detail=_failure_detail(node, upstream_status=status),
+                headers={"Retry-After": retry_after} if retry_after else None,
+            )
+        if isinstance(node, MCPError):
+            return HTTPException(
+                status_code=UPSTREAM_BAD_GATEWAY,
+                detail=_failure_detail(node, protocol_code=node.code),
+            )
+    if target_type is HTTPException:
+        for node in nodes:
+            # Compatibility for transports that have already discarded the
+            # typed HTTP response. Never copy the untrusted message out.
+            match = CLIENT_ERROR_STATUS_CODE_PATTERN.search(_safe_str(node))
+            if match:
+                status = int(match.group(1))
+                return HTTPException(
+                    status_code=status,
+                    detail=_failure_detail(node, upstream_status=status),
+                )
+    return None
+
+
+@contextmanager
+def upstream_phase(phase: str):
+    """Annotate original errors without changing MCP protocol semantics."""
     try:
-        if isinstance(exception, target_type):
-            return exception
+        yield
+    except Exception as exc:
+        from opentelemetry import trace
 
-        # Convert upstream HTTP transport status failures into FastAPI HTTP exceptions
-        # so callers can pass through the remote status code (e.g. 401) instead of 500.
-        converted_http_exception = _convert_http_status_error(exception, target_type)
-        if converted_http_exception is not None:
-            return converted_http_exception
+        for node in _exception_nodes(exc):
+            if not hasattr(node, "_mcp_failure_phase"):
+                node._mcp_failure_phase = phase
+        from fastapi import HTTPException
 
-        converted_client_error_exception = _convert_wrapped_client_error(
-            exception, target_type
+        converted = find_exception_in_exception_groups(exc, HTTPException)
+        span = trace.get_current_span()
+        span.set_attribute(
+            "enterprise_mcp_bridge.failure.phase", _failure_detail(exc)["phase"]
         )
-        if converted_client_error_exception is not None:
-            return converted_client_error_exception
-
-        # Check for sub-exceptions if this is an exception group
-        if hasattr(exception, "exceptions"):
-            sub_exceptions = _safe_get_exceptions(exception)
-            for sub_exc in sub_exceptions:
-                inner_exc = find_exception_in_exception_groups(sub_exc, target_type)
-                if inner_exc is not None:
-                    return inner_exc
-
-        return None
-    except Exception:
-        # If anything goes wrong, we assume we didn't find the target type
-        return None
-
-
-def _convert_http_status_error(exception: Exception, target_type: Any):
-    """
-    Convert httpx.HTTPStatusError into FastAPI HTTPException when requested.
-
-    This keeps upstream HTTP status codes visible to clients instead of
-    collapsing them into generic 500 responses.
-    """
-    try:
-        from fastapi import HTTPException as FastAPIHTTPException
-        import httpx
-    except Exception:
-        return None
-
-    if target_type is not FastAPIHTTPException:
-        return None
-
-    if not isinstance(exception, httpx.HTTPStatusError):
-        return None
-
-    status_code = getattr(getattr(exception, "response", None), "status_code", None)
-    if not isinstance(status_code, int):
-        return None
-
-    return FastAPIHTTPException(status_code=status_code, detail=_safe_str(exception))
-
-
-def _convert_wrapped_client_error(exception: Exception, target_type: Any):
-    """
-    Convert non-httpx wrapped upstream client errors into HTTPException.
-
-    Some async transport layers wrap remote 4xx responses into generic
-    exceptions (often with "future: ..." prefixes). Keep the upstream
-    client error status code visible to callers instead of returning 500.
-    """
-    try:
-        from fastapi import HTTPException as FastAPIHTTPException
-    except Exception:
-        return None
-
-    if target_type is not FastAPIHTTPException:
-        return None
-
-    message = _safe_str(exception)
-    status_match = CLIENT_ERROR_STATUS_CODE_PATTERN.search(message)
-    if status_match is None:
-        return None
-    status_code = int(status_match.group(1))
-    if status_code < CLIENT_ERROR_STATUS_MIN or status_code > CLIENT_ERROR_STATUS_MAX:
-        return None
-
-    return FastAPIHTTPException(
-        status_code=status_code,
-        detail=message,
-    )
+        span.set_attribute("exception.type", type(exc).__name__)
+        log = logging.getLogger("uvicorn.error")
+        metadata = (
+            converted.detail if converted and isinstance(converted.detail, dict) else {}
+        )
+        log.warning(
+            "[RemoteMCP] Upstream failure phase=%s type=%s status=%s code=%s",
+            _failure_detail(exc)["phase"],
+            type(exc).__name__,
+            metadata.get("upstream_status"),
+            metadata.get("protocol_code"),
+        )
+        if converted and isinstance(converted.detail, dict):
+            for key in ("upstream_status", "protocol_code"):
+                if key in converted.detail:
+                    span.set_attribute(
+                        "enterprise_mcp_bridge." + key, converted.detail[key]
+                    )
+        # Preserve the SDK/framework exception contract; HTTP conversion is
+        # performed only by REST routes, never inside the MCP session.
+        raise
 
 
 def log_exception_with_details(

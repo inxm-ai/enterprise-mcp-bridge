@@ -448,3 +448,38 @@ You now know how to:
 - [Remote MCP Example](../reference/examples.md#remote-mcp)
 - [Configuration Reference](../reference/configuration.md)
 - [Token Exchange Flow](../explanation/token-exchange.md)
+
+## Bound concurrent remote sessions
+
+Set `MCP_REMOTE_MAX_CONCURRENT_SESSIONS=5` and
+`MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS=30` to bound sessions for one remote
+server in each bridge pod. Admission is disabled by default (`0`); the wait
+default is 30 seconds. Both settings may be overridden in an `MCP_SERVERS`
+entry's `settings` object:
+
+```json
+{
+  "id": "mcp-github-server",
+  "base_path": "/api/mcp-github-server",
+  "url": "https://api.githubcopilot.com/mcp/",
+  "settings": {
+    "MCP_REMOTE_MAX_CONCURRENT_SESSIONS": "5",
+    "MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS": "30"
+  }
+}
+```
+
+Slots are shared by workers via `MCP_ADMISSION_DIR`, keyed by server identity
+(or a hash of the standalone remote URL), and cover transport opening,
+negotiation, discovery, calls and bounded transport teardown. Crashed owners'
+locks are reclaimed. Multiple pods each have their own bound; scheduler
+pools are still needed for workflow-wide control.
+
+If capacity stays full, the REST response is 503 with `Retry-After: 5` and
+`X-MCP-Admission: refused`. This marker means no downstream contact occurred.
+An upstream failure preserves its HTTP status and valid Retry-After, with
+sanitized phase, exception type and status metadata. MCP protocol failures
+include their protocol code and map to 502 on REST; -32603 alone is not
+evidence of rate limiting. The original protocol exception remains intact
+inside MCP sessions. The bridge does not automatically retry tool calls:
+a failed response does not establish whether a write executed.

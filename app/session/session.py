@@ -9,11 +9,14 @@ from typing import Optional, Union
 from mcp import StdioServerParameters
 
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
-from ..utils.exception_logging import log_exception_with_details
+from ..utils.exception_logging import upstream_phase, find_exception_in_exception_groups
+from fastapi import HTTPException
+from ..utils.mcp_operation import log_sanitized_exception
 from ..utils.mcp_operation import downstream_call_kwargs, safe_arg_keys
 from .client_strategy import (
     MCPClientStrategy,
     LocalMCPClientStrategy,
+    RemoteMCPClientStrategy,
     build_mcp_client_strategy,
 )
 
@@ -135,6 +138,16 @@ class MCPSessionBase(ABC):
             )
             await self._task
 
+    async def _report_failure(self, exc: Exception):
+        # Keep typed upstream errors intact across the session task boundary.
+        # Generic local errors retain the legacy result shape.
+        if isinstance(
+            self.client_strategy, RemoteMCPClientStrategy
+        ) or find_exception_in_exception_groups(exc, HTTPException):
+            await self.response_queue.put(exc)
+        else:
+            await self.response_queue.put({"error": str(exc)})
+
     async def request(self, req):
         # Requests carry decorated arguments (including injected credentials)
         # and responses carry tool results — neither may be logged raw.
@@ -146,6 +159,8 @@ class MCPSessionBase(ABC):
         logger.debug(
             f"[{self.__class__.__name__}] Response type: {type(response).__name__}"
         )
+        if isinstance(response, BaseException):
+            raise response
         return response
 
 
@@ -193,34 +208,32 @@ class MCPLocalSessionTask(MCPSessionBase):
                     if req == "list_tools":
                         logger.debug("[MCPLocalSessionTask] Listing available tools.")
                         try:
-                            result = await session.list_tools()
+                            with upstream_phase("discovery"):
+                                result = await session.list_tools()
                             await self.response_queue.put(result)
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif req == "list_prompts":
                         logger.debug("[MCPLocalSessionTask] Listing available prompts.")
                         try:
-                            result = await session.list_prompts()
+                            with upstream_phase("discovery"):
+                                result = await session.list_prompts()
                             await self.response_queue.put(result)
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif req == "list_resources":
                         logger.debug(
                             "[MCPLocalSessionTask] Listing available resources."
                         )
                         try:
-                            result = await session.list_resources()
+                            with upstream_phase("discovery"):
+                                result = await session.list_resources()
                             await self.response_queue.put(result)
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif isinstance(req, dict) and req.get("action") == "read_resource":
                         resource_name = req["resource_name"]
                         logger.info(
@@ -230,10 +243,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                             result = await session.read_resource(resource_name)
                             await self.response_queue.put(result)
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif isinstance(req, dict) and req.get("action") == "get_prompt":
                         prompt_name = req["prompt_name"]
                         args = req.get("args", {})
@@ -245,10 +256,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                             result = await session.get_prompt(prompt_name, args)
                             await self.response_queue.put(result)
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif (
                         isinstance(req, dict)
                         and req.get("action") == "run_tool_with_progress"
@@ -298,10 +307,8 @@ class MCPLocalSessionTask(MCPSessionBase):
                                 }
                             )
                         except Exception as e:
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     elif isinstance(req, dict) and req.get("action") == "run_tool":
                         tool_name = req["tool_name"]
                         args = req.get("args", {})
@@ -331,16 +338,14 @@ class MCPLocalSessionTask(MCPSessionBase):
                             )
                         except Exception as e:
                             # Handle TaskGroup exceptions with multiple sub-exceptions
-                            log_exception_with_details(
-                                logger, "[MCPLocalSessionTask]", e
-                            )
-                            await self.response_queue.put({"error": str(e)})
+                            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
+                            await self._report_failure(e)
                     else:
                         logger.warning(f"[MCPLocalSessionTask] Unknown request: {req}")
                         await self.response_queue.put({"error": "Unknown request"})
         except Exception as e:
             # Handle TaskGroup exceptions with multiple sub-exceptions
-            log_exception_with_details(logger, "[MCPLocalSessionTask]", e)
+            log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
             if not self._started.is_set():
                 self._start_error = e
         finally:

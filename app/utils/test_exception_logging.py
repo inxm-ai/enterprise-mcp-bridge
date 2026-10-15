@@ -604,7 +604,7 @@ class TestEdgeCasesAndStressTests:
 
             assert isinstance(found, HTTPException)
             assert found.status_code == 401
-            assert "401 Unauthorized" in str(found.detail)
+            assert found.detail["upstream_status"] == 401
 
         def test_maps_nested_http_status_error_to_http_exception(self):
             from app.utils.exception_logging import find_exception_in_exception_groups
@@ -638,7 +638,7 @@ class TestEdgeCasesAndStressTests:
 
             assert isinstance(found, HTTPException)
             assert found.status_code == 429
-            assert "429 Too Many Requests" in str(found.detail)
+            assert found.detail["upstream_status"] == 429
 
         def test_maps_wrapped_404_exception_to_http_exception(self):
             from app.utils.exception_logging import find_exception_in_exception_groups
@@ -651,9 +651,75 @@ class TestEdgeCasesAndStressTests:
 
             assert isinstance(found, HTTPException)
             assert found.status_code == 404
-            assert "404 Not Found" in str(found.detail)
+            assert found.detail["upstream_status"] == 404
 
 
 if __name__ == "__main__":
     # Run the tests
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("client_module", [httpx, __import__("httpx2")])
+@pytest.mark.parametrize(
+    "retry_after", ["5", "Wed, 21 Oct 2026 07:28:00 GMT", "secret-canary", "-1"]
+)
+def test_nested_http_failure_preserves_only_safe_status_and_retry_after(
+    client_module, retry_after
+):
+    from app.utils.exception_logging import (
+        find_exception_in_exception_groups,
+        upstream_phase,
+    )
+
+    request = client_module.Request(
+        "GET", "https://user:secret-canary@remote.invalid/?token=secret-canary"
+    )
+    response = client_module.Response(
+        429, request=request, headers={"Retry-After": retry_after}
+    )
+    error = client_module.HTTPStatusError(
+        "secret-canary", request=request, response=response
+    )
+    with pytest.raises(ExceptionGroup):
+        with upstream_phase("discovery"):
+            raise ExceptionGroup(
+                "wrapper 401 secret-canary", [ExceptionGroup("inner", [error])]
+            )
+    found = find_exception_in_exception_groups(error, HTTPException)
+    assert found.status_code == 429
+    assert found.detail["phase"] == "discovery"
+    assert "secret-canary" not in str(found.detail)
+    if retry_after in ("5", "Wed, 21 Oct 2026 07:28:00 GMT"):
+        assert found.headers == {"Retry-After": retry_after}
+    else:
+        assert found.headers is None
+
+
+def test_mcp_internal_error_keeps_protocol_semantics_and_maps_to_bad_gateway():
+    from mcp.shared.exceptions import MCPError
+    from app.utils.exception_logging import (
+        find_exception_in_exception_groups,
+        upstream_phase,
+    )
+    from app.utils.mcp_operation import (
+        classify_exception,
+        ERROR_TYPE_DOWNSTREAM_EXECUTION,
+    )
+
+    error = MCPError(-32603, "secret-canary 429", data={"token": "secret-canary"})
+    with pytest.raises(MCPError) as original:
+        with upstream_phase("initialization"):
+            raise error
+    assert original.value is error
+    found = find_exception_in_exception_groups(
+        ExceptionGroup("wrapper 429", [error]), HTTPException
+    )
+    assert found.status_code == 502
+    assert found.detail == {
+        "error": "upstream_failure",
+        "phase": "initialization",
+        "exception_type": "MCPError",
+        "protocol_code": -32603,
+    }
+    assert found.headers is None
+    assert classify_exception(error) == ERROR_TYPE_DOWNSTREAM_EXECUTION

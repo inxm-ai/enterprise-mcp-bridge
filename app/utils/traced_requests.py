@@ -20,7 +20,9 @@ def traced_request(
     user_id: Optional[str] = None,
 ):
     """Context manager to create a span, set common attributes, and log a start message."""
-    with tracer.start_as_current_span(operation) as span:
+    with tracer.start_as_current_span(
+        operation, record_exception=False, set_status_on_exception=False
+    ) as span:
         if session_value:
             # Bridge session values embed the caller's access token
             # (session_id() concatenates it), so only a fingerprint may
@@ -34,4 +36,10 @@ def traced_request(
             for k, v in extra_attrs.items():
                 span.set_attribute(k, v)
         logger.info(mask_token(start_message, session_value))
-        yield span
+        try:
+            yield span
+        except BaseException as exc:
+            from app.utils.mcp_operation import MCPOperationRecorder
+
+            MCPOperationRecorder(span).record_exception(exc)
+            raise

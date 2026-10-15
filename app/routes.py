@@ -249,7 +249,7 @@ async def list_resources(
         logger.warning(f"[Resources] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        log_exception_with_details(logger, "[Session]", e)
+        log_sanitized_exception(logger, "[Session]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -395,7 +395,7 @@ async def list_prompts(
         logger.warning(f"[Prompts] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        log_exception_with_details(logger, "[Session]", e)
+        log_sanitized_exception(logger, "[Session]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -442,7 +442,7 @@ async def list_tools(
         logger.warning(f"[Tools] Unauthorized access: {str(e)}")
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
-        log_exception_with_details(logger, "[Tools]", e)
+        log_sanitized_exception(logger, "[Tools]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -887,7 +887,7 @@ async def start_session(
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
-        log_exception_with_details(logger, "[Session]", e)
+        log_sanitized_exception(logger, "[Session]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
         if child_http_exception:
             raise child_http_exception
@@ -938,7 +938,7 @@ async def close_session(
         raise HTTPException(status_code=401, detail=e.message)
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
-        log_exception_with_details(logger, "[Session]", e)
+        log_sanitized_exception(logger, "[Session]", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
