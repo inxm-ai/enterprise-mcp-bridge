@@ -723,3 +723,20 @@ def test_mcp_internal_error_keeps_protocol_semantics_and_maps_to_bad_gateway():
     }
     assert found.headers is None
     assert classify_exception(error) == ERROR_TYPE_DOWNSTREAM_EXECUTION
+
+
+def test_client_caused_mcp_protocol_errors_are_not_bad_gateway():
+    from mcp.shared.exceptions import MCPError
+    from fastapi import HTTPException
+    from app.utils.exception_logging import find_exception_in_exception_groups
+
+    for code in (-32600, -32602):
+        found = find_exception_in_exception_groups(
+            MCPError(code, "bad params"), HTTPException
+        )
+        assert found.status_code == 400
+        assert found.detail["protocol_code"] == code
+    found = find_exception_in_exception_groups(
+        MCPError(-32603, "internal"), HTTPException
+    )
+    assert found.status_code == 502
