@@ -304,6 +304,7 @@ ENV=dev
 |----------|---------|---------|
 | `MCP_REMOTE_MAX_CONCURRENT_SESSIONS` | `0` | Per-server session ceiling across workers in one pod; 0 disables admission |
 | `MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS` | `30` | Maximum wait for a remote slot; 0 refuses immediately when full |
+| `MCP_REMOTE_ADMISSION_IDLE_SECONDS` | `300` | Close a persistent session idle this long so it releases its remote slot; 0 disables. Global only |
 
 Both support per-server `settings` overrides. Slot files use
 `MCP_ADMISSION_DIR` in a separate namespace from local child admission.

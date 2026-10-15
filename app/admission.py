@@ -226,6 +226,20 @@ def _try_remote_admit(server: str, limit: int) -> Optional[_Slot]:
             os.close(lock_fd)
 
 
+def remote_session_idle_seconds() -> Optional[float]:
+    """Idle limit for a persistent session holding a remote slot, else None."""
+    from app import vars as app_vars
+
+    limit = app_vars.per_server_int(
+        "MCP_REMOTE_MAX_CONCURRENT_SESSIONS",
+        app_vars.MCP_REMOTE_MAX_CONCURRENT_SESSIONS,
+    )
+    idle = app_vars.MCP_REMOTE_ADMISSION_IDLE_SECONDS
+    if limit <= 0 or not math.isfinite(idle) or idle <= 0:
+        return None
+    return idle
+
+
 @asynccontextmanager
 async def remote_slot(url: str) -> AsyncIterator[None]:
     """Hold a cross-worker, per-server slot through remote transport teardown."""

@@ -265,6 +265,12 @@ MCP_REMOTE_MAX_CONCURRENT_SESSIONS = int(
 MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS = float(
     os.getenv("MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS", "30")
 )
+# A persistent session holds its remote admission slot until it closes. Close
+# it after this many idle seconds so sessions nobody closes (CLI, scripts)
+# cannot exhaust admission. Only applies while remote admission is enabled.
+MCP_REMOTE_ADMISSION_IDLE_SECONDS = float(
+    os.getenv("MCP_REMOTE_ADMISSION_IDLE_SECONDS", "300")
+)
 # OTLP JSON trace query URL template ("{trace_id}" placeholder) for the
 # group-gated paginated span overlay only. Validated here so a bad template
 # fails startup, not the first request.

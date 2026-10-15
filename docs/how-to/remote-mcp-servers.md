@@ -475,6 +475,11 @@ negotiation, discovery, calls and bounded transport teardown. Crashed owners'
 locks are reclaimed. Multiple pods each have their own bound; scheduler
 pools are still needed for workflow-wide control.
 
+A persistent session (`/session/start`) holds its slot until it closes. While
+admission is enabled it closes after `MCP_REMOTE_ADMISSION_IDLE_SECONDS` (default
+300) without requests; its next request returns 404 and the client starts a
+new session.
+
 If capacity stays full, the REST response is 503 with `Retry-After: 5` and
 `X-MCP-Admission: refused`. This marker means no downstream contact occurred.
 An upstream failure preserves its HTTP status and valid Retry-After, with
