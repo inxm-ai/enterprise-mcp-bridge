@@ -241,18 +241,28 @@ class ExceptionSession:
 class DownloadedFileSession:
     """Returns a file the way github-mcp-server's get_file_contents does."""
 
+    def __init__(
+        self,
+        note="successfully downloaded text file",
+        file_text="# Principal developer",
+        mime="text/markdown",
+    ):
+        self.note = note
+        self.file_text = file_text
+        self.mime = mime
+
     async def call_tool(self, name, args, access_token):
         return SimpleNamespace(
             isError=False,
             structuredContent=None,
             content=[
-                SimpleNamespace(type="text", text="successfully downloaded text file"),
+                SimpleNamespace(type="text", text=self.note),
                 SimpleNamespace(
                     type="resource",
                     resource=SimpleNamespace(
-                        uri="repo://o/r/contents/SKILL.md",
-                        mimeType="text/markdown",
-                        text="# Principal developer",
+                        uri="repo://o/r/contents/file",
+                        mimeType=self.mime,
+                        text=self.file_text,
                     ),
                 ),
             ],
@@ -382,6 +392,43 @@ class TestToolService:
         assert payload["text"] == (
             "successfully downloaded text file\n# Principal developer"
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_does_not_read_a_json_file_as_an_error(
+        self, tool_service
+    ):
+        file_text = '{"success": false, "error": "fixture"}'
+        session = DownloadedFileSession(file_text=file_text, mime="application/json")
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_json_file")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert "error" not in payload
+        assert payload["text"] == "successfully downloaded text file\n" + file_text
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_keeps_the_file_next_to_a_json_note(
+        self, tool_service
+    ):
+        session = DownloadedFileSession(note='{"sha": "e89dc91"}')
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_json_note")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert payload["text"] == '{"sha": "e89dc91"}\n# Principal developer'
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_still_reads_an_error_note_next_to_a_file(
+        self, tool_service
+    ):
+        session = DownloadedFileSession(note='{"error": "rate limited"}')
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_err_note")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        assert json.loads(result["content"]) == {"error": "rate limited"}
 
     @pytest.mark.asyncio
     async def test_execute_tool_call_uses_llm_when_error_message_missing(

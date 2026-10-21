@@ -7,8 +7,6 @@ protocol's camelCase names. Every read goes through here, so a result may
 be an SDK model of either line, one of the bridge's own models, or a dict.
 """
 
-import base64
-import binascii
 from typing import Any
 
 from pydantic import BaseModel
@@ -76,6 +74,19 @@ def first_text(result: Any) -> str:
     return read(items[0], "text", "text") or ""
 
 
+NON_TEXT_TYPES = ("resource", "resource_link", "image", "audio")
+
+
+def is_text_item(item: Any) -> bool:
+    """Whether the item is the tool's own words rather than a file or media.
+
+    Only these speak for the tool: parsing them for structured data or an
+    error signal is sound, while a downloaded JSON file saying
+    ``"success": false`` is just a file.
+    """
+    return read(item, "type", "type") not in NON_TEXT_TYPES
+
+
 def content_text(item: Any) -> str:
     """What a content item says as text, whatever its type.
 
@@ -127,11 +138,9 @@ def binary_data(contents: Any) -> Any:
 
 def _binary_note(kind: str, uri: Any, mime: Any, data: Any) -> str:
     details = [str(part) for part in (uri, mime) if part]
-    if isinstance(data, str):
-        try:
-            details.append(f"{len(base64.b64decode(data))} bytes")
-        except (binascii.Error, ValueError):
-            pass
+    if isinstance(data, str) and data:
+        # The decoded size without decoding: a blob can be megabytes.
+        details.append(f"{len(data) * 3 // 4 - data[-2:].count('=')} bytes")
     return f"[{kind}: {', '.join(details)}]" if details else f"[{kind}]"
 
 

@@ -595,6 +595,8 @@ async def run_tool(
                     )
                 else:
                     for content in mcp_fields.content(result):
+                        if not mcp_fields.is_text_item(content):
+                            continue
                         text = mcp_fields.read(content, "text", "text")
                         if text:
                             parsed = try_parse_structured_text(text)

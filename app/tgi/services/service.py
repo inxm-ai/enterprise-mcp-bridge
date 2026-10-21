@@ -310,11 +310,7 @@ class TGIService:
                 if mcp_fields.is_error(result):
                     error_content = ""
                     if hasattr(result, "content") and result.content:
-                        error_content = (
-                            str(result.content[0].text)
-                            if result.content
-                            else str(result)
-                        )
+                        error_content = mcp_fields.content_text(result.content[0])
 
                     self.logger.error(f"[TGI] Tool execution error: {error_content}")
                     span.set_attribute("error", True)
@@ -353,13 +349,7 @@ class TGIService:
                     else:
                         content = json.dumps(
                             [
-                                {
-                                    "text": (
-                                        item.text
-                                        if hasattr(item, "text")
-                                        else str(item)
-                                    )
-                                }
+                                {"text": mcp_fields.content_text(item)}
                                 for item in raw_content
                             ]
                         )

@@ -533,10 +533,18 @@ class ToolService:
                                 separators=(",", ":"),
                             )
                     else:
+                        # Files and media are passed on as they are; only the
+                        # tool's own text is read for JSON and error signals.
+                        has_files = not all(
+                            mcp_fields.is_text_item(item) for item in content_entries
+                        )
                         json_from_text = self._parse_json_from_text_entries(
                             content_entries
                         )
-                        if json_from_text is not None:
+                        if json_from_text is not None and (
+                            not has_files
+                            or self._payload_has_error_signal(json_from_text)
+                        ):
                             if self._payload_has_error_signal(json_from_text):
                                 resolved_error = self._extract_error_message(
                                     json_from_text
@@ -712,11 +720,15 @@ class ToolService:
             except Exception:
                 return None
 
-    def _extract_text_entries(self, content_entries: Any) -> List[str]:
+    def _extract_text_entries(
+        self, content_entries: Any, *, text_only: bool = False
+    ) -> List[str]:
         texts: List[str] = []
         if not isinstance(content_entries, list):
             return texts
         for item in content_entries:
+            if text_only and not mcp_fields.is_text_item(item):
+                continue
             text = mcp_fields.content_text(item)
             if text:
                 texts.append(text)
@@ -746,7 +758,7 @@ class ToolService:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def _parse_json_from_text_entries(self, content_entries: Any) -> Optional[Any]:
-        texts = self._extract_text_entries(content_entries)
+        texts = self._extract_text_entries(content_entries, text_only=True)
         if not texts:
             return None
         if len(texts) == 1:
