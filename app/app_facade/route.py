@@ -19,7 +19,11 @@ from app.vars import (
     APP_CONVERSATIONAL_UI_ENABLED,
 )
 from app.session import session_id, try_get_session_id
-from app.session_manager import mcp_session_context, session_manager
+from app.session_manager import (
+    mcp_session_context,
+    preflight_caller,
+    session_manager,
+)
 from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
 from app.multi_server import current_base_path, current_server
@@ -322,6 +326,7 @@ async def create_generated_ui(
         mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
+    await preflight_caller(mcp_access_token)
 
     async def event_stream() -> AsyncIterator[bytes]:
         logger.info("[create_generated_ui] Starting event stream generator")
@@ -498,6 +503,7 @@ async def update_generated_ui(
         mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
+    await preflight_caller(mcp_access_token)
 
     async def event_stream() -> AsyncIterator[bytes]:
         logger.info("[update_generated_ui] Starting event stream generator")
@@ -681,6 +687,7 @@ async def chat_generated_ui(
         mcp_access_token,
     )
     requested_group = scope.identifier if scope.kind == "group" else None
+    await preflight_caller(mcp_access_token)
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:

@@ -111,9 +111,11 @@ def policy_url() -> str:
 
 
 def server_id() -> str:
+    from app import vars as app_vars
     from app.multi_server import current_server_id
 
-    return current_server_id() or os.getenv("SERVICE_NAME", "").strip()
+    # Single-server mode: the bridge's own service name, with its default.
+    return (current_server_id() or app_vars.SERVICE_NAME or "").strip()
 
 
 def credential_kind() -> str:

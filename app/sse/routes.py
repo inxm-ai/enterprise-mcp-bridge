@@ -16,7 +16,11 @@ from app.elicitation import get_elicitation_coordinator
 from app.oauth.token_dependency import get_access_token
 from app.oauth.token_exchange import UserLoggedOutException
 from app.session import try_get_session_id, session_id
-from app.session_manager import mcp_session_context, session_manager
+from app.session_manager import (
+    mcp_session_context,
+    preflight_caller,
+    session_manager,
+)
 from app.multi_server import current_effect_tools, session_storage_key
 from app.utils.exception_logging import (
     find_exception_in_exception_groups,
@@ -144,6 +148,9 @@ async def run_tool_with_progress(
         StreamingResponse with SSE events
     """
     try:
+        # Before the stream starts: denials keep their status, and the
+        # attestation reaches the response headers.
+        await preflight_caller(access_token)
         x_inxm_mcp_session = session_id(
             try_get_session_id(
                 x_inxm_mcp_session_header,

@@ -59,7 +59,7 @@ def authority(monkeypatch):
     monkeypatch.setenv(
         "CONNECTION_POLICY_URL", "http://manager.test/v2/connections/enforce"
     )
-    monkeypatch.setenv("SERVICE_NAME", "mcp-linear-server")
+    monkeypatch.setattr(app_vars, "SERVICE_NAME", "mcp-linear-server")
     monkeypatch.setattr(app_vars, "KEYCLOAK_PROVIDER_ALIAS", "linear")
     monkeypatch.setattr(connection_policy, "_decide", _decide)
     monkeypatch.setattr(connection_policy, "_cache", {})
@@ -347,3 +347,71 @@ class TestAnonymousListing:
         authority.update(status=409, body={"code": "blocked_by_policy"})
         response = client.get("/tools", headers={TOKEN_HEADER: TOKEN})
         assert response.status_code == 403
+
+
+class TestServerId:
+    @pytest.mark.asyncio
+    async def test_a_single_server_bridge_uses_its_default_service_name(
+        self, authority, verifier, monkeypatch
+    ):
+        monkeypatch.delenv("SERVICE_NAME", raising=False)
+        monkeypatch.setattr(app_vars, "SERVICE_NAME", "enterprise-mcp-bridge")
+        await connection_policy.enforce_connection_policy(TOKEN)
+        assert authority["calls"][0][2] == "enterprise-mcp-bridge"
+
+
+class TestStreaming:
+    """A StreamingResponse starts before its generator runs: the policy is
+    decided first, so denials keep their status and allowed streams are
+    attested."""
+
+    def test_a_denied_stream_is_refused_with_its_status(
+        self, client, authority, verifier, downstream
+    ):
+        authority.update(status=409, body={"code": "blocked_by_policy"})
+        response = client.post(
+            "/tools/current_user/stream", headers={TOKEN_HEADER: TOKEN}, json={}
+        )
+        assert response.status_code == 403
+        assert downstream.calls == 0
+
+    def test_an_allowed_stream_carries_the_attestation(
+        self, client, authority, verifier, downstream
+    ):
+        response = client.post(
+            "/tools/current_user/stream", headers={TOKEN_HEADER: TOKEN}, json={}
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["x-inxm-caller-subject"] == "ben"
+        assert response.headers["x-inxm-connector-revision"] == REVISION
+
+
+class TestSseMessages:
+    """POST /sse/messages has no credential of its own; each message re-checks
+    the caller the stream was opened for."""
+
+    @pytest.mark.asyncio
+    async def test_a_message_after_a_policy_change_never_reaches_downstream(
+        self, authority, verifier
+    ):
+        from app.sse.mcp_proxy import _build_proxy_handlers
+        from app.utils import mcp_fields
+        from mcp import types
+
+        fake = FakeSession()
+        handlers = _build_proxy_handlers(fake, TOKEN, {}, None)
+        allowed = await handlers["on_call_tool"](
+            None, types.CallToolRequestParams(name="current_user", arguments={})
+        )
+        assert not mcp_fields.is_error(allowed)
+        reached = fake.calls
+
+        connection_policy._cache.clear()  # the 30 s decision bound passed
+        authority.update(status=409, body={"code": "blocked_by_policy"})
+        denied = await handlers["on_call_tool"](
+            None, types.CallToolRequestParams(name="current_user", arguments={})
+        )
+        assert mcp_fields.is_error(denied)
+        assert fake.calls == reached
+        with pytest.raises(CallerNotAuthorizedError):
+            await handlers["on_list_tools"](None, None)
