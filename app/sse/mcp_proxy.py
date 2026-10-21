@@ -37,6 +37,7 @@ from app.oauth.user_info import (
     CallerNotAuthorizedError,
     ensure_caller_in_required_groups,
 )
+from app.oauth.connection_policy import enforce_connection_policy
 from app.session import mcp_session
 from app.session_manager.session_context import (
     ResponseTooLargeError,
@@ -327,6 +328,7 @@ class _SSEConnectionApp:
         # before the SSE stream opens so the client gets a proper HTTP status.
         try:
             ensure_caller_in_required_groups(access_token)
+            await enforce_connection_policy(access_token)
         except CallerNotAuthorizedError as exc:
             logger.warning(f"[MCP-SSE] Connection rejected: {exc.detail}")
             resp = Response(exc.detail, status_code=exc.status_code)

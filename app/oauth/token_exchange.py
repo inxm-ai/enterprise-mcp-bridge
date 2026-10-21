@@ -43,6 +43,19 @@ from app.multi_server import (
 logger = logging.getLogger("uvicorn.error")
 
 
+def _token_metadata(token: Any) -> Dict[str, Any]:
+    """Token-free facts about a token response, safe for logs and traces."""
+    if not isinstance(token, dict):
+        return {"present": False}
+    return {
+        "present": True,
+        "has_access_token": bool(token.get("access_token")),
+        "has_refresh_token": bool(token.get("refresh_token")),
+        "expires_in": token.get("expires_in"),
+        "token_type": token.get("token_type"),
+    }
+
+
 class TokenRetriever:
     def retrieve_token(self, token: str) -> Dict[str, Any]:
         pass
@@ -613,8 +626,10 @@ class KeyCloakTokenRetriever(TokenRetriever):
             current_tokens = self._get_stored_provider_token(keycloak_token)
             if current_tokens and current_tokens.get("refresh_token"):
                 new_token = self._refresh_provider_token(current_tokens, keycloak_token)
+                # Never log the token dictionary: it holds access/refresh tokens.
                 self.logger.info(
-                    f"[REFRESH]Forced refresh successful using refresh token: {str(new_token)}"
+                    "[REFRESH]Forced refresh successful using refresh token",
+                    extra={"token_metadata": _token_metadata(new_token)},
                 )
                 return {
                     "success": True,
@@ -622,8 +637,10 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 }
             else:
                 new_token = self._force_broker_refresh(keycloak_token)
+                # Never log the token dictionary: it holds access/refresh tokens.
                 self.logger.info(
-                    f"[BROKER]Forced refresh successful using broker: {str(new_token)}"
+                    "[BROKER]Forced refresh successful using broker",
+                    extra={"token_metadata": _token_metadata(new_token)},
                 )
                 return {
                     "success": True,

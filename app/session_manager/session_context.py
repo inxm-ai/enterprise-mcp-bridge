@@ -28,6 +28,7 @@ from app.oauth.user_info import (
     ensure_caller_in_required_groups,
     get_data_access_manager,
 )
+from app.oauth.connection_policy import enforce_connection_policy
 from app.utils import mask_token
 from app.utils.mcp_operation import (
     build_trace_meta,
@@ -608,6 +609,7 @@ async def mcp_session_context(
     # every request through this seam is gated before any downstream contact.
     try:
         ensure_caller_in_required_groups(access_token)
+        await enforce_connection_policy(access_token)
     except CallerNotAuthorizedError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 

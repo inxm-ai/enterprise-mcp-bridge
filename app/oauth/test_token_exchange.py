@@ -266,3 +266,25 @@ def test_force_token_refresh_passthrough_when_no_provider(monkeypatch):
     result = r.force_token_refresh("kc_token")
     assert result["success"] is True
     assert result["access_token"] == "kc_token"
+
+
+def test_force_token_refresh_never_logs_token_values(monkeypatch, retriever, caplog):
+    tokens = {
+        "access_token": "access-canary",
+        "refresh_token": "refresh-canary",
+        "expires_in": 300,
+    }
+    monkeypatch.setattr(
+        retriever, "_get_stored_provider_token", lambda t: {"refresh_token": "old"}
+    )
+    monkeypatch.setattr(retriever, "_refresh_provider_token", lambda td, kt: tokens)
+    monkeypatch.setattr(retriever, "logger", token_exchange.logging.getLogger("t"))
+    with caplog.at_level("DEBUG"):
+        assert retriever.force_token_refresh("tok")["success"] is True
+        monkeypatch.setattr(retriever, "_get_stored_provider_token", lambda t: {})
+        monkeypatch.setattr(retriever, "_force_broker_refresh", lambda t: tokens)
+        assert retriever.force_token_refresh("tok")["success"] is True
+    rendered = " ".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    assert "Forced refresh successful" in rendered
+    assert "access-canary" not in rendered
+    assert "refresh-canary" not in rendered
