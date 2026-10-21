@@ -135,6 +135,28 @@ def test_a_result_that_already_passed_a_bridge_keeps_its_file():
     assert twice.content[1].mimeType == "text/markdown"
 
 
+def test_an_empty_binary_file_keeps_its_empty_payload():
+    result = types.CallToolResult(
+        content=[
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.BlobResourceContents(
+                    uri="repo://o/r/contents/empty.bin",
+                    mimeType="application/octet-stream",
+                    blob="",
+                ),
+            )
+        ]
+    )
+
+    (file,) = RunToolsResult(result).content
+
+    assert file.data == ""
+    assert file.text == (
+        "[resource: repo://o/r/contents/empty.bin, application/octet-stream, 0 bytes]"
+    )
+
+
 def test_content_text_reads_wire_shaped_resources():
     item = {
         "type": "resource",

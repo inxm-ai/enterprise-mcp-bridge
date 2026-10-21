@@ -3670,6 +3670,11 @@ async def test_tool_error_detection_various_formats(tmp_path, monkeypatch):
     assert tool_result_has_error("500 Internal Server Error") is True
     assert tool_result_has_error("401 unauthorized access") is True
 
+    # A downloaded file is content, not the call's verdict
+    file_item = {"type": "resource", "uri": "file:///f.json", "text": '{"error": 1}'}
+    assert tool_result_has_error(json.dumps([file_item])) is False
+    assert tool_result_has_error(json.dumps({"content": [file_item]})) is False
+
     # Normal successful responses
     assert tool_result_has_error('{"result": "success"}') is False
     assert (

@@ -132,13 +132,17 @@ def resource_contents(item: Any) -> Any:
 
 
 def binary_data(contents: Any) -> Any:
-    """The base64 payload of a blob resource, an image or audio, if any."""
-    return read(contents, "blob", "blob") or read(contents, "data", "data")
+    """The base64 payload of a blob resource, an image or audio, if any.
+
+    ``""`` is a payload too: the encoding of an empty file.
+    """
+    blob = read(contents, "blob", "blob")
+    return blob if blob is not None else read(contents, "data", "data")
 
 
 def _binary_note(kind: str, uri: Any, mime: Any, data: Any) -> str:
     details = [str(part) for part in (uri, mime) if part]
-    if isinstance(data, str) and data:
+    if isinstance(data, str):
         # The decoded size without decoding: a blob can be megabytes.
         details.append(f"{len(data) * 3 // 4 - data[-2:].count('=')} bytes")
     return f"[{kind}: {', '.join(details)}]" if details else f"[{kind}]"

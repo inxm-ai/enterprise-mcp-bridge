@@ -251,6 +251,9 @@ class DownloadedFileSession:
         self.file_text = file_text
         self.mime = mime
 
+    async def list_tools(self):
+        return await DummySession().list_tools()
+
     async def call_tool(self, name, args, access_token):
         return SimpleNamespace(
             isError=False,
@@ -627,6 +630,56 @@ class TestToolService:
         assert len(result) == 1
         payload = json.loads(result[0].content)
         assert payload.get("error")
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_does_not_fail_on_a_json_file(self, tool_service):
+        session = DownloadedFileSession(
+            file_text='{"success": false, "error": "fixture"}',
+            mime="application/json",
+        )
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_file_ok")
+
+        result, success = await tool_service.execute_tool_calls(
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
+        )
+
+        assert success is True
+        assert '\\"success\\": false' in result[0].content
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_fails_on_an_error_note_next_to_a_file(
+        self, tool_service
+    ):
+        session = DownloadedFileSession(note='{"error": "rate limited"}')
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_file_err")
+
+        _, success = await tool_service.execute_tool_calls(
+            session, [(tool_call, ToolCallFormat.OPENAI_JSON)], None, None
+        )
+
+        assert success is False
+
+    def test_a_streamed_result_is_not_judged_by_its_files(self, tool_service):
+        file_item = {
+            "type": "resource",
+            "uri": "repo://o/r/contents/fixture.json",
+            "mimeType": "application/json",
+            "text": '{"success": false}',
+        }
+        streamed = {
+            "isError": False,
+            "content": [{"type": "text", "text": "downloaded"}, file_item],
+        }
+        failed = {
+            "isError": False,
+            "content": [
+                {"type": "text", "text": '{"error": "rate limited"}'},
+                file_item,
+            ],
+        }
+
+        assert tool_service._result_has_error(streamed) is False
+        assert tool_service._result_has_error(failed) is True
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_exception(self, tool_service):

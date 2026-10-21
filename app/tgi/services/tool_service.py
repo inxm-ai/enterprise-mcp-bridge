@@ -499,6 +499,9 @@ class ToolService:
 
                 # Format successful result
                 content = ""
+                # Set once the verdict is taken from the tool's own text while
+                # files ride along, so no later check reads the files for one.
+                files_judged = False
                 if mcp_fields.has_structured_content(result):
                     logger.debug(
                         f"[ToolService] Tool '{tool_call.function.name}' returned structured content: {str(structured)[1000:]}"
@@ -567,6 +570,7 @@ class ToolService:
                                     separators=(",", ":"),
                                 )
                         else:
+                            files_judged = has_files
                             compact_text_payload = self._compact_text_entries_payload(
                                 content_entries
                             )
@@ -645,6 +649,8 @@ class ToolService:
                 # Attach the untruncated content only when truncation happened
                 if raw_content is not content:
                     result_dict["_raw_content"] = raw_content
+                if files_judged:
+                    result_dict["_files_judged"] = True
                 return result_dict
 
             except Exception as e:
@@ -788,7 +794,12 @@ class ToolService:
             return False
 
         if isinstance(payload, list):
-            return any(self._payload_has_error_signal(item) for item in payload)
+            # A list of content items: files in it say nothing about the call.
+            return any(
+                self._payload_has_error_signal(item)
+                for item in payload
+                if mcp_fields.is_text_item(item)
+            )
 
         if isinstance(payload, str):
             parsed = self._try_parse_json_value(payload)
@@ -1035,6 +1046,8 @@ class ToolService:
 
         if result.get("isError") is True or result.get("success") is False:
             return True
+        if result.get("_files_judged"):
+            return False
 
         content = result.get("content")
         parsed_content: Any = content
