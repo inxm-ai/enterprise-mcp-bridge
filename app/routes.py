@@ -427,7 +427,12 @@ async def list_tools(
             start_message=f"[Tools] Listing tools. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
+                listing=True,
             ) as session:
                 tools = await session.list_tools()
                 # Map tools for client response (apply header mapping and pruning)
@@ -475,7 +480,12 @@ async def get_tool_details(
             start_message=f"[Tool-Details] Getting tool details. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
+                listing=True,
             ) as session:
                 tools = await session.list_tools()
                 result = map_tools(tools)

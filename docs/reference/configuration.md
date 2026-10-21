@@ -945,6 +945,11 @@ checks:
 A downstream server can never set these headers. Without this setting the
 manager reports `enforcement_unavailable` rather than a verified connection.
 
+Tool listings (`GET /tools`, `GET /tools/{name}`) are checked and attested the
+same way for a verifiable caller. Without one, as for the manager's tools crawl,
+a listing is served as before, without attestation; tool calls always need an
+allowed decision.
+
 ```bash
 CONNECTION_POLICY_URL=http://app-mcp-manager.orchestrator.svc.cluster.local:8000/v2/connections/enforce
 ```

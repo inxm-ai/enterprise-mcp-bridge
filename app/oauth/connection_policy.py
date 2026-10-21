@@ -161,11 +161,12 @@ async def _decide(url: str, access_token: str, server: str) -> httpx.Response:
 
 
 async def enforce_connection_policy(
-    access_token: Optional[str],
+    access_token: Optional[str], *, listing: bool = False
 ) -> Optional[Attestation]:
     """Raise CallerNotAuthorizedError unless the central authority allows this caller.
 
-    Returns None (no attestation) when no authority is configured.
+    Returns None (no attestation) when no authority is configured, or for a
+    tool listing (``listing``) without a verifiable caller.
     """
     url = policy_url()
     if not url:
@@ -174,8 +175,17 @@ async def enforce_connection_policy(
     if not server:
         raise CallerNotAuthorizedError(503, "Connection policy is unavailable")
     if not access_token:
+        if listing:
+            return None
         raise CallerNotAuthorizedError(401, "Authentication required")
-    subject = _verified_subject(access_token)
+    try:
+        subject = _verified_subject(access_token)
+    except CallerNotAuthorizedError:
+        # Tool metadata for an anonymous reader (the manager's tools crawl):
+        # served as before, never attested, never a tool call.
+        if listing:
+            return None
+        raise
     key = _cache_key(url, access_token, server)
     attestation = _cached(key)
     if attestation is not None and attestation.subject == subject:

@@ -595,8 +595,14 @@ async def mcp_session_context(
     access_token: Optional[str],
     group: Optional[str],
     incoming_headers: Optional[dict[str, str]] = None,
+    listing: bool = False,
 ):
-    """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes."""
+    """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes.
+
+    ``listing`` marks a tool-metadata read: central connection policy still
+    applies (and is attested) for a verifiable caller, but an anonymous or
+    unverifiable listing, such as the manager's tools crawl, is served as before.
+    """
     from app.memory_scope import memory_tenant
 
     memory_tenant(
@@ -609,7 +615,7 @@ async def mcp_session_context(
     # every request through this seam is gated before any downstream contact.
     try:
         ensure_caller_in_required_groups(access_token)
-        await enforce_connection_policy(access_token)
+        await enforce_connection_policy(access_token, listing=listing)
     except CallerNotAuthorizedError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 

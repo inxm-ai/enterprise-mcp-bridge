@@ -318,3 +318,32 @@ class TestRest:
         response = client.get("/tools", headers={TOKEN_HEADER: TOKEN})
         assert response.status_code == 200
         assert not any(h.startswith("x-inxm-") for h in response.headers)
+
+
+class TestAnonymousListing:
+    """The manager's tools crawl lists tools with a placeholder bearer."""
+
+    CRAWL = {"Authorization": "Bearer app-mcp-manager-tools-crawl"}
+
+    def test_an_unverifiable_listing_is_served_unattested(
+        self, client, authority, verifier, downstream
+    ):
+        for headers in (self.CRAWL, {}):
+            response = client.get("/tools", headers=headers)
+            assert response.status_code == 200, response.text
+            assert "x-inxm-connection-policy-version" not in response.headers
+        assert authority["calls"] == []
+
+    def test_an_unverifiable_tool_call_is_still_refused(
+        self, client, authority, verifier, downstream
+    ):
+        response = client.post("/tools/current_user", headers=self.CRAWL, json={})
+        assert response.status_code == 401
+        assert downstream.calls == 0
+
+    def test_a_verified_listing_is_still_checked_and_attested(
+        self, client, authority, verifier, downstream
+    ):
+        authority.update(status=409, body={"code": "blocked_by_policy"})
+        response = client.get("/tools", headers={TOKEN_HEADER: TOKEN})
+        assert response.status_code == 403
