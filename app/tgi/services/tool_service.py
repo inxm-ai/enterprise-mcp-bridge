@@ -477,11 +477,7 @@ class ToolService:
                 if result_is_error:
                     error_content = ""
                     if content_entries:
-                        error_content = (
-                            str(content_entries[0].text)
-                            if content_entries
-                            else str(result)
-                        )
+                        error_content = mcp_fields.content_text(content_entries[0])
 
                     self.logger.error(
                         f"[ToolService] Tool execution error: {error_content}"
@@ -571,13 +567,7 @@ class ToolService:
                             else:
                                 content = json.dumps(
                                     [
-                                        {
-                                            "text": (
-                                                item.text
-                                                if hasattr(item, "text")
-                                                else str(item)
-                                            )
-                                        }
+                                        {"text": mcp_fields.content_text(item)}
                                         for item in content_entries
                                     ],
                                     ensure_ascii=False,
@@ -727,16 +717,8 @@ class ToolService:
         if not isinstance(content_entries, list):
             return texts
         for item in content_entries:
-            if isinstance(item, str):
-                texts.append(item)
-                continue
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    texts.append(text)
-                continue
-            text = getattr(item, "text", None)
-            if isinstance(text, str):
+            text = mcp_fields.content_text(item)
+            if text:
                 texts.append(text)
         return texts
 

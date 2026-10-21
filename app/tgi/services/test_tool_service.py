@@ -238,6 +238,27 @@ class ExceptionSession:
             return await DummySession().list_tools()
 
 
+class DownloadedFileSession:
+    """Returns a file the way github-mcp-server's get_file_contents does."""
+
+    async def call_tool(self, name, args, access_token):
+        return SimpleNamespace(
+            isError=False,
+            structuredContent=None,
+            content=[
+                SimpleNamespace(type="text", text="successfully downloaded text file"),
+                SimpleNamespace(
+                    type="resource",
+                    resource=SimpleNamespace(
+                        uri="repo://o/r/contents/SKILL.md",
+                        mimeType="text/markdown",
+                        text="# Principal developer",
+                    ),
+                ),
+            ],
+        )
+
+
 def make_tool_call(name="list-files", args='{"path": "bar"}', id="call_1"):
     return ToolCall(
         id=id,
@@ -347,6 +368,20 @@ class TestToolService:
 
         payload = json.loads(result["content"])
         assert payload == {"payload": {"result": {"plan_id": "plan-1"}}}
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_passes_an_embedded_file_to_the_llm(
+        self, tool_service
+    ):
+        session = DownloadedFileSession()
+        tool_call = make_tool_call(name="read-file", args="{}", id="call_file")
+
+        result = await tool_service.execute_tool_call(session, tool_call, None)
+
+        payload = json.loads(result["content"])
+        assert payload["text"] == (
+            "successfully downloaded text file\n# Principal developer"
+        )
 
     @pytest.mark.asyncio
     async def test_execute_tool_call_uses_llm_when_error_message_missing(

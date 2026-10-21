@@ -7,6 +7,8 @@ protocol's camelCase names. Every read goes through here, so a result may
 be an SDK model of either line, one of the bridge's own models, or a dict.
 """
 
+import base64
+import binascii
 from typing import Any
 
 from pydantic import BaseModel
@@ -72,6 +74,65 @@ def first_text(result: Any) -> str:
     if not items:
         return ""
     return read(items[0], "text", "text") or ""
+
+
+def content_text(item: Any) -> str:
+    """What a content item says as text, whatever its type.
+
+    Only text items carry ``text`` at the top level. An embedded resource
+    (a downloaded file, say) holds its text under ``resource``, and binary
+    payloads (a blob, an image, audio) are described rather than inlined, so
+    no item reads as empty just because it is not a text item.
+    """
+    if isinstance(item, str):
+        return item
+    item_type = read(item, "type", "type")
+    if item_type == "resource":
+        resource = resource_contents(item)
+        text = read(resource, "text", "text")
+        if isinstance(text, str):
+            return text
+        return _binary_note(
+            "resource",
+            read(resource, "uri", "uri"),
+            mime_type(resource),
+            binary_data(resource),
+        )
+    if item_type == "resource_link":
+        return _binary_note(
+            "resource link", read(item, "uri", "uri"), mime_type(item), None
+        )
+    if item_type in ("image", "audio"):
+        return _binary_note(
+            item_type, None, mime_type(item), read(item, "data", "data")
+        )
+    text = read(item, "text", "text", "")
+    return "" if text is None else str(text)
+
+
+def resource_contents(item: Any) -> Any:
+    """The contents of an embedded resource item.
+
+    The protocol nests them under ``resource``; the bridge's own envelope
+    has them flattened onto the item, so a result that already passed
+    through a bridge reads the same.
+    """
+    return read(item, "resource", "resource") or item
+
+
+def binary_data(contents: Any) -> Any:
+    """The base64 payload of a blob resource, an image or audio, if any."""
+    return read(contents, "blob", "blob") or read(contents, "data", "data")
+
+
+def _binary_note(kind: str, uri: Any, mime: Any, data: Any) -> str:
+    details = [str(part) for part in (uri, mime) if part]
+    if isinstance(data, str):
+        try:
+            details.append(f"{len(base64.b64decode(data))} bytes")
+        except (binascii.Error, ValueError):
+            pass
+    return f"[{kind}: {', '.join(details)}]" if details else f"[{kind}]"
 
 
 def set_structured_content(result: Any, value: Any) -> None:
