@@ -253,3 +253,41 @@ def test_empty_structured_content_is_not_overwritten_from_text(
 
     assert response.status_code == 200
     assert response.json()["structuredContent"] == {}
+
+
+def test_a_downloaded_file_is_not_parsed_into_structured_content(
+    client, mock_session_context
+):
+    """A JSON file the tool returns is content, not the tool's structured result."""
+    from mcp import types
+    from app.models import RunToolsResult
+
+    file_text = json.dumps({"name": "pkg", "version": "1.0.0"})
+    mock_session_context.call_tool.return_value = RunToolsResult(
+        types.CallToolResult(
+            content=[
+                types.TextContent(type="text", text="successfully downloaded"),
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri="repo://o/r/contents/package.json",
+                        mimeType="application/json",
+                        text=file_text,
+                    ),
+                ),
+            ]
+        )
+    )
+
+    with patch.dict(app.vars.TOOL_OUTPUT_SCHEMAS, {}, clear=True):
+        response = client.post(
+            "/tools/get_file_contents",
+            headers={"x-inxm-mcp-session": "test-session"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["structuredContent"] is None
+    assert data["content"][1]["text"] == file_text
+    assert data["content"][1]["type"] == "resource"

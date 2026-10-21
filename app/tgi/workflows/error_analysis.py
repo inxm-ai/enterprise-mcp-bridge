@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.tgi.workflows import dict_utils
+from app.utils import mcp_fields
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -56,6 +57,9 @@ def tool_result_has_error(content: str) -> bool:
             return None
         texts: list[str] = []
         for item in value:
+            # Files and media in a result say nothing about the call.
+            if not mcp_fields.is_text_item(item):
+                continue
             if isinstance(item, str):
                 texts.append(item)
             elif isinstance(item, dict):
@@ -83,7 +87,9 @@ def tool_result_has_error(content: str) -> bool:
                 return True
             return False
         if isinstance(payload, list):
-            if any(_has_error(item) for item in payload):
+            if any(
+                _has_error(item) for item in payload if mcp_fields.is_text_item(item)
+            ):
                 return True
             nested_json = _parse_text_entries(payload)
             if nested_json is not None and _has_error(nested_json):

@@ -2,7 +2,16 @@ from pydantic import BaseModel
 from typing import Any, Optional, Dict
 from mcp.server.mcpserver.prompts import base
 
-from app.utils.mcp_fields import MISSING, is_error, read, structured_content
+from app.utils.mcp_fields import (
+    MISSING,
+    binary_data,
+    content_text,
+    is_error,
+    mime_type,
+    read,
+    resource_contents,
+    structured_content,
+)
 
 
 class MCPRequest(BaseModel):
@@ -18,11 +27,29 @@ class RunToolResultContent(BaseModel):
     text: str
     # Any JSON value: protocol 2026-07-28 no longer limits structured content to objects.
     structuredContent: Optional[Any]
+    # Set for non-text items, so a client can tell a downloaded file from a
+    # message and save a binary payload (base64 in ``data``) as it came.
+    type: Optional[str] = None
+    uri: Optional[str] = None
+    mimeType: Optional[str] = None
+    data: Optional[str] = None
 
     def __init__(self, resultEntry):
+        item_type = read(resultEntry, "type", "type")
+        source = resultEntry
+        if item_type == "resource":
+            source = resource_contents(resultEntry)
+        data = binary_data(source)
+        is_file = item_type in ("resource", "resource_link", "image", "audio")
+        uri = read(source, "uri", "uri")
+        mime = mime_type(source)
         super().__init__(
-            text=str(read(resultEntry, "text", "text", "")),
+            text=content_text(resultEntry),
             structuredContent=structured_content(resultEntry),
+            type=item_type if is_file else None,
+            uri=str(uri) if is_file and uri else None,
+            mimeType=mime if is_file else None,
+            data=data if is_file and isinstance(data, str) else None,
         )
 
 

@@ -74,6 +74,80 @@ def first_text(result: Any) -> str:
     return read(items[0], "text", "text") or ""
 
 
+NON_TEXT_TYPES = ("resource", "resource_link", "image", "audio")
+
+
+def is_text_item(item: Any) -> bool:
+    """Whether the item is the tool's own words rather than a file or media.
+
+    Only these speak for the tool: parsing them for structured data or an
+    error signal is sound, while a downloaded JSON file saying
+    ``"success": false`` is just a file.
+    """
+    return read(item, "type", "type") not in NON_TEXT_TYPES
+
+
+def content_text(item: Any) -> str:
+    """What a content item says as text, whatever its type.
+
+    Only text items carry ``text`` at the top level. An embedded resource
+    (a downloaded file, say) holds its text under ``resource``, and binary
+    payloads (a blob, an image, audio) are described rather than inlined, so
+    no item reads as empty just because it is not a text item.
+    """
+    if isinstance(item, str):
+        return item
+    item_type = read(item, "type", "type")
+    if item_type == "resource":
+        resource = resource_contents(item)
+        text = read(resource, "text", "text")
+        if isinstance(text, str):
+            return text
+        return _binary_note(
+            "resource",
+            read(resource, "uri", "uri"),
+            mime_type(resource),
+            binary_data(resource),
+        )
+    if item_type == "resource_link":
+        return _binary_note(
+            "resource link", read(item, "uri", "uri"), mime_type(item), None
+        )
+    if item_type in ("image", "audio"):
+        return _binary_note(
+            item_type, None, mime_type(item), read(item, "data", "data")
+        )
+    text = read(item, "text", "text", "")
+    return "" if text is None else str(text)
+
+
+def resource_contents(item: Any) -> Any:
+    """The contents of an embedded resource item.
+
+    The protocol nests them under ``resource``; the bridge's own envelope
+    has them flattened onto the item, so a result that already passed
+    through a bridge reads the same.
+    """
+    return read(item, "resource", "resource") or item
+
+
+def binary_data(contents: Any) -> Any:
+    """The base64 payload of a blob resource, an image or audio, if any.
+
+    ``""`` is a payload too: the encoding of an empty file.
+    """
+    blob = read(contents, "blob", "blob")
+    return blob if blob is not None else read(contents, "data", "data")
+
+
+def _binary_note(kind: str, uri: Any, mime: Any, data: Any) -> str:
+    details = [str(part) for part in (uri, mime) if part]
+    if isinstance(data, str):
+        # The decoded size without decoding: a blob can be megabytes.
+        details.append(f"{len(data) * 3 // 4 - data[-2:].count('=')} bytes")
+    return f"[{kind}: {', '.join(details)}]" if details else f"[{kind}]"
+
+
 def set_structured_content(result: Any, value: Any) -> None:
     """Write the structured content back under whichever name the object carries."""
     if isinstance(result, dict):

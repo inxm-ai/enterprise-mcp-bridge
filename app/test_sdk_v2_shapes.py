@@ -64,6 +64,110 @@ def test_the_rest_envelope_accepts_a_dict_shaped_result():
     assert RunToolsResult({"isError": True}).content[0].text == "An error occurred"
 
 
+def _downloaded_file_result():
+    """What github-mcp-server's get_file_contents returns: a note plus the file."""
+    return types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text", text="successfully downloaded text file (SHA: e89dc91)"
+            ),
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.TextResourceContents(
+                    uri="repo://inxm-ai/int-llm-skills/contents/SKILL.md",
+                    mimeType="text/markdown",
+                    text="# Principal developer",
+                ),
+            ),
+        ]
+    )
+
+
+def test_the_rest_envelope_carries_the_text_of_an_embedded_resource():
+    envelope = RunToolsResult(_downloaded_file_result())
+
+    note, file = envelope.content
+    assert note.text.startswith("successfully downloaded")
+    assert note.type is None
+    assert file.text == "# Principal developer"
+    assert file.type == "resource"
+    assert file.uri == "repo://inxm-ai/int-llm-skills/contents/SKILL.md"
+    assert file.mimeType == "text/markdown"
+    assert file.data is None
+
+
+def test_the_rest_envelope_keeps_binary_payloads_and_describes_them():
+    result = types.CallToolResult(
+        content=[
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.BlobResourceContents(
+                    uri="repo://o/r/contents/logo.png",
+                    mimeType="image/png",
+                    blob="iVBORw0=",
+                ),
+            ),
+            types.ImageContent(type="image", data="AAAA", mimeType="image/png"),
+            types.ResourceLink(
+                type="resource_link", name="big.zip", uri="https://example.com/big.zip"
+            ),
+        ]
+    )
+
+    blob, image, link = RunToolsResult(result).content
+
+    assert blob.text == "[resource: repo://o/r/contents/logo.png, image/png, 5 bytes]"
+    assert blob.data == "iVBORw0="
+    assert image.text == "[image: image/png, 3 bytes]"
+    assert image.data == "AAAA"
+    assert link.text == "[resource link: https://example.com/big.zip]"
+    assert link.uri == "https://example.com/big.zip"
+    assert link.data is None
+
+
+def test_a_result_that_already_passed_a_bridge_keeps_its_file():
+    once = RunToolsResult(_downloaded_file_result())
+
+    twice = RunToolsResult(once.model_dump())
+
+    assert twice.content[1].text == "# Principal developer"
+    assert twice.content[1].uri == "repo://inxm-ai/int-llm-skills/contents/SKILL.md"
+    assert twice.content[1].mimeType == "text/markdown"
+
+
+def test_an_empty_binary_file_keeps_its_empty_payload():
+    result = types.CallToolResult(
+        content=[
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.BlobResourceContents(
+                    uri="repo://o/r/contents/empty.bin",
+                    mimeType="application/octet-stream",
+                    blob="",
+                ),
+            )
+        ]
+    )
+
+    (file,) = RunToolsResult(result).content
+
+    assert file.data == ""
+    assert file.text == (
+        "[resource: repo://o/r/contents/empty.bin, application/octet-stream, 0 bytes]"
+    )
+
+
+def test_content_text_reads_wire_shaped_resources():
+    item = {
+        "type": "resource",
+        "resource": {"uri": "file:///a.txt", "mimeType": "text/plain", "text": "hi"},
+    }
+
+    assert mcp_fields.content_text(item) == "hi"
+    assert mcp_fields.content_text({"text": "plain"}) == "plain"
+    assert mcp_fields.content_text({"type": "image"}) == "[image]"
+
+
 def test_error_results_are_classified_by_payload_then_text():
     transient = types.CallToolResult(
         content=[types.TextContent(type="text", text="busy")],
