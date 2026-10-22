@@ -31,6 +31,15 @@ EFFECT_TOOLS = [
     if pattern.strip()
 ]
 
+# Tools to advertise as read-only (MCP `readOnlyHint`), as glob patterns, for
+# upstream servers that do not annotate their reads. Clients use the hint to
+# run a call without asking for approval, so list only tools that change nothing.
+READ_ONLY_TOOLS = [
+    pattern.strip()
+    for pattern in os.environ.get("READ_ONLY_TOOLS", "").split(",")
+    if pattern.strip()
+]
+
 
 def tool_matches_patterns(tool_name: str, patterns: list[str]) -> bool:
     """Return whether a tool name matches one of the configured glob patterns."""
