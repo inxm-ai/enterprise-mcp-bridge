@@ -39,7 +39,9 @@ from app.vars import (
     MCP_MAP_HEADER_TO_INPUT,
     TOOL_OUTPUT_SCHEMAS,
     MCP_BASE_PATH,
+    READ_ONLY_TOOLS,
     get_tool_output_schema,
+    tool_matches_patterns,
 )
 from app import vars as app_vars
 from app.isolation import PRIVATE_DIR
@@ -266,6 +268,7 @@ def _cache_signature() -> dict:
         "exclude": exclude_tools,
         "map_header_to_input": app_vars.per_server_header_map(MCP_MAP_HEADER_TO_INPUT),
         "tool_output_schemas": current_tool_output_schemas(TOOL_OUTPUT_SCHEMAS),
+        "read_only_tools": READ_ONLY_TOOLS,
         "server": current_command(os.environ.get("MCP_SERVER_COMMAND", ""))
         or current_remote_url(os.environ.get("MCP_REMOTE_SERVER", "")),
     }
@@ -274,6 +277,19 @@ def _cache_signature() -> dict:
 def matches_pattern(value, pattern):
     """Check if a value matches a glob-like pattern."""
     return fnmatch(value, pattern)
+
+
+def with_read_only_hint(name: str, annotations: Any) -> Any:
+    """`annotations` with `readOnlyHint` set when READ_ONLY_TOOLS lists `name`."""
+    if not tool_matches_patterns(name, READ_ONLY_TOOLS):
+        return annotations
+    if isinstance(annotations, dict):
+        base = dict(annotations)
+    elif hasattr(annotations, "model_dump"):
+        base = annotations.model_dump(by_alias=True, exclude_none=True)
+    else:
+        base = {}
+    return {**base, "readOnlyHint": True, "destructiveHint": False}
 
 
 def map_tools(tools):
@@ -347,7 +363,7 @@ def map_tools(tools):
                 "description": description,
                 "inputSchema": input_schema_copy,
                 "outputSchema": output_schema,
-                "annotations": annotations,
+                "annotations": with_read_only_hint(name, annotations),
                 "meta": meta,
                 "url": f"{current_base_path(MCP_BASE_PATH)}/tools/{name}",
             }
