@@ -334,7 +334,7 @@ class TestAnonymousListing:
             assert "x-inxm-connection-policy-version" not in response.headers
         assert authority["calls"] == []
 
-    def test_an_unverifiable_tool_call_is_still_refused(
+    def test_an_unverifiable_tool_call_on_a_personal_connector_is_still_refused(
         self, client, authority, verifier, downstream
     ):
         response = client.post("/tools/current_user", headers=self.CRAWL, json={})
@@ -415,3 +415,45 @@ class TestSseMessages:
         assert fake.calls == reached
         with pytest.raises(CallerNotAuthorizedError):
             await handlers["on_list_tools"](None, None)
+
+
+class TestNoPersonalCredential:
+    """A connector that acts as nobody in particular (public, shared service
+    key) keeps serving calls that carry no platform token; one that acts as a
+    person always needs a verified one."""
+
+    @pytest.mark.parametrize("kind", ["public", "service_key"])
+    @pytest.mark.parametrize(
+        "headers", [{}, {"Authorization": "Bearer a-shared-service-key"}]
+    )
+    def test_a_tokenless_call_is_served_unattested(
+        self, client, authority, verifier, downstream, monkeypatch, kind, headers
+    ):
+        monkeypatch.setattr(app_vars, "KEYCLOAK_PROVIDER_ALIAS", "")
+        monkeypatch.setattr(app_vars, "AUTH_PROVIDER", "keycloak")
+        monkeypatch.delenv("MCP_REMOTE_ANON_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("MCP_REMOTE_BEARER_TOKEN", raising=False)
+        if kind == "service_key":
+            monkeypatch.setenv("MCP_REMOTE_BEARER_TOKEN", "shared")
+        response = client.post("/tools/current_user", headers=headers, json={})
+        assert response.status_code == 200, response.text
+        assert "x-inxm-connection-policy-version" not in response.headers
+        assert authority["calls"] == []
+        assert downstream.calls >= 1
+
+    def test_a_verified_caller_on_a_public_connector_is_still_checked(
+        self, client, authority, verifier, downstream, monkeypatch
+    ):
+        monkeypatch.setattr(app_vars, "KEYCLOAK_PROVIDER_ALIAS", "")
+        authority.update(status=409, body={"code": "blocked_by_policy"})
+        response = client.post(
+            "/tools/current_user", headers={TOKEN_HEADER: TOKEN}, json={}
+        )
+        assert response.status_code == 403
+
+    def test_a_tokenless_call_on_a_personal_connector_is_refused(
+        self, client, authority, verifier, downstream
+    ):
+        response = client.post("/tools/current_user", json={})
+        assert response.status_code == 401
+        assert downstream.calls == 0

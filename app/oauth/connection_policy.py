@@ -167,8 +167,14 @@ async def enforce_connection_policy(
 ) -> Optional[Attestation]:
     """Raise CallerNotAuthorizedError unless the central authority allows this caller.
 
-    Returns None (no attestation) when no authority is configured, or for a
-    tool listing (``listing``) without a verifiable caller.
+    Returns None (no attestation) when no authority is configured, for a tool
+    listing (``listing``) without a verifiable caller, and for a caller that
+    cannot be verified on a connector that uses no personal credential
+    (``public`` or ``service_key``): there is no person to attribute the call
+    to, so there is nothing the authority could decide, and such a call has
+    always been served (the platform gateway and the manager proxy are its
+    boundary, and ``BRIDGE_REQUIRED_GROUPS`` above still applies). A connector
+    that acts as a person (``oauth``, ``api_key``) always needs a verified one.
     """
     url = policy_url()
     if not url:
@@ -176,16 +182,20 @@ async def enforce_connection_policy(
     server = server_id()
     if not server:
         raise CallerNotAuthorizedError(503, "Connection policy is unavailable")
+    # Calls nobody can be named for are served unattested where no personal
+    # credential is involved.
+    unattributed_ok = listing or credential_kind() in ("public", "service_key")
     if not access_token:
-        if listing:
+        if unattributed_ok:
             return None
         raise CallerNotAuthorizedError(401, "Authentication required")
     try:
         subject = _verified_subject(access_token)
     except CallerNotAuthorizedError:
-        # Tool metadata for an anonymous reader (the manager's tools crawl):
-        # served as before, never attested, never a tool call.
-        if listing:
+        # Tool metadata for an anonymous reader (the manager's tools crawl), or
+        # a bearer that is not a platform token (a shared service key): served
+        # as before, never attested.
+        if unattributed_ok:
             return None
         raise
     key = _cache_key(url, access_token, server)
