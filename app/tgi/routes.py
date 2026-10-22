@@ -20,7 +20,11 @@ from uuid import uuid4
 
 from app.utils.traced_requests import traced_request
 from app.session import try_get_session_id, session_id
-from app.session_manager import mcp_session_context, session_manager
+from app.session_manager import (
+    mcp_session_context,
+    preflight_caller,
+    session_manager,
+)
 from app.multi_server import session_storage_key
 from app.oauth.token_exchange import UserLoggedOutException
 from app.utils.exception_logging import (
@@ -573,6 +577,7 @@ async def chat_completions(
         is_streaming = chat_request.stream
 
         if is_streaming:
+            await preflight_caller(access_token)
             return StreamingResponse(
                 _handle_chat_completion(
                     request,

@@ -74,7 +74,12 @@ def configure_logging() -> None:
 # Configure logging early before app creation
 configure_logging()
 
+from app.oauth.connection_policy import ConnectionAttestationMiddleware
+
 app = FastAPI()
+# Added first so it is the innermost layer: the multi-server context (when
+# present) is already set when enforcement records the attestation.
+app.add_middleware(ConnectionAttestationMiddleware)
 if is_multi_server_mode():
     app.add_middleware(MultiServerContextMiddleware)
 

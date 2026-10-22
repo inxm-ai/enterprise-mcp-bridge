@@ -71,6 +71,7 @@ from .oauth.user_info import (
     ensure_caller_in_required_groups,
     get_data_access_manager,
 )
+from app.oauth.connection_policy import enforce_connection_policy
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .oauth.token_dependency import get_access_token
@@ -426,7 +427,12 @@ async def list_tools(
             start_message=f"[Tools] Listing tools. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
+                listing=True,
             ) as session:
                 tools = await session.list_tools()
                 # Map tools for client response (apply header mapping and pruning)
@@ -474,7 +480,12 @@ async def get_tool_details(
             start_message=f"[Tool-Details] Getting tool details. Session: {x_inxm_mcp_session}, Group: {group}",
         ):
             async with mcp_session_context(
-                sessions, x_inxm_mcp_session, access_token, group, incoming_headers
+                sessions,
+                x_inxm_mcp_session,
+                access_token,
+                group,
+                incoming_headers,
+                listing=True,
             ) as session:
                 tools = await session.list_tools()
                 result = map_tools(tools)
@@ -805,6 +816,7 @@ async def start_session(
             # BRIDGE_REQUIRED_GROUPS.
             try:
                 ensure_caller_in_required_groups(access_token)
+                await enforce_connection_policy(access_token)
             except CallerNotAuthorizedError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=exc.detail)
             x_inxm_mcp_session = session_id(str(uuid.uuid4()), access_token)

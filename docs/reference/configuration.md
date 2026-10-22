@@ -915,6 +915,45 @@ at all.
 MCP_FORWARD_ACCESS_TOKEN=false
 ```
 
+#### CONNECTION_POLICY_URL
+
+The app-mcp-manager connection authority (`POST /v2/connections/enforce`).
+When set, every transport (REST, session start, SSE) asks it as the verified
+caller before any downstream contact, after `BRIDGE_REQUIRED_GROUPS` (both must
+allow). The bridge identifies itself with the multi-server id or, for a single
+server, `SERVICE_NAME`.
+
+- **Type:** URL
+- **Default:** empty (no central policy, no attestation)
+- **Required:** No
+
+A denial is `403` and final, a hidden or unknown server is `404`, and an
+authority outage is a retryable `503`: the bridge never assumes "allowed".
+An allowed decision is reused for at most 30 seconds per caller token and
+server (the agreed maximum revocation delay); the token itself is still
+verified on every request, and denials or failures are never cached.
+Allowed responses carry attestation headers the manager's connection probe
+checks:
+
+| Header | Value |
+|---|---|
+| `X-Inxm-Connection-Policy-Version` | Policy version of the decision |
+| `X-Inxm-Connector-Revision` | Connector revision of the decision |
+| `X-Inxm-Caller-Subject` | Verified caller, matching the decision |
+| `X-Inxm-Credential-Kind` | What this bridge sends upstream: `oauth` (the caller's broker grant), `api_key` (the caller's own key), `service_key` (a shared bearer), `public` (none) |
+
+A downstream server can never set these headers. Without this setting the
+manager reports `enforcement_unavailable` rather than a verified connection.
+
+Tool listings (`GET /tools`, `GET /tools/{name}`) are checked and attested the
+same way for a verifiable caller. Without one, as for the manager's tools crawl,
+a listing is served as before, without attestation; tool calls always need an
+allowed decision.
+
+```bash
+CONNECTION_POLICY_URL=http://app-mcp-manager.orchestrator.svc.cluster.local:8000/v2/connections/enforce
+```
+
 ### Advanced
 
 #### MCP_ENV_*

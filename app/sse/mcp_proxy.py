@@ -37,6 +37,7 @@ from app.oauth.user_info import (
     CallerNotAuthorizedError,
     ensure_caller_in_required_groups,
 )
+from app.oauth.connection_policy import enforce_connection_policy
 from app.session import mcp_session
 from app.session_manager.session_context import (
     ResponseTooLargeError,
@@ -152,7 +153,16 @@ def _build_proxy_handlers(
 
     downstream = with_trace_query_tools(downstream)
 
+    async def still_allowed(listing: bool = False) -> None:
+        # The SSE stream outlives the check made when it opened, and
+        # ``POST /sse/messages`` carries no credential of its own: every
+        # message re-checks the stream's caller, so token expiry and policy
+        # changes apply within the authority's 30 s decision bound.
+        ensure_caller_in_required_groups(access_token)
+        await enforce_connection_policy(access_token, listing=listing)
+
     async def list_tools(ctx, params) -> types.ListToolsResult:
+        await still_allowed(listing=True)
         tools = await downstream.list_tools()
         return types.ListToolsResult(tools=filter_tools(_to_tool_list(tools)))
 
@@ -163,6 +173,13 @@ def _build_proxy_handlers(
         # errors, the same set the REST route maps to statuses. Anything else
         # is a bridge fault: it propagates, and the SDK answers with a generic
         # internal error rather than the exception's message.
+        try:
+            await still_allowed()
+        except CallerNotAuthorizedError as exc:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=exc.detail)],
+                is_error=True,
+            )
         try:
             return await _call_tool(ctx, params)
         except (ToolPolicyDeniedError, ResponseTooLargeError, MCPError) as exc:
@@ -234,6 +251,7 @@ def _build_proxy_handlers(
             )
 
     async def list_prompts(ctx, params) -> types.ListPromptsResult:
+        await still_allowed(listing=True)
         result = await downstream.list_prompts()
         prompts = list(result.prompts) if hasattr(result, "prompts") else list(result)
         return types.ListPromptsResult(prompts=prompts)
@@ -241,6 +259,7 @@ def _build_proxy_handlers(
     async def get_prompt(
         ctx, params: types.GetPromptRequestParams
     ) -> types.GetPromptResult:
+        await still_allowed()
         with mcp_operation_span(
             method=MCP_METHOD_PROMPTS_GET,
             target=params.name,
@@ -257,6 +276,7 @@ def _build_proxy_handlers(
             return result
 
     async def list_resources(ctx, params) -> types.ListResourcesResult:
+        await still_allowed(listing=True)
         result = await _list_resources_helper(downstream.list_resources)
         resources = (
             list(result.resources) if hasattr(result, "resources") else list(result)
@@ -266,6 +286,7 @@ def _build_proxy_handlers(
     async def read_resource(
         ctx, params: types.ReadResourceRequestParams
     ) -> types.ReadResourceResult:
+        await still_allowed()
         with mcp_operation_span(
             method=MCP_METHOD_RESOURCES_READ,
             transport=TRANSPORT_SSE,
@@ -327,6 +348,7 @@ class _SSEConnectionApp:
         # before the SSE stream opens so the client gets a proper HTTP status.
         try:
             ensure_caller_in_required_groups(access_token)
+            await enforce_connection_policy(access_token)
         except CallerNotAuthorizedError as exc:
             logger.warning(f"[MCP-SSE] Connection rejected: {exc.detail}")
             resp = Response(exc.detail, status_code=exc.status_code)

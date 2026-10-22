@@ -28,6 +28,7 @@ from app.oauth.user_info import (
     ensure_caller_in_required_groups,
     get_data_access_manager,
 )
+from app.oauth.connection_policy import enforce_connection_policy
 from app.utils import mask_token
 from app.utils.mcp_operation import (
     build_trace_meta,
@@ -587,6 +588,21 @@ async def close_idle_sessions(sessions: SessionManagerBase) -> None:
             )
 
 
+async def preflight_caller(access_token: Optional[str], *, listing: bool = False):
+    """Run the bridge's caller gates (required groups, central connection policy).
+
+    Streaming routes call this before building their response: a
+    ``StreamingResponse`` starts the response before its generator enters
+    :func:`mcp_session_context`, so a denial there would arrive as a 200 SSE
+    error and an allowed decision too late for the attestation headers.
+    """
+    try:
+        ensure_caller_in_required_groups(access_token)
+        await enforce_connection_policy(access_token, listing=listing)
+    except CallerNotAuthorizedError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
 @asynccontextmanager
 async def mcp_session_context(
     sessions: SessionManagerBase,
@@ -594,8 +610,14 @@ async def mcp_session_context(
     access_token: Optional[str],
     group: Optional[str],
     incoming_headers: Optional[dict[str, str]] = None,
+    listing: bool = False,
 ):
-    """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes."""
+    """Yield a delegate with unified list_tools() and call_tool() across sessionful and sessionless modes.
+
+    ``listing`` marks a tool-metadata read: central connection policy still
+    applies (and is attested) for a verifiable caller, but an anonymous or
+    unverifiable listing, such as the manager's tools crawl, is served as before.
+    """
     from app.memory_scope import memory_tenant
 
     memory_tenant(
@@ -606,10 +628,7 @@ async def mcp_session_context(
     )
     # Bridge-level authorization boundary: when BRIDGE_REQUIRED_GROUPS is set,
     # every request through this seam is gated before any downstream contact.
-    try:
-        ensure_caller_in_required_groups(access_token)
-    except CallerNotAuthorizedError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    await preflight_caller(access_token, listing=listing)
 
     # Sessionless path: validate group access (if present) and open a transient MCP session
     if x_inxm_mcp_session is None or current_sessionless(app_vars.MCP_SESSIONLESS):
