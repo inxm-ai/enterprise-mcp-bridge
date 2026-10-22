@@ -2,6 +2,7 @@ import pytest
 from app.session_manager.session_context import map_tools
 from unittest.mock import patch
 import app.session_manager.session_context as session_context
+from mcp import types as mcp_types
 
 
 class MockTool:
@@ -105,3 +106,58 @@ def test_output_schema_pluralized_name_alias_is_applied():
         mapped = map_tools(tools)
 
     assert mapped[0]["outputSchema"] == expected_schema
+
+
+def test_read_only_tools_are_annotated_read_only_over_upstream_hints():
+    tools = MockTools(
+        [
+            MockTool("search_traces", None, "", {}, None, None, None),
+            MockTool(
+                "get_services",
+                None,
+                "",
+                {},
+                None,
+                {"title": "Services", "readOnlyHint": False},
+                None,
+            ),
+            MockTool("delete_trace", None, "", {}, None, {"title": "Delete"}, None),
+        ]
+    )
+
+    with patch.object(session_context, "READ_ONLY_TOOLS", ["get_*", "search_traces"]):
+        mapped = {tool["name"]: tool["annotations"] for tool in map_tools(tools)}
+
+    assert mapped["search_traces"] == {"readOnlyHint": True, "destructiveHint": False}
+    assert mapped["get_services"] == {
+        "title": "Services",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+    }
+    assert mapped["delete_trace"] == {"title": "Delete"}
+
+
+def test_read_only_hint_keeps_the_fields_of_sdk_annotations():
+    tools = MockTools(
+        [
+            MockTool(
+                "get_services",
+                None,
+                "",
+                {},
+                None,
+                mcp_types.ToolAnnotations(title="Services", openWorldHint=False),
+                None,
+            )
+        ]
+    )
+
+    with patch.object(session_context, "READ_ONLY_TOOLS", ["get_services"]):
+        mapped = map_tools(tools)
+
+    assert mapped[0]["annotations"] == {
+        "title": "Services",
+        "openWorldHint": False,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+    }
