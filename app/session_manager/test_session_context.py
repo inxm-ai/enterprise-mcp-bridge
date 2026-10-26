@@ -127,6 +127,60 @@ async def test_sessionful_overlay_misconfiguration_is_not_a_client_error(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list", "call", "progress"])
+async def test_sessionful_discovery_timeout_closes_and_removes_the_worker(
+    monkeypatch, operation
+):
+    """A task-backed tools/list must have the same deadline as direct sessions."""
+    from contextlib import asynccontextmanager
+    from fastapi import HTTPException
+    from app.session.session import MCPLocalSessionTask
+    from app.session.client_strategy import MCPClientStrategy
+    from app.session_manager.session_manager import InMemorySessionManager
+
+    closed = asyncio.Event()
+    ran_tool = AsyncMock()
+
+    async def stalled_listing():
+        await asyncio.Event().wait()
+
+    class Strategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            try:
+                yield types.SimpleNamespace(
+                    list_tools=stalled_listing, call_tool=ran_tool
+                )
+            finally:
+                closed.set()
+
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    worker = MCPLocalSessionTask(Strategy())
+    manager = InMemorySessionManager()
+    manager.set("notion-test", worker)
+    worker.start()
+    await worker.wait_started()
+    try:
+        with pytest.raises(HTTPException) as caught:
+            async with sc.mcp_session_context(
+                manager, "notion-test", None, None, {}
+            ) as delegate:
+                if operation == "list":
+                    await delegate.list_tools()
+                elif operation == "call":
+                    await delegate.call_tool("browse", {}, None)
+                else:
+                    await delegate.call_tool_with_progress("browse", {}, None)
+        assert caught.value.status_code == 504
+        assert caught.value.detail["error"] == "upstream_discovery_timeout"
+        await asyncio.wait_for(closed.wait(), 1)
+        assert manager.get("notion-test") is None
+        ran_tool.assert_not_awaited()
+    finally:
+        await asyncio.wait_for(worker.stop(), 1)
+
+
+@pytest.mark.asyncio
 async def test_sessionless_call_tool_injects_headers(monkeypatch):
     # Prepare fake tools: toolA expects userId
     tools_list = [
