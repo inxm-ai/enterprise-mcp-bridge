@@ -29,7 +29,9 @@ def dict_to_obj(d):
 
 
 @pytest.mark.asyncio
-async def test_discovery_timeout_does_not_execute_the_tool_and_a_later_call_can_recover(monkeypatch):
+async def test_discovery_timeout_does_not_execute_the_tool_and_a_later_call_can_recover(
+    monkeypatch,
+):
     """Hosted Notion hung in tools/list until the hub's 60s call expired."""
     from contextlib import asynccontextmanager
     from fastapi import HTTPException
@@ -91,7 +93,9 @@ async def test_schema_recovery_shares_the_discovery_deadline(monkeypatch):
 async def test_caller_cancellation_is_not_misreported_as_discovery_timeout(monkeypatch):
     """Cancelled requests remain cancelled and never become retryable 504s."""
     monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 1)
-    session = types.SimpleNamespace(list_tools=AsyncMock(side_effect=asyncio.CancelledError))
+    session = types.SimpleNamespace(
+        list_tools=AsyncMock(side_effect=asyncio.CancelledError)
+    )
     with pytest.raises(asyncio.CancelledError):
         await sc.resilient_list_tools(session)
 
