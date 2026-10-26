@@ -15,6 +15,7 @@ from mcp import types as mcp_types
 from app.utils.mcp_operation import is_mcp_error
 from app.utils import mcp_fields
 from app.utils.exception_logging import upstream_phase
+from app.utils.discovery_timeout import with_discovery_deadline, is_discovery_timeout
 from app.elicitation import ElicitationRequiredError, InvalidUserFeedbackError
 from app.session import MCPSessionBase, mcp_session
 from app.session_manager.prompt_helper import list_prompts, call_prompt
@@ -105,6 +106,16 @@ def _to_tool_list(tools: Any) -> list:
 
 
 async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
+    """Discover tools within one deadline, including schema-recovery retries.
+
+    A slow tools/list must report its discovery timeout before the caller's
+    whole tool-call request expires. In particular, no tool has run yet, so
+    the response must not pretend the vendor rejected the user's login.
+    """
+    return await with_discovery_deadline(_resilient_list_tools(session))
+
+
+async def _resilient_list_tools(session) -> mcp_types.ListToolsResult:
     """``list_tools()`` that tolerates individually non-conforming tools.
 
     SDK v2 validates every tool's ``outputSchema`` in one shot, so a single
@@ -894,9 +905,19 @@ async def mcp_session_context(
             detail="Session not found. It might have expired, please start a new.",
         )
 
+    async def task_tools():
+        try:
+            return await mcp_task.request("list_tools")
+        except HTTPException as error:
+            if is_discovery_timeout(error) and sessions.get(storage_key) is mcp_task:
+                # The task owns cancellation/transport cleanup. Remove it now
+                # so a new request cannot enqueue work into that closing task.
+                sessions.pop(storage_key)
+            raise
+
     class TaskDelegate:
         async def list_tools(self):
-            tools = await mcp_task.request("list_tools")
+            tools = await task_tools()
             return _to_tool_list(tools)
 
         async def call_tool(
@@ -906,7 +927,7 @@ async def mcp_session_context(
             access_token_inner: Optional[str],
         ):
             ensure_tool_allowed(tool_name)
-            tools = await mcp_task.request("list_tools")
+            tools = await task_tools()
             decorated_args = await decorate_args_with_oauth_token(
                 tools, tool_name, args, access_token_inner
             )
@@ -961,7 +982,7 @@ async def mcp_session_context(
                 RunToolsResult with the tool execution result
             """
             ensure_tool_allowed(tool_name)
-            tools = await mcp_task.request("list_tools")
+            tools = await task_tools()
             decorated_args = await decorate_args_with_oauth_token(
                 tools, tool_name, args, access_token_inner
             )

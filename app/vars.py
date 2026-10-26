@@ -350,6 +350,11 @@ MCP_PROTOCOL_NEGOTIATION = (
 # Per-call timeout towards the downstream MCP server. 0 keeps SDK defaults.
 MCP_TOOL_TIMEOUT_SECONDS = float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "0"))
 
+# Discovery also runs before a tool call (argument decoration and SDK output
+# schemas). Bound it separately so it cannot consume a caller's entire tool
+# request deadline before the actual tool is even sent. 0 opts out.
+MCP_DISCOVERY_TIMEOUT_SECONDS = float(os.getenv("MCP_DISCOVERY_TIMEOUT_SECONDS", "20"))
+
 
 def _parse_map_header_to_input(raw: str) -> dict:
     mapping: dict = {}

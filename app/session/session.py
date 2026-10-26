@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from ..admission import remote_session_idle_seconds
 from ..utils.mcp_operation import log_sanitized_exception
 from ..utils.mcp_operation import downstream_call_kwargs, safe_arg_keys
+from ..utils.discovery_timeout import with_discovery_deadline, is_discovery_timeout
 from .client_strategy import (
     MCPClientStrategy,
     LocalMCPClientStrategy,
@@ -246,11 +247,17 @@ class MCPLocalSessionTask(MCPSessionBase):
                         logger.debug("[MCPLocalSessionTask] Listing available tools.")
                         try:
                             with upstream_phase("discovery"):
-                                result = await session.list_tools()
+                                result = await with_discovery_deadline(
+                                    session.list_tools()
+                                )
                             await self.response_queue.put(result)
                         except Exception as e:
                             log_sanitized_exception(logger, "[MCPLocalSessionTask]", e)
                             await self._report_failure(e)
+                            if is_discovery_timeout(e):
+                                # A cancelled request must not leave this MCP
+                                # transport available for subsequent tool work.
+                                break
                     elif req == "list_prompts":
                         logger.debug("[MCPLocalSessionTask] Listing available prompts.")
                         try:

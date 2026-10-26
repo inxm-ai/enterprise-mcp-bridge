@@ -67,6 +67,15 @@ uvicorn app.server:app --host 0.0.0.0 --port 8000
 
 **[Complete MCP configuration guide →](https://inxm-ai.github.io/enterprise-mcp-bridge/#/how-to/remote-mcp-servers)**
 
+Tool discovery has a separate deadline: `MCP_DISCOVERY_TIMEOUT_SECONDS`
+defaults to **20 seconds**, including the lenient schema-recovery retry.
+This also bounds discovery performed before executing a tool. A discovery
+timeout returns HTTP **504** with `error: upstream_discovery_timeout`,
+`phase: discovery`, and `retryable: true`; no tool has been executed.
+It is distinct from a vendor sign-in failure and from `MCP_TOOL_TIMEOUT_SECONDS`,
+which bounds the actual tool call. Set the discovery deadline to `0` to retain
+unbounded discovery, or override it in an `MCP_SERVERS` entry's `settings`.
+
 ### Production Deployment
 
 ```bash

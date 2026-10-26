@@ -1,6 +1,7 @@
 import os
 import types
 import fcntl
+import asyncio
 import pytest
 from unittest.mock import AsyncMock
 
@@ -28,6 +29,78 @@ def dict_to_obj(d):
 
 
 @pytest.mark.asyncio
+async def test_discovery_timeout_does_not_execute_the_tool_and_a_later_call_can_recover(
+    monkeypatch,
+):
+    """Hosted Notion hung in tools/list until the hub's 60s call expired."""
+    from contextlib import asynccontextmanager
+    from fastapi import HTTPException
+    from mcp import types as mcp_types
+
+    closed = []
+    session = types.SimpleNamespace(
+        list_tools=AsyncMock(side_effect=lambda: None),
+        call_tool=AsyncMock(),
+    )
+
+    async def stalled_listing():
+        await asyncio.Event().wait()
+
+    session.list_tools.side_effect = stalled_listing
+
+    @asynccontextmanager
+    async def fake_session(**kwargs):
+        try:
+            yield session
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(sc, "mcp_session", fake_session)
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    with pytest.raises(HTTPException) as caught:
+        async with sc.mcp_session_context({}, None, None, None, {}) as delegate:
+            await delegate.call_tool("browse", {}, None)
+    assert caught.value.status_code == 504
+    assert caught.value.detail["error"] == "upstream_discovery_timeout"
+    assert caught.value.detail["retryable"] is True
+    session.call_tool.assert_not_awaited()
+    assert closed == [True]
+
+    session.list_tools.side_effect = None
+    session.list_tools.return_value = mcp_types.ListToolsResult(tools=[])
+    assert await sc.resilient_list_tools(session) == session.list_tools.return_value
+
+
+@pytest.mark.asyncio
+async def test_schema_recovery_shares_the_discovery_deadline(monkeypatch):
+    """The lenient second tools/list used to escape the discovery deadline."""
+    from fastapi import HTTPException
+
+    async def stalled_raw_request(*args):
+        await asyncio.Event().wait()
+
+    session = types.SimpleNamespace(
+        list_tools=AsyncMock(side_effect=_list_tools_validation_error()),
+        _dispatcher=types.SimpleNamespace(send_raw_request=stalled_raw_request),
+    )
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    with pytest.raises(HTTPException) as caught:
+        await sc.resilient_list_tools(session)
+    assert caught.value.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_is_not_misreported_as_discovery_timeout(monkeypatch):
+    """Cancelled requests remain cancelled and never become retryable 504s."""
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 1)
+    session = types.SimpleNamespace(
+        list_tools=AsyncMock(side_effect=asyncio.CancelledError)
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await sc.resilient_list_tools(session)
+
+
+@pytest.mark.asyncio
 async def test_sessionful_overlay_misconfiguration_is_not_a_client_error(monkeypatch):
     """A broken deployment contract is a bridge fault, never a 4xx for the caller."""
     from fastapi import HTTPException
@@ -51,6 +124,60 @@ async def test_sessionful_overlay_misconfiguration_is_not_a_client_error(monkeyp
         ):
             pytest.fail("invalid configuration yielded a session")
     assert not issubclass(trace_query_tools.TraceQueryMisconfigured, HTTPException)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list", "call", "progress"])
+async def test_sessionful_discovery_timeout_closes_and_removes_the_worker(
+    monkeypatch, operation
+):
+    """A task-backed tools/list must have the same deadline as direct sessions."""
+    from contextlib import asynccontextmanager
+    from fastapi import HTTPException
+    from app.session.session import MCPLocalSessionTask
+    from app.session.client_strategy import MCPClientStrategy
+    from app.session_manager.session_manager import InMemorySessionManager
+
+    closed = asyncio.Event()
+    ran_tool = AsyncMock()
+
+    async def stalled_listing():
+        await asyncio.Event().wait()
+
+    class Strategy(MCPClientStrategy):
+        @asynccontextmanager
+        async def session(self):
+            try:
+                yield types.SimpleNamespace(
+                    list_tools=stalled_listing, call_tool=ran_tool
+                )
+            finally:
+                closed.set()
+
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    worker = MCPLocalSessionTask(Strategy())
+    manager = InMemorySessionManager()
+    manager.set("notion-test", worker)
+    worker.start()
+    await worker.wait_started()
+    try:
+        with pytest.raises(HTTPException) as caught:
+            async with sc.mcp_session_context(
+                manager, "notion-test", None, None, {}
+            ) as delegate:
+                if operation == "list":
+                    await delegate.list_tools()
+                elif operation == "call":
+                    await delegate.call_tool("browse", {}, None)
+                else:
+                    await delegate.call_tool_with_progress("browse", {}, None)
+        assert caught.value.status_code == 504
+        assert caught.value.detail["error"] == "upstream_discovery_timeout"
+        await asyncio.wait_for(closed.wait(), 1)
+        assert manager.get("notion-test") is None
+        ran_tool.assert_not_awaited()
+    finally:
+        await asyncio.wait_for(worker.stop(), 1)
 
 
 @pytest.mark.asyncio
