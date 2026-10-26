@@ -122,6 +122,7 @@ SETTINGS = {
     "SYSTEM_DEFINED_PROMPTS": _json_list,
     "MCP_MAP_HEADER_TO_INPUT": str,
     "MCP_TOOL_TIMEOUT_SECONDS": float,
+    "MCP_DISCOVERY_TIMEOUT_SECONDS": float,
     "MCP_MAX_RESPONSE_BYTES": int,
     "TRACE_QUERY_URL": trace_query_url,
     "BRIDGE_REQUIRED_GROUPS": str,

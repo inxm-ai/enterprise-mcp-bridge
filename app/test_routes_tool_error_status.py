@@ -93,6 +93,32 @@ def test_timeout_detection_is_case_insensitive(client, mock_session_context):
     assert response.status_code == HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT
 
 
+def test_discovery_timeout_is_a_retryable_http_504_without_executing_a_tool(
+    client, mock_session_context, monkeypatch
+):
+    """A stalled vendor tools/list must not become a generic 500 or 401."""
+    import asyncio
+    from types import SimpleNamespace
+    from app.session_manager import session_context as sc
+
+    async def listing():
+        await asyncio.Event().wait()
+
+    downstream = SimpleNamespace(list_tools=listing, call_tool=AsyncMock())
+
+    async def prepare_then_call(*args):
+        await sc.resilient_list_tools(downstream)
+        return await downstream.call_tool(*args)
+
+    monkeypatch.setattr(sc.app_vars, "MCP_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    mock_session_context.call_tool.side_effect = prepare_then_call
+    response = client.post("/tools/browse", json={})
+    assert response.status_code == 504
+    assert response.json()["detail"]["error"] == "upstream_discovery_timeout"
+    assert response.json()["detail"]["retryable"] is True
+    downstream.call_tool.assert_not_awaited()
+
+
 def test_unknown_tool_still_maps_to_404(client, mock_session_context):
     response = _call_failing_tool(
         client, mock_session_context, "Unknown tool: nope_tool"

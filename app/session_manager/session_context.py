@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 import asyncio
+import anyio
 from fastapi import HTTPException
 from typing import Optional, Dict, Awaitable, Callable, Any
 import os
@@ -105,6 +106,34 @@ def _to_tool_list(tools: Any) -> list:
 
 
 async def resilient_list_tools(session) -> mcp_types.ListToolsResult:
+    """Discover tools within one deadline, including schema-recovery retries.
+
+    A slow tools/list must report its discovery timeout before the caller's
+    whole tool-call request expires. In particular, no tool has run yet, so
+    the response must not pretend the vendor rejected the user's login.
+    """
+    timeout = app_vars.per_server_float(
+        "MCP_DISCOVERY_TIMEOUT_SECONDS", app_vars.MCP_DISCOVERY_TIMEOUT_SECONDS
+    )
+    if timeout <= 0:
+        return await _resilient_list_tools(session)
+    try:
+        with anyio.fail_after(timeout):
+            return await _resilient_list_tools(session)
+    except TimeoutError:
+        logger.warning("[Tools] MCP discovery timed out before tool execution")
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "upstream_discovery_timeout",
+                "phase": "discovery",
+                "retryable": True,
+                "message": "MCP tool discovery timed out; no tool was executed",
+            },
+        ) from None
+
+
+async def _resilient_list_tools(session) -> mcp_types.ListToolsResult:
     """``list_tools()`` that tolerates individually non-conforming tools.
 
     SDK v2 validates every tool's ``outputSchema`` in one shot, so a single
