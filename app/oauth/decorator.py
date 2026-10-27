@@ -31,6 +31,23 @@ async def decorate_args_with_oauth_token(
         )
         return args
 
+    # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
+    schema = input_schema(tool_info) if tool_info else None
+    if not schema:
+        logger.info(f"[Tool-Call] Tool {tool_name} has no inputSchema or tool_info.")
+        return args
+    # inputSchema might be a dict or an object with 'properties'
+    if isinstance(schema, dict):
+        properties = schema.get("properties", {})
+    else:
+        properties = getattr(schema, "properties", {})
+    if "oauth_token" not in properties:
+        # Only a tool that takes the token pays for the exchange: a failed
+        # exchange (e.g. no broker read-token for a link-only provider) must
+        # not break tools that never use the downstream credential.
+        logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token.")
+        return args
+
     oauth_token = None
     if access_token:
         # Keycloak mode without a provider alias passes the token through;
@@ -50,30 +67,14 @@ async def decorate_args_with_oauth_token(
                 )
             oauth_token = token_result["access_token"]
 
-    # inputSchema {'properties': {'file_name': {}, 'content_type': {}, 'file_content': {}, 'oauth_token': {'title': 'Oauth Token', 'type': 'string'}}, 'required': ['file_name', 'content_type', 'file_content', 'oauth_token'], 'title': 'upload_file_to_onedriveArguments', 'type': 'object'}
-    schema = input_schema(tool_info) if tool_info else None
-    if schema:
-        # inputSchema might be a dict or an object with 'properties'
-        if isinstance(schema, dict):
-            properties = schema.get("properties", {})
-        else:
-            properties = getattr(schema, "properties", {})
-        if "oauth_token" in properties:
-            if oauth_token:
-                args["oauth_token"] = oauth_token
-                logger.info(
-                    f"[Tool-Call] Tool {tool_name} will be called with oauth_token."
-                )
-            else:
-                logger.warning(
-                    f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided."
-                )
-                raise HTTPException(
-                    status_code=401,
-                    detail="Tool requires oauth_token but none provided.",
-                )
-        else:
-            logger.info(f"[Tool-Call] Tool {tool_name} does not require oauth_token.")
-    else:
-        logger.info(f"[Tool-Call] Tool {tool_name} has no inputSchema or tool_info.")
+    if not oauth_token:
+        logger.warning(
+            f"[Tool-Call] Tool {tool_name} requires oauth_token but none provided."
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Tool requires oauth_token but none provided.",
+        )
+    args["oauth_token"] = oauth_token
+    logger.info(f"[Tool-Call] Tool {tool_name} will be called with oauth_token.")
     return args

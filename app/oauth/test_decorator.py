@@ -90,3 +90,58 @@ async def test_no_oauth_token_when_forwarding_disabled_by_env(monkeypatch):
     )
 
     assert result == {"foo": "bar"}
+
+
+class FailingRetriever:
+    def __init__(self):
+        self.calls = 0
+
+    def retrieve_token(self, token):
+        self.calls += 1
+        raise RuntimeError("broker refused: no read-token")
+
+
+@pytest.fixture
+def broker_alias_with_failing_exchange(monkeypatch):
+    """Keycloak with a provider alias whose broker exchange always fails, as
+    on a hosted install where nobody holds broker read-token."""
+    from app.oauth import decorator
+
+    retriever = FailingRetriever()
+    monkeypatch.setattr(decorator, "AUTH_PROVIDER", "keycloak")
+    monkeypatch.setattr(decorator, "KEYCLOAK_PROVIDER_ALIAS", "microsoft")
+    monkeypatch.setattr(
+        decorator,
+        "TokenRetrieverFactory",
+        lambda: type("F", (), {"get": lambda self: retriever})(),
+    )
+    return retriever
+
+
+@pytest.mark.asyncio
+async def test_tool_without_oauth_token_skips_the_exchange(
+    broker_alias_with_failing_exchange,
+):
+    tools = DummyTools(
+        [DummyTool("search_nodes", {"properties": {"query": {"type": "string"}}})]
+    )
+
+    result = await decorate_args_with_oauth_token(
+        tools, "search_nodes", {"query": "x"}, "kc-token"
+    )
+
+    assert result == {"query": "x"}
+    assert broker_alias_with_failing_exchange.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_with_oauth_token_still_exchanges(
+    broker_alias_with_failing_exchange,
+):
+    tools = DummyTools(
+        [DummyTool("upload", {"properties": {"oauth_token": {"type": "string"}}})]
+    )
+
+    with pytest.raises(RuntimeError):
+        await decorate_args_with_oauth_token(tools, "upload", {}, "kc-token")
+    assert broker_alias_with_failing_exchange.calls == 1
