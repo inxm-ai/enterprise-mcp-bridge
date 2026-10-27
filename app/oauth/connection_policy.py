@@ -44,6 +44,8 @@ ATTESTATION_HEADERS = (
     "x-inxm-caller-subject",
     "x-inxm-credential-kind",
 )
+# Set by this bridge alone (see ``record_connection_code``); never relayed.
+CONNECTION_CODE_HEADER = "x-inxm-connection-code"
 _TIMEOUT_SECONDS = 5.0
 _MAX_BODY_BYTES = 16_384
 # Allowed decisions may be reused for at most 30 seconds (the agreed maximum
@@ -94,10 +96,11 @@ class Attestation:
 
 
 class _Holder:
-    __slots__ = ("attestation",)
+    __slots__ = ("attestation", "connection_code")
 
     def __init__(self) -> None:
         self.attestation: Optional[Attestation] = None
+        self.connection_code: Optional[str] = None
 
 
 _current: contextvars.ContextVar[Optional[_Holder]] = contextvars.ContextVar(
@@ -255,6 +258,13 @@ def _record(attestation: Attestation) -> None:
         holder.attestation = attestation
 
 
+def record_connection_code(code: str) -> None:
+    """Have this request's response carry ``X-Inxm-Connection-Code: <code>``."""
+    holder = _current.get()
+    if holder is not None:
+        holder.connection_code = code
+
+
 class ConnectionAttestationMiddleware:
     """Adds the request's policy attestation to its response headers.
 
@@ -276,10 +286,18 @@ class ConnectionAttestationMiddleware:
                 headers = [
                     (k, v)
                     for k, v in message.get("headers", [])
-                    if k.lower().decode("latin-1") not in ATTESTATION_HEADERS
+                    if k.lower().decode("latin-1")
+                    not in (*ATTESTATION_HEADERS, CONNECTION_CODE_HEADER)
                 ]
                 if holder.attestation is not None:
                     headers.extend(holder.attestation.headers())
+                if holder.connection_code is not None:
+                    headers.append(
+                        (
+                            CONNECTION_CODE_HEADER.encode(),
+                            holder.connection_code.encode(),
+                        )
+                    )
                 message = dict(message, headers=headers)
             await send(message)
 

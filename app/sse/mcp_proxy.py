@@ -37,6 +37,7 @@ from app.oauth.user_info import (
     CallerNotAuthorizedError,
     ensure_caller_in_required_groups,
 )
+from app.oauth import scope_rejection
 from app.oauth.connection_policy import enforce_connection_policy
 from app.session import mcp_session
 from app.session_manager.session_context import (
@@ -219,6 +220,7 @@ def _build_proxy_handlers(
                     )
                     result = enforce_response_ceiling(result)
                     if mcp_fields.is_error(result):
+                        result = scope_rejection.prefix_result(result, name)
                         op.record_error_result(classify_error_result(result), result)
                     else:
                         op.record_success(result)
