@@ -305,3 +305,142 @@ def test_remote_discovery_and_tool_failures_keep_sanitized_diagnostics(
         assert response.json()["detail"]["protocol_code"] == -32603
         assert "Retry-After" not in response.headers
     assert getattr(mock_session_context, action).await_count == 1
+
+
+SLACK_MISSING_SCOPE = (
+    "Error executing tool reactions_add: "
+    '{"ok": false, "error": "missing_scope", "needed": "reactions:write", '
+    '"provided": "channels:read,chat:write"}'
+)
+
+
+@pytest.fixture
+def personal_grant(monkeypatch):
+    monkeypatch.setattr("app.vars.KEYCLOAK_PROVIDER_ALIAS", "slack")
+
+
+def test_slack_missing_scope_is_typed_403(client, mock_session_context, personal_grant):
+    response = _call_failing_tool(client, mock_session_context, SLACK_MISSING_SCOPE)
+
+    assert response.status_code == 403
+    assert response.headers["x-inxm-connection-code"] == "scope_missing"
+    assert response.json() == {
+        "detail": (
+            "Slack needs more permissions for test_tool. Reconnect Slack to "
+            "grant them. (upstream: missing_scope)"
+        ),
+        "code": "scope_missing",
+        "provider": "slack",
+        "tool": "test_tool",
+        "missing_scopes": ["reactions:write"],
+    }
+
+
+def test_insufficient_scope_without_named_scopes(
+    client, mock_session_context, personal_grant
+):
+    response = _call_failing_tool(
+        client, mock_session_context, "Error: Insufficient_Scope for this request"
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["missing_scopes"] == []
+    assert body["detail"].endswith("(upstream: Insufficient_Scope)")
+
+
+def test_invalid_needed_scopes_are_dropped(
+    client, mock_session_context, personal_grant
+):
+    response = _call_failing_tool(
+        client,
+        mock_session_context,
+        'missing_scope {"needed": "a:b, <script>, ok.scope"}',
+    )
+
+    assert response.json()["missing_scopes"] == ["a:b", "ok.scope"]
+
+
+def test_unmatched_error_stays_422(client, mock_session_context, personal_grant):
+    response = _call_failing_tool(
+        client, mock_session_context, "Error: channel_not_found"
+    )
+
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+    assert "x-inxm-connection-code" not in response.headers
+
+
+def test_scope_error_on_non_oauth_credential_stays_422(
+    client, mock_session_context, monkeypatch
+):
+    monkeypatch.setattr("app.vars.KEYCLOAK_PROVIDER_ALIAS", "")
+    response = _call_failing_tool(client, mock_session_context, SLACK_MISSING_SCOPE)
+
+    assert response.status_code == HTTP_STATUS_TOOL_EXECUTION_ERROR
+    assert "x-inxm-connection-code" not in response.headers
+
+
+def test_custom_scope_error_pattern(
+    client, mock_session_context, personal_grant, monkeypatch
+):
+    monkeypatch.setenv("BRIDGE_SCOPE_ERROR_PATTERNS", "not_allowed_token_type, [bad")
+    response = _call_failing_tool(
+        client, mock_session_context, "Error: not_allowed_token_type"
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"].endswith("(upstream: not_allowed_token_type)")
+
+
+def test_downstream_cannot_inject_connection_code(
+    client, mock_session_context, personal_grant
+):
+    from fastapi import HTTPException
+
+    mock_session_context.call_tool.side_effect = HTTPException(
+        status_code=422,
+        detail="nope",
+        headers={"X-Inxm-Connection-Code": "scope_missing"},
+    )
+    response = client.post(
+        "/tools/test_tool", headers={"x-inxm-mcp-session": "test-session"}, json={}
+    )
+
+    assert response.status_code == 422
+    assert "x-inxm-connection-code" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_mcp_transport_prefixes_detail_and_keeps_is_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.sse import mcp_proxy
+
+    monkeypatch.setattr("app.vars.KEYCLOAK_PROVIDER_ALIAS", "slack")
+    downstream = AsyncMock()
+    downstream.list_tools.return_value = SimpleNamespace(
+        tools=[
+            types.Tool(
+                name="reactions_add",
+                description="d",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        ]
+    )
+    downstream.call_tool.return_value = types.CallToolResult(
+        content=[types.TextContent(type="text", text=SLACK_MISSING_SCOPE)],
+        is_error=True,
+    )
+    handlers = mcp_proxy._build_proxy_handlers(downstream, None, {}, None)
+
+    result = await handlers["on_call_tool"](
+        None, types.CallToolRequestParams(name="reactions_add", arguments={})
+    )
+
+    assert result.is_error
+    text = result.content[0].text
+    assert text.startswith(
+        "Slack needs more permissions for reactions_add. Reconnect Slack to "
+        "grant them. (upstream: missing_scope) "
+    )
+    assert "reactions:write" in text

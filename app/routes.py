@@ -71,7 +71,11 @@ from .oauth.user_info import (
     ensure_caller_in_required_groups,
     get_data_access_manager,
 )
-from app.oauth.connection_policy import enforce_connection_policy
+from app.oauth import scope_rejection
+from app.oauth.connection_policy import (
+    enforce_connection_policy,
+    record_connection_code,
+)
 from opentelemetry import trace
 from .oauth.token_exchange import UserLoggedOutException
 from .oauth.token_dependency import get_access_token
@@ -655,6 +659,13 @@ async def run_tool(
                     status_code=HTTP_STATUS_TOOL_UPSTREAM_TIMEOUT,
                     detail=_error_detail(result),
                 )
+
+            # The provider refused for a missing permission: the person can fix
+            # that by reconnecting, so say so in a typed 403.
+            scope_missing = scope_rejection.detect(result, tool_name)
+            if scope_missing is not None:
+                record_connection_code(scope_rejection.SCOPE_MISSING_CODE)
+                return JSONResponse(status_code=403, content=scope_missing)
 
             # The tool ran and rejected the request; the bridge itself is healthy.
             # 4xx keeps callers from retrying a failure that cannot succeed.
