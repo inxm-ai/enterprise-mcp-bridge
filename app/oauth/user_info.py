@@ -286,11 +286,12 @@ def get_data_access_manager() -> DataAccessManager:
 
 
 class CallerNotAuthorizedError(Exception):
-    """The caller may not use this bridge instance (BRIDGE_REQUIRED_GROUPS).
+    """The caller may not use this bridge instance (BRIDGE_REQUIRED_GROUPS,
+    BRIDGE_ALLOWED_USERS).
 
     Carries the HTTP status so transports map it without re-deriving the
     reason: 401 when identity is missing/unreadable, 403 when the identity is
-    valid but outside the required groups.
+    valid but outside the required groups or the allowed users.
     """
 
     def __init__(self, status_code: int, detail: str):
@@ -300,14 +301,17 @@ class CallerNotAuthorizedError(Exception):
 
 
 def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
-    """Fail closed unless the caller's VERIFIED token carries a required group.
+    """Fail closed unless the caller's VERIFIED token passes both gates.
 
-    No-op when BRIDGE_REQUIRED_GROUPS is unset. This gate is an authorization
+    BRIDGE_REQUIRED_GROUPS: the token must carry one of the groups.
+    BRIDGE_ALLOWED_USERS: the token's ``sub`` must be in the list. Each is
+    read per server and a no-op when empty; with both empty this returns
+    without reading the token. This gate is an authorization
     boundary, and the bridge deliberately accepts direct Bearer tokens
-    (desktop clients bypass the ingress proxy) — so group membership is read
-    only from claims that passed signature (realm JWKS), expiry, and exact
-    issuer verification. A forged but syntactically valid JWT never reaches
-    the group check.
+    (desktop clients bypass the ingress proxy) — so group membership and
+    ``sub`` are read only from claims that passed signature (realm JWKS),
+    expiry, and exact issuer verification. A forged but syntactically valid
+    JWT never reaches either check.
     """
     from app import vars as app_vars
     from app.oauth.token_exchange import (
@@ -318,7 +322,10 @@ def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     required = app_vars.per_server_list(
         "BRIDGE_REQUIRED_GROUPS", app_vars.BRIDGE_REQUIRED_GROUPS
     )
-    if not required:
+    allowed = app_vars.per_server_list(
+        "BRIDGE_ALLOWED_USERS", app_vars.BRIDGE_ALLOWED_USERS
+    )
+    if not required and not allowed:
         return
     if not access_token:
         raise CallerNotAuthorizedError(401, "Authentication required")
@@ -326,15 +333,22 @@ def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
         claims = verified_caller_claims(access_token)
     except UserLoggedOutException:
         raise CallerNotAuthorizedError(401, "Access token failed verification")
-    data_manager = get_data_access_manager()
-    extractor = data_manager.user_extractor
-    user_info = {
-        "groups": extractor._extract_groups(claims),
-        "roles": extractor._extract_roles(claims),
-    }
-    if not any(data_manager._user_in_group(user_info, group) for group in required):
+    if required:
+        data_manager = get_data_access_manager()
+        extractor = data_manager.user_extractor
+        user_info = {
+            "groups": extractor._extract_groups(claims),
+            "roles": extractor._extract_roles(claims),
+        }
+        if not any(data_manager._user_in_group(user_info, group) for group in required):
+            logger.warning(
+                "[BridgeAuthz] Caller %s denied: not in required groups",
+                claims.get("sub", "<unknown>"),
+            )
+            raise CallerNotAuthorizedError(403, "Not authorized for this bridge")
+    if allowed and claims.get("sub") not in allowed:
         logger.warning(
-            "[BridgeAuthz] Caller %s denied: not in required groups",
+            "[BridgeAuthz] Caller %s denied: not in allowed users",
             claims.get("sub", "<unknown>"),
         )
         raise CallerNotAuthorizedError(403, "Not authorized for this bridge")

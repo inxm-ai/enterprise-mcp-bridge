@@ -326,6 +326,14 @@ MCP_TRACE_BAGGAGE_ALLOWLIST = [
 BRIDGE_REQUIRED_GROUPS = [
     g.strip() for g in os.getenv("BRIDGE_REQUIRED_GROUPS", "").split(",") if g.strip()
 ]
+# Keycloak `sub` values allowed to use this bridge instance (or, per server,
+# one `MCP_SERVERS` entry). Empty (default) means unrestricted. Checked after
+# BRIDGE_REQUIRED_GROUPS on the same VERIFIED claims; both must pass. The
+# manager sets it per server for a personal connection so only its owner
+# reaches it.
+BRIDGE_ALLOWED_USERS = [
+    u.strip() for u in os.getenv("BRIDGE_ALLOWED_USERS", "").split(",") if u.strip()
+]
 # Ceiling on the JSON-encoded size of a downstream tool result. 0 disables
 # the check. Some downstream MCP servers enforce count-based limits, which do
 # not bound every serialized response, so the bridge has its own byte cap.

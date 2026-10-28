@@ -915,6 +915,36 @@ at all.
 MCP_FORWARD_ACCESS_TOKEN=false
 ```
 
+#### BRIDGE_REQUIRED_GROUPS / BRIDGE_ALLOWED_USERS
+
+Caller gates the bridge enforces itself, on every transport (REST, session
+start, SSE), before any downstream contact. Both read only claims from a
+verified token (realm JWKS signature, expiry, exact issuer); a missing or
+unverifiable token is `401`.
+
+- `BRIDGE_REQUIRED_GROUPS`: the caller must carry one of these groups or
+  realm roles.
+- `BRIDGE_ALLOWED_USERS`: the caller's Keycloak `sub` must be in this list.
+  app-mcp-manager sets it per server for a personal connection, so only its
+  owner reaches it.
+
+When both are set, both must pass. A caller outside either gets
+`403 Not authorized for this bridge`.
+
+- **Type:** Comma-separated list
+- **Default:** empty (gate disabled)
+- **Required:** No
+
+Both may be set per server in an `MCP_SERVERS` entry's `settings` object; a
+per-server value (including an empty one) replaces the global value.
+
+```bash
+BRIDGE_REQUIRED_GROUPS="operators"
+MCP_SERVERS='[{"id": "notes", "base_path": "/api/notes",
+  "url": "https://notes.example/mcp",
+  "settings": {"BRIDGE_ALLOWED_USERS": "0b6f3c1e-7d1a-4c5e-9a43-2f1b8e6d4c21"}}]'
+```
+
 #### CONNECTION_POLICY_URL
 
 The app-mcp-manager connection authority (`POST /v2/connections/enforce`).
@@ -947,8 +977,9 @@ manager reports `enforcement_unavailable` rather than a verified connection.
 
 Tool listings (`GET /tools`, `GET /tools/{name}`) are checked and attested the
 same way for a verifiable caller. Without one, as for the manager's tools crawl,
-a listing is served as before, without attestation; tool calls always need an
-allowed decision.
+a listing is served as before, without attestation, unless
+`BRIDGE_REQUIRED_GROUPS` or `BRIDGE_ALLOWED_USERS` applies to the server: those
+gates answer `401` first. Tool calls always need an allowed decision.
 
 ```bash
 CONNECTION_POLICY_URL=http://app-mcp-manager.orchestrator.svc.cluster.local:8000/v2/connections/enforce
