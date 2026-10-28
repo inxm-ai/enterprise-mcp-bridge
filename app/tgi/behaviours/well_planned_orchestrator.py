@@ -1941,6 +1941,17 @@ class WellPlannedOrchestrator:
 
         unique_tool_names = sorted(set(available_tool_names))
         tool_list_text = ", ".join(unique_tool_names) if unique_tool_names else "none"
+        tool_reference = json.dumps(
+            [
+                (
+                    tool.model_dump(mode="json", exclude_none=True)
+                    if hasattr(tool, "model_dump")
+                    else tool
+                )
+                for tool in available_tools or []
+            ],
+            ensure_ascii=False,
+        )
         conversation_text = "\n".join([f"{m.role}: {m.content}" for m in messages])
 
         intent_schema = self._build_intent_response_schema(request.response_format)
@@ -1969,6 +1980,9 @@ class WellPlannedOrchestrator:
             "a short reasoning step without tools; if a clean split is possible, use subtasks. "
             "If more then one todo is needed, ensure the final todo delivers a clear user-facing answer. "
             f"Available tools: {tool_list_text}.\n\n"
+            "Tool definitions are planning reference only. Describe their use in the todo list; "
+            "do not execute tools during intent classification.\n"
+            f"{tool_reference}\n\n"
             "Return only JSON that conforms to the following JSON Schema (response_format):\n\n"
             + json.dumps(intent_schema, ensure_ascii=False)
             + "\n\nConversation:\n"
@@ -1976,6 +1990,10 @@ class WellPlannedOrchestrator:
             + "\n\nReturn only the JSON object that matches the schema above."
         )
 
+        # Intent classification returns a plan, never an executable tool turn.
+        # The reference above provides planning context; exposing callable tools here
+        # lets structured-output adapters return tool_calls without JSON content.
+        # Keep the actual tools for the execution stage below.
         plan_request = ChatCompletionRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=intent_prompt),
@@ -1983,7 +2001,7 @@ class WellPlannedOrchestrator:
             ],
             model=request.model or self.model_name,
             stream=True,
-            tools=available_tools,
+            tool_choice=None,
         )
 
         intent_result, plan_error = await self._stream_intent_decision(

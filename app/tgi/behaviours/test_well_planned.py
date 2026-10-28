@@ -13,6 +13,7 @@ from app.tgi.models import (
     Message,
     MessageRole,
     Usage,
+    Tool,
 )
 
 
@@ -115,6 +116,105 @@ def _parse_stream_json(chunk: str):
         return json.loads(payload)
     except Exception:
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("typed_tools", [True, False])
+async def test_intent_classification_cannot_call_tools_but_execution_retains_them(
+    stream, typed_tools
+):
+    messages = [Message(role=MessageRole.USER, content="Who am I on GitHub?")]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_me",
+                "description": "Get the authenticated GitHub user's profile.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    if typed_tools:
+        tools = [Tool.model_validate(tool) for tool in tools]
+    captured = []
+
+    async def intent_stream(request, access_token, span):
+        captured.append(request)
+        # Reproduce the gateway's legal tool-only response when classification
+        # accidentally exposes executable GitHub tools.
+        if request.tools:
+            delta = {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "get-me",
+                        "type": "function",
+                        "function": {"name": "get_me", "arguments": "{}"},
+                    }
+                ]
+            }
+        else:
+            delta = {
+                "content": json.dumps(
+                    {
+                        "intent": "plan",
+                        "todos": [
+                            {
+                                "id": "1",
+                                "name": "Identify user",
+                                "goal": "Fetch GitHub profile",
+                                "tools": ["get_me"],
+                            }
+                        ],
+                    }
+                )
+            }
+        yield (
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": delta}]}) + "\n\n"
+        )
+        yield "data: [DONE]\n\n"
+
+    llm = Mock()
+    llm.stream_completion = intent_stream
+    orchestrator = WellPlannedOrchestrator(
+        llm_client=llm,
+        prompt_service=Mock(prepare_messages=AsyncMock(return_value=messages)),
+        tool_service=Mock(get_all_mcp_tools=AsyncMock(return_value=tools)),
+        non_stream_chat_with_tools_callable=None,
+        stream_chat_with_tools_callable=None,
+        tool_resolution=None,
+    )
+    orchestrator._well_planned_streaming = Mock(return_value="execution")
+    orchestrator._well_planned_non_streaming = AsyncMock(return_value="execution")
+    request = ChatCompletionRequest(messages=messages, stream=stream)
+
+    result = await orchestrator.well_planned_chat_completion(None, request)
+
+    assert result == "execution"
+    assert len(captured) == 1
+    assert not captured[0].tools
+    assert captured[0].tool_choice is None
+    payload = captured[0].model_dump(mode="json", exclude_none=True)
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+    assert captured[0].response_format["json_schema"]["name"] == "intent_response"
+    assert "Available tools: get_me" in captured[0].messages[0].content
+    assert (
+        "Get the authenticated GitHub user's profile."
+        in captured[0].messages[0].content
+    )
+    assert (
+        '"parameters": {"type": "object", "properties": {}}'
+        in captured[0].messages[0].content
+    )
+    execution = (
+        orchestrator._well_planned_streaming
+        if stream
+        else orchestrator._well_planned_non_streaming
+    )
+    assert execution.call_args.args[3] == tools
+    assert execution.call_args.args[0].list_todos()[0].tools == ["get_me"]
 
 
 def test_enforce_final_answer_appends_when_last_todo_has_tools():
