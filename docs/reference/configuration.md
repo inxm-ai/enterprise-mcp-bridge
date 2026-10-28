@@ -568,6 +568,25 @@ Sent as HTTP headers:
 - `X-API-KEY: secret-key-123`
 - `X-Client-Version: 1.0.0`
 
+### Tool annotations
+
+#### READ_ONLY_TOOLS
+
+Glob patterns of tools the bridge advertises as read-only: their listed
+`annotations` get `readOnlyHint: true` and `destructiveHint: false`, over
+whatever the upstream server sent. Use it for upstream servers that do not
+annotate their reads. Clients may run a read-only tool without asking for
+approval, so list only tools that change nothing.
+
+- **Type:** String (comma-separated glob patterns)
+- **Default:** None (annotations are passed through unchanged)
+- **Required:** No
+- **Applies to:** every server of this bridge, also in multi-server mode
+
+```bash
+READ_ONLY_TOOLS="get_*,search_traces"
+```
+
 ### Trace query overlay
 
 #### TRACE_QUERY_URL
