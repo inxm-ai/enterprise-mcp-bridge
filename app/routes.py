@@ -23,6 +23,7 @@ import uuid
 import os
 
 from app.utils.traced_requests import traced_request
+from app.utils.probe_tracing import untraced
 from app.utils.mcp_operation import (
     MCP_METHOD_PROMPTS_GET,
     MCP_METHOD_RESOURCES_READ,
@@ -191,8 +192,11 @@ async def healthz_child():
     traceback already lands in pod logs, so no stderr plumbing here.
     """
     try:
-        async with mcp_session(anon=True) as session:
-            tools = await session.list_tools()
+        # Probe-only session: keep its MCP initialize/tools/list spans out
+        # of the trace store (the HTTP span is excluded in server.py).
+        with untraced():
+            async with mcp_session(anon=True) as session:
+                tools = await session.list_tools()
     except Exception as e:
         log_exception_with_details(logger, "[Healthz-Child]", e)
         raise HTTPException(

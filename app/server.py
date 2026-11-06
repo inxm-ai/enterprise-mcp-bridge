@@ -1,4 +1,4 @@
-from app.vars import SERVICE_NAME, OTLP_ENDPOINT, OTLP_HEADERS
+from app.vars import SERVICE_NAME, OTLP_ENDPOINT, OTLP_HEADERS, MCP_BASE_PATH
 from fastapi import FastAPI
 from .routes import router
 from opentelemetry import trace
@@ -16,6 +16,7 @@ from app.multi_server import (
     is_multi_server_mode,
 )
 from app.utils.prometheus_routing import safe_route_name_resolver
+from app.utils.probe_tracing import probe_excluded_urls
 from app.tgi.a2a_runtime import build_a2a_app
 
 
@@ -173,10 +174,20 @@ if _OTEL_AVAILABLE:
         span_processor = BatchSpanProcessor(filtering_exporter)
         tracer_provider.add_span_processor(span_processor)
 
-    # Instrument FastAPI
+    # Instrument FastAPI. Probes and scrapes (/metrics, /healthz*, the
+    # base-path root) are excluded: no request span, no http send/receive.
+    _probe_base_paths = [MCP_BASE_PATH]
+    if is_multi_server_mode():
+        _probe_base_paths += [c.base_path for c in configured_servers()]
     FastAPIInstrumentor.instrument_app(
         app,
-        excluded_urls="",  # We handle URL exclusion elsewhere
+        excluded_urls=probe_excluded_urls(
+            _probe_base_paths,
+            extra=_os.environ.get(
+                "OTEL_PYTHON_FASTAPI_EXCLUDED_URLS",
+                _os.environ.get("OTEL_PYTHON_EXCLUDED_URLS", ""),
+            ),
+        ),
         server_request_hook=None,
         client_request_hook=None,
     )
