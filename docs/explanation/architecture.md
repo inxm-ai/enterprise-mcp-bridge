@@ -461,6 +461,8 @@ OpenTelemetry distributed tracing:
 - OAuth token exchange
 - External API calls
 
+Probe and scrape traffic is not traced: `/metrics`, `/healthz`, `/healthz/child` and the base-path root (liveness), with or without the base path, are excluded from HTTP tracing via the FastAPI instrumentation's `excluded_urls` (extend it with `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`), and the MCP `initialize`/`tools/list` calls of the `/healthz/child` probe run under an unsampled context.
+
 ## Extension Points
 
 ### Custom Session Managers
