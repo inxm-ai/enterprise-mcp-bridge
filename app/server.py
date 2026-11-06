@@ -16,7 +16,7 @@ from app.multi_server import (
     is_multi_server_mode,
 )
 from app.utils.prometheus_routing import safe_route_name_resolver
-from app.utils.probe_tracing import probe_excluded_urls
+from app.utils.probe_tracing import ProbeSuppressingSampler, probe_excluded_urls
 from app.tgi.a2a_runtime import build_a2a_app
 
 
@@ -159,9 +159,12 @@ if _OTEL_AVAILABLE:
         if _value:
             _resource_attributes[_attr] = _value
 
-    trace.set_tracer_provider(
-        TracerProvider(resource=Resource.create(_resource_attributes))
-    )
+    # The SDK resolves the sampler from OTEL_TRACES_SAMPLER/_ARG; wrap that
+    # one (before any tracer captures it) so spans inside untraced() are
+    # dropped under every sampler while normal traffic keeps the configured one.
+    _provider = TracerProvider(resource=Resource.create(_resource_attributes))
+    _provider.sampler = ProbeSuppressingSampler(_provider.sampler)
+    trace.set_tracer_provider(_provider)
     tracer_provider = trace.get_tracer_provider()
     if OTLP_ENDPOINT:
         otlp_exporter = OTLPSpanExporter(

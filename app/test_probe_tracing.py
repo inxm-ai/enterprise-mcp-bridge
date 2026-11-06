@@ -23,7 +23,11 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 import app.routes as routes
 from app.server import app as fastapi_app
 from app.session.session import mcp_session
-from app.utils.probe_tracing import probe_excluded_urls, untraced
+from app.utils.probe_tracing import (
+    ProbeSuppressingSampler,
+    probe_excluded_urls,
+    untraced,
+)
 
 BASE = "/api/mcp-jaeger-server"
 
@@ -212,6 +216,68 @@ async def test_untraced_does_not_leak_into_later_spans(spans):
     with tracer.start_as_current_span("after"):
         pass
 
+    assert _names(spans) == ["after"]
+
+
+def test_server_wraps_the_configured_sampler():
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Decision
+
+    sampler = trace.get_tracer_provider().sampler
+    assert isinstance(sampler, ProbeSuppressingSampler)
+    # Unset OTEL_TRACES_SAMPLER resolves to the SDK default, kept as delegate.
+    assert sampler.get_description() == sampler.delegate.get_description()
+
+    wrapped = ProbeSuppressingSampler(ALWAYS_ON)
+    assert wrapped.get_description() == ALWAYS_ON.get_description()
+    result = wrapped.should_sample(None, 1, "normal")
+    assert result.decision == Decision.RECORD_AND_SAMPLE
+
+
+@pytest.fixture
+def always_on(monkeypatch):
+    """Configure the app's provider as if OTEL_TRACES_SAMPLER=always_on.
+
+    Every SDK tracer (the MCP SDK's included) holds the provider's sampler
+    object, so swapping the wrapper's delegate takes effect immediately.
+    """
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+
+    sampler = trace.get_tracer_provider().sampler
+    assert isinstance(sampler, ProbeSuppressingSampler)
+    monkeypatch.setattr(sampler, "_delegate", ALWAYS_ON)
+    return sampler
+
+
+@pytest.mark.asyncio
+async def test_probe_spans_are_dropped_under_always_on(
+    spans, child_params, monkeypatch, always_on
+):
+    """always_on ignores the unsampled parent; the wrapper must still drop."""
+
+    @asynccontextmanager
+    async def probe_session(**kwargs):
+        async with mcp_session(child_params) as session:
+            yield session
+
+    monkeypatch.setattr(routes, "mcp_session", probe_session)
+    assert await routes.healthz_child() == {"status": "ok", "tools": 1}
+    assert not [name for name in _names(spans) if name.startswith("MCP ")]
+
+    # Normal traffic is still sampled by the configured always_on sampler.
+    async with mcp_session(child_params) as session:
+        await session.list_tools()
+    names = _names(spans)
+    assert "MCP send initialize" in names
+    assert "MCP send tools/list" in names
+
+    # untraced() does not leak into spans started after it.
+    spans.clear()
+    tracer = trace.get_tracer(__name__)
+    with untraced():
+        with tracer.start_as_current_span("inside"):
+            pass
+    with tracer.start_as_current_span("after"):
+        pass
     assert _names(spans) == ["after"]
 
 
