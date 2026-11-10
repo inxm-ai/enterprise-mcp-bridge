@@ -964,6 +964,45 @@ MCP_SERVERS='[{"id": "notes", "base_path": "/api/notes",
   "settings": {"BRIDGE_ALLOWED_USERS": "0b6f3c1e-7d1a-4c5e-9a43-2f1b8e6d4c21"}}]'
 ```
 
+#### TRUSTED_ISSUERS
+
+For a bridge that serves users of many identity-provider tenants, one issuer
+per tenant, where new tenants appear without a redeploy. Instead of one
+issuer, the bridge trusts issuer patterns, where `*` stands for exactly one
+DNS label. Only whoever controls the domain can create a matching issuer.
+When set, every request on every transport needs a token from a matching
+issuer, checked before any other caller gate:
+
+- The issuer must fit a pattern; anything else is `401` without a lookup.
+- Signing keys come only from `<issuer>/protocol/openid-connect/certs`. They
+  are cached per issuer for 5 minutes; a token naming a key the cache lacks
+  refetches once (key rotation), at most every 10 seconds per issuer.
+- Signature, expiry (with leeway), audience and requesting client (`azp`)
+  must pass; anything else is `401`.
+- If the issuer's keys can't be fetched, the answer is `503`, not `401`, and
+  the failure is remembered for `TRUSTED_ISSUER_KEY_FAILURE_SECONDS`.
+
+Refusals are logged with the reason, issuer, client and audience, never the
+user's identity. `BRIDGE_REQUIRED_GROUPS` and `BRIDGE_ALLOWED_USERS` verify
+against a single issuer, so leave them unset on such a bridge.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `TRUSTED_ISSUERS` | Comma-separated issuer patterns, each starting with `https://` | empty (check off) |
+| `TRUSTED_ISSUER_AUDIENCE` | Audience (`aud`) every token must name | empty; required when the check is on |
+| `TRUSTED_ISSUER_CLIENTS` | Comma-separated clients (`azp`) allowed to have requested the token | empty; required when the check is on |
+| `TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS` | Allowed clock skew for `exp` and `nbf` | `60` |
+| `TRUSTED_ISSUER_KEY_FAILURE_SECONDS` | How long a failed key fetch is remembered | `30` |
+
+With the check on but the audience or clients empty, or a pattern not on
+`https://`, every caller gets `503` and the bridge logs an error.
+
+```bash
+TRUSTED_ISSUERS="https://*.auth.example.com/realms/main"
+TRUSTED_ISSUER_AUDIENCE=mcp-bridge
+TRUSTED_ISSUER_CLIENTS=token-exchange
+```
+
 #### CONNECTION_POLICY_URL
 
 The app-mcp-manager connection authority (`POST /v2/connections/enforce`).
