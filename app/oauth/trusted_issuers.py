@@ -21,7 +21,9 @@ Every request must carry a token that passes, in this order:
    lookups, and stale keys are never used.
 4. Signature, expiry (with TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS), audience
    (TRUSTED_ISSUER_AUDIENCE) and requesting client (``azp`` in
-   TRUSTED_ISSUER_CLIENTS). Otherwise 401.
+   TRUSTED_ISSUER_CLIENTS). The audience must be this bridge alone: a token
+   that is also meant for other services would work there too, so it is
+   refused even when the requesting client fits. Otherwise 401.
 
 Every refusal is logged with its reason, the issuer, the client and the
 audience, so it is clear which tenant or client to fix; never with the
@@ -237,3 +239,9 @@ def ensure_trusted_issuer_caller(access_token: Optional[str]) -> None:
 
     if claims.get("azp") not in app_vars.TRUSTED_ISSUER_CLIENTS:
         raise _refusal(UNAUTHORIZED, "requesting client not allowed", claims)
+    if not _audience_is_only(claims.get("aud"), app_vars.TRUSTED_ISSUER_AUDIENCE):
+        raise _refusal(UNAUTHORIZED, "token is also meant for others", claims)
+
+
+def _audience_is_only(aud: object, audience: str) -> bool:
+    return aud == audience or aud == [audience]

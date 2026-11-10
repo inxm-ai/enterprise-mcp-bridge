@@ -978,7 +978,9 @@ issuer, checked before any other caller gate:
   are cached per issuer for 5 minutes; a token naming a key the cache lacks
   refetches once (key rotation), at most every 10 seconds per issuer.
 - Signature, expiry (with leeway), audience and requesting client (`azp`)
-  must pass; anything else is `401`.
+  must pass; anything else is `401`. The audience must be
+  `TRUSTED_ISSUER_AUDIENCE` alone: a token also meant for other services
+  would work there too, so it is refused even from an allowed client.
 - If the issuer's keys can't be fetched, the answer is `503`, not `401`, and
   the failure is remembered for `TRUSTED_ISSUER_KEY_FAILURE_SECONDS`.
 

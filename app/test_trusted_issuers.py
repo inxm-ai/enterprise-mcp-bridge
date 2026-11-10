@@ -161,8 +161,8 @@ class TestAccepts:
     def test_every_pattern_is_trusted(self, trusted_issuers_on):
         ensure_caller_in_required_groups(_token(issuer=OTHER_DOMAIN_ISSUER))
 
-    def test_audience_list_containing_ours_passes(self, trusted_issuers_on):
-        ensure_caller_in_required_groups(_token(audience=[AUDIENCE, "other"]))
+    def test_audience_list_of_only_ours_passes(self, trusted_issuers_on):
+        ensure_caller_in_required_groups(_token(audience=[AUDIENCE]))
 
     def test_expiry_within_the_leeway_passes(self, trusted_issuers_on):
         ensure_caller_in_required_groups(_token(expires_in=-(LEEWAY_SECONDS - 10)))
@@ -208,6 +208,20 @@ class TestRefusesWith401:
 
     def test_token_requested_by_another_client(self, trusted_issuers_on):
         assert _status(_token(azp=OTHER_CLIENT)) == 401
+
+    def test_token_also_meant_for_another_service(self, trusted_issuers_on):
+        # Requested by an allowed client, but it would also work at
+        # OTHER_CLIENT: refused, so it can't be replayed there from here.
+        assert _status(_token(audience=[AUDIENCE, OTHER_CLIENT])) == 401
+
+    def test_token_from_another_client_also_meant_for_another_service(
+        self, trusted_issuers_on
+    ):
+        # The shape of a user's token sent straight from their app: both the
+        # client and the audience checks refuse it, each on its own.
+        assert (
+            _status(_token(azp=OTHER_CLIENT, audience=[OTHER_CLIENT, AUDIENCE])) == 401
+        )
 
     def test_signature_from_another_key(self, trusted_issuers_on):
         assert _status(_token(key=OTHER_KEY)) == 401
