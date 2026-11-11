@@ -24,9 +24,10 @@ Every request must carry a token that passes, in this order:
    requests that need its keys, never other tenants' calls on the same pod.
    Requests that need the same issuer's keys at once share one fetch. At
    most MAX_NEW_ISSUER_FETCHES fetches run at once for issuers without
-   cached keys; a token from yet another such issuer is 503 at once and not
+   cached keys; a token from yet another such issuer waits up to
+   NEW_ISSUER_SLOT_WAIT_SECONDS for a free slot, then is 503 and not
    remembered as a failure, so made-up issuers can't tie up the pod and a
-   real new tenant only needs to retry.
+   burst of real new tenants, as after a restart, still gets through.
 4. Signature, expiry (with TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS), audience
    (TRUSTED_ISSUER_AUDIENCE) and requesting client (``azp`` in
    TRUSTED_ISSUER_CLIENTS). The audience must be this bridge alone: a token
@@ -59,6 +60,10 @@ MIN_REFETCH_SECONDS = 10
 KEY_FETCH_TIMEOUT_SECONDS = 5
 MAX_CACHED_ISSUERS = 1024
 MAX_NEW_ISSUER_FETCHES = 4
+# How long a new issuer's fetch waits for a free slot before the caller gets
+# 503. After a restart every tenant is new, so a short wait keeps a burst of
+# first calls from failing while the first fetches are still running.
+NEW_ISSUER_SLOT_WAIT_SECONDS = 1
 ALGORITHMS = ["RS256", "ES256"]
 REQUIRED_CLAIMS = ["exp", "iss", "aud", "azp"]
 KEYS_PATH = "/protocol/openid-connect/certs"
@@ -92,21 +97,29 @@ class _Fetch:
     """One key fetch in progress, shared by every request that needs it."""
 
     done: anyio.Event = field(default_factory=anyio.Event)
-    key_set: Optional[jwt.PyJWKSet] = None
+    outcome: Union[jwt.PyJWKSet, KeyLookupFailure] = KeyLookupFailure.UNAVAILABLE
 
 
 _key_sets: dict[str, _CachedKeySet] = {}
 _failed_at: dict[str, float] = {}
 _fetches: dict[str, _Fetch] = {}
-_new_issuer_fetches = 0
+_new_issuer_slots: Optional[anyio.Semaphore] = None
 
 
 def forget_cached_keys() -> None:
-    global _new_issuer_fetches
+    global _new_issuer_slots
     _key_sets.clear()
     _failed_at.clear()
     _fetches.clear()
-    _new_issuer_fetches = 0
+    _new_issuer_slots = None
+
+
+def _new_issuer_fetch_slots() -> anyio.Semaphore:
+    # Created on first use: it needs a running event loop.
+    global _new_issuer_slots
+    if _new_issuer_slots is None:
+        _new_issuer_slots = anyio.Semaphore(MAX_NEW_ISSUER_FETCHES)
+    return _new_issuer_slots
 
 
 def cached_issuer_count() -> int:
@@ -164,43 +177,55 @@ async def _shared_fresh_key_set(
 ) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
     """A fresh key set, fetched once for every request that needs it now.
 
-    An issuer without cached keys needs one of MAX_NEW_ISSUER_FETCHES slots;
-    without a free slot the answer is BUSY, which isn't remembered. An issuer
-    that only ever failed counts as new, so made-up issuers can't skip the
-    limit once their failure is forgotten.
+    An issuer without cached keys needs one of MAX_NEW_ISSUER_FETCHES slots
+    and waits up to NEW_ISSUER_SLOT_WAIT_SECONDS for one; without a slot the
+    answer is BUSY, which isn't remembered. An issuer that only ever failed
+    counts as new, so made-up issuers can't skip the limit once their failure
+    is forgotten.
     """
-    global _new_issuer_fetches
     running = _fetches.get(issuer)
     if running is not None:
         await running.done.wait()
-        return _key_set_or_unavailable(running)
+        return running.outcome
 
-    new_issuer = issuer not in _key_sets
-    if new_issuer and _new_issuer_fetches >= MAX_NEW_ISSUER_FETCHES:
-        return KeyLookupFailure.BUSY
-
+    # Registered before any wait for a slot, so requests for the same issuer
+    # join this fetch instead of each waiting for a slot of their own.
     fetch = _Fetch()
     _fetches[issuer] = fetch
-    if new_issuer:
-        _new_issuer_fetches += 1
     try:
-        fetch.key_set = await _fresh_key_set(issuer, now)
+        if issuer in _key_sets:
+            fetch.outcome = await _fresh_key_set_or_unavailable(issuer, now)
+        else:
+            fetch.outcome = await _new_issuer_key_set(issuer, now)
     finally:
         # Also on cancellation: the requests waiting on this fetch then see
         # no keys and get 503, without the issuer being marked as failed.
-        if new_issuer:
-            _new_issuer_fetches -= 1
         del _fetches[issuer]
         fetch.done.set()
-    return _key_set_or_unavailable(fetch)
+    return fetch.outcome
 
 
-def _key_set_or_unavailable(
-    fetch: _Fetch,
+async def _new_issuer_key_set(
+    issuer: str, now: float
 ) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
-    if fetch.key_set is None:
-        return KeyLookupFailure.UNAVAILABLE
-    return fetch.key_set
+    slots = _new_issuer_fetch_slots()
+    admitted = False
+    with anyio.move_on_after(NEW_ISSUER_SLOT_WAIT_SECONDS):
+        await slots.acquire()
+        admitted = True
+    if not admitted:
+        return KeyLookupFailure.BUSY
+    try:
+        return await _fresh_key_set_or_unavailable(issuer, now)
+    finally:
+        slots.release()
+
+
+async def _fresh_key_set_or_unavailable(
+    issuer: str, now: float
+) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
+    key_set = await _fresh_key_set(issuer, now)
+    return KeyLookupFailure.UNAVAILABLE if key_set is None else key_set
 
 
 async def _signing_key(issuer: str, kid: str) -> Union[jwt.PyJWK, KeyLookupFailure]:
