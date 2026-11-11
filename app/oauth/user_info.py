@@ -8,6 +8,7 @@ from app.vars import (
     MCP_SHARED_DATA_ACCESS_TEMPLATE,
     MCP_USER_DATA_ACCESS_TEMPLATE,
 )
+from dataclasses import dataclass
 import anyio
 import jwt
 from typing import Dict, Any, List, Optional
@@ -305,15 +306,60 @@ class CallerNotAuthorizedError(Exception):
 # threads of its own: a hanging Keycloak then holds at most this many
 # threads, never the event loop or the threads FastAPI runs other work on.
 REALM_KEY_CHECK_THREADS = 8
-_realm_key_check_limiter: Optional[anyio.CapacityLimiter] = None
+# How long a check waits for one of those threads before the caller gets 503.
+# A hanging Keycloak holds each thread for up to PyJWKClient's 30 s timeout;
+# without this, callers queuing behind it would wait just as long.
+REALM_KEY_CHECK_WAIT_SECONDS = 1
+REALM_KEY_CHECK_BUSY_DETAIL = "Sign-in is temporarily unavailable"
 
 
-def _realm_key_check_threads() -> anyio.CapacityLimiter:
-    # Created on first use: a CapacityLimiter needs a running event loop.
-    global _realm_key_check_limiter
-    if _realm_key_check_limiter is None:
-        _realm_key_check_limiter = anyio.CapacityLimiter(REALM_KEY_CHECK_THREADS)
-    return _realm_key_check_limiter
+@dataclass(frozen=True)
+class _RealmKeyCheckThreads:
+    # admission bounds the wait for a thread (run_sync can't); threads keeps
+    # the checks off FastAPI's own pool. Admission never lets in more checks
+    # than there are threads, so nothing waits on the limiter itself.
+    admission: anyio.Semaphore
+    threads: anyio.CapacityLimiter
+
+
+_realm_key_check: Optional[_RealmKeyCheckThreads] = None
+
+
+def _realm_key_check_threads() -> _RealmKeyCheckThreads:
+    # Created on first use: both need a running event loop.
+    global _realm_key_check
+    if _realm_key_check is None:
+        _realm_key_check = _RealmKeyCheckThreads(
+            admission=anyio.Semaphore(REALM_KEY_CHECK_THREADS),
+            threads=anyio.CapacityLimiter(REALM_KEY_CHECK_THREADS),
+        )
+    return _realm_key_check
+
+
+async def _verified_caller_claims_in_thread(access_token: str) -> Dict[str, Any]:
+    """verified_caller_claims in a worker thread, or 503 when all are busy."""
+    from app.oauth.token_exchange import verified_caller_claims
+
+    pool = _realm_key_check_threads()
+    admitted = False
+    with anyio.move_on_after(REALM_KEY_CHECK_WAIT_SECONDS):
+        await pool.admission.acquire()
+        admitted = True
+    if not admitted:
+        logger.warning(
+            "[BridgeAuthz] Every realm key check thread is busy for %ss; "
+            "answering 503",
+            REALM_KEY_CHECK_WAIT_SECONDS,
+        )
+        raise CallerNotAuthorizedError(503, REALM_KEY_CHECK_BUSY_DETAIL)
+    try:
+        # A cancelled caller still waits for its thread to finish, so the
+        # admission slot is released only once the thread is free again.
+        return await anyio.to_thread.run_sync(
+            verified_caller_claims, access_token, limiter=pool.threads
+        )
+    finally:
+        pool.admission.release()
 
 
 async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
@@ -335,10 +381,7 @@ async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     bridge's single configured issuer, so such a bridge leaves them unset.
     """
     from app import vars as app_vars
-    from app.oauth.token_exchange import (
-        UserLoggedOutException,
-        verified_caller_claims,
-    )
+    from app.oauth.token_exchange import UserLoggedOutException
     from app.oauth.trusted_issuers import ensure_trusted_issuer_caller
 
     await ensure_trusted_issuer_caller(access_token)
@@ -354,11 +397,7 @@ async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     if not access_token:
         raise CallerNotAuthorizedError(401, "Authentication required")
     try:
-        claims = await anyio.to_thread.run_sync(
-            verified_caller_claims,
-            access_token,
-            limiter=_realm_key_check_threads(),
-        )
+        claims = await _verified_caller_claims_in_thread(access_token)
     except UserLoggedOutException:
         raise CallerNotAuthorizedError(401, "Access token failed verification")
     if required:

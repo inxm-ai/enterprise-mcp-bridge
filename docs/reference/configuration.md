@@ -1010,6 +1010,11 @@ unverifiable token is `401`.
 When both are set, both must pass. A caller outside either gets
 `403 Not authorized for this bridge`.
 
+A slow Keycloak never holds up the rest of the bridge: the token check runs
+in at most 8 worker threads of its own, and a caller that can't get one
+within 1 second gets `503`, so it can try again instead of queuing behind a
+hanging key fetch.
+
 - **Type:** Comma-separated list
 - **Default:** empty (gate disabled)
 - **Required:** No
