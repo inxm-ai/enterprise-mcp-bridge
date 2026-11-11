@@ -195,6 +195,38 @@ class TestGateUnit:
 
         asyncio.run(scenario())
 
+    def test_callers_beyond_the_busy_threads_get_503_quickly(
+        self, required_groups, monkeypatch
+    ):
+        """With every key check thread held by a hanging Keycloak, a caller
+        waits at most REALM_KEY_CHECK_WAIT_SECONDS, then hears "try again"."""
+        from app.oauth import user_info
+
+        monkeypatch.setattr(user_info, "REALM_KEY_CHECK_THREADS", 1)
+        monkeypatch.setattr(user_info, "REALM_KEY_CHECK_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(user_info, "_realm_key_check", None)
+        release = threading.Event()
+
+        def slow_verify(token):
+            release.wait(timeout=5)
+            return jwt.decode(token, options={"verify_signature": False})
+
+        monkeypatch.setattr(token_exchange, "verified_caller_claims", slow_verify)
+
+        async def scenario():
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(ensure_caller_in_required_groups, IN_GROUP_TOKEN)
+                await anyio.sleep(0.01)
+                with pytest.raises(CallerNotAuthorizedError) as excinfo:
+                    with anyio.fail_after(1):
+                        await ensure_caller_in_required_groups(IN_GROUP_TOKEN)
+                assert excinfo.value.status_code == 503
+                release.set()
+            # The thread is free again, so the next caller is checked as usual.
+            await ensure_caller_in_required_groups(IN_GROUP_TOKEN)
+
+        asyncio.run(scenario())
+
 
 class TestVerifiedCallerClaims:
     """The shared verifier itself: signature and issuer verification."""
