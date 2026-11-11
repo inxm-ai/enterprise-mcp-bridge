@@ -49,6 +49,8 @@ TOKEN_LIFETIME_SECONDS = 300
 LEEWAY_SECONDS = 60
 FAILURE_SECONDS = 30
 USER_ID = "user-42"
+# Keeps the tests that let a slot wait run out fast.
+SHORT_SLOT_WAIT_SECONDS = 0.05
 
 
 def _private_key():
@@ -388,10 +390,13 @@ class TestSlowIssuersHoldUpOnlyTheirOwnCallers:
 
         asyncio.run(scenario())
 
-    def test_new_issuers_beyond_the_limit_are_503_at_once(
+    def test_new_issuers_beyond_the_limit_are_503_once_the_wait_runs_out(
         self, trusted_issuers_on, key_server, monkeypatch
     ):
         monkeypatch.setattr(trusted_issuers, "MAX_NEW_ISSUER_FETCHES", 2)
+        monkeypatch.setattr(
+            trusted_issuers, "NEW_ISSUER_SLOT_WAIT_SECONDS", SHORT_SLOT_WAIT_SECONDS
+        )
         held = [_new_issuer("one"), _new_issuer("two")]
         extra = _new_issuer("three")
         for issuer in [*held, extra]:
@@ -410,6 +415,38 @@ class TestSlowIssuersHoldUpOnlyTheirOwnCallers:
                     key_server.release(issuer)
             # Not remembered as a failure: once a slot is free it just works.
             assert await _status_async(_token(issuer=extra)) is None
+
+        asyncio.run(scenario())
+
+    def test_a_new_issuer_waits_briefly_for_a_free_slot(
+        self, trusted_issuers_on, key_server, monkeypatch
+    ):
+        # After a restart every tenant is new: one that arrives while the
+        # slots are full waits for a slot instead of getting 503 at once.
+        monkeypatch.setattr(trusted_issuers, "MAX_NEW_ISSUER_FETCHES", 2)
+        held = [_new_issuer("one"), _new_issuer("two")]
+        late = _new_issuer("late")
+        for issuer in [*held, late]:
+            key_server.publish(issuer, _public_jwk(SIGNING_KEY, KEY_ID))
+
+        async def scenario():
+            for issuer in held:
+                key_server.hold(issuer)
+            results = []
+
+            async def late_call():
+                results.append(await _status_async(_token(issuer=late)))
+
+            async with anyio.create_task_group() as tasks:
+                for issuer in held:
+                    tasks.start_soon(_status_async, _token(issuer=issuer))
+                await anyio.wait_all_tasks_blocked()
+                tasks.start_soon(late_call)
+                await anyio.wait_all_tasks_blocked()
+                key_server.release(held[0])
+                await anyio.wait_all_tasks_blocked()
+                key_server.release(held[1])
+            assert results == [None]
 
         asyncio.run(scenario())
 
@@ -437,6 +474,9 @@ class TestSlowIssuersHoldUpOnlyTheirOwnCallers:
         self, trusted_issuers_on, key_server, clock, monkeypatch
     ):
         monkeypatch.setattr(trusted_issuers, "MAX_NEW_ISSUER_FETCHES", 1)
+        monkeypatch.setattr(
+            trusted_issuers, "NEW_ISSUER_SLOT_WAIT_SECONDS", SHORT_SLOT_WAIT_SECONDS
+        )
         made_up = _new_issuer("made-up")
         newcomer = _new_issuer("newcomer")
         key_server.take_down(made_up)
