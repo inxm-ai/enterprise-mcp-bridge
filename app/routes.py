@@ -830,7 +830,7 @@ async def start_session(
             # a persistent session must not be creatable by callers outside
             # BRIDGE_REQUIRED_GROUPS.
             try:
-                ensure_caller_in_required_groups(access_token)
+                await ensure_caller_in_required_groups(access_token)
                 await enforce_connection_policy(access_token)
             except CallerNotAuthorizedError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=exc.detail)

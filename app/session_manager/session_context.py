@@ -624,7 +624,7 @@ async def preflight_caller(access_token: Optional[str], *, listing: bool = False
     error and an allowed decision too late for the attestation headers.
     """
     try:
-        ensure_caller_in_required_groups(access_token)
+        await ensure_caller_in_required_groups(access_token)
         await enforce_connection_policy(access_token, listing=listing)
     except CallerNotAuthorizedError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)

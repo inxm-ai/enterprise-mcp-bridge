@@ -159,7 +159,7 @@ def _build_proxy_handlers(
         # ``POST /sse/messages`` carries no credential of its own: every
         # message re-checks the stream's caller, so token expiry and policy
         # changes apply within the authority's 30 s decision bound.
-        ensure_caller_in_required_groups(access_token)
+        await ensure_caller_in_required_groups(access_token)
         await enforce_connection_policy(access_token, listing=listing)
 
     async def list_tools(ctx, params) -> types.ListToolsResult:
@@ -349,7 +349,7 @@ class _SSEConnectionApp:
         # Bridge-level authorization boundary (BRIDGE_REQUIRED_GROUPS): reject
         # before the SSE stream opens so the client gets a proper HTTP status.
         try:
-            ensure_caller_in_required_groups(access_token)
+            await ensure_caller_in_required_groups(access_token)
             await enforce_connection_policy(access_token)
         except CallerNotAuthorizedError as exc:
             logger.warning(f"[MCP-SSE] Connection rejected: {exc.detail}")
