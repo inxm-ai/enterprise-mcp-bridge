@@ -216,6 +216,17 @@ USER_API_KEY_ALLOWED_CLIENTS = [
 KEYCLOAK_ISSUER = os.getenv("KEYCLOAK_ISSUER", "")
 
 AUTH_ALLOW_UNSAFE_CERT = os.getenv("AUTH_ALLOW_UNSAFE_CERT", "false").lower() == "true"
+
+# AUTH_PROVIDER=token-exchange: before calling the remote MCP, swap the
+# caller's token for one meant only for TOKEN_EXCHANGE_AUDIENCE (OAuth 2.0
+# Token Exchange, RFC 8693), signing in as TOKEN_EXCHANGE_CLIENT_ID. Without a
+# caller, the client's own token (client_credentials) is used.
+# Empty URL: {AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token.
+TOKEN_EXCHANGE_URL = os.getenv("TOKEN_EXCHANGE_URL", "")
+TOKEN_EXCHANGE_CLIENT_ID = os.getenv("TOKEN_EXCHANGE_CLIENT_ID", "")
+TOKEN_EXCHANGE_CLIENT_SECRET = os.getenv("TOKEN_EXCHANGE_CLIENT_SECRET", "")
+TOKEN_EXCHANGE_AUDIENCE = os.getenv("TOKEN_EXCHANGE_AUDIENCE", "")
+TOKEN_EXCHANGE_TIMEOUT_SECONDS = float(os.getenv("TOKEN_EXCHANGE_TIMEOUT_SECONDS", "5"))
 LOG_TOKEN_VALUES = os.getenv("LOG_TOKEN_VALUES", "false").lower() == "true"
 
 # AUTH_PROVIDER=gcp-metadata: fetch a fresh GCP service-account identity

@@ -8,6 +8,7 @@ from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
 import anyio
+from fastapi import HTTPException
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.client import negotiate_auto
@@ -35,7 +36,11 @@ from app.multi_server import (
     current_server_id,
 )
 from app.oauth.credential_headers import is_caller_credential_header
-from app.oauth.token_exchange import TokenRetrieverFactory, UserLoggedOutException
+from app.oauth.token_exchange import (
+    TokenRetrieverFactory,
+    TokenServiceUnavailableError,
+    UserLoggedOutException,
+)
 from app.utils.exception_logging import log_exception_with_details, upstream_phase
 from app.vars import (
     AUTH_PROVIDER,
@@ -58,6 +63,11 @@ logger = logging.getLogger("uvicorn.error")
 # Providers that self-fetch a fresh, short-lived bearer token ambiently from
 # the host platform, independent of any end-user/caller identity.
 AMBIENT_IDENTITY_PROVIDERS = {"gcp-metadata", "azure-metadata", "aws-metadata"}
+# Fetches its own token too, but for the caller when there is one: the remote
+# gets a token meant only for it (TokenExchangeTokenRetriever). Same
+# fail-closed path as the ambient providers.
+TOKEN_EXCHANGE_PROVIDER = "token-exchange"
+TOKEN_SERVICE_RETRY_AFTER_SECONDS = "5"
 
 
 def _describe_log_data(data: object) -> str:
@@ -299,7 +309,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
 
     def _prepare_auth(self) -> None:
         auth_provider = current_auth_provider(AUTH_PROVIDER)
-        if auth_provider in AMBIENT_IDENTITY_PROVIDERS:
+        if (
+            auth_provider in AMBIENT_IDENTITY_PROVIDERS
+            or auth_provider == TOKEN_EXCHANGE_PROVIDER
+        ):
             self._prepare_ambient_identity_auth()
             return
 
@@ -397,10 +410,21 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         the TokenRetriever subclass the factory returns. No fallback to
         MCP_REMOTE_BEARER_TOKEN or the incoming access token — a retriever
         failure here is fail-closed and propagates as UserLoggedOutException.
+        Also serves token-exchange, whose retriever uses the caller's token
+        when there is one; an unreachable token endpoint is a 503 there.
         """
         retriever = TokenRetrieverFactory().get()
         caller_token = (self.access_token or "") if self.forward_access_token else ""
-        token_result = retriever.retrieve_token(caller_token)
+        try:
+            token_result = retriever.retrieve_token(caller_token)
+        except TokenServiceUnavailableError:
+            # The token endpoint is down or failing: "try again", not
+            # "not allowed".
+            raise HTTPException(
+                status_code=503,
+                detail="Sign-in for this MCP server is temporarily unavailable; retry shortly.",
+                headers={"Retry-After": TOKEN_SERVICE_RETRY_AFTER_SECONDS},
+            )
         token_value = token_result.get("access_token") if token_result else None
         if not token_value:
             raise UserLoggedOutException(

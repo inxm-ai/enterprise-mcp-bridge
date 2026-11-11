@@ -509,6 +509,66 @@ file readable, non-empty -> contents (trimmed) used directly as the bearer token
 unset / missing / empty  -> retrieval error (fail closed)
 ```
 
+#### AUTH_PROVIDER=token-exchange (a token meant only for the remote)
+
+Before each remote-MCP connection, the bridge swaps the caller's token at the
+identity provider for a token for the same user whose audience is only the
+remote (OAuth 2.0 Token Exchange, RFC 8693), signing in as its own
+confidential client. The remote never sees the caller's own token, so nothing
+it receives works anywhere else. Without a caller (a tool listing without a
+user, the child health probe, or `forward_access_token: false`), the bridge
+gets its client's own token (`client_credentials`) and swaps that the same
+way, so the remote again gets a token meant only for it, even when one
+client serves several remotes.
+
+It fails closed like the ambient providers: it never falls back to
+`MCP_REMOTE_BEARER_TOKEN` or the caller's token. A refused exchange or an
+answer without a token is `401`; an unreachable token endpoint or a `5xx` is
+`503` with `Retry-After`, so the caller hears "try again", not "not allowed".
+
+With Keycloak, the client needs standard token exchange enabled, and the
+caller's token must name the client in its `aud`. The exchanged token's
+audience comes from the client's own scopes; `audience` narrows it.
+
+| Variable | Purpose |
+| --- | --- |
+| `TOKEN_EXCHANGE_URL` | Token endpoint. Empty (default) uses `{AUTH_BASE_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token` |
+| `TOKEN_EXCHANGE_CLIENT_ID` | The bridge's confidential client (required) |
+| `TOKEN_EXCHANGE_CLIENT_SECRET` | Its secret (required) |
+| `TOKEN_EXCHANGE_AUDIENCE` | Audience the exchanged token is for (required). Can be set per server in an `MCP_SERVERS` entry's `settings`, so one bridge serves remotes with different audiences |
+| `TOKEN_EXCHANGE_TIMEOUT_SECONDS` | Timeout for the token endpoint call (default `5`) |
+
+`AUTH_ALLOW_UNSAFE_CERT` applies to the call as for the other Keycloak calls.
+Set `auth_provider: "token-exchange"` on an `MCP_SERVERS` entry to use it for
+one server only:
+
+```bash
+MCP_SERVERS='[{"id": "tools", "base_path": "/api/tools",
+  "url": "https://tools.example.com/mcp", "auth_provider": "token-exchange",
+  "settings": {"TOKEN_EXCHANGE_AUDIENCE": "remote-tools"}}]'
+```
+
+```bash
+AUTH_PROVIDER="token-exchange"
+MCP_REMOTE_SERVER="https://tools.example.com/mcp"
+TOKEN_EXCHANGE_CLIENT_ID="bridge-exchange"
+TOKEN_EXCHANGE_CLIENT_SECRET="..."
+TOKEN_EXCHANGE_AUDIENCE="remote-tools"
+```
+
+```
+POST {token URL}
+  grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+  client_id, client_secret, audience
+  subject_token=<caller token>, subject_token_type=requested_token_type=urn:ietf:params:oauth:token-type:access_token
+  (no caller: first grant_type=client_credentials, client_id, client_secret;
+   then the same exchange with that token as subject_token)
+
+200 {"access_token": "..."}   -> Authorization: Bearer <access_token>
+4xx / no access_token         -> 401 (fail closed)
+5xx / unreachable / timeout   -> 503, Retry-After
+```
+
 #### MCP_REMOTE_ANON_BEARER_TOKEN
 
 Bearer token for anonymous/unauthenticated requests.

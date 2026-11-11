@@ -77,6 +77,8 @@ class TokenRetrieverFactory:
             return AzureManagedIdentityTokenRetriever()
         elif provider == "aws-metadata":
             return AwsWebIdentityTokenRetriever()
+        elif provider == "token-exchange":
+            return TokenExchangeTokenRetriever()
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -385,6 +387,129 @@ class AwsWebIdentityTokenRetriever(AmbientIdentityTokenRetriever):
             raise UserLoggedOutException(self.unavailable_message)
         with open(token_file, "r") as f:
             return f.read().strip()
+
+
+class TokenServiceUnavailableError(Exception):
+    """The token endpoint could not be reached or failed on its side.
+
+    Not the caller's fault, so it must not become a 401: the remote MCP
+    session maps it to 503 with Retry-After.
+    """
+
+
+TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+SERVER_ERROR_STATUS = 500
+
+
+class TokenExchangeTokenRetriever(TokenRetriever):
+    """AUTH_PROVIDER=token-exchange: a token meant only for the remote.
+
+    With a caller token, swaps it at the identity provider (OAuth 2.0 Token
+    Exchange, RFC 8693) for a token for the same user whose audience is
+    TOKEN_EXCHANGE_AUDIENCE, signing in as TOKEN_EXCHANGE_CLIENT_ID. The
+    remote never sees the caller's own token, so nothing it receives works
+    anywhere else. Without a caller (tool listings, probes), gets the
+    client's own token (client_credentials) and swaps that the same way: one
+    client may serve several remotes, and its own token names all of them.
+
+    TOKEN_EXCHANGE_AUDIENCE may be set per server (MCP_SERVERS `settings`),
+    so one bridge can serve remotes with different audiences.
+
+    Fails closed: a refused exchange or an answer without a token raises
+    UserLoggedOutException; an unreachable endpoint or a server error raises
+    TokenServiceUnavailableError. Neither falls back to the caller's token or
+    a shared bearer.
+    """
+
+    def _token_url(self) -> str:
+        from app import vars as app_vars
+
+        if app_vars.TOKEN_EXCHANGE_URL:
+            return app_vars.TOKEN_EXCHANGE_URL
+        if not app_vars.AUTH_BASE_URL:
+            return ""
+        return (
+            f"{app_vars.AUTH_BASE_URL.rstrip('/')}/realms/"
+            f"{app_vars.KEYCLOAK_REALM}/protocol/openid-connect/token"
+        )
+
+    def retrieve_token(self, token: str) -> Dict[str, Any]:
+        from app import vars as app_vars
+
+        url = self._token_url()
+        client_id = app_vars.TOKEN_EXCHANGE_CLIENT_ID
+        client_secret = app_vars.TOKEN_EXCHANGE_CLIENT_SECRET
+        audience = app_vars.per_server_str(
+            "TOKEN_EXCHANGE_AUDIENCE", app_vars.TOKEN_EXCHANGE_AUDIENCE
+        )
+        if not (url and client_id and client_secret and audience):
+            logger.error(
+                "[TokenExchange] TOKEN_EXCHANGE_CLIENT_ID, _CLIENT_SECRET, "
+                "_AUDIENCE and a token URL (TOKEN_EXCHANGE_URL or "
+                "AUTH_BASE_URL) are required; refusing"
+            )
+            raise UserLoggedOutException("Token exchange is not configured")
+
+        client = {"client_id": client_id, "client_secret": client_secret}
+        subject_token = token or self._post(
+            url, {"grant_type": "client_credentials", **client}
+        )
+        return {
+            "success": True,
+            "access_token": self._post(
+                url,
+                {
+                    "grant_type": TOKEN_EXCHANGE_GRANT,
+                    **client,
+                    "subject_token": subject_token,
+                    "subject_token_type": ACCESS_TOKEN_TYPE,
+                    "requested_token_type": ACCESS_TOKEN_TYPE,
+                    "audience": audience,
+                },
+            ),
+            "token_type": "Bearer",
+        }
+
+    def _post(self, url: str, data: Dict[str, str]) -> str:
+        """The access token the endpoint answers with, or fail closed."""
+        from app import vars as app_vars
+
+        try:
+            response = requests.post(
+                url,
+                data=data,
+                timeout=app_vars.TOKEN_EXCHANGE_TIMEOUT_SECONDS,
+                verify=not app_vars.AUTH_ALLOW_UNSAFE_CERT,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[TokenExchange] Token endpoint unreachable: %s", type(exc).__name__
+            )
+            raise TokenServiceUnavailableError() from exc
+
+        if response.status_code >= SERVER_ERROR_STATUS:
+            logger.error(
+                "[TokenExchange] Token endpoint failed with HTTP %d",
+                response.status_code,
+            )
+            raise TokenServiceUnavailableError()
+        if response.status_code != 200:
+            logger.warning(
+                "[TokenExchange] %s refused with HTTP %d",
+                data["grant_type"],
+                response.status_code,
+            )
+            raise UserLoggedOutException("Token exchange was refused")
+
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        access_token = body.get("access_token") if isinstance(body, dict) else None
+        if not access_token:
+            raise UserLoggedOutException("Token endpoint returned no access token")
+        return access_token
 
 
 class KeyCloakTokenRetriever(TokenRetriever):
