@@ -343,6 +343,30 @@ BRIDGE_REQUIRED_GROUPS = [
 BRIDGE_ALLOWED_USERS = [
     u.strip() for u in os.getenv("BRIDGE_ALLOWED_USERS", "").split(",") if u.strip()
 ]
+# Callers from many issuers that share an address pattern
+# (app/oauth/trusted_issuers.py). Comma-separated issuer patterns, where `*`
+# stands for exactly one DNS label, e.g.
+# https://*.auth.example.com/realms/main. Empty (default) turns the check off.
+# When set, every MCP request needs a token from a matching issuer, checked
+# before any other caller gate.
+TRUSTED_ISSUERS = [
+    p.strip() for p in os.getenv("TRUSTED_ISSUERS", "").split(",") if p.strip()
+]
+# The audience (`aud`) every such token must name.
+TRUSTED_ISSUER_AUDIENCE = os.getenv("TRUSTED_ISSUER_AUDIENCE", "")
+# Clients allowed to have requested the token (`azp`).
+TRUSTED_ISSUER_CLIENTS = [
+    c.strip() for c in os.getenv("TRUSTED_ISSUER_CLIENTS", "").split(",") if c.strip()
+]
+# Allowed clock skew when checking expiry.
+TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS = int(
+    os.getenv("TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS", "60")
+)
+# How long a failed key fetch is remembered, so tokens naming unreachable
+# issuers can't make the bridge flood DNS or the issuer with lookups.
+TRUSTED_ISSUER_KEY_FAILURE_SECONDS = int(
+    os.getenv("TRUSTED_ISSUER_KEY_FAILURE_SECONDS", "30")
+)
 # Ceiling on the JSON-encoded size of a downstream tool result. 0 disables
 # the check. Some downstream MCP servers enforce count-based limits, which do
 # not bound every serialized response, so the bridge has its own byte cap.

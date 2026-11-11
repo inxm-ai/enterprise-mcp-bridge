@@ -312,12 +312,20 @@ def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     ``sub`` are read only from claims that passed signature (realm JWKS),
     expiry, and exact issuer verification. A forged but syntactically valid
     JWT never reaches either check.
+
+    With TRUSTED_ISSUERS set, the trusted issuer check runs first: every
+    request needs a token from an issuer that fits one of its patterns
+    (app/oauth/trusted_issuers.py). The two gates above verify against this
+    bridge's single configured issuer, so such a bridge leaves them unset.
     """
     from app import vars as app_vars
     from app.oauth.token_exchange import (
         UserLoggedOutException,
         verified_caller_claims,
     )
+    from app.oauth.trusted_issuers import ensure_trusted_issuer_caller
+
+    ensure_trusted_issuer_caller(access_token)
 
     required = app_vars.per_server_list(
         "BRIDGE_REQUIRED_GROUPS", app_vars.BRIDGE_REQUIRED_GROUPS
