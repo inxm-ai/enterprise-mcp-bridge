@@ -300,7 +300,7 @@ class CallerNotAuthorizedError(Exception):
         super().__init__(detail)
 
 
-def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
+async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     """Fail closed unless the caller's VERIFIED token passes both gates.
 
     BRIDGE_REQUIRED_GROUPS: the token must carry one of the groups.
@@ -325,7 +325,7 @@ def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     )
     from app.oauth.trusted_issuers import ensure_trusted_issuer_caller
 
-    ensure_trusted_issuer_caller(access_token)
+    await ensure_trusted_issuer_caller(access_token)
 
     required = app_vars.per_server_list(
         "BRIDGE_REQUIRED_GROUPS", app_vars.BRIDGE_REQUIRED_GROUPS

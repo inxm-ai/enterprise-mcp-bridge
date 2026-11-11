@@ -1043,6 +1043,11 @@ issuer, checked before any other caller gate:
   would work there too, so it is refused even from an allowed client.
 - If the issuer's keys can't be fetched, the answer is `503`, not `401`, and
   the failure is remembered for `TRUSTED_ISSUER_KEY_FAILURE_SECONDS`.
+- A slow issuer delays only the requests that need its keys, never other
+  tenants' calls on the same pod; requests that need the same keys at once
+  share one fetch (at most 5 seconds). At most 4 fetches run at once for
+  issuers whose keys aren't cached yet; a token from yet another such issuer
+  gets `503` at once, without that being remembered as a failure.
 
 Refusals are logged with the reason, issuer, client and audience, never the
 user's identity. `BRIDGE_REQUIRED_GROUPS` and `BRIDGE_ALLOWED_USERS` verify

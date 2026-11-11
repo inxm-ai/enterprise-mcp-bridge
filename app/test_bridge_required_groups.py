@@ -10,6 +10,7 @@ downstream contact, and members pass. Default (unset) keeps today's
 behaviour.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import jwt
@@ -120,12 +121,12 @@ def fake_downstream(monkeypatch):
 class TestGateUnit:
     def test_disabled_gate_is_noop(self, monkeypatch):
         monkeypatch.setattr(app_vars, "BRIDGE_REQUIRED_GROUPS", [])
-        ensure_caller_in_required_groups(None)
-        ensure_caller_in_required_groups(OUT_OF_GROUP_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(None))
+        asyncio.run(ensure_caller_in_required_groups(OUT_OF_GROUP_TOKEN))
 
     def test_missing_token_is_401(self, required_groups, fake_verifier):
         with pytest.raises(CallerNotAuthorizedError) as excinfo:
-            ensure_caller_in_required_groups(None)
+            asyncio.run(ensure_caller_in_required_groups(None))
         assert excinfo.value.status_code == 401
 
     def test_forged_token_with_matching_groups_is_401(
@@ -135,22 +136,22 @@ class TestGateUnit:
         issued must fail verification before its group claims are read."""
         monkeypatch.setattr(token_exchange, "_jwks_client", None)
         with pytest.raises(CallerNotAuthorizedError) as excinfo:
-            ensure_caller_in_required_groups(FORGED_TOKEN)
+            asyncio.run(ensure_caller_in_required_groups(FORGED_TOKEN))
         assert excinfo.value.status_code == 401
 
     def test_group_gate_does_not_require_client_allowlist(
         self, monkeypatch, fake_verifier
     ):
         monkeypatch.setattr(app_vars, "BRIDGE_REQUIRED_GROUPS", ["operators"])
-        ensure_caller_in_required_groups(IN_GROUP_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(IN_GROUP_TOKEN))
 
     def test_out_of_group_is_403(self, required_groups, fake_verifier):
         with pytest.raises(CallerNotAuthorizedError) as excinfo:
-            ensure_caller_in_required_groups(OUT_OF_GROUP_TOKEN)
+            asyncio.run(ensure_caller_in_required_groups(OUT_OF_GROUP_TOKEN))
         assert excinfo.value.status_code == 403
 
     def test_member_passes(self, required_groups, fake_verifier):
-        ensure_caller_in_required_groups(IN_GROUP_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(IN_GROUP_TOKEN))
 
     def test_realm_role_membership_counts(self, required_groups, monkeypatch):
         claims = {
@@ -161,7 +162,7 @@ class TestGateUnit:
         monkeypatch.setattr(
             token_exchange, "verified_caller_claims", lambda *a, **k: claims
         )
-        ensure_caller_in_required_groups("any-token")
+        asyncio.run(ensure_caller_in_required_groups("any-token"))
 
 
 class TestVerifiedCallerClaims:

@@ -19,6 +19,14 @@ Every request must carry a token that passes, in this order:
    The failure is remembered for TRUSTED_ISSUER_KEY_FAILURE_SECONDS, so
    tokens naming unreachable issuers can't flood DNS or the issuer with
    lookups, and stale keys are never used.
+
+   Fetches never block the event loop: a slow issuer delays only the
+   requests that need its keys, never other tenants' calls on the same pod.
+   Requests that need the same issuer's keys at once share one fetch. At
+   most MAX_NEW_ISSUER_FETCHES fetches run at once for issuers without
+   cached keys; a token from yet another such issuer is 503 at once and not
+   remembered as a failure, so made-up issuers can't tie up the pod and a
+   real new tenant only needs to retry.
 4. Signature, expiry (with TRUSTED_ISSUER_CLOCK_LEEWAY_SECONDS), audience
    (TRUSTED_ISSUER_AUDIENCE) and requesting client (``azp`` in
    TRUSTED_ISSUER_CLIENTS). The audience must be this bridge alone: a token
@@ -33,12 +41,13 @@ user's identity.
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Optional, Union
 
+import anyio
+import httpx
 import jwt
-import requests
 
 from app import vars as app_vars
 from app.oauth.user_info import CallerNotAuthorizedError
@@ -49,6 +58,7 @@ KEY_SET_LIFESPAN_SECONDS = 300
 MIN_REFETCH_SECONDS = 10
 KEY_FETCH_TIMEOUT_SECONDS = 5
 MAX_CACHED_ISSUERS = 1024
+MAX_NEW_ISSUER_FETCHES = 4
 ALGORITHMS = ["RS256", "ES256"]
 REQUIRED_CLAIMS = ["exp", "iss", "aud", "azp"]
 KEYS_PATH = "/protocol/openid-connect/certs"
@@ -68,6 +78,7 @@ _monotonic = time.monotonic
 class KeyLookupFailure(Enum):
     UNAVAILABLE = "keys could not be fetched"
     UNKNOWN_KEY = "signing key not in the issuer's key set"
+    BUSY = "too many new issuers at once"
 
 
 @dataclass(frozen=True)
@@ -76,26 +87,48 @@ class _CachedKeySet:
     fetched_at: float
 
 
+@dataclass
+class _Fetch:
+    """One key fetch in progress, shared by every request that needs it."""
+
+    done: anyio.Event = field(default_factory=anyio.Event)
+    key_set: Optional[jwt.PyJWKSet] = None
+
+
 _key_sets: dict[str, _CachedKeySet] = {}
 _failed_at: dict[str, float] = {}
+_fetches: dict[str, _Fetch] = {}
+_new_issuer_fetches = 0
 
 
 def forget_cached_keys() -> None:
+    global _new_issuer_fetches
     _key_sets.clear()
     _failed_at.clear()
+    _fetches.clear()
+    _new_issuer_fetches = 0
 
 
 def cached_issuer_count() -> int:
     return len(_key_sets) + len(_failed_at)
 
 
-def _fetch_key_set(url: str) -> Optional[Mapping[str, Any]]:
-    """The issuer's published key set, or None if it can't be fetched."""
+async def _fetch_key_set(url: str) -> Optional[Mapping[str, Any]]:
+    """The issuer's published key set, or None if it can't be fetched.
+
+    KEY_FETCH_TIMEOUT_SECONDS bounds the whole fetch, not each read, so an
+    issuer that trickles its answer can't hold a request longer. Redirects
+    are followed, as before.
+    """
     try:
-        response = requests.get(url, timeout=KEY_FETCH_TIMEOUT_SECONDS)
+        with anyio.fail_after(KEY_FETCH_TIMEOUT_SECONDS):
+            async with httpx.AsyncClient(
+                timeout=KEY_FETCH_TIMEOUT_SECONDS, follow_redirects=True
+            ) as client:
+                response = await client.get(url)
         response.raise_for_status()
         body = response.json()
-    except (requests.RequestException, ValueError):
+    except (httpx.HTTPError, TimeoutError, ValueError):
         return None
     return body if isinstance(body, dict) else None
 
@@ -111,8 +144,8 @@ def _key_with_id(key_set: jwt.PyJWKSet, kid: str) -> Optional[jwt.PyJWK]:
     return next((key for key in key_set.keys if key.key_id == kid), None)
 
 
-def _fresh_key_set(issuer: str, now: float) -> Optional[jwt.PyJWKSet]:
-    published = _fetch_key_set(f"{issuer}{KEYS_PATH}")
+async def _fresh_key_set(issuer: str, now: float) -> Optional[jwt.PyJWKSet]:
+    published = await _fetch_key_set(f"{issuer}{KEYS_PATH}")
     try:
         key_set = jwt.PyJWKSet.from_dict(published) if published else None
     except jwt.PyJWKSetError:
@@ -126,7 +159,51 @@ def _fresh_key_set(issuer: str, now: float) -> Optional[jwt.PyJWKSet]:
     return key_set
 
 
-def _signing_key(issuer: str, kid: str) -> Union[jwt.PyJWK, KeyLookupFailure]:
+async def _shared_fresh_key_set(
+    issuer: str, now: float
+) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
+    """A fresh key set, fetched once for every request that needs it now.
+
+    An issuer without cached keys needs one of MAX_NEW_ISSUER_FETCHES slots;
+    without a free slot the answer is BUSY, which isn't remembered. An issuer
+    that only ever failed counts as new, so made-up issuers can't skip the
+    limit once their failure is forgotten.
+    """
+    global _new_issuer_fetches
+    running = _fetches.get(issuer)
+    if running is not None:
+        await running.done.wait()
+        return _key_set_or_unavailable(running)
+
+    new_issuer = issuer not in _key_sets
+    if new_issuer and _new_issuer_fetches >= MAX_NEW_ISSUER_FETCHES:
+        return KeyLookupFailure.BUSY
+
+    fetch = _Fetch()
+    _fetches[issuer] = fetch
+    if new_issuer:
+        _new_issuer_fetches += 1
+    try:
+        fetch.key_set = await _fresh_key_set(issuer, now)
+    finally:
+        # Also on cancellation: the requests waiting on this fetch then see
+        # no keys and get 503, without the issuer being marked as failed.
+        if new_issuer:
+            _new_issuer_fetches -= 1
+        del _fetches[issuer]
+        fetch.done.set()
+    return _key_set_or_unavailable(fetch)
+
+
+def _key_set_or_unavailable(
+    fetch: _Fetch,
+) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
+    if fetch.key_set is None:
+        return KeyLookupFailure.UNAVAILABLE
+    return fetch.key_set
+
+
+async def _signing_key(issuer: str, kid: str) -> Union[jwt.PyJWK, KeyLookupFailure]:
     now = _monotonic()
     failed_at = _failed_at.get(issuer)
     if (
@@ -143,9 +220,9 @@ def _signing_key(issuer: str, kid: str) -> Union[jwt.PyJWK, KeyLookupFailure]:
         if now - cached.fetched_at < MIN_REFETCH_SECONDS:
             return KeyLookupFailure.UNKNOWN_KEY
 
-    fresh = _fresh_key_set(issuer, now)
-    if fresh is None:
-        return KeyLookupFailure.UNAVAILABLE
+    fresh = await _shared_fresh_key_set(issuer, now)
+    if isinstance(fresh, KeyLookupFailure):
+        return fresh
     key = _key_with_id(fresh, kid)
     return key if key is not None else KeyLookupFailure.UNKNOWN_KEY
 
@@ -191,7 +268,7 @@ def _refusal(
     return CallerNotAuthorizedError(status_code, detail)
 
 
-def ensure_trusted_issuer_caller(access_token: Optional[str]) -> None:
+async def ensure_trusted_issuer_caller(access_token: Optional[str]) -> None:
     """Fail closed unless the token comes from a trusted issuer pattern.
 
     A no-op while TRUSTED_ISSUERS is empty. Raises CallerNotAuthorizedError
@@ -218,8 +295,8 @@ def ensure_trusted_issuer_caller(access_token: Optional[str]) -> None:
     if not isinstance(kid, str):
         raise _refusal(UNAUTHORIZED, "no key id", unverified)
 
-    key = _signing_key(issuer, kid)
-    if key is KeyLookupFailure.UNAVAILABLE:
+    key = await _signing_key(issuer, kid)
+    if key is KeyLookupFailure.UNAVAILABLE or key is KeyLookupFailure.BUSY:
         raise _refusal(UNAVAILABLE, key.value, unverified)
     if isinstance(key, KeyLookupFailure):
         raise _refusal(UNAUTHORIZED, key.value, unverified)

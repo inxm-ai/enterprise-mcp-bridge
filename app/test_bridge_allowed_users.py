@@ -7,6 +7,7 @@ required groups. Empty keeps today's behaviour. With groups also set, both
 must pass.
 """
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -74,7 +75,7 @@ def owner_only(monkeypatch):
 
 def _status(token):
     with pytest.raises(CallerNotAuthorizedError) as excinfo:
-        ensure_caller_in_required_groups(token)
+        asyncio.run(ensure_caller_in_required_groups(token))
     return excinfo.value.status_code
 
 
@@ -96,11 +97,11 @@ def _bound(settings):
 
 class TestAllowListUnit:
     def test_empty_allow_list_keeps_behaviour(self, fake_verifier):
-        ensure_caller_in_required_groups(None)
-        ensure_caller_in_required_groups(OTHER_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(None))
+        asyncio.run(ensure_caller_in_required_groups(OTHER_TOKEN))
 
     def test_listed_sub_passes(self, owner_only, fake_verifier):
-        ensure_caller_in_required_groups(OWNER_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(OWNER_TOKEN))
 
     def test_unlisted_sub_is_403(self, owner_only, fake_verifier):
         assert _status(OTHER_TOKEN) == 403
@@ -113,7 +114,7 @@ class TestAllowListUnit:
 
     def test_comma_separated_list(self, monkeypatch, fake_verifier):
         monkeypatch.setattr(app_vars, "BRIDGE_ALLOWED_USERS", ["a", OWNER_SUB])
-        ensure_caller_in_required_groups(OWNER_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(OWNER_TOKEN))
         assert _status(OTHER_TOKEN) == 403
 
 
@@ -122,21 +123,21 @@ class TestPerServerOverride:
         monkeypatch.setattr(app_vars, "BRIDGE_ALLOWED_USERS", ["someone-else"])
         token = _bound({"BRIDGE_ALLOWED_USERS": OWNER_SUB})
         try:
-            ensure_caller_in_required_groups(OWNER_TOKEN)
+            asyncio.run(ensure_caller_in_required_groups(OWNER_TOKEN))
             assert _status(OTHER_TOKEN) == 403
         finally:
             multi_server.reset_server(token)
-        ensure_caller_in_required_groups(OTHER_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(OTHER_TOKEN))
         assert _status(OWNER_TOKEN) == 403
 
     def test_server_list_restricts_unrestricted_global(self, fake_verifier):
         token = _bound({"BRIDGE_ALLOWED_USERS": f" {OWNER_SUB} , other "})
         try:
-            ensure_caller_in_required_groups(OWNER_TOKEN)
+            asyncio.run(ensure_caller_in_required_groups(OWNER_TOKEN))
             assert _status(OTHER_TOKEN) == 403
         finally:
             multi_server.reset_server(token)
-        ensure_caller_in_required_groups(OTHER_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(OTHER_TOKEN))
 
     def test_server_without_setting_uses_global(self, owner_only, fake_verifier):
         token = _bound({})
@@ -148,7 +149,7 @@ class TestPerServerOverride:
     def test_empty_server_value_lifts_global(self, owner_only, fake_verifier):
         token = _bound({"BRIDGE_ALLOWED_USERS": ""})
         try:
-            ensure_caller_in_required_groups(OTHER_TOKEN)
+            asyncio.run(ensure_caller_in_required_groups(OTHER_TOKEN))
         finally:
             multi_server.reset_server(token)
 
@@ -159,7 +160,7 @@ class TestGroupsAndAllowList:
         monkeypatch.setattr(app_vars, "BRIDGE_REQUIRED_GROUPS", ["operators"])
 
     def test_listed_member_passes(self, both, fake_verifier):
-        ensure_caller_in_required_groups(OWNER_OPERATOR_TOKEN)
+        asyncio.run(ensure_caller_in_required_groups(OWNER_OPERATOR_TOKEN))
 
     def test_listed_non_member_is_403(self, both, fake_verifier):
         assert _status(OWNER_TOKEN) == 403
