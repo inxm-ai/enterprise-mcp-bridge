@@ -8,6 +8,7 @@ from app.vars import (
     MCP_SHARED_DATA_ACCESS_TEMPLATE,
     MCP_USER_DATA_ACCESS_TEMPLATE,
 )
+import anyio
 import jwt
 from typing import Dict, Any, List, Optional
 import re
@@ -300,6 +301,21 @@ class CallerNotAuthorizedError(Exception):
         super().__init__(detail)
 
 
+# The realm's key fetch (PyJWKClient) blocks, so the check runs in worker
+# threads of its own: a hanging Keycloak then holds at most this many
+# threads, never the event loop or the threads FastAPI runs other work on.
+REALM_KEY_CHECK_THREADS = 8
+_realm_key_check_limiter: Optional[anyio.CapacityLimiter] = None
+
+
+def _realm_key_check_threads() -> anyio.CapacityLimiter:
+    # Created on first use: a CapacityLimiter needs a running event loop.
+    global _realm_key_check_limiter
+    if _realm_key_check_limiter is None:
+        _realm_key_check_limiter = anyio.CapacityLimiter(REALM_KEY_CHECK_THREADS)
+    return _realm_key_check_limiter
+
+
 async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     """Fail closed unless the caller's VERIFIED token passes both gates.
 
@@ -338,7 +354,11 @@ async def ensure_caller_in_required_groups(access_token: Optional[str]) -> None:
     if not access_token:
         raise CallerNotAuthorizedError(401, "Authentication required")
     try:
-        claims = verified_caller_claims(access_token)
+        claims = await anyio.to_thread.run_sync(
+            verified_caller_claims,
+            access_token,
+            limiter=_realm_key_check_threads(),
+        )
     except UserLoggedOutException:
         raise CallerNotAuthorizedError(401, "Access token failed verification")
     if required:
