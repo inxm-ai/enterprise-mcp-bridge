@@ -11,8 +11,10 @@ behaviour.
 """
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 
+import anyio
 import jwt
 import pytest
 from fastapi.testclient import TestClient
@@ -163,6 +165,35 @@ class TestGateUnit:
             token_exchange, "verified_caller_claims", lambda *a, **k: claims
         )
         asyncio.run(ensure_caller_in_required_groups("any-token"))
+
+    def test_slow_key_check_leaves_the_event_loop_free(
+        self, required_groups, monkeypatch
+    ):
+        """The realm's key fetch blocks, so it runs in a worker thread: other
+        requests on the pod go on while Keycloak is slow."""
+        release = threading.Event()
+
+        def slow_verify(token):
+            release.wait(timeout=5)
+            return jwt.decode(token, options={"verify_signature": False})
+
+        monkeypatch.setattr(token_exchange, "verified_caller_claims", slow_verify)
+
+        async def scenario():
+            finished = []
+
+            async def check():
+                await ensure_caller_in_required_groups(IN_GROUP_TOKEN)
+                finished.append(True)
+
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(check)
+                await anyio.sleep(0.05)
+                assert finished == []
+                release.set()
+            assert finished == [True]
+
+        asyncio.run(scenario())
 
 
 class TestVerifiedCallerClaims:
