@@ -18,6 +18,8 @@ from app.vars import (
     GCP_METADATA_TOKEN_TIMEOUT_SECONDS,
     INTERNAL_API_SECRET,
     KEYCLOAK_PROVIDER_ALIAS,
+    KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID,
+    KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET,
     KEYCLOAK_PROVIDER_REFRESH_MODE,
     KEYCLOAK_REALM,
     KEYCLOAK_ISSUER,
@@ -89,6 +91,24 @@ class UserLoggedOutException(Exception):
     def __init__(self, message: str = "User is logged out or unauthorized"):
         self.message = message
         super().__init__(message)
+
+
+class ProviderTokenExpiredError(UserLoggedOutException):
+    """The person's stored provider token expired and could not be renewed.
+
+    Raised only after Keycloak returned a stored token for the provider, so
+    the person is signed in and linked: the link itself needs renewing. The
+    bridge must not fall back to the caller's own token here, since a server
+    that wants the provider's token would get a credential for the wrong
+    service and fail in a misleading way.
+    """
+
+    def __init__(self, provider_alias: str):
+        self.provider_alias = provider_alias
+        super().__init__(
+            f"The {provider_alias} connection has expired and could not be "
+            f"renewed. Reconnect {provider_alias} and try again."
+        )
 
 
 _jwks_client = None
@@ -399,6 +419,8 @@ class TokenServiceUnavailableError(Exception):
 
 TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+# Keycloak may call the provider to refresh before it answers.
+PROVIDER_EXCHANGE_TIMEOUT_SECONDS = 15
 SERVER_ERROR_STATUS = 500
 
 
@@ -569,9 +591,17 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 )
             # Check if token needs refresh
             if self._token_needs_refresh(provider_tokens):
-                provider_tokens = self._refresh_provider_token(
-                    provider_tokens, keycloak_token
-                )
+                try:
+                    provider_tokens = self._refresh_provider_token(
+                        provider_tokens, keycloak_token
+                    )
+                except Exception as exc:
+                    self.logger.error(
+                        "Renewing the expired %s token failed: %s",
+                        self.provider_alias,
+                        exc,
+                    )
+                    raise ProviderTokenExpiredError(self.provider_alias) from exc
             self.logger.info(
                 f"Successfully retrieved {self.provider_alias} token from Keycloak"
             )
@@ -581,6 +611,8 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 "token_type": provider_tokens.get("token_type", "Bearer"),
                 "expires_in": provider_tokens.get("expires_in"),
             }
+        except ProviderTokenExpiredError:
+            raise
         except Exception as e:
             self.logger.error(f"Token retrieval failed: {str(e)}")
             raise UserLoggedOutException(
@@ -690,6 +722,11 @@ class KeyCloakTokenRetriever(TokenRetriever):
         self, token_data: Dict[str, Any], keycloak_token: str
     ) -> Dict[str, Any]:
         """Refresh provider token using appropriate strategy based on provider type"""
+        if self._refresh_mode() == "exchange":
+            self.logger.info(
+                f"Refreshing {self.provider_alias} token via token exchange (mode=exchange)"
+            )
+            return self._exchange_provider_token(keycloak_token)
         refresh_token = token_data.get("refresh_token")
         if not refresh_token:
             self.logger.info(
@@ -697,7 +734,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
             )
             return self._force_broker_refresh(keycloak_token)
 
-        refresh_mode = KEYCLOAK_PROVIDER_REFRESH_MODE
+        refresh_mode = self._refresh_mode()
 
         # For external OAuth2 identity providers (mode='broker'), refresh via broker endpoint
         # For OIDC providers registered as clients (mode='oidc'), use Keycloak's token endpoint
@@ -738,6 +775,75 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     )
                 )
                 raise UserLoggedOutException("Failed to refresh token")
+
+    def _refresh_mode(self) -> str:
+        """KEYCLOAK_PROVIDER_REFRESH_MODE, overridable per server."""
+        from app import vars as app_vars
+
+        return (
+            app_vars.per_server_str(
+                "KEYCLOAK_PROVIDER_REFRESH_MODE", KEYCLOAK_PROVIDER_REFRESH_MODE
+            )
+            .strip()
+            .lower()
+        )
+
+    def _exchange_provider_token(self, keycloak_token: str) -> Dict[str, Any]:
+        """The person's provider token by Keycloak token exchange (v1).
+
+        Keycloak answers with the stored provider token and refreshes it
+        first when it has expired, using the provider's own client
+        credentials, so this works for linked external providers whose
+        refresh token only the provider accepts. The requesting client needs
+        Keycloak's token-exchange permission on the provider.
+        """
+        client_id = KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID
+        client_secret = KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET
+        if not (client_id and client_secret):
+            raise UserLoggedOutException(
+                "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID and _CLIENT_SECRET are "
+                "required for KEYCLOAK_PROVIDER_REFRESH_MODE=exchange"
+            )
+        url = f"{self.keycloak_base_url}/realms/{self.realm}/protocol/openid-connect/token"
+        response = requests.post(
+            url,
+            data={
+                "grant_type": TOKEN_EXCHANGE_GRANT,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "subject_token": keycloak_token,
+                "subject_token_type": ACCESS_TOKEN_TYPE,
+                "requested_issuer": self.provider_alias,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            verify=not self.allow_unsafe_cert,
+            timeout=PROVIDER_EXCHANGE_TIMEOUT_SECONDS,
+        )
+        self.logger.info(
+            f"Exchanging for {self.provider_alias} token at Keycloak: {response.status_code}"
+        )
+        if response.status_code != 200:
+            # The body names the reason (e.g. not linked, expired without a
+            # refresh token); it carries no credential.
+            self.logger.error(
+                "Token exchange for %s refused: %s",
+                self.provider_alias,
+                (response.text or "")[:300],
+            )
+            raise UserLoggedOutException(
+                f"Token exchange for {self.provider_alias} was refused"
+            )
+        try:
+            tokens = response.json()
+        except ValueError as exc:
+            raise UserLoggedOutException(
+                f"Token exchange for {self.provider_alias} returned no JSON"
+            ) from exc
+        if not isinstance(tokens, dict) or not tokens.get("access_token"):
+            raise UserLoggedOutException(
+                f"Token exchange for {self.provider_alias} returned no access token"
+            )
+        return tokens
 
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""

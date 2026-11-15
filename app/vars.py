@@ -193,9 +193,24 @@ AUTH_BASE_URL = os.getenv("AUTH_BASE_URL", "")
 AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "keycloak").lower()
 KEYCLOAK_PROVIDER_ALIAS = os.getenv("KEYCLOAK_PROVIDER_ALIAS", "")
 KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "inxm")
+# How an expired provider token is renewed (per server via MCP_SERVERS
+# `settings`): "oidc" posts the refresh token to Keycloak's token endpoint
+# with the alias as client_id (only for providers that are Keycloak clients),
+# "broker" re-reads the stored token, and "exchange" asks Keycloak for the
+# provider token by token exchange (v1, `requested_issuer=<alias>`), which
+# makes Keycloak refresh the stored token itself with the provider's own
+# client credentials. "exchange" is the one that works for linked external
+# providers (e.g. Entra): signing in as KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID,
+# which needs the token-exchange permission on each such provider.
 KEYCLOAK_PROVIDER_REFRESH_MODE = os.getenv(
     "KEYCLOAK_PROVIDER_REFRESH_MODE", "oidc"
 ).lower()
+KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID = os.getenv(
+    "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID", ""
+)
+KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET = os.getenv(
+    "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET", ""
+)
 
 # AUTH_PROVIDER=user-api-key: each user stores their own API key for this
 # connection in app-auth-tokens; the bridge fetches it per request-user via

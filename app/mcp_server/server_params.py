@@ -3,7 +3,7 @@ import os
 import sys
 from typing import Optional
 from mcp import StdioServerParameters
-from app.oauth.token_exchange import TokenRetrieverFactory
+from app.oauth.token_exchange import ProviderTokenExpiredError, TokenRetrieverFactory
 from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
 from app.isolation import enabled_globally, isolate, uid_for
@@ -70,6 +70,16 @@ def defined_env(
         )
         try:
             token_result = retriever.retrieve_token(access_token)
+        except ProviderTokenExpiredError:
+            # The server wants the provider's token and the person's link has
+            # expired: the caller's own token would be a credential for the
+            # wrong service, so fail and let them reconnect.
+            logger.warning(
+                "Provider token for %s expired and could not be renewed; "
+                "not falling back to the caller's token.",
+                _redacted_env_var_name(oauth_env_var),
+            )
+            raise
         except Exception:
             # If retrieval fails, and we are in cookie mode, maybe we should just pass the token as is?
             # This is a fallback for when the token is not a valid Keycloak token but just a cookie value
