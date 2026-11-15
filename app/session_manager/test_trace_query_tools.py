@@ -53,6 +53,13 @@ def trace_payload(count=344, resource_attributes=None, wrap_result=True):
     return {"result": document} if wrap_result else document
 
 
+def span_page(payload, trace_id, offset, limit):
+    """Page a payload as the backend sends it: JSON bytes."""
+    return trace_tools.span_page(
+        trace_tools.json.dumps(payload).encode(), trace_id, offset, limit
+    )
+
+
 def spans_of(payload):
     document = payload.get("result", payload)
     return document["resourceSpans"][0]["scopeSpans"][0]["spans"]
@@ -64,7 +71,7 @@ def spans_of(payload):
 )
 def test_snapshot_detects_content_changes_with_unchanged_span_ids(field):
     payload = trace_payload(2)
-    initial = trace_tools.span_page(payload, TRACE, 0, 1)["snapshot_id"]
+    initial = span_page(payload, TRACE, 0, 1)["snapshot_id"]
     changed = copy.deepcopy(payload)
     span = spans_of(changed)[1]
     if field in {"startTimeUnixNano", "endTimeUnixNano"}:
@@ -77,21 +84,21 @@ def test_snapshot_detects_content_changes_with_unchanged_span_ids(field):
         span[field] = [{"traceId": "2" * 32, "spanId": "2" * 16}]
     else:
         span[field] = {"code": 2}
-    assert trace_tools.span_page(changed, TRACE, 0, 1)["snapshot_id"] != initial
+    assert span_page(changed, TRACE, 0, 1)["snapshot_id"] != initial
     spans_of(payload).reverse()
-    assert trace_tools.span_page(payload, TRACE, 0, 1)["snapshot_id"] == initial
+    assert span_page(payload, TRACE, 0, 1)["snapshot_id"] == initial
 
 
 def test_resource_changes_alter_the_snapshot():
     payload = trace_payload(1)
-    initial = trace_tools.span_page(payload, TRACE, 0, 1)["snapshot_id"]
+    initial = span_page(payload, TRACE, 0, 1)["snapshot_id"]
     changed = trace_payload(
         1,
         resource_attributes=[
             {"key": "service.version", "value": {"stringValue": "r2"}}
         ],
     )
-    assert trace_tools.span_page(changed, TRACE, 0, 1)["snapshot_id"] != initial
+    assert span_page(changed, TRACE, 0, 1)["snapshot_id"] != initial
 
 
 def test_progress_and_streaming_calls_route_overlay_and_preserve_native_callbacks(
@@ -137,10 +144,7 @@ def test_progress_and_streaming_calls_route_overlay_and_preserve_native_callback
 
 def test_all_344_spans_are_reachable_with_a_stable_snapshot():
     payload = trace_payload()
-    pages = [
-        trace_tools.span_page(payload, TRACE, offset, 20)
-        for offset in range(0, 344, 20)
-    ]
+    pages = [span_page(payload, TRACE, offset, 20) for offset in range(0, 344, 20)]
     spans = [span for page in pages for span in page["spans"]]
     assert len(spans) == 344
     assert len({span["span_id"] for span in spans}) == 344
@@ -148,13 +152,13 @@ def test_all_344_spans_are_reachable_with_a_stable_snapshot():
     assert pages[-1]["next_offset"] is None
     assert len({page["snapshot_id"] for page in pages}) == 1
     assert (
-        trace_tools.span_page(trace_payload(345), TRACE, 0, 20)["snapshot_id"]
+        span_page(trace_payload(345), TRACE, 0, 20)["snapshot_id"]
         != pages[0]["snapshot_id"]
     )
 
 
 def test_accepts_a_bare_otlp_document_without_the_result_envelope():
-    page = trace_tools.span_page(trace_payload(3, wrap_result=False), TRACE, 0, 20)
+    page = span_page(trace_payload(3, wrap_result=False), TRACE, 0, 20)
     assert page["total_count"] == 3
 
 
@@ -200,7 +204,7 @@ def test_normalizes_parent_kind_status_attributes_events_and_links():
             "attributes": [{"key": "kind", "value": {"stringValue": "approval"}}],
         }
     ]
-    detail = trace_tools.span_page(payload, TRACE, 0, 20)["spans"][0]
+    detail = span_page(payload, TRACE, 0, 20)["spans"][0]
     assert detail["parent_span_id"] == "2" * 16
     assert detail["kind"] == "Client"
     assert detail["status"] == {"code": "Error", "message": "boom"}
@@ -229,7 +233,7 @@ def test_normalizes_parent_kind_status_attributes_events_and_links():
 def test_root_span_has_no_parent_and_ok_status_maps_to_ok():
     payload = trace_payload(1)
     spans_of(payload)[0]["status"] = {"code": 1}
-    detail = trace_tools.span_page(payload, TRACE, 0, 20)["spans"][0]
+    detail = span_page(payload, TRACE, 0, 20)["spans"][0]
     assert detail["parent_span_id"] is None
     assert detail["status"] == {"code": "Ok"}
     assert detail["kind"] == "Server"
@@ -248,7 +252,7 @@ def test_resource_metadata_is_kept_separate_from_span_attributes():
     spans_of(payload)[0]["attributes"] = [
         {"key": "shared", "value": {"stringValue": "span"}}
     ]
-    detail = trace_tools.span_page(payload, TRACE, 0, 20)["spans"][0]
+    detail = span_page(payload, TRACE, 0, 20)["spans"][0]
     assert detail["service"] == "agent-hub"
     assert detail["scope"] == "agent-hub"
     assert detail["resource_attributes"] == {
@@ -274,7 +278,7 @@ def test_spans_across_resources_are_merged_and_ordered_by_start_time():
             "scopeSpans": [{"scope": {"name": "tgi"}, "spans": [late]}],
         }
     )
-    page = trace_tools.span_page(payload, TRACE, 0, 20)
+    page = span_page(payload, TRACE, 0, 20)
     assert [span["service"] for span in page["spans"]] == [
         "agent-hub",
         "tgi-core",
@@ -306,7 +310,7 @@ def test_wide_pages_have_a_typed_size_error_and_smaller_pages_keep_all_spans(
     monkeypatch.setattr(trace_tools, "ensure_tool_allowed", lambda name: None)
 
     async def fetch(url_template, args):
-        page = trace_tools.span_page(payload, TRACE, args["offset"], args["limit"])
+        page = span_page(payload, TRACE, args["offset"], args["limit"])
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=trace_tools.json.dumps(page))],
             structured_content=page,
@@ -352,13 +356,82 @@ def test_rejects_duplicate_mismatched_or_empty_trace_identity():
     payload = trace_payload(2)
     spans_of(payload)[1]["spanId"] = spans_of(payload)[0]["spanId"]
     with pytest.raises(ValueError, match="duplicate"):
-        trace_tools.span_page(payload, TRACE, 0, 20)
+        span_page(payload, TRACE, 0, 20)
     with pytest.raises(ValueError, match="different trace"):
-        trace_tools.span_page(trace_payload(), "2" * 32, 0, 20)
+        span_page(trace_payload(), "2" * 32, 0, 20)
     with pytest.raises(ValueError, match="not found"):
-        trace_tools.span_page({"result": {"resourceSpans": []}}, TRACE, 0, 20)
+        span_page({"result": {"resourceSpans": []}}, TRACE, 0, 20)
     with pytest.raises(ValueError, match="invalid OTLP"):
-        trace_tools.span_page({"data": []}, TRACE, 0, 20)
+        span_page({"data": []}, TRACE, 0, 20)
+
+
+def test_numbers_keep_the_values_json_loads_gives():
+    """An integer-form double beyond 64 bits must not make the trace unreadable."""
+    body = (
+        b'{"resourceSpans": [{"scopeSpans": [{"spans": [{'
+        b'"traceId": "' + TRACE.encode() + b'", "spanId": "0000000000000001",'
+        b'"startTimeUnixNano": "1", "endTimeUnixNano": "2", "attributes": ['
+        b'{"key": "huge", "value": {"doubleValue": 100000000000000000000}},'
+        b'{"key": "exponent", "value": {"doubleValue": 1e20}},'
+        b'{"key": "count", "value": {"intValue": 123456789012345678901234567890}},'
+        b'{"key": "ratio", "value": {"doubleValue": 0.1}}]}]}]}]}'
+    )
+    attributes = trace_tools.span_page(body, TRACE, 0, 20)["spans"][0]["attributes"]
+    assert attributes == {
+        "huge": 100000000000000000000,
+        "exponent": 1e20,
+        "count": 123456789012345678901234567890,
+        "ratio": 0.1,
+    }
+    assert [type(value) for value in attributes.values()] == [int, float, int, float]
+
+
+@pytest.mark.parametrize("scope_first", [True, False])
+def test_omitted_scope_reads_as_empty(scope_first):
+    payload = trace_payload(3)
+    resource_spans = payload["result"]["resourceSpans"][0]
+    del resource_spans["scopeSpans"][0]["scope"]
+    if not scope_first:
+        resource_spans["resource"] = resource_spans.pop("resource")
+    page = span_page(payload, TRACE, 0, 20)
+    assert [span["scope"] for span in page["spans"]] == ["", "", ""]
+    assert {span["service"] for span in page["spans"]} == {"agent-hub"}
+
+
+def test_resource_and_scope_sent_after_their_spans_are_still_attached():
+    payload = trace_payload(2)
+    resource_spans = payload["result"]["resourceSpans"][0]
+    scope_spans = resource_spans["scopeSpans"][0]
+    reordered = {
+        "result": {
+            "resourceSpans": [
+                {
+                    "scopeSpans": [
+                        {"spans": scope_spans["spans"], "scope": scope_spans["scope"]}
+                    ],
+                    "resource": resource_spans["resource"],
+                }
+            ]
+        }
+    }
+    expected = span_page(payload, TRACE, 0, 20)
+    assert span_page(reordered, TRACE, 0, 20) == expected
+    assert expected["spans"][0]["service"] == "agent-hub"
+    assert expected["spans"][0]["scope"] == "agent-hub"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"result": {"resourceSpans": [',
+        b"[]",
+        b'{"result": [], "resourceSpans": []}',
+        b'{"resourceSpans": [{"scopeSpans": null}]}',
+    ],
+)
+def test_truncated_or_malformed_documents_are_invalid(body):
+    with pytest.raises(ValueError, match="invalid OTLP trace response"):
+        trace_tools.span_page(body, TRACE, 0, 20)
 
 
 @pytest.mark.parametrize(
