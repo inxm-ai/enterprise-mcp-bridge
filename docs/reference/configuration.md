@@ -111,21 +111,13 @@ Optional entry fields:
   token is exchanged for the caller's token. An empty string means "no alias":
   the Keycloak token is passed through, as with an empty global.
 
-  When the stored provider token has expired, the bridge renews it as
-  `KEYCLOAK_PROVIDER_REFRESH_MODE` says (globally, or per server in
-  `settings`):
+  The bridge renews a stored provider token a minute before it expires
+  (`KEYCLOAK_PROVIDER_REFRESH_MODE`). If that fails, a token that is still
+  valid is used until it expires, and an expired one is read from the broker
+  once more: Keycloak renews stored tokens of OIDC identity providers itself
+  once they have expired (e.g. linked Entra accounts).
 
-  | Mode | Renews by | Use for |
-  |---|---|---|
-  | `oidc` (default) | posting the stored refresh token to Keycloak's token endpoint with the alias as `client_id` | providers that are themselves Keycloak clients |
-  | `broker` | reading the stored token again | providers whose tokens do not expire |
-  | `exchange` | Keycloak token exchange (v1) with `requested_issuer=<alias>`, signing in as `KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID` / `_CLIENT_SECRET`; Keycloak refreshes the stored token with the provider's own client credentials | linked external providers such as Entra ID |
-
-  `exchange` needs Keycloak's `token-exchange` (v1) and
-  `admin-fine-grained-authz` (v1) features, and the client's token-exchange
-  permission on each provider.
-
-  When the stored token is there but cannot be renewed, the call fails with
+  When the stored token is there but cannot be renewed either way, the call fails with
   401 "The `<alias>` connection has expired … Reconnect `<alias>`" with
   `X-Inxm-Connection-Code: provider_token_expired`: the bridge never sends the
   caller's own token in place of the provider's.

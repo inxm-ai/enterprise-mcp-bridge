@@ -290,114 +290,77 @@ def test_force_token_refresh_never_logs_token_values(monkeypatch, retriever, cap
     assert "refresh-canary" not in rendered
 
 
-# --- linked external providers: renewal by token exchange ---------------------
+# --- linked external providers: a failed bridge refresh ----------------------
 
 from app.oauth.token_exchange import ProviderTokenExpiredError  # noqa: E402
 
 
-@pytest.fixture
-def exchange_retriever(monkeypatch, retriever):
-    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_REFRESH_MODE", "exchange")
-    monkeypatch.setattr(
-        token_exchange, "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_ID", "mcp-bridge"
-    )
-    monkeypatch.setattr(
-        token_exchange, "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET", "s3cret"
-    )
-    return retriever
-
-
-def _response(status, body=None, text=""):
-    response = MagicMock()
-    response.status_code = status
-    response.json.return_value = body
-    response.text = text
-    return response
-
-
-def test_exchange_mode_asks_keycloak_for_the_provider_token(exchange_retriever):
-    fresh = {"access_token": "fresh-entra-token", "expires_in": 3599}
-    with patch("requests.post", return_value=_response(200, fresh)) as post:
-        result = exchange_retriever._refresh_provider_token(
-            {"access_token": "expired", "refresh_token": "entra-refresh"},
-            "callers-keycloak-token",
-        )
-
-    assert result["access_token"] == "fresh-entra-token"
-    url = post.call_args.args[0]
-    data = post.call_args.kwargs["data"]
-    assert url == "https://test.keycloak/realms/testrealm/protocol/openid-connect/token"
-    assert data == {
-        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "client_id": "mcp-bridge",
-        "client_secret": "s3cret",
-        "subject_token": "callers-keycloak-token",
-        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "requested_issuer": "testprovider",
+def _tokens(seconds_left, name="stored"):
+    return {
+        "access_token": jwt.encode(
+            {"exp": int(datetime.now().timestamp() + seconds_left), "n": name},
+            "secret",
+            algorithm="HS256",
+        ),
+        "refresh_token": "entra-refresh",
     }
-    # The provider's refresh token never leaves the bridge in this mode.
-    assert "entra-refresh" not in data.values()
 
 
-def test_exchange_mode_works_without_a_stored_refresh_token(exchange_retriever):
-    with patch("requests.post", return_value=_response(200, {"access_token": "fresh"})):
-        result = exchange_retriever._refresh_provider_token({}, "kc-token")
-    assert result["access_token"] == "fresh"
+def _refused(token_data, keycloak_token):
+    raise UserLoggedOutException("User is logged out or unauthorized")
 
 
-@pytest.mark.parametrize(
-    "response",
-    [
-        _response(
-            400, text='{"error":"invalid_token","error_description":"not linked"}'
-        ),
-        _response(403, text='{"error":"access_denied"}'),
-        _response(200, {"issued_token_type": "x"}),
-    ],
-)
-def test_a_refused_or_empty_exchange_is_an_error(exchange_retriever, response):
-    with patch("requests.post", return_value=response):
-        with pytest.raises(UserLoggedOutException):
-            exchange_retriever._refresh_provider_token({}, "kc-token")
-
-
-def test_exchange_mode_needs_its_client(exchange_retriever, monkeypatch):
-    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_EXCHANGE_CLIENT_SECRET", "")
-    with patch("requests.post") as post:
-        with pytest.raises(UserLoggedOutException):
-            exchange_retriever._refresh_provider_token({}, "kc-token")
-    post.assert_not_called()
-
-
-def test_the_refresh_mode_can_be_set_per_server(retriever, monkeypatch):
-    from app import vars as app_vars
-
-    monkeypatch.setattr(token_exchange, "KEYCLOAK_PROVIDER_REFRESH_MODE", "oidc")
+def test_a_still_valid_token_is_used_when_the_refresh_fails(monkeypatch, retriever):
+    # The bridge refreshes a minute early; Keycloak renews only after expiry.
+    stored = _tokens(40)
+    reads = []
     monkeypatch.setattr(
-        app_vars,
-        "per_server_str",
-        lambda name, default: (
-            "Exchange" if name == "KEYCLOAK_PROVIDER_REFRESH_MODE" else default
-        ),
+        retriever,
+        "_get_stored_provider_token",
+        lambda t: reads.append(t) or stored,
     )
-    assert retriever._refresh_mode() == "exchange"
+    monkeypatch.setattr(retriever, "_refresh_provider_token", _refused)
+
+    result = retriever.retrieve_token("callers-keycloak-token")
+
+    assert result["access_token"] == stored["access_token"]
+    assert len(reads) == 1
+
+
+def test_an_expired_token_is_read_again_and_keycloaks_renewal_used(
+    monkeypatch, retriever
+):
+    expired, renewed = _tokens(-20, "old"), _tokens(3600, "new")
+    answers = iter([expired, renewed])
+    monkeypatch.setattr(
+        retriever, "_get_stored_provider_token", lambda t: next(answers)
+    )
+    monkeypatch.setattr(retriever, "_refresh_provider_token", _refused)
+
+    result = retriever.retrieve_token("callers-keycloak-token")
+
+    assert result["access_token"] == renewed["access_token"]
 
 
 def test_an_expired_token_that_cannot_be_renewed_names_the_provider(
     monkeypatch, retriever
 ):
-    expired = {
-        "access_token": make_token(exp=(datetime.now().timestamp() - 10)),
-        "refresh_token": "entra-refresh",
-    }
+    expired = _tokens(-20)
     monkeypatch.setattr(retriever, "_get_stored_provider_token", lambda t: expired)
-
-    def refused(token_data, keycloak_token):
-        raise UserLoggedOutException("User is logged out or unauthorized")
-
-    monkeypatch.setattr(retriever, "_refresh_provider_token", refused)
+    monkeypatch.setattr(retriever, "_refresh_provider_token", _refused)
 
     with pytest.raises(ProviderTokenExpiredError) as raised:
         retriever.retrieve_token("callers-keycloak-token")
     assert raised.value.provider_alias == "testprovider"
     assert "Reconnect testprovider" in raised.value.message
+
+
+def test_an_unlinked_reread_is_also_an_expired_link(monkeypatch, retriever):
+    answers = iter([_tokens(-20), None])
+    monkeypatch.setattr(
+        retriever, "_get_stored_provider_token", lambda t: next(answers)
+    )
+    monkeypatch.setattr(retriever, "_refresh_provider_token", _refused)
+
+    with pytest.raises(ProviderTokenExpiredError):
+        retriever.retrieve_token("callers-keycloak-token")
