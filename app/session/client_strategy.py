@@ -39,6 +39,7 @@ from app.multi_server import (
     current_keycloak_provider_alias,
     current_remote_url,
     current_server_id,
+    remote_proxy_url,
 )
 from app.oauth.credential_headers import is_caller_credential_header
 from app.oauth.token_exchange import (
@@ -315,8 +316,11 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         # tailnet; None connects directly.
         from app import vars as app_vars
 
+        # Validated again: settings_from reads it from the environment as is.
         self.proxy = (
-            app_vars.per_server_str("MCP_REMOTE_PROXY_URL", MCP_REMOTE_PROXY_URL)
+            remote_proxy_url(
+                app_vars.per_server_str("MCP_REMOTE_PROXY_URL", MCP_REMOTE_PROXY_URL)
+            )
             or None
         )
         self._prepare_auth()

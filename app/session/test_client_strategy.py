@@ -885,3 +885,65 @@ async def test_proxied_client_sends_requests_to_the_proxy_only(monkeypatch):
         await server.wait_closed()
     assert response.text == "ok"
     assert seen == ["GET http://home.tail1234.ts.net:8080/mcp HTTP/1.1"]
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_sends_sse_traffic_through_its_proxy(monkeypatch):
+    from app import multi_server
+
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_sse_client(url, headers=None, httpx_client_factory=None, **kw):
+        captured["url"] = url
+        client = httpx_client_factory(headers=headers)
+        captured["proxied"] = client._mounts
+        await client.aclose()
+        yield object(), object()
+
+    monkeypatch.setattr(client_strategy, "sse_client", fake_sse_client)
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    proxy = "http://tailnet-abc.orchestrator.svc.cluster.local:1055"
+    token = multi_server.bind_server(_proxy_server(proxy))
+    try:
+        strategy = client_strategy.RemoteMCPClientStrategy(
+            "https://home.tail1234.ts.net/sse",
+            access_token=None,
+            requested_group=None,
+            anon=True,
+        )
+    finally:
+        multi_server.reset_server(token)
+    async with strategy.session():
+        pass
+    assert captured["url"] == "https://home.tail1234.ts.net/sse"
+    assert captured["proxied"], "the SSE client must be built with the proxy"
+
+
+def test_a_proxy_from_settings_from_is_validated(monkeypatch):
+    from app import multi_server
+
+    monkeypatch.setenv("MCPS_HOME__PROXY", "http://user:pw@proxy:1055/path")
+    (server,) = multi_server.parse_servers(
+        __import__("json").dumps(
+            [
+                {
+                    "id": "mcp-home-server",
+                    "base_path": "/api/mcp-home-server",
+                    "url": "https://home.tail1234.ts.net/mcp",
+                    "settings_from": {"MCP_REMOTE_PROXY_URL": "MCPS_HOME__PROXY"},
+                }
+            ]
+        )
+    )
+    token = multi_server.bind_server(server)
+    try:
+        with pytest.raises(ValueError):
+            client_strategy.RemoteMCPClientStrategy(
+                "https://home.tail1234.ts.net/mcp",
+                access_token=None,
+                requested_group=None,
+                anon=True,
+            )
+    finally:
+        multi_server.reset_server(token)
