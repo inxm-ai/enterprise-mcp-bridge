@@ -118,6 +118,52 @@ class TestTokenExtraction:
         ):
             assert _extract_access_token(request) is None
 
+    def test_extract_falls_back_to_bearer_authorization(self):
+        """A caller without oauth2-proxy in front sends only Authorization."""
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer bearer_tok"}
+        request.cookies = {}
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
+        ):
+            assert _extract_access_token(request) == "bearer_tok"
+
+    def test_extract_prefers_token_header_over_authorization(self):
+        request = MagicMock()
+        request.headers = {
+            "X-Auth-Request-Access-Token": "proxy_tok",
+            "Authorization": "Bearer bearer_tok",
+        }
+        request.cookies = {}
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
+        ):
+            assert _extract_access_token(request) == "proxy_tok"
+
+    def test_extract_ignores_non_bearer_authorization(self):
+        request = MagicMock()
+        request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
+        request.cookies = {}
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
+        ):
+            assert _extract_access_token(request) is None
+
+    def test_extract_cookie_mode_falls_back_to_headers(self):
+        """Same order as the REST routes: cookie, then header, then Bearer."""
+        request = MagicMock()
+        request.headers = {"Authorization": "bearer bearer_tok"}
+        request.cookies = {}
+        with (
+            patch("app.sse.mcp_proxy.TOKEN_SOURCE", "cookie"),
+            patch("app.sse.mcp_proxy.TOKEN_COOKIE_NAME", "_oauth2_proxy"),
+            patch("app.sse.mcp_proxy.TOKEN_NAME", "X-Auth-Request-Access-Token"),
+        ):
+            assert _extract_access_token(request) == "bearer_tok"
+
 
 # ---------------------------------------------------------------------------
 # Proxy server builder
