@@ -864,8 +864,10 @@ async def test_proxied_client_sends_requests_to_the_proxy_only(monkeypatch):
 
     async def proxy(reader, writer):
         seen.append((await reader.readline()).decode().strip())
-        while (await reader.readline()).strip():
-            pass
+        while line := (await reader.readline()).strip():
+            name, _, value = line.decode().partition(":")
+            if name.lower() == "proxy-authorization":
+                seen.append(value.strip())
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
         await writer.drain()
         writer.close()
@@ -874,9 +876,9 @@ async def test_proxied_client_sends_requests_to_the_proxy_only(monkeypatch):
     port = server.sockets[0].getsockname()[1]
     monkeypatch.setenv("HTTP_PROXY", "http://env-proxy.invalid:3128")
     try:
-        client = client_strategy._proxied_client_factory(f"http://127.0.0.1:{port}")(
-            headers={"x": "y"}
-        )
+        client = client_strategy._proxied_client_factory(
+            f"http://inxm:t0ken@127.0.0.1:{port}"
+        )(headers={"x": "y"})
         async with client:
             assert client.timeout.read == 300.0
             response = await client.get("http://home.tail1234.ts.net:8080/mcp")
@@ -884,7 +886,11 @@ async def test_proxied_client_sends_requests_to_the_proxy_only(monkeypatch):
         server.close()
         await server.wait_closed()
     assert response.text == "ok"
-    assert seen == ["GET http://home.tail1234.ts.net:8080/mcp HTTP/1.1"]
+    # The credential in the URL goes to the proxy as Basic auth.
+    assert seen == [
+        "GET http://home.tail1234.ts.net:8080/mcp HTTP/1.1",
+        "Basic " + __import__("base64").b64encode(b"inxm:t0ken").decode(),
+    ]
 
 
 @pytest.mark.asyncio
@@ -924,6 +930,7 @@ def test_a_proxy_from_settings_from_is_validated(monkeypatch):
     from app import multi_server
 
     monkeypatch.setenv("MCPS_HOME__PROXY", "http://user:pw@proxy:1055/path")
+    # (credentials are fine; the path is not)
     (server,) = multi_server.parse_servers(
         __import__("json").dumps(
             [

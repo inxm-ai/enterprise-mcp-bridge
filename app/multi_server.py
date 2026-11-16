@@ -120,8 +120,10 @@ def trace_query_url(value: str) -> str:
 def remote_proxy_url(value: str) -> str:
     """Validate an HTTP proxy for a remote server's upstream traffic.
 
-    ``http://host:port`` or ``https://host:port``; empty disables it. No
-    credentials, path, query or fragment: the URL is logged and shown.
+    ``http(s)://host:port``, optionally ``http(s)://user:password@host:port``
+    (sent as ``Proxy-Authorization: Basic``, e.g. a Tailscale connector's
+    token); empty disables it. No path, query or fragment. The value is never
+    logged: error messages do not repeat it.
     """
     if not value:
         return value
@@ -134,15 +136,15 @@ def remote_proxy_url(value: str) -> str:
         parsed.scheme not in ("http", "https")
         or not parsed.hostname
         or port is None
-        or parsed.username is not None
-        or parsed.password is not None
+        # A user name needs its password (and the other way round).
+        or (parsed.username is None) != (parsed.password is None)
         or parsed.path not in ("", "/")
         or parsed.query
         or parsed.fragment
     ):
         raise ValueError(
-            "MCP_REMOTE_PROXY_URL must be http(s)://host:port without "
-            "credentials or path"
+            "MCP_REMOTE_PROXY_URL must be http(s)://[user:password@]host:port "
+            "without a path"
         )
     return value
 

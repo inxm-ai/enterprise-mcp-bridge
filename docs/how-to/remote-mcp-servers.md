@@ -510,3 +510,14 @@ sets `MCP_REMOTE_PROXY_URL` in its `settings`:
 
 Only that server's upstream traffic uses the proxy; other servers in the same
 bridge connect directly. Environment proxy variables do not apply to it.
+
+A proxy that requires authentication takes `user:password@` in the URL; it
+is sent as `Proxy-Authorization: Basic`. Because the URL then carries a
+credential, read it from a Secret with `settings_from` rather than
+`settings` (app-mcp-manager does this for Tailscale connectors):
+
+```json
+"settings_from": {"MCP_REMOTE_PROXY_URL": "MCPS_HOME__MCP_REMOTE_PROXY_URL"}
+```
+
+The bridge never logs the value, and validation errors do not repeat it.
