@@ -1519,6 +1519,7 @@ def test_forward_access_token_env_is_the_standalone_default(monkeypatch):
     [
         "http://tailnet-abc.orchestrator.svc.cluster.local:1055",
         "https://proxy.example:8443/",
+        "http://inxm:0123456789abcdef@tailnet-abc.orchestrator.svc.cluster.local:1055",
     ],
 )
 def test_a_server_may_set_its_remote_proxy(proxy):
@@ -1542,7 +1543,7 @@ def test_a_server_may_set_its_remote_proxy(proxy):
     [
         "socks5://proxy:1080",
         "http://proxy",
-        "http://user:pw@proxy:1055",
+        "http://user@proxy:1055",
         "http://proxy:1055/path",
         "http://proxy:1055?x=1",
         "http://:1055",
@@ -1550,7 +1551,7 @@ def test_a_server_may_set_its_remote_proxy(proxy):
     ],
 )
 def test_a_bad_remote_proxy_is_refused(proxy):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as refused:
         multi_server.parse_servers(
             json.dumps(
                 [
@@ -1563,3 +1564,11 @@ def test_a_bad_remote_proxy_is_refused(proxy):
                 ]
             )
         )
+    # The value may carry a token: the error never repeats it.
+    assert proxy not in str(refused.value)
+
+
+def test_a_refused_proxy_with_a_token_never_shows_the_token():
+    with pytest.raises(ValueError) as refused:
+        multi_server.remote_proxy_url("http://inxm:s3cret-token@proxy:1055/path")
+    assert "s3cret-token" not in str(refused.value)

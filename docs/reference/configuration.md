@@ -313,11 +313,12 @@ ENV=dev
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MCP_REMOTE_PROXY_URL` | _(empty)_ | `http(s)://host:port` of an HTTP proxy every request to the remote MCP server goes through, e.g. a Tailscale connector's outbound proxy into a private tailnet. Empty connects directly |
+| `MCP_REMOTE_PROXY_URL` | _(empty)_ | `http(s)://[user:password@]host:port` of an HTTP proxy every request to the remote MCP server goes through, e.g. a Tailscale connector's outbound proxy into a private tailnet. Empty connects directly |
 
-Set it per server in an `MCP_SERVERS` entry's `settings`. With a proxy the
-server's client ignores `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`. The URL may not
-carry credentials or a path.
+Set it per server in an `MCP_SERVERS` entry's `settings` (or `settings_from`
+when it carries a credential). With a proxy the server's client ignores
+`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`. The URL may carry `user:password@`
+(Basic proxy authentication) but no path; it is never logged.
 
 ### Remote session admission
 
