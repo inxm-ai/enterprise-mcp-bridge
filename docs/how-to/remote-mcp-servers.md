@@ -488,3 +488,25 @@ include their protocol code and map to 502 on REST; -32603 alone is not
 evidence of rate limiting. The original protocol exception remains intact
 inside MCP sessions. The bridge does not automatically retry tool calls:
 a failed response does not establish whether a write executed.
+
+## Reach a remote through an HTTP proxy
+
+A remote that is only reachable through a proxy (for example a server in a
+private tailnet, reached through a Tailscale connector's outbound HTTP proxy)
+sets `MCP_REMOTE_PROXY_URL` in its `settings`:
+
+```json
+{
+  "id": "mcp-home-server",
+  "base_path": "/api/mcp-home-server",
+  "url": "https://home.tail1234.ts.net/mcp",
+  "sessionless": true,
+  "forward_access_token": false,
+  "settings": {
+    "MCP_REMOTE_PROXY_URL": "http://tailnet-connector.orchestrator.svc.cluster.local:1055"
+  }
+}
+```
+
+Only that server's upstream traffic uses the proxy; other servers in the same
+bridge connect directly. Environment proxy variables do not apply to it.

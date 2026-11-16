@@ -94,6 +94,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from app.isolation import check_unique_uids, enabled_globally
 
@@ -116,6 +117,36 @@ def trace_query_url(value: str) -> str:
     return value
 
 
+def remote_proxy_url(value: str) -> str:
+    """Validate an HTTP proxy for a remote server's upstream traffic.
+
+    ``http://host:port`` or ``https://host:port``; empty disables it. No
+    credentials, path, query or fragment: the URL is logged and shown.
+    """
+    if not value:
+        return value
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("MCP_REMOTE_PROXY_URL has an invalid port") from exc
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "MCP_REMOTE_PROXY_URL must be http(s)://host:port without "
+            "credentials or path"
+        )
+    return value
+
+
 # Bridge settings a server may set for itself, with a check of the value.
 SETTINGS = {
     "INTERNAL_API_SECRET": str,
@@ -132,6 +163,7 @@ SETTINGS = {
     "MCP_REMOTE_MAX_CONCURRENT_SESSIONS": int,
     "MCP_REMOTE_ADMISSION_TIMEOUT_SECONDS": float,
     "TOKEN_EXCHANGE_AUDIENCE": str,
+    "MCP_REMOTE_PROXY_URL": remote_proxy_url,
 }
 
 
