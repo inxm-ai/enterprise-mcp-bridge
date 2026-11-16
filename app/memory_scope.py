@@ -2,11 +2,17 @@
 
 Only the local memory child can accept this header. It is deliberately not a
 general data_path override, and never falls back to a personal/shared tenant.
+
+One more scope exists for removing a person: ``u/<user id>`` names another
+person's own memory, and is accepted for exactly one tool, ``delete_graph``,
+from a platform administrator. Nothing can read or write through it.
 """
 
 import hmac
 import os
-from typing import Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator, Optional
 from urllib.parse import quote_plus
 from uuid import UUID
 
@@ -14,8 +20,49 @@ from fastapi import HTTPException
 
 from app.multi_server import current_server, current_setting, is_multi_server_mode
 from app.oauth.user_info import get_data_access_manager
+from app.vars import MCP_USER_DATA_ACCESS_TEMPLATE
 
 SCOPE_HEADER = "x-inxm-memory-scope"
+# The only tool a removed person's memory accepts, and who may call it.
+WIPE_TOOL = "delete_graph"
+PLATFORM_ADMIN_ROLE = "platform-admin"
+
+# The tool a request is calling, when it is a tool call. Unset anywhere else
+# (listings, prompts, sessions), where a person scope is always refused.
+_called_tool: ContextVar[Optional[str]] = ContextVar("memory_scope_tool", default=None)
+
+
+@contextmanager
+def calling_tool(tool_name: Optional[str]) -> Iterator[None]:
+    """Marks the tool the current request calls, for the scope decision."""
+    token = _called_tool.set(tool_name)
+    try:
+        yield
+    finally:
+        _called_tool.reset(token)
+
+
+def _removed_person_tenant(scope: str, access_token: str, group: Optional[str]) -> str:
+    """``u/<user id>``: another person's own memory, to delete it and nothing else."""
+    if group is not None or _called_tool.get() != WIPE_TOOL:
+        raise HTTPException(400, "A person's memory scope only deletes that memory")
+    manager = get_data_access_manager()
+    user_id = scope[2:]
+    if not user_id or manager._sanitize_identifier(user_id) != user_id:
+        raise HTTPException(400, "Invalid person memory scope")
+    # The tenant a person's own calls resolve to; a deployment that stores
+    # personal memory elsewhere has no `u/` scope to delete.
+    if MCP_USER_DATA_ACCESS_TEMPLATE.format(user_id=user_id) != scope:
+        raise HTTPException(400, "Invalid person memory scope")
+    try:
+        caller = manager.user_extractor.extract_user_info(access_token)
+    except (AssertionError, ValueError):
+        raise HTTPException(401, "Invalid caller credential")
+    if PLATFORM_ADMIN_ROLE not in (caller.get("roles") or []):
+        raise HTTPException(
+            403, "Only a platform administrator deletes a person's memory"
+        )
+    return scope
 
 
 def memory_tenant(
@@ -81,4 +128,6 @@ def memory_tenant(
         except (AssertionError, ValueError):
             raise HTTPException(401, "Invalid caller credential")
         return scope
+    if scope.startswith("u/"):
+        return _removed_person_tenant(scope, access_token, group)
     raise HTTPException(400, "Unsupported memory scope")

@@ -252,3 +252,73 @@ def test_start_session_rejects_scope_headers_before_starting_a_personal_child(
     assert response.status_code == 400, response.text
     assert "sessionless" in response.text
     start.assert_not_called()
+
+
+# Removing a person: their own memory is addressed by `u/<user id>`, to
+# delete it and for nothing else.
+
+PERSON = "u/3f0c2c7e-9d1b-4a57-8f5e-0a1b2c3d4e5f"
+
+
+def _admin_token():
+    return jwt.encode(
+        {"sub": "admin", "realm_access": {"roles": ["platform-admin"]}},
+        "test",
+        algorithm="HS256",
+    )
+
+
+def test_an_administrator_deletes_a_removed_persons_memory_and_nothing_else(configured):
+    from app.memory_scope import calling_tool
+
+    with calling_tool("delete_graph"):
+        assert memory_tenant(headers(PERSON), _admin_token(), None) == PERSON
+    # Reading or writing through it is refused, as is a call that is no tool call.
+    for tool in (
+        "read_graph",
+        "search_nodes",
+        "create_entities",
+        "delete_entities",
+        None,
+    ):
+        with calling_tool(tool):
+            with pytest.raises(HTTPException) as refused:
+                memory_tenant(headers(PERSON), _admin_token(), None)
+            assert refused.value.status_code == 400, tool
+
+
+def test_a_persons_memory_scope_needs_the_secret_an_administrator_and_a_plain_id(
+    configured,
+):
+    from app.memory_scope import calling_tool
+
+    with calling_tool("delete_graph"):
+        with pytest.raises(HTTPException) as no_secret:
+            memory_tenant(headers(PERSON, secret="wrong"), _admin_token(), None)
+        assert no_secret.value.status_code == 403
+        # `configured` is an ordinary person's token.
+        with pytest.raises(HTTPException) as not_admin:
+            memory_tenant(headers(PERSON), configured, None)
+        assert not_admin.value.status_code == 403
+        with pytest.raises(HTTPException) as no_caller:
+            memory_tenant(headers(PERSON), None, None)
+        assert no_caller.value.status_code == 401
+        for scope in ("u/", "u/../g/team", "u/a/b", "u/a b", "g/team", "shared/x"):
+            with pytest.raises(HTTPException) as invalid:
+                memory_tenant(headers(scope), _admin_token(), None)
+            assert invalid.value.status_code == 400, scope
+        with pytest.raises(HTTPException) as grouped:
+            memory_tenant(headers(PERSON), _admin_token(), "engineering")
+        assert grouped.value.status_code == 400
+
+
+def test_the_wipe_starts_the_memory_child_for_that_person_only(configured):
+    from app.memory_scope import calling_tool
+
+    with calling_tool("delete_graph"):
+        strategy = build_mcp_client_strategy(
+            access_token=_admin_token(),
+            requested_group=None,
+            incoming_headers=headers(PERSON),
+        )
+    assert strategy.server_params.env["MEMORY_TENANT"] == PERSON
