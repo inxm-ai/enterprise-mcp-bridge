@@ -178,7 +178,8 @@ if _OTEL_AVAILABLE:
         tracer_provider.add_span_processor(span_processor)
 
     # Instrument FastAPI. Probes and scrapes (/metrics, /healthz*, the
-    # base-path root) are excluded: no request span, no http send/receive.
+    # base-path root) are excluded: no request span. No request gets http
+    # send/receive child spans: they repeat the request span's status.
     _probe_base_paths = [MCP_BASE_PATH]
     if is_multi_server_mode():
         _probe_base_paths += [c.base_path for c in configured_servers()]
@@ -193,6 +194,7 @@ if _OTEL_AVAILABLE:
         ),
         server_request_hook=None,
         client_request_hook=None,
+        exclude_spans=["receive", "send"],
     )
 
 # Add app_name to the metrics

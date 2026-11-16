@@ -167,6 +167,17 @@ def test_bridge_probes_and_scrapes_produce_no_spans(spans, monkeypatch):
     assert "GET /openapi.json" in _names(spans)
 
 
+def test_traced_requests_have_no_asgi_send_receive_spans(spans):
+    """The request span already carries method, route and status."""
+    client = TestClient(fastapi_app)
+
+    assert client.get("/openapi.json").status_code == 200
+    assert "GET /openapi.json" in _names(spans)
+    assert not [
+        name for name in _names(spans) if name.endswith((" http send", " http receive"))
+    ]
+
+
 @pytest.fixture
 def child_params(tmp_path):
     server = tmp_path / "probe_server.py"
