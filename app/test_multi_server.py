@@ -1512,3 +1512,54 @@ def test_forward_access_token_env_is_the_standalone_default(monkeypatch):
 
     monkeypatch.setenv("MCP_FORWARD_ACCESS_TOKEN", "TRUE")
     assert multi_server.current_forward_access_token() is True
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "http://tailnet-abc.orchestrator.svc.cluster.local:1055",
+        "https://proxy.example:8443/",
+    ],
+)
+def test_a_server_may_set_its_remote_proxy(proxy):
+    (server,) = multi_server.parse_servers(
+        json.dumps(
+            [
+                {
+                    "id": "x",
+                    "base_path": "/x",
+                    "url": "https://home.tail1234.ts.net/mcp",
+                    "settings": {"MCP_REMOTE_PROXY_URL": proxy},
+                }
+            ]
+        )
+    )
+    assert server.settings["MCP_REMOTE_PROXY_URL"] == proxy
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "socks5://proxy:1080",
+        "http://proxy",
+        "http://user:pw@proxy:1055",
+        "http://proxy:1055/path",
+        "http://proxy:1055?x=1",
+        "http://:1055",
+        "http://proxy:notaport",
+    ],
+)
+def test_a_bad_remote_proxy_is_refused(proxy):
+    with pytest.raises(ValueError):
+        multi_server.parse_servers(
+            json.dumps(
+                [
+                    {
+                        "id": "x",
+                        "base_path": "/x",
+                        "url": "https://home.tail1234.ts.net/mcp",
+                        "settings": {"MCP_REMOTE_PROXY_URL": proxy},
+                    }
+                ]
+            )
+        )

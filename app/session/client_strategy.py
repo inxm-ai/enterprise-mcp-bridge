@@ -15,7 +15,12 @@ from mcp.client.client import negotiate_auto
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.client.sse import sse_client
-from mcp.shared._httpx_utils import create_mcp_http_client
+import httpx2
+from mcp.shared._httpx_utils import (
+    MCP_DEFAULT_SSE_READ_TIMEOUT,
+    MCP_DEFAULT_TIMEOUT,
+    create_mcp_http_client,
+)
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
 
 from app.admission import child_slot, remote_slot, remote_identity
@@ -51,6 +56,7 @@ from app.vars import (
     MCP_REMOTE_BEARER_TOKEN,
     MCP_REMOTE_CLIENT_ID,
     MCP_REMOTE_CLIENT_SECRET,
+    MCP_REMOTE_PROXY_URL,
     MCP_REMOTE_REDIRECT_URI,
     MCP_REMOTE_SCOPE,
     MCP_REMOTE_SERVER,
@@ -130,14 +136,38 @@ async def _negotiate(session) -> None:
     )
 
 
+def _proxied_client_factory(proxy: str):
+    """An MCP HTTP client factory whose clients send everything through ``proxy``.
+
+    Same defaults as the SDK's ``create_mcp_http_client``. Environment proxy
+    variables are ignored: this server's traffic goes to ``proxy`` only.
+    """
+
+    def factory(headers=None, timeout=None, auth=None) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            headers=headers,
+            timeout=timeout
+            or httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
+            auth=auth,
+            proxy=proxy,
+            trust_env=False,
+        )
+
+    return factory
+
+
 @asynccontextmanager
-async def _streamable_client(url: str, headers=None, auth=None):
+async def _streamable_client(url: str, headers=None, auth=None, proxy=None):
     """The streamable HTTP transport with the bridge's headers and auth on its client.
 
     SDK v2 takes a ready HTTP client instead of headers and auth; the client
-    is owned here, so it is closed here.
+    is owned here, so it is closed here. With ``proxy`` every request goes
+    through that HTTP proxy.
     """
-    http_client = create_mcp_http_client(headers=headers, auth=auth)
+    if proxy:
+        http_client = _proxied_client_factory(proxy)(headers=headers, auth=auth)
+    else:
+        http_client = create_mcp_http_client(headers=headers, auth=auth)
     async with http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
@@ -281,6 +311,14 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
         self._client_metadata = self._build_client_metadata()
         # Resolved here, inside the request, for the server being connected.
         self.forward_access_token = current_forward_access_token(True)
+        # Upstream traffic through an HTTP proxy, e.g. into a private
+        # tailnet; None connects directly.
+        from app import vars as app_vars
+
+        self.proxy = (
+            app_vars.per_server_str("MCP_REMOTE_PROXY_URL", MCP_REMOTE_PROXY_URL)
+            or None
+        )
         self._prepare_auth()
 
     def _build_client_metadata(self) -> OAuthClientMetadata:
@@ -599,6 +637,15 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                         sse_client(
                             self.url,
                             headers=headers,
+                            **(
+                                {
+                                    "httpx_client_factory": _proxied_client_factory(
+                                        self.proxy
+                                    )
+                                }
+                                if self.proxy
+                                else {}
+                            ),
                         )
                     )
                 else:
@@ -610,6 +657,7 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                             self.url,
                             headers=headers,
                             auth=self._auth_provider,
+                            **({"proxy": self.proxy} if self.proxy else {}),
                         )
                     )
 

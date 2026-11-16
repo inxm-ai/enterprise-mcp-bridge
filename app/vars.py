@@ -9,6 +9,7 @@ from typing import Any, Optional
 from app.multi_server import (
     current_setting,
     current_tool_output_schemas,
+    remote_proxy_url,
     trace_query_url,
 )
 from app.utils.effect_tools import is_effect_tool
@@ -303,6 +304,9 @@ MCP_REMOTE_CLIENT_ID = os.getenv("MCP_REMOTE_CLIENT_ID", "")
 MCP_REMOTE_CLIENT_SECRET = os.getenv("MCP_REMOTE_CLIENT_SECRET", "")
 MCP_REMOTE_BEARER_TOKEN = os.getenv("MCP_REMOTE_BEARER_TOKEN", "")
 MCP_REMOTE_ANON_BEARER_TOKEN = os.getenv("MCP_REMOTE_ANON_BEARER_TOKEN", "")
+# HTTP proxy for upstream remote MCP traffic (e.g. a Tailscale connector's
+# outbound proxy into a private tailnet). Per server via `settings`.
+MCP_REMOTE_PROXY_URL = remote_proxy_url(os.getenv("MCP_REMOTE_PROXY_URL", ""))
 # Upper bound on remote transport teardown. An unbounded close wedged inside a
 # cancelled scope busy-loops anyio's cancellation delivery (permanent CPU spin).
 MCP_REMOTE_TEARDOWN_TIMEOUT_SECONDS = float(

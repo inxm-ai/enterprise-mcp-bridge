@@ -783,3 +783,105 @@ def test_provider_alias_fails_closed_when_exchange_returns_no_token(monkeypatch)
         client_strategy.build_mcp_client_strategy(
             access_token="caller-jwt", requested_group=None
         )
+
+
+def _proxy_server(proxy):
+    from app import multi_server
+
+    (server,) = multi_server.parse_servers(
+        __import__("json").dumps(
+            [
+                {
+                    "id": "mcp-home-server",
+                    "base_path": "/api/mcp-home-server",
+                    "url": "https://home.tail1234.ts.net/mcp",
+                    "settings": {"MCP_REMOTE_PROXY_URL": proxy},
+                }
+            ]
+        )
+    )
+    return server
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_sends_a_servers_traffic_through_its_proxy(
+    monkeypatch,
+):
+    from app import multi_server
+
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None, proxy=None):
+        captured["url"] = url
+        captured["proxy"] = proxy
+        yield object(), object()
+
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    proxy = "http://tailnet-abc.orchestrator.svc.cluster.local:1055"
+    token = multi_server.bind_server(_proxy_server(proxy))
+    try:
+        strategy = client_strategy.RemoteMCPClientStrategy(
+            "https://home.tail1234.ts.net/mcp",
+            access_token=None,
+            requested_group=None,
+            anon=True,
+        )
+    finally:
+        multi_server.reset_server(token)
+    async with strategy.session():
+        pass
+    assert captured == {"url": "https://home.tail1234.ts.net/mcp", "proxy": proxy}
+
+
+@pytest.mark.asyncio
+async def test_remote_strategy_without_proxy_connects_directly(monkeypatch):
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_streamable_client(url, headers=None, auth=None, **kwargs):
+        captured.update(kwargs)
+        yield object(), object()
+
+    monkeypatch.setattr(client_strategy, "_streamable_client", fake_streamable_client)
+    monkeypatch.setattr(client_strategy, "ClientSession", DummyClientSession)
+    strategy = client_strategy.RemoteMCPClientStrategy(
+        "https://remote.example/mcp",
+        access_token=None,
+        requested_group=None,
+        anon=True,
+    )
+    assert strategy.proxy is None
+    async with strategy.session():
+        pass
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_proxied_client_sends_requests_to_the_proxy_only(monkeypatch):
+    seen = []
+
+    async def proxy(reader, writer):
+        seen.append((await reader.readline()).decode().strip())
+        while (await reader.readline()).strip():
+            pass
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(proxy, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("HTTP_PROXY", "http://env-proxy.invalid:3128")
+    try:
+        client = client_strategy._proxied_client_factory(f"http://127.0.0.1:{port}")(
+            headers={"x": "y"}
+        )
+        async with client:
+            assert client.timeout.read == 300.0
+            response = await client.get("http://home.tail1234.ts.net:8080/mcp")
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert response.text == "ok"
+    assert seen == ["GET http://home.tail1234.ts.net:8080/mcp HTTP/1.1"]
