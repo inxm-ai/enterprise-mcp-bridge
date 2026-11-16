@@ -94,11 +94,33 @@ sse_transport = SseServerTransport(_message_endpoint_path())
 # ---------------------------------------------------------------------------
 
 
+BEARER_PREFIX = "bearer "
+
+
 def _extract_access_token(request: Request) -> Optional[str]:
-    """Extract access token from request headers or cookies."""
+    """Extract the caller's access token, in the same order as the REST routes
+    (app/oauth/token_dependency.get_access_token): the cookie when
+    TOKEN_SOURCE=cookie, then the TOKEN_NAME header, then a standard
+    ``Authorization: Bearer`` header. Clients without oauth2-proxy in front of
+    the bridge (desktop clients, another bridge calling this one as a remote
+    MCP server) send only the last.
+
+    KEEP IN STEP with get_access_token: the two lookups are separate copies
+    (that one is a FastAPI dependency, this one serves the raw ASGI SSE
+    endpoint), and when the SSE copy lacked the Bearer fallback, Bearer-only
+    callers were refused here while the REST routes accepted them. Change
+    both together, or move both onto one shared helper."""
     if TOKEN_SOURCE == "cookie":
-        return request.cookies.get(TOKEN_COOKIE_NAME)
-    return request.headers.get(TOKEN_NAME)
+        cookie_value = request.cookies.get(TOKEN_COOKIE_NAME)
+        if cookie_value:
+            return cookie_value
+    header_token = request.headers.get(TOKEN_NAME)
+    if header_token:
+        return header_token
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith(BEARER_PREFIX):
+        return auth[len(BEARER_PREFIX) :]
+    return None
 
 
 # ---------------------------------------------------------------------------

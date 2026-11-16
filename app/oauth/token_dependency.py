@@ -14,6 +14,10 @@ async def get_access_token(
 ) -> Optional[str]:
     """
     Dependency to retrieve the access token based on the configured TOKEN_SOURCE.
+
+    KEEP IN STEP with app/sse/mcp_proxy._extract_access_token, which applies
+    the same order (cookie, TOKEN_NAME header, Authorization: Bearer) to the
+    SSE endpoint. Change both together, or move both onto one shared helper.
     """
     if TOKEN_SOURCE == "cookie":
         cookie_value = request.cookies.get(TOKEN_COOKIE_NAME)
