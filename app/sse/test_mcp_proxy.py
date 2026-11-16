@@ -144,7 +144,7 @@ class TestTokenExtraction:
 
     def test_extract_ignores_non_bearer_authorization(self):
         request = MagicMock()
-        request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
+        request.headers = {"Authorization": "Basic some-secret"}
         request.cookies = {}
         with (
             patch("app.sse.mcp_proxy.TOKEN_SOURCE", "header"),
