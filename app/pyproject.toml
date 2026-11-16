@@ -7,6 +7,8 @@ authors = [{ name = "Matthias Kainer", email = "matthias@inxm.ai" }]
 requires-python = ">=3.11"
 dependencies = [
     "httpx",
+    # The MCP SDK's HTTP client; the remote proxy builds its own.
+    "httpx2",
     "ijson>=3.3",
     "fastapi",
     "uvicorn",
