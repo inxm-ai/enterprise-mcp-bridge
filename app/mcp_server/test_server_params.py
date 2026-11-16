@@ -226,3 +226,48 @@ def test_command_template_uses_caller_token_not_exchanged_token(monkeypatch):
     assert params.command == "server"
     assert params.args == ["--cache", "/cache/u/caller_jwt"]
     assert seen_tokens == ["caller_jwt"]
+
+
+class RaisingTokenRetrieverFactory:
+    def __init__(self, error):
+        self.error = error
+
+    def get(self, *args, **kwargs):
+        error = self.error
+
+        class Retriever:
+            def retrieve_token(self, token):
+                raise error
+
+        return Retriever()
+
+
+def test_an_expired_provider_link_never_falls_back_to_the_callers_token(monkeypatch):
+    from app.oauth.token_exchange import ProviderTokenExpiredError
+
+    patch_module(monkeypatch, env={"OAUTH_ENV": "AZURE_MGMT_OAUTH_TOKEN"})
+    monkeypatch.setattr(
+        server_params,
+        "TokenRetrieverFactory",
+        lambda: RaisingTokenRetrieverFactory(
+            ProviderTokenExpiredError("azure-management")
+        ),
+    )
+
+    with pytest.raises(ProviderTokenExpiredError) as raised:
+        server_params.get_server_params(access_token="callers-keycloak-token")
+    assert "Reconnect azure-management" in raised.value.message
+
+
+def test_other_retrieval_failures_still_pass_the_raw_value_through(monkeypatch):
+    # Cookie set-ups rely on this: the broker refuses the cookie value, and
+    # the server wants that value as it is.
+    patch_module(monkeypatch, env={"OAUTH_ENV": "OAUTH_TOKEN_VAR"})
+    monkeypatch.setattr(
+        server_params,
+        "TokenRetrieverFactory",
+        lambda: RaisingTokenRetrieverFactory(RuntimeError("broker said no")),
+    )
+
+    params = server_params.get_server_params(access_token="cookie-value")
+    assert params.env["OAUTH_TOKEN_VAR"] == "cookie-value"

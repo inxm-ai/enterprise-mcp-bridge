@@ -78,9 +78,22 @@ from app.oauth.connection_policy import (
     record_connection_code,
 )
 from opentelemetry import trace
-from .oauth.token_exchange import UserLoggedOutException
+from .oauth.token_exchange import ProviderTokenExpiredError, UserLoggedOutException
 from .oauth.token_dependency import get_access_token
 from .utils import mask_token, token_fingerprint
+
+# Typed X-Inxm-Connection-Code on the 401 when the person's linked provider
+# token expired and could not be renewed: they need to reconnect that
+# provider, not sign in to the platform again.
+PROVIDER_TOKEN_EXPIRED_CODE = "provider_token_expired"
+
+
+def _unauthorized(error: UserLoggedOutException) -> HTTPException:
+    if isinstance(error, ProviderTokenExpiredError):
+        record_connection_code(PROVIDER_TOKEN_EXPIRED_CODE)
+    return HTTPException(status_code=401, detail=error.message)
+
+
 from .utils.exception_logging import (
     find_exception_in_exception_groups,
     log_exception_with_details,
@@ -256,7 +269,7 @@ async def list_resources(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Resources] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         log_sanitized_exception(logger, "[Session]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
@@ -353,7 +366,7 @@ async def get_resource_details(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Resource-Details] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         # Resource bodies and downstream error messages are sensitive; only
         # sanitized exception details reach the logs on this path.
@@ -402,7 +415,7 @@ async def list_prompts(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Prompts] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         log_sanitized_exception(logger, "[Session]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
@@ -454,7 +467,7 @@ async def list_tools(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tools] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         log_sanitized_exception(logger, "[Tools]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
@@ -512,7 +525,7 @@ async def get_tool_details(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tool-Details] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         log_exception_with_details(logger, "[Tool-Details]", e)
         child_http_exception = find_exception_in_exception_groups(e, HTTPException)
@@ -711,7 +724,7 @@ async def run_tool(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         # Downstream exception messages can embed request/response content,
         # so only sanitized details reach the logs on this path.
@@ -805,7 +818,7 @@ async def run_prompt(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Prompt-Call] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         # Downstream exception messages can embed request/response content,
         # so only sanitized details reach the logs on this path.
@@ -913,7 +926,7 @@ async def start_session(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
         log_sanitized_exception(logger, "[Session]", e)
@@ -964,7 +977,7 @@ async def close_session(
         raise e
     except UserLoggedOutException as e:
         logger.warning(f"[Tool-Call] Unauthorized access: {str(e)}")
-        raise HTTPException(status_code=401, detail=e.message)
+        raise _unauthorized(e)
     except Exception as e:
         # Handle TaskGroup exceptions with multiple sub-exceptions
         log_sanitized_exception(logger, "[Session]", e)

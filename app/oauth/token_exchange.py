@@ -91,6 +91,24 @@ class UserLoggedOutException(Exception):
         super().__init__(message)
 
 
+class ProviderTokenExpiredError(UserLoggedOutException):
+    """The person's stored provider token expired and could not be renewed.
+
+    Raised only after Keycloak returned a stored token for the provider, so
+    the person is signed in and linked: the link itself needs renewing. The
+    bridge must not fall back to the caller's own token here, since a server
+    that wants the provider's token would get a credential for the wrong
+    service and fail in a misleading way.
+    """
+
+    def __init__(self, provider_alias: str):
+        self.provider_alias = provider_alias
+        super().__init__(
+            f"The {provider_alias} connection has expired and could not be "
+            f"renewed. Reconnect {provider_alias} and try again."
+        )
+
+
 _jwks_client = None
 
 
@@ -569,9 +587,20 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 )
             # Check if token needs refresh
             if self._token_needs_refresh(provider_tokens):
-                provider_tokens = self._refresh_provider_token(
-                    provider_tokens, keycloak_token
-                )
+                try:
+                    provider_tokens = self._refresh_provider_token(
+                        provider_tokens, keycloak_token
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "Renewing the %s token failed: %s", self.provider_alias, exc
+                    )
+                    usable = self._usable_after_failed_refresh(
+                        provider_tokens, keycloak_token
+                    )
+                    if usable is None:
+                        raise ProviderTokenExpiredError(self.provider_alias) from exc
+                    provider_tokens = usable
             self.logger.info(
                 f"Successfully retrieved {self.provider_alias} token from Keycloak"
             )
@@ -581,6 +610,8 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 "token_type": provider_tokens.get("token_type", "Bearer"),
                 "expires_in": provider_tokens.get("expires_in"),
             }
+        except ProviderTokenExpiredError:
+            raise
         except Exception as e:
             self.logger.error(f"Token retrieval failed: {str(e)}")
             raise UserLoggedOutException(
@@ -738,6 +769,44 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     )
                 )
                 raise UserLoggedOutException("Failed to refresh token")
+
+    def _still_valid(self, token_data: Optional[Dict[str, Any]]) -> bool:
+        """Whether the access token's `exp` is still ahead (by a few seconds)."""
+        access_token = (token_data or {}).get("access_token")
+        if not access_token:
+            return False
+        try:
+            payload = jwt.decode(
+                access_token, options={"verify_signature": False, "verify_exp": False}
+            )
+            return int(payload["exp"]) > datetime.now().timestamp() + 5
+        except Exception:
+            return False
+
+    def _usable_after_failed_refresh(
+        self, token_data: Dict[str, Any], keycloak_token: str
+    ) -> Optional[Dict[str, Any]]:
+        """A provider token that still works although our own refresh failed.
+
+        The bridge refreshes a minute before `exp`, but Keycloak may renew a
+        stored token itself once it has expired (KC 26.8 does for OIDC
+        identity providers, e.g. linked Entra accounts). So: a token that is
+        still valid is used as is, and an expired one is read from the broker
+        once more, which returns the renewed token when Keycloak renewed it.
+        """
+        if self._still_valid(token_data):
+            self.logger.info(
+                "Using the stored %s token until it expires; renewing it failed",
+                self.provider_alias,
+            )
+            return token_data
+        reread = self._get_stored_provider_token(keycloak_token)
+        if self._still_valid(reread):
+            self.logger.info(
+                "Keycloak renewed the expired %s token on read", self.provider_alias
+            )
+            return reread
+        return None
 
     def force_token_refresh(self, keycloak_token: str) -> Dict[str, Any]:
         """Force a token refresh by re-requesting from Keycloak broker"""

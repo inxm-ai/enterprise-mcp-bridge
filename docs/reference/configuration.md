@@ -110,6 +110,17 @@ Optional entry fields:
   `KEYCLOAK_PROVIDER_ALIAS`, i.e. the Keycloak identity provider whose stored
   token is exchanged for the caller's token. An empty string means "no alias":
   the Keycloak token is passed through, as with an empty global.
+
+  The bridge renews a stored provider token a minute before it expires
+  (`KEYCLOAK_PROVIDER_REFRESH_MODE`). If that fails, a token that is still
+  valid is used until it expires, and an expired one is read from the broker
+  once more: Keycloak renews stored tokens of OIDC identity providers itself
+  once they have expired (e.g. linked Entra accounts).
+
+  When the stored token is there but cannot be renewed either way, the call fails with
+  401 "The `<alias>` connection has expired … Reconnect `<alias>`" with
+  `X-Inxm-Connection-Code: provider_token_expired`: the bridge never sends the
+  caller's own token in place of the provider's.
 - `effect_tools` (array of strings): override the global `EFFECT_TOOLS` glob
   list used for dry runs (`X-Inxm-Dry-Run: true`) and generated-UI sampling.
   `[]` means no effect tools for this server. The entry `"auto"` enables
