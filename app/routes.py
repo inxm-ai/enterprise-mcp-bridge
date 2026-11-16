@@ -2,6 +2,7 @@ import base64
 import logging
 import io
 import re
+from app.memory_scope import calling_tool
 from app.vars import (
     EFFECT_TOOLS,
     MCP_BASE_PATH,
@@ -552,6 +553,31 @@ async def run_tool(
     group: Optional[str] = Query(
         None, description="Group name for sessionless group-specific data access"
     ),
+):
+    # The memory scope decision needs the tool: a removed person's memory
+    # accepts one tool only (app/memory_scope.py).
+    with calling_tool(tool_name):
+        return await _run_tool(
+            tool_name,
+            request,
+            x_inxm_mcp_session_header,
+            x_inxm_mcp_session_cookie,
+            x_inxm_dry_run,
+            access_token,
+            args,
+            group,
+        )
+
+
+async def _run_tool(
+    tool_name: str,
+    request: Request,
+    x_inxm_mcp_session_header: Optional[str],
+    x_inxm_mcp_session_cookie: Optional[str],
+    x_inxm_dry_run: Optional[str],
+    access_token: Optional[str],
+    args: Optional[Dict],
+    group: Optional[str],
 ):
     try:
         x_inxm_mcp_session = session_id(
