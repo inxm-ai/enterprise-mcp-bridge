@@ -8,12 +8,17 @@ is vendor-neutral: the deployment chooses the endpoint through a URL template,
 and the parser knows only the OpenTelemetry wire format.
 """
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
+import io
 import json
 import re
 
 import httpx
+import ijson
+from ijson.common import ObjectBuilder
 from mcp import types
 
 from app import vars as app_vars
@@ -73,6 +78,9 @@ def _any_value(value: object) -> object:
     if "intValue" in wrapper:
         # Protobuf JSON encodes 64-bit integers as decimal strings.
         return int(str(wrapper["intValue"]))
+    if isinstance(wrapper.get("doubleValue"), Decimal):
+        # The streaming parser keeps non-integer numbers exact; report floats.
+        return float(wrapper["doubleValue"])
     for key in ("stringValue", "boolValue", "doubleValue", "bytesValue"):
         if key in wrapper:
             return wrapper[key]
@@ -97,43 +105,146 @@ def _timestamp(unix_nano: int) -> str:
     return datetime.fromtimestamp(unix_nano / 1_000_000_000, timezone.utc).isoformat()
 
 
-def _resource_spans(payload: object) -> list[object]:
-    document = _mapping(payload)
-    # Jaeger's query API v3 (grpc-gateway) wraps the OTLP document in ``result``.
-    if "result" in document:
-        document = _mapping(document["result"])
-    return _items(document.get("resourceSpans"))
+INVALID_RESPONSE = "invalid OTLP trace response"
+RESOURCE_SPANS = "resourceSpans"
+RESOURCE = f"{RESOURCE_SPANS}.item.resource"
+SCOPE_SPANS = f"{RESOURCE_SPANS}.item.scopeSpans"
+SCOPE = f"{SCOPE_SPANS}.item.scope"
+SPANS = f"{SCOPE_SPANS}.item.spans"
+CAPTURED = {RESOURCE, SCOPE, f"{SPANS}.item"}
+DEPTH_CHANGE = {"start_map": 1, "start_array": 1, "end_map": -1, "end_array": -1}
+# Containers the walk descends through: (prefix, open event, close event).
+CONTAINERS = {
+    RESOURCE_SPANS: ("start_array", "end_array"),
+    f"{RESOURCE_SPANS}.item": ("start_map", "end_map"),
+    SCOPE_SPANS: ("start_array", "end_array"),
+    f"{SCOPE_SPANS}.item": ("start_map", "end_map"),
+    SPANS: ("start_array", "end_array"),
+}
 
 
-def _flatten(payload: object) -> list[dict[str, object]]:
-    """Every span with its resource and scope attached, in document order."""
-    flat: list[dict[str, object]] = []
-    for raw_resource in _resource_spans(payload):
-        resource_spans = _mapping(raw_resource)
-        resource = _mapping(resource_spans.get("resource", {}))
-        for raw_scope in _items(resource_spans.get("scopeSpans", [])):
-            scope_spans = _mapping(raw_scope)
-            scope = _mapping(scope_spans.get("scope", {}))
-            for raw_span in _items(scope_spans.get("spans", [])):
-                flat.append(
-                    {"span": _mapping(raw_span), "resource": resource, "scope": scope}
-                )
-    return flat
+def _relative(prefix: str) -> str | None:
+    """Path below the document root; Jaeger's API v3 wraps it in ``result``."""
+    if prefix == RESOURCE_SPANS or prefix.startswith(f"{RESOURCE_SPANS}."):
+        return prefix
+    if prefix.startswith(f"result.{RESOURCE_SPANS}"):
+        return prefix.removeprefix("result.")
+    return None
 
 
-def _normalize(entry: dict[str, object], trace_id: str) -> dict[str, object]:
-    span = _mapping(entry["span"])
-    resource_attributes = _attributes(_mapping(entry["resource"]).get("attributes", []))
+def _otlp_spans(body: bytes) -> Iterator[tuple[dict, dict, dict]]:
+    """Stream (span, resource attributes, scope) for each span.
+
+    Only one span is materialized at a time, so memory stays near the size of
+    ``body`` instead of the whole trace as Python objects. A resource or scope
+    sent after its spans is still attached, by holding those spans as compact
+    JSON until the enclosing object ends.
+    """
+    root_keys: set[str] = set()
+    seen_resource_spans = False
+    builder: ObjectBuilder | None = None
+    resource: dict | None = None
+    scope: dict | None = None
+    held_by_scope: list[str] = []
+    held_by_resource: list[tuple[str, dict]] = []
+    # Default number handling: integers of any size stay exact ints.
+    events = ijson.parse(io.BytesIO(body))
+    try:
+        for prefix, event, value in events:
+            if builder is not None:
+                build(event, value)
+                depth += DEPTH_CHANGE.get(event, 0)
+                if depth:
+                    continue
+                captured, builder = _mapping(builder.value), None
+                if captured_at == RESOURCE:
+                    resource = _attributes(captured.get("attributes", []))
+                elif captured_at == SCOPE:
+                    scope = captured
+                elif resource is not None and scope is not None:
+                    yield captured, resource, scope
+                else:
+                    held_by_scope.append(_compact(captured))
+                continue
+            if prefix == "":
+                if event == "map_key":
+                    root_keys.add(value)
+                    if {"result", RESOURCE_SPANS} <= root_keys:
+                        raise ValueError(INVALID_RESPONSE)
+                elif event not in {"start_map", "end_map"}:
+                    raise ValueError(INVALID_RESPONSE)
+                continue
+            if prefix == "result" and event not in {"start_map", "end_map", "map_key"}:
+                raise ValueError(INVALID_RESPONSE)
+            path = _relative(prefix)
+            if path is None:
+                continue
+            if path in CAPTURED:
+                if event not in {"start_map", "start_array"}:
+                    raise ValueError(INVALID_RESPONSE)
+                captured_at, builder, depth = path, ObjectBuilder(), 1
+                build = builder.event
+                build(event, value)
+                continue
+            if path not in CONTAINERS:
+                continue
+            if event == "map_key":
+                continue
+            if event not in CONTAINERS[path]:
+                raise ValueError(INVALID_RESPONSE)
+            seen_resource_spans = True
+            if (path, event) == (f"{RESOURCE_SPANS}.item", "start_map"):
+                resource = None
+            elif (path, event) == (f"{SCOPE_SPANS}.item", "start_map"):
+                scope = None
+            elif (path, event) == (f"{SCOPE_SPANS}.item", "end_map"):
+                for span in held_by_scope:
+                    if resource is None:
+                        held_by_resource.append((span, scope or {}))
+                    else:
+                        yield _expand(span), resource, scope or {}
+                held_by_scope = []
+            elif (path, event) == (f"{RESOURCE_SPANS}.item", "end_map"):
+                for span, span_scope in held_by_resource:
+                    yield _expand(span), resource or {}, span_scope
+                held_by_resource = []
+    except ijson.JSONError as error:
+        raise ValueError(INVALID_RESPONSE) from error
+    if not seen_resource_spans:
+        raise ValueError(INVALID_RESPONSE)
+
+
+def _compact(value: object) -> str:
+    """Hold a parsed span as JSON text, close to its wire size."""
+    return json.dumps(value, separators=(",", ":"), default=_exact_number)
+
+
+def _exact_number(value: object) -> float:
+    """Non-integer numbers become the float ``json.loads`` would produce."""
+    if isinstance(value, Decimal):
+        return float(value)
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")
+
+
+def _expand(text: str) -> dict:
+    return _mapping(json.loads(text))
+
+
+def _normalize(
+    span: dict[str, object],
+    resource_attributes: dict[str, object],
+    scope: dict[str, object],
+) -> dict[str, object]:
+    """Span details without ``trace_id``, which the page adds once validated."""
     start = _unix_nano(span.get("startTimeUnixNano"))
     end = _unix_nano(span.get("endTimeUnixNano", start))
     status = _mapping(span.get("status", {}))
     status_code = status.get("code", 0)
     return {
-        "trace_id": trace_id,
         "span_id": span["spanId"],
         "parent_span_id": span.get("parentSpanId") or None,
         "service": str(resource_attributes.get("service.name", "")),
-        "scope": str(_mapping(entry["scope"]).get("name", "")),
+        "scope": str(scope.get("name", "")),
         "span_name": span.get("name", ""),
         "kind": SPAN_KIND_NAMES.get(span.get("kind", 0), "Unspecified"),
         "start_time": _timestamp(start),
@@ -166,41 +277,43 @@ def _normalize(entry: dict[str, object], trace_id: str) -> dict[str, object]:
     }
 
 
-def span_page(
-    payload: object, trace_id: str, offset: int, limit: int
-) -> dict[str, object]:
-    """Normalize a complete OTLP trace document; never silently return a prefix."""
-    entries = _flatten(payload)
-    if not entries:
+def span_page(body: bytes, trace_id: str, offset: int, limit: int) -> dict[str, object]:
+    """Page a complete OTLP JSON trace in one streaming pass; never a prefix.
+
+    Each span is kept only as its compact normalized JSON, which is close to
+    its wire size, instead of as Python objects; only the page is decoded.
+    """
+    spans: list[tuple[int, str, str]] = []
+    for span, resource, scope in _otlp_spans(body):
+        span_id = span.get("spanId")
+        if not isinstance(span_id, str):
+            raise ValueError("invalid OTLP span identity")
+        if span.get("traceId") != trace_id:
+            raise ValueError("trace query returned a different trace")
+        normalized = _normalize(span, resource, scope)
+        text = _compact(normalized)
+        spans.append((_unix_nano(span.get("startTimeUnixNano")), span_id, text))
+    if not spans:
         raise ValueError("trace not found")
-    if any(
-        not isinstance(_mapping(entry["span"]).get("spanId"), str) for entry in entries
-    ):
-        raise ValueError("invalid OTLP span identity")
-    if any(_mapping(entry["span"]).get("traceId") != trace_id for entry in entries):
-        raise ValueError("trace query returned a different trace")
-    ordered = sorted(
-        entries,
-        key=lambda entry: (
-            _unix_nano(_mapping(entry["span"]).get("startTimeUnixNano")),
-            str(_mapping(entry["span"])["spanId"]),
-        ),
-    )
-    spans = [_normalize(entry, trace_id) for entry in ordered]
-    ids = [str(span["span_id"]) for span in spans]
-    if len(set(ids)) != len(ids):
+    spans.sort()
+    if len({span[1] for span in spans}) != len(spans):
         raise ValueError("duplicate span IDs in trace")
-    page = spans[offset : offset + limit]
+    # Hash the normalized spans in order so the snapshot is vendor-independent.
+    snapshot = hashlib.sha256()
+    for _, _, text in spans:
+        snapshot.update(text.encode())
+        snapshot.update(b"\n")
+    page = [
+        {"trace_id": trace_id, **json.loads(text)}
+        for _, _, text in spans[offset : offset + limit]
+    ]
     next_offset = offset + len(page)
     return {
         "trace_id": trace_id,
         "spans": page,
         "total_count": len(spans),
         "next_offset": next_offset if next_offset < len(spans) else None,
-        # Hash the normalized spans so the snapshot is vendor-independent.
-        "snapshot_id": hashlib.sha256(
-            json.dumps(spans, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "snapshot_id": snapshot.hexdigest(),
     }
 
 
@@ -244,7 +357,7 @@ async def get_trace_spans(
                         "trace exceeds the 32 MiB query budget; no partial trace returned"
                     )
                 body.extend(chunk)
-    page = span_page(json.loads(body), trace_id, offset, limit)
+    page = span_page(bytes(body), trace_id, offset, limit)
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=json.dumps(page))],
         structured_content=page,
@@ -322,11 +435,10 @@ class TraceQueryDelegate:
                 },
                 is_error=True,
             )
-        except (ValueError, httpx.HTTPError, json.JSONDecodeError) as error:
+        except (ValueError, httpx.HTTPError) as error:
             message = (
                 str(error)
                 if isinstance(error, ValueError)
-                and not isinstance(error, json.JSONDecodeError)
                 else "trace query unavailable or invalid"
             )
             return types.CallToolResult(
