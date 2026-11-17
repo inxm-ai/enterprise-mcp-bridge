@@ -271,3 +271,34 @@ def test_other_retrieval_failures_still_pass_the_raw_value_through(monkeypatch):
 
     params = server_params.get_server_params(access_token="cookie-value")
     assert params.env["OAUTH_TOKEN_VAR"] == "cookie-value"
+
+
+class _FailingRetriever:
+    def retrieve_token(self, token):
+        raise RuntimeError("no linked account")
+
+
+class _FailingFactory:
+    def get(self, *args, **kwargs):
+        return _FailingRetriever()
+
+
+def test_a_provider_bound_server_never_gets_the_callers_own_token(monkeypatch):
+    patch_module(monkeypatch, env={"OAUTH_ENV": "VENDOR_TOKEN"})
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", _FailingFactory)
+    monkeypatch.setattr(
+        server_params, "current_keycloak_provider_alias", lambda default: "vendor"
+    )
+    with pytest.raises(RuntimeError):
+        server_params.defined_env({"OAUTH_ENV": "VENDOR_TOKEN"}, "platform-token")
+
+
+def test_a_server_without_a_provider_still_gets_the_value_as_it_came(monkeypatch):
+    patch_module(monkeypatch, env={"OAUTH_ENV": "COOKIE_VALUE"})
+    monkeypatch.setattr(server_params, "TokenRetrieverFactory", _FailingFactory)
+    monkeypatch.setattr(
+        server_params, "current_keycloak_provider_alias", lambda default: ""
+    )
+    env = server_params.defined_env({"OAUTH_ENV": "COOKIE_VALUE"}, "cookie-value")
+    env = env[0] if isinstance(env, tuple) else env
+    assert env["COOKIE_VALUE"] == "cookie-value"

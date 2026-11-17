@@ -14,7 +14,9 @@ from app.multi_server import (
     current_isolate,
     current_server_id,
     current_server,
+    current_keycloak_provider_alias,
 )
+from app.vars import KEYCLOAK_PROVIDER_ALIAS
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -63,6 +65,7 @@ def defined_env(
         # If the user hasn't configured KEYCLOAK_PROVIDER_ALIAS, KeycloakTokenRetriever returns the token as is.
         # Let's check if that's the case.
 
+        provider_alias = current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
         retriever = TokenRetrieverFactory().get()
         logger.info(
             "Retrieving token for %s using TokenRetriever",
@@ -81,16 +84,29 @@ def defined_env(
             )
             raise
         except Exception:
-            # If retrieval fails, and we are in cookie mode, maybe we should just pass the token as is?
-            # This is a fallback for when the token is not a valid Keycloak token but just a cookie value
-            # that the MCP needs.
+            # A server bound to a provider wants that provider's token. The
+            # caller's own platform token is a credential for the wrong
+            # service and must never be handed to it, e.g. when the person
+            # has not linked the account.
+            if provider_alias:
+                logger.warning(
+                    "Provider token for %s could not be retrieved; "
+                    "not falling back to the caller's token.",
+                    _redacted_env_var_name(oauth_env_var),
+                )
+                raise
+            # No provider: the value is passed through as it came (a cookie
+            # value the MCP needs, not a token to exchange).
             logger.warning(
                 "Token retrieval failed. Falling back to using the raw token/cookie value."
             )
             token_result = {"access_token": access_token}
 
         if not token_result or "access_token" not in token_result:
-            # Fallback to raw token if retrieval returned structure but no access_token (unlikely if we handled exception)
+            if provider_alias:
+                raise ValueError(
+                    "no provider token for this server; the person has to connect the account"
+                )
             token_result = {"access_token": access_token}
 
         logger.info(
