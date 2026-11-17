@@ -47,6 +47,7 @@ from app.oauth.token_exchange import (
     TokenServiceUnavailableError,
     UserLoggedOutException,
 )
+from app.session.upstream_auth import add_auth_challenge_hook, watch_auth_challenges
 from app.utils.exception_logging import log_exception_with_details, upstream_phase
 from app.vars import (
     AUTH_PROVIDER,
@@ -145,16 +146,27 @@ def _proxied_client_factory(proxy: str):
     """
 
     def factory(headers=None, timeout=None, auth=None) -> httpx2.AsyncClient:
-        return httpx2.AsyncClient(
-            headers=headers,
-            timeout=timeout
-            or httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
-            auth=auth,
-            proxy=proxy,
-            trust_env=False,
+        return add_auth_challenge_hook(
+            httpx2.AsyncClient(
+                headers=headers,
+                timeout=timeout
+                or httpx2.Timeout(
+                    MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT
+                ),
+                auth=auth,
+                proxy=proxy,
+                trust_env=False,
+            )
         )
 
     return factory
+
+
+def _remote_client_factory(headers=None, timeout=None, auth=None):
+    """The SDK's default MCP HTTP client, recording upstream auth refusals."""
+    return add_auth_challenge_hook(
+        create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    )
 
 
 @asynccontextmanager
@@ -168,7 +180,7 @@ async def _streamable_client(url: str, headers=None, auth=None, proxy=None):
     if proxy:
         http_client = _proxied_client_factory(proxy)(headers=headers, auth=auth)
     else:
-        http_client = create_mcp_http_client(headers=headers, auth=auth)
+        http_client = _remote_client_factory(headers=headers, auth=auth)
     async with http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
@@ -641,14 +653,10 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                         sse_client(
                             self.url,
                             headers=headers,
-                            **(
-                                {
-                                    "httpx_client_factory": _proxied_client_factory(
-                                        self.proxy
-                                    )
-                                }
+                            httpx_client_factory=(
+                                _proxied_client_factory(self.proxy)
                                 if self.proxy
-                                else {}
+                                else _remote_client_factory
                             ),
                         )
                     )
@@ -673,6 +681,9 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     elicitation_callback=_make_elicitation_callback(self.session_key),
                 )
             )
+            # The SDK reports an upstream 401/403 as a bare -32603; recover
+            # it as a typed "sign in to this service" error.
+            watch_auth_challenges(session, unanswered_on_refusal=use_sse_only)
             with upstream_phase("initialization"):
                 await _negotiate(session)
             with upstream_phase("execution"):

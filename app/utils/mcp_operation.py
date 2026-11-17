@@ -58,6 +58,10 @@ ERROR_TYPE_BRIDGE_INTERNAL = "bridge_internal_error"
 ERROR_TYPE_UPSTREAM_RATE_LIMIT = "upstream_rate_limit"
 MCP_INTERNAL_ERROR_CODE = -32603
 
+# ``detail.error`` of the HTTP errors built from upstream failures
+# (app/utils/exception_logging.py).
+UPSTREAM_ERROR_KINDS = ("upstream_failure", "upstream_auth_required")
+
 RESULT_STATUS_SUCCESS = "success"
 RESULT_STATUS_ERROR = "error"
 
@@ -229,7 +233,7 @@ def classify_exception(exc: BaseException) -> str:
     if (
         upstream
         and isinstance(upstream.detail, dict)
-        and upstream.detail.get("error") == "upstream_failure"
+        and upstream.detail.get("error") in UPSTREAM_ERROR_KINDS
     ):
         return _HTTP_STATUS_TO_ERROR_TYPE.get(
             upstream.status_code, ERROR_TYPE_DOWNSTREAM_EXECUTION
@@ -395,7 +399,7 @@ class MCPOperationRecorder:
         if (
             upstream
             and isinstance(upstream.detail, dict)
-            and upstream.detail.get("error") == "upstream_failure"
+            and upstream.detail.get("error") in UPSTREAM_ERROR_KINDS
         ):
             for key in ("phase", "upstream_status", "protocol_code"):
                 value = upstream.detail.get(key)

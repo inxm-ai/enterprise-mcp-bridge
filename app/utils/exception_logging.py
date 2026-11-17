@@ -96,6 +96,24 @@ def _retry_after(value):
     return None
 
 
+MCP_INTERNAL_ERROR_CODE = -32603
+
+
+def _auth_required_exception(error, phase: str):
+    """The non-retryable 401/403 for an upstream that wants the person to sign in.
+
+    ``X-Inxm-Connection-Code`` is recorded on the current request (a no-op
+    outside one); the body keeps the ``{"detail": {...}}`` envelope of other
+    upstream failures, with a safe sentence in ``detail.message``.
+    """
+    from fastapi import HTTPException
+    from app.oauth.connection_policy import record_connection_code
+    from app.session.upstream_auth import UPSTREAM_AUTH_REQUIRED
+
+    record_connection_code(UPSTREAM_AUTH_REQUIRED)
+    return HTTPException(status_code=error.http_status, detail=error.detail(phase))
+
+
 def find_exception_in_exception_groups(exception: Exception, target_type: Any):
     """Find typed failures before attempting legacy text-only status recovery.
 
@@ -106,6 +124,11 @@ def find_exception_in_exception_groups(exception: Exception, target_type: Any):
     from mcp.shared.exceptions import MCPError
     import httpx
     import httpx2
+    from app.session.upstream_auth import (
+        AUTH_STATUSES,
+        UpstreamAuthRequiredError,
+        challenge_from_headers,
+    )
 
     nodes = list(_exception_nodes(exception))
     for node in nodes:
@@ -113,6 +136,23 @@ def find_exception_in_exception_groups(exception: Exception, target_type: Any):
             return node
         if target_type is not HTTPException:
             continue
+        if isinstance(node, UpstreamAuthRequiredError):
+            return _auth_required_exception(node, _failure_detail(node)["phase"])
+        if (
+            isinstance(node, (httpx.HTTPStatusError, httpx2.HTTPStatusError))
+            and node.response.status_code in AUTH_STATUSES
+        ):
+            # E.g. the SSE transport's GET answered 401: same typed error.
+            from app.utils.mcp_operation import downstream_server_label
+
+            auth_error = UpstreamAuthRequiredError(
+                challenge_from_headers(
+                    node.response.status_code, node.response.headers
+                ),
+                downstream_server_label(),
+                MCP_INTERNAL_ERROR_CODE,
+            )
+            return _auth_required_exception(auth_error, _failure_detail(node)["phase"])
         if isinstance(node, (httpx.HTTPStatusError, httpx2.HTTPStatusError)):
             status = node.response.status_code
             retry_after = _retry_after(node.response.headers.get("Retry-After"))
@@ -166,11 +206,13 @@ def upstream_phase(phase: str):
             converted.detail if converted and isinstance(converted.detail, dict) else {}
         )
         log.warning(
-            "[RemoteMCP] Upstream failure phase=%s type=%s status=%s code=%s",
+            "[RemoteMCP] Upstream failure phase=%s type=%s status=%s code=%s "
+            "auth_required=%s",
             _failure_detail(exc)["phase"],
             type(exc).__name__,
             metadata.get("upstream_status"),
             metadata.get("protocol_code"),
+            metadata.get("error") == "upstream_auth_required",
         )
         if converted and isinstance(converted.detail, dict):
             for key in ("upstream_status", "protocol_code"):
