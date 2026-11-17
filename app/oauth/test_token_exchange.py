@@ -164,6 +164,18 @@ def test_get_stored_provider_token_unauthorized(monkeypatch, retriever):
             retriever._get_stored_provider_token("tok")
 
 
+@pytest.mark.parametrize("status", [400, 404])
+def test_a_provider_without_a_stored_token_is_not_connected(retriever, status):
+    from app.oauth.token_exchange import ProviderNotConnectedError
+
+    mock_response = MagicMock()
+    mock_response.status_code = status
+    mock_response.text = "not linked"
+    with patch("requests.get", return_value=mock_response):
+        with pytest.raises(ProviderNotConnectedError):
+            retriever.retrieve_token("tok")
+
+
 def test_get_stored_provider_token_other_error(monkeypatch, retriever):
     mock_response = MagicMock()
     mock_response.status_code = 500

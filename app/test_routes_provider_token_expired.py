@@ -40,3 +40,15 @@ def test_a_signed_out_caller_is_a_plain_401():
 
     assert response.status_code == 401
     assert "x-inxm-connection-code" not in response.headers
+
+
+def test_a_never_linked_provider_is_a_typed_connect_your_account_401():
+    from app.oauth.token_exchange import ProviderNotConnectedError
+
+    response = _client(ProviderNotConnectedError("microsoft")).get("/call")
+
+    assert response.status_code == 401
+    assert response.headers["x-inxm-connection-code"] == "upstream_auth_required"
+    detail = response.json()["detail"]
+    assert detail["error"] == "upstream_auth_required"
+    assert "microsoft requires you to connect your account" in detail["message"]

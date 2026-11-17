@@ -91,6 +91,22 @@ class UserLoggedOutException(Exception):
         super().__init__(message)
 
 
+class ProviderNotConnectedError(UserLoggedOutException):
+    """Keycloak has no stored token for the provider: the account is not linked.
+
+    The person is signed in to the platform; what is missing is their account
+    with the provider. Callers must not ask them to sign in to the platform
+    again, so the bridge answers it as ``upstream_auth_required``.
+    """
+
+    def __init__(self, provider_alias: str):
+        self.provider_alias = provider_alias
+        super().__init__(
+            f"{provider_alias} requires you to connect your account (sign in) "
+            "before this can run. Connect your account, then try again."
+        )
+
+
 class ProviderTokenExpiredError(UserLoggedOutException):
     """The person's stored provider token expired and could not be renewed.
 
@@ -610,7 +626,7 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 "token_type": provider_tokens.get("token_type", "Bearer"),
                 "expires_in": provider_tokens.get("expires_in"),
             }
-        except ProviderTokenExpiredError:
+        except (ProviderTokenExpiredError, ProviderNotConnectedError):
             raise
         except Exception as e:
             self.logger.error(f"Token retrieval failed: {str(e)}")
@@ -678,6 +694,10 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 url,
                 response.status_code,
             )
+            if response.status_code in (400, 404):
+                # Keycloak knows the caller but holds no token for this
+                # provider: the account was never linked.
+                raise ProviderNotConnectedError(self.provider_alias)
             raise Exception(f"Failed to retrieve token: HTTP {response.status_code}")
 
     def _token_needs_refresh(self, token_data: Dict[str, Any]) -> bool:
