@@ -349,6 +349,17 @@ When set, local `MCP_SERVER_COMMAND` is ignored.
 MCP_REMOTE_SERVER="https://mcp-github.example.com"
 ```
 
+When the remote refuses a request for lack of authorization (HTTP 401/403 on
+the MCP request, typically with a `WWW-Authenticate` challenge, or a JSON-RPC
+error saying authorization is required), the REST routes answer with the same
+401/403 instead of a retryable 502, with
+`X-Inxm-Connection-Code: upstream_auth_required` and
+`{"detail": {"error": "upstream_auth_required", "message": "<server> requires
+you to connect your account (sign in) …", "upstream_status": 401, …}}`. Only the
+challenge's `error`, `scope` and a short sanitised `error_description` (or the
+body's `message`) are passed on, never bodies, headers or tokens. MCP clients of
+the bridge get the same sentence as the tool error text.
+
 #### MCP_REMOTE_BEARER_TOKEN
 
 Static bearer token for remote server authentication.
