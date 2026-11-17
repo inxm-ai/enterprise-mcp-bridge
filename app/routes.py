@@ -79,7 +79,11 @@ from app.oauth.connection_policy import (
     record_connection_code,
 )
 from opentelemetry import trace
-from .oauth.token_exchange import ProviderTokenExpiredError, UserLoggedOutException
+from .oauth.token_exchange import (
+    ProviderNotConnectedError,
+    ProviderTokenExpiredError,
+    UserLoggedOutException,
+)
 from .oauth.token_dependency import get_access_token
 from .utils import mask_token, token_fingerprint
 
@@ -90,6 +94,18 @@ PROVIDER_TOKEN_EXPIRED_CODE = "provider_token_expired"
 
 
 def _unauthorized(error: UserLoggedOutException) -> HTTPException:
+    if isinstance(error, ProviderNotConnectedError):
+        # Signed in to the platform, but never linked to the provider: the
+        # same typed answer as an upstream that wants the account connected.
+        record_connection_code(UPSTREAM_AUTH_REQUIRED)
+        return HTTPException(
+            status_code=401,
+            detail={
+                "error": UPSTREAM_AUTH_REQUIRED,
+                "message": error.message,
+                "provider": error.provider_alias,
+            },
+        )
     if isinstance(error, ProviderTokenExpiredError):
         record_connection_code(PROVIDER_TOKEN_EXPIRED_CODE)
     return HTTPException(status_code=401, detail=error.message)
@@ -107,6 +123,7 @@ from .tgi.tool_dry_run.tool_response import (
 from .app_facade.route import router as app_facade_router
 from app.well_known.oauth_metadata import router as oauth_metadata_router
 from app.sse.routes import router as sse_router
+from .session.upstream_auth import UPSTREAM_AUTH_REQUIRED
 
 router = APIRouter()
 sessions = session_manager()
