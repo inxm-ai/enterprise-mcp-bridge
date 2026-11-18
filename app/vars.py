@@ -20,6 +20,13 @@ TOKEN_COOKIE_NAME = os.environ.get("TOKEN_COOKIE_NAME", "_oauth2_proxy")
 TOKEN_SOURCE = os.environ.get("TOKEN_SOURCE", "header").lower()
 SESSION_FIELD_NAME = os.environ.get("SESSION_FIELD_NAME", "x-inxm-mcp-session")
 DRY_RUN_HEADER_NAME = "X-Inxm-Dry-Run"
+# In a dry run, asks that this call be simulated even though it only reads:
+# its arguments come from a simulated call's answer (a made-up id), so the
+# real service could only answer "not found".
+DRY_RUN_SIMULATE_HEADER_NAME = "X-Inxm-Dry-Run-Simulate"
+# Marks a simulated answer, on the response and in the result's `_meta`.
+SIMULATED_HEADER_NAME = "X-Inxm-Simulated"
+SIMULATED_META_KEY = "inxm/simulated"
 MCP_BASE_PATH = os.environ.get("MCP_BASE_PATH", "")
 INCLUDE_TOOLS = [t for t in os.environ.get("INCLUDE_TOOLS", "").split(",") if t]
 EXCLUDE_TOOLS = [t for t in os.environ.get("EXCLUDE_TOOLS", "").split(",") if t]

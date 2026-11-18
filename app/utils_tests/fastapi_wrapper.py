@@ -370,6 +370,36 @@ class FastAPIWrapper:
             response.status_code == 200
         ), f"Unexpected status code: {response.status_code}, body: {response.text}"
         assert response.json()["structuredContent"]["result"] == "dry-run"
+        # A simulated answer says so, on the response and in its result.
+        assert response.headers.get("X-Inxm-Simulated") == "true"
+        assert response.json()["_meta"] == {"inxm/simulated": True}
+
+        # A read whose arguments came from a simulated answer is simulated
+        # too when asked; without the request it runs for real.
+        real = self.client.post(
+            f"{self.base_url}/tools/hello",
+            headers={"X-Inxm-Dry-Run": "true"},
+            json={},
+        )
+        assert real.status_code == 200, real.text
+        assert real.headers.get("X-Inxm-Simulated") is None
+        assert called == [("add", {"a": 1, "b": 2})]
+        simulated = self.client.post(
+            f"{self.base_url}/tools/hello",
+            headers={"X-Inxm-Dry-Run": "true", "X-Inxm-Dry-Run-Simulate": "true"},
+            json={},
+        )
+        assert simulated.status_code == 200, simulated.text
+        assert simulated.headers.get("X-Inxm-Simulated") == "true"
+        assert called[-1] == ("hello", {})
+        # Outside a dry run the request changes nothing.
+        plain = self.client.post(
+            f"{self.base_url}/tools/hello",
+            headers={"X-Inxm-Dry-Run-Simulate": "true"},
+            json={},
+        )
+        assert plain.status_code == 200, plain.text
+        assert plain.headers.get("X-Inxm-Simulated") is None
 
     def test_header_mapping_integration(self, monkeypatch):
         """Integration test: ensure MCP_MAP_HEADER_TO_INPUT mapping prunes tool schema and

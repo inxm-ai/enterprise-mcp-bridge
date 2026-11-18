@@ -40,6 +40,7 @@ from app.tgi.tool_dry_run.tool_response import (
 )
 from app.vars import (
     DRY_RUN_HEADER_NAME,
+    DRY_RUN_SIMULATE_HEADER_NAME,
     EFFECT_TOOLS,
     SESSION_FIELD_NAME,
 )
@@ -97,6 +98,9 @@ async def run_tool_with_progress(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     x_inxm_dry_run: Optional[str] = Header(None, alias=DRY_RUN_HEADER_NAME),
+    x_inxm_dry_run_simulate: Optional[str] = Header(
+        None, alias=DRY_RUN_SIMULATE_HEADER_NAME
+    ),
     access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
@@ -220,6 +224,7 @@ async def run_tool_with_progress(
                                 x_inxm_dry_run,
                                 name,
                                 current_effect_tools(EFFECT_TOOLS),
+                                x_inxm_dry_run_simulate,
                             )
                             if dry_run:
                                 result = await dry_run_tool_result(
