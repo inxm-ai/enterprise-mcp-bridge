@@ -355,10 +355,10 @@ error saying authorization is required), the REST routes answer with the same
 401/403 instead of a retryable 502, with
 `X-Inxm-Connection-Code: upstream_auth_required` and
 `{"detail": {"error": "upstream_auth_required", "message": "<server> requires
-you to connect your account (sign in) …", "upstream_status": 401, …}}`. Only the
-challenge's `error`, `scope` and a short sanitised `error_description` (or the
-body's `message`) are passed on, never bodies, headers or tokens. MCP clients of
-the bridge get the same sentence as the tool error text.
+you to connect your account (sign in) …", "upstream_status": 401, …}}`. Known
+OAuth error codes from the challenge are included when available. The bridge
+does not pass along upstream messages, scopes, or bodies, which may contain
+credentials. MCP clients get the same reconnect guidance as the tool error text.
 
 #### MCP_REMOTE_BEARER_TOKEN
 

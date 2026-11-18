@@ -18,9 +18,8 @@ The bridge recovers that information itself:
   refusal, it raises ``UpstreamAuthRequiredError`` instead. A JSON-RPC error
   whose message plainly says authorization is required is treated the same.
 
-Only bounded, sanitised fields leave this module: the status, the challenge's
-``error`` code, ``scope`` and ``error_description`` (or the body's short
-``message``), never bodies, headers or tokens.
+Only the status and known OAuth error codes from the challenge leave this
+module. Upstream messages and other arbitrary values can contain credentials.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ import json
 import logging
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 from mcp.shared.exceptions import MCPError
@@ -48,31 +47,23 @@ _AUTH_MESSAGE_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_HEADER_CHARS = 4096
-_MAX_BODY_BYTES = 8192
-_MAX_TEXT_CHARS = 200
-_MAX_SCOPES = 32
 _PARAM_RE = re.compile(
     r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))'
 )
-_CODE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-_SCOPE_RE = re.compile(r"^[A-Za-z0-9:._/-]{1,128}$")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
-# Credential-looking strings never leave the bridge, even inside a message.
-_SECRET_RES = (
-    re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
-    re.compile(r"\b[A-Za-z0-9_-]{40,}={0,2}"),
-)
+_AUTH_ERROR_CODES = {
+    "invalid_request",
+    "invalid_token",
+    "insufficient_scope",
+    "authorization_required",
+}
 
 
 @dataclass
 class AuthChallenge:
-    """What an upstream auth refusal said, bounded and sanitised."""
+    """Safe metadata about an upstream auth refusal."""
 
     status: Optional[int]
     error: Optional[str] = None
-    description: Optional[str] = None
-    scopes: list[str] = field(default_factory=list)
 
 
 class UpstreamAuthRequiredError(MCPError):
@@ -111,42 +102,7 @@ class UpstreamAuthRequiredError(MCPError):
             detail["server"] = self.server
         if self.challenge.error:
             detail["upstream_error"] = self.challenge.error
-        if self.challenge.description:
-            detail["upstream_message"] = self.challenge.description
-        if self.challenge.scopes:
-            detail["required_scopes"] = list(self.challenge.scopes)
         return detail
-
-
-def sanitize_text(value: Any) -> Optional[str]:
-    """A short single-line text, with anything credential-like removed."""
-    if not isinstance(value, str):
-        return None
-    text = _CONTROL_RE.sub(" ", value)
-    for secret in _SECRET_RES:
-        text = secret.sub("[redacted]", text)
-    text = " ".join(text.split())
-    if not text:
-        return None
-    if len(text) > _MAX_TEXT_CHARS:
-        text = text[: _MAX_TEXT_CHARS - 1].rstrip() + "…"
-    return text
-
-
-def _code(value: Any) -> Optional[str]:
-    return value if isinstance(value, str) and _CODE_RE.match(value) else None
-
-
-def _scopes(value: Any) -> list[str]:
-    scopes: list[str] = []
-    if not isinstance(value, str):
-        return scopes
-    for scope in value.split():
-        if _SCOPE_RE.match(scope) and scope not in scopes:
-            scopes.append(scope)
-        if len(scopes) >= _MAX_SCOPES:
-            break
-    return scopes
 
 
 def parse_www_authenticate(value: Optional[str]) -> dict[str, str]:
@@ -160,59 +116,13 @@ def parse_www_authenticate(value: Optional[str]) -> dict[str, str]:
     return params
 
 
-def _body_fields(body: bytes) -> tuple[Optional[str], Optional[str]]:
-    """``(error code, message)`` from a small JSON error body, if it has them."""
-    try:
-        parsed = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        return None, None
-    if not isinstance(parsed, dict):
-        return None, None
-    error = parsed.get("error")
-    if isinstance(error, dict):  # A JSON-RPC error object.
-        return None, sanitize_text(error.get("message"))
-    message = parsed.get("error_description") or parsed.get("message")
-    return _code(error), sanitize_text(message)
-
-
-async def challenge_from_response(response) -> AuthChallenge:
-    """Read the bounded challenge of an HTTP 401/403 response."""
-    params = parse_www_authenticate(response.headers.get("www-authenticate"))
-    error = _code(params.get("error"))
-    description = sanitize_text(params.get("error_description"))
-    content_type = response.headers.get("content-type", "").lower()
-    try:
-        length = int(response.headers.get("content-length", ""))
-    except ValueError:
-        length = None
-    if (
-        content_type.startswith("application/json")
-        and length is not None
-        and length <= _MAX_BODY_BYTES
-    ):
-        try:
-            # Read in full and cached: the SDK reads the same body afterwards.
-            body_error, body_message = _body_fields(await response.aread())
-        except Exception:
-            body_error, body_message = None, None
-        error = error or body_error
-        description = description or body_message
-    return AuthChallenge(
-        status=response.status_code,
-        error=error,
-        description=description,
-        scopes=_scopes(params.get("scope")),
-    )
-
-
 def challenge_from_headers(status: int, headers) -> AuthChallenge:
-    """The challenge of an already-raised ``HTTPStatusError`` (headers only)."""
+    """Classify the refusal without reading the response body."""
     params = parse_www_authenticate(headers.get("www-authenticate"))
+    error = params.get("error")
     return AuthChallenge(
         status=status,
-        error=_code(params.get("error")),
-        description=sanitize_text(params.get("error_description")),
-        scopes=_scopes(params.get("scope")),
+        error=error if error in _AUTH_ERROR_CODES else None,
     )
 
 
@@ -229,8 +139,6 @@ def auth_required_message(challenge: AuthChallenge, server: Optional[str]) -> st
             f"{name} requires you to connect your account (sign in) before this "
             "can run. Connect your account, then try again."
         )
-    if challenge.description:
-        sentence += f' The service said: "{challenge.description}"'
     return sentence
 
 
@@ -261,13 +169,12 @@ async def capture_auth_challenge(response) -> None:
         if holder is not None:
             holder["challenge"] = None
         return
-    challenge = await challenge_from_response(response)
+    challenge = challenge_from_headers(response.status_code, response.headers)
     logger.warning(
-        "[RemoteMCP] Upstream auth challenge status=%s error=%s scopes=%s "
+        "[RemoteMCP] Upstream auth challenge status=%s error=%s "
         "has_www_authenticate=%s",
         challenge.status,
         challenge.error,
-        " ".join(challenge.scopes) or None,
         "www-authenticate" in response.headers,
     )
     if holder is not None:
@@ -349,9 +256,7 @@ def watch_auth_challenges(session, *, unanswered_on_refusal: bool = False) -> An
             except MCPError as exc:
                 challenge = holder["challenge"]
                 if challenge is None and _AUTH_MESSAGE_RE.search(exc.message or ""):
-                    challenge = AuthChallenge(
-                        status=None, description=sanitize_text(exc.message)
-                    )
+                    challenge = AuthChallenge(status=None)
                 if challenge is None:
                     raise
                 raise UpstreamAuthRequiredError(
