@@ -14,7 +14,7 @@ from app.tgi.models.models import ChatCompletionRequest
 from app.tgi.services.prompt_service import PromptService
 from app.tgi.protocols.chunk_reader import chunk_reader
 from app.utils.effect_tools import auto_effect_enabled
-from app.vars import is_dry_run_effect_call, is_dry_run_requested
+from app.vars import SIMULATED_META_KEY, is_dry_run_effect_call, is_dry_run_requested
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -172,15 +172,20 @@ async def resolve_dry_run_effect_call(
     dry_run_header: Optional[str],
     tool_name: str,
     effect_tools: list[str],
+    simulate_header: Optional[str] = None,
 ) -> tuple[bool, Optional[list[dict]]]:
     """Decide whether a tool call is answered with a dry-run result.
 
     Returns the decision and, when the session's tools had to be listed for
     auto classification, the mapped listing so the caller can reuse it. Tools
-    are listed only when a dry run is requested and "auto" is enabled.
+    are listed only when a dry run is requested and "auto" is enabled. In a
+    dry run, ``simulate_header`` "true" simulates any tool, reads included:
+    the caller passes it when the arguments come from a simulated answer.
     """
     if not is_dry_run_requested(dry_run_header):
         return False, None
+    if is_dry_run_requested(simulate_header):
+        return True, None
     tools: Optional[list[dict]] = None
     tool_def = None
     if auto_effect_enabled(effect_tools):
@@ -209,5 +214,35 @@ async def dry_run_tool_result(
     # sync function, so await only when a coroutine comes back.
     maybe_result = get_tool_dry_run_response(session, tool, tool_input)
     if asyncio.iscoroutine(maybe_result):
-        return await maybe_result
-    return maybe_result
+        maybe_result = await maybe_result
+    return mark_simulated(maybe_result)
+
+
+def mark_simulated(result: Any) -> Any:
+    """Mark a simulated answer in its MCP `_meta`, so a caller can tell a
+    made-up result (and the ids in it) from a real one, also on a stream."""
+    if isinstance(result, dict):
+        meta = result.get("_meta")
+        result["_meta"] = {
+            **(meta if isinstance(meta, dict) else {}),
+            SIMULATED_META_KEY: True,
+        }
+        return result
+    if "meta" in getattr(type(result), "model_fields", {}):
+        # An MCP SDK result: its `meta` field is sent as `_meta`.
+        meta = getattr(result, "meta", None)
+        result.meta = {
+            **(meta if isinstance(meta, dict) else {}),
+            SIMULATED_META_KEY: True,
+        }
+        return result
+    try:
+        meta = getattr(result, "_meta", None)
+        setattr(
+            result,
+            "_meta",
+            {**(meta if isinstance(meta, dict) else {}), SIMULATED_META_KEY: True},
+        )
+    except (AttributeError, TypeError):
+        pass
+    return result

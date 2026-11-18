@@ -318,6 +318,22 @@ class TestSSEStreamDryRun:
         assert [e["type"] for e in events] == ["result"]
         assert events[0]["data"]["structuredContent"] == {"result": "dry-run"}
 
+    def test_a_simulated_answer_is_marked_and_a_read_can_be_simulated(
+        self, client, dry_run_calls
+    ):
+        events, _ = self._stream(
+            client, "create_interaction_request", {"X-Inxm-Dry-Run": "true"}
+        )
+        assert events[0]["data"]["_meta"] == {"inxm/simulated": True}
+        events, call_tool_with_progress = self._stream(
+            client,
+            "list_interaction_requests",
+            {"X-Inxm-Dry-Run": "true", "X-Inxm-Dry-Run-Simulate": "true"},
+        )
+        call_tool_with_progress.assert_not_called()
+        assert dry_run_calls[-1][0] == "list_interaction_requests"
+        assert events[0]["data"]["_meta"] == {"inxm/simulated": True}
+
     def test_effect_tool_without_header_calls_tool(self, client, dry_run_calls):
         events, call_tool_with_progress = self._stream(
             client, "create_interaction_request", {}

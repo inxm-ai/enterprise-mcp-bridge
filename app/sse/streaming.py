@@ -332,6 +332,10 @@ def _serialize_result(result: Any) -> Any:
     )
     if structured is not mcp_fields.MISSING:
         result_dict["structuredContent"] = structured
+    # A simulated answer's marker (`_meta`, see tool_dry_run.mark_simulated).
+    meta = getattr(result, "_meta", None)
+    if isinstance(meta, dict) and meta:
+        result_dict["_meta"] = meta
 
     return result_dict if result_dict else str(result)
 

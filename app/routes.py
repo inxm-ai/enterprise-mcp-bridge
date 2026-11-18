@@ -10,8 +10,19 @@ from app.vars import (
     TGI_ENABLED,
     APP_CONVERSATIONAL_UI_ENABLED,
     DRY_RUN_HEADER_NAME,
+    DRY_RUN_SIMULATE_HEADER_NAME,
+    SIMULATED_HEADER_NAME,
 )
-from fastapi import APIRouter, HTTPException, Header, Cookie, Query, Request, Depends
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Header,
+    Cookie,
+    Query,
+    Request,
+    Depends,
+    Response,
+)
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
@@ -565,11 +576,15 @@ async def run_tool(
     x_inxm_mcp_session_header: Optional[str] = Header(None, alias=SESSION_FIELD_NAME),
     x_inxm_mcp_session_cookie: Optional[str] = Cookie(None, alias=SESSION_FIELD_NAME),
     x_inxm_dry_run: Optional[str] = Header(None, alias=DRY_RUN_HEADER_NAME),
+    x_inxm_dry_run_simulate: Optional[str] = Header(
+        None, alias=DRY_RUN_SIMULATE_HEADER_NAME
+    ),
     access_token: Optional[str] = Depends(get_access_token),
     args: Optional[Dict] = None,
     group: Optional[str] = Query(
         None, description="Group name for sessionless group-specific data access"
     ),
+    response: Response = None,
 ):
     # The memory scope decision needs the tool: a removed person's memory
     # accepts one tool only (app/memory_scope.py).
@@ -583,6 +598,8 @@ async def run_tool(
             access_token,
             args,
             group,
+            x_inxm_dry_run_simulate,
+            response,
         )
 
 
@@ -595,6 +612,8 @@ async def _run_tool(
     access_token: Optional[str],
     args: Optional[Dict],
     group: Optional[str],
+    x_inxm_dry_run_simulate: Optional[str] = None,
+    response: Optional[Response] = None,
 ):
     try:
         x_inxm_mcp_session = session_id(
@@ -654,11 +673,14 @@ async def _run_tool(
                     x_inxm_dry_run,
                     tool_name,
                     current_effect_tools(EFFECT_TOOLS),
+                    x_inxm_dry_run_simulate,
                 )
                 if dry_run:
                     result = await dry_run_tool_result(
                         session, tool_name, args or {}, tools=listed_tools
                     )
+                    if response is not None:
+                        response.headers[SIMULATED_HEADER_NAME] = "true"
                 else:
                     result = await session.call_tool(tool_name, args, access_token)
 
