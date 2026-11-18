@@ -155,6 +155,16 @@ def _host_does_not_exist(error: BaseException) -> bool:
     return False
 
 
+def _failed_at_url(error: httpx.RequestError, url: str) -> bool:
+    """Whether the request that failed is the one for `url`, not a redirect."""
+    try:
+        failed = error.request.url
+    except RuntimeError:
+        # No request attached: it can't be shown to be the issuer's own.
+        return False
+    return failed == httpx.URL(url)
+
+
 async def _fetch_key_set(
     url: str,
 ) -> Union[Mapping[str, Any], KeyLookupFailure, None]:
@@ -163,7 +173,10 @@ async def _fetch_key_set(
 
     KEY_FETCH_TIMEOUT_SECONDS bounds the whole fetch, not each read, so an
     issuer that trickles its answer can't hold a request longer. Redirects
-    are followed, as before.
+    are followed, as before. Only the issuer's own key address can say the
+    issuer doesn't exist: a 404 or a missing host after a redirect is
+    somewhere else's problem, so it is None (503), and a real issuer whose
+    redirect target is broken is never refused as made up.
     """
     try:
         with anyio.fail_after(KEY_FETCH_TIMEOUT_SECONDS):
@@ -171,12 +184,14 @@ async def _fetch_key_set(
                 timeout=KEY_FETCH_TIMEOUT_SECONDS, follow_redirects=True
             ) as client:
                 response = await client.get(url)
-        if response.status_code == NOT_FOUND:
+        if response.status_code == NOT_FOUND and not response.history:
             return KeyLookupFailure.NO_SUCH_ISSUER
         response.raise_for_status()
         body = response.json()
     except httpx.ConnectError as error:
-        return KeyLookupFailure.NO_SUCH_ISSUER if _host_does_not_exist(error) else None
+        if _host_does_not_exist(error) and _failed_at_url(error, url):
+            return KeyLookupFailure.NO_SUCH_ISSUER
+        return None
     except (httpx.HTTPError, TimeoutError, ValueError):
         return None
     return body if isinstance(body, dict) else None

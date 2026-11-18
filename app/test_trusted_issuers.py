@@ -40,6 +40,8 @@ PATTERNS = [
 ]
 TENANT_ISSUER = "https://acme.auth.example.com/realms/main"
 TENANT_KEYS_URL = f"{TENANT_ISSUER}/protocol/openid-connect/certs"
+# Where a redirect sends the key fetch, on a host other than the issuer's.
+MOVED_KEYS_URL = "https://keys.example.net/realms/main/certs"
 OTHER_DOMAIN_ISSUER = "https://globex.login.example.org/realms/main"
 AUDIENCE = "mcp-bridge"
 ALLOWED_CLIENT = "token-exchange"
@@ -594,6 +596,29 @@ class TestKeyFetch:
 
         transport["respond"] = respond
         assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) == expected
+
+    def test_a_404_after_a_redirect_is_not_no_such_issuer(self, transport):
+        # A real issuer whose key address redirects to a broken page is
+        # having trouble, not made up: 503, never a remembered 401.
+        async def respond(request):
+            if str(request.url) == TENANT_KEYS_URL:
+                return httpx.Response(302, headers={"Location": MOVED_KEYS_URL})
+            return httpx.Response(404)
+
+        transport["respond"] = respond
+        assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) is None
+
+    def test_a_missing_host_after_a_redirect_is_not_no_such_issuer(self, transport):
+        async def respond(request):
+            if str(request.url) == TENANT_KEYS_URL:
+                return httpx.Response(302, headers={"Location": MOVED_KEYS_URL})
+            try:
+                raise socket.gaierror(socket.EAI_NONAME, "dns")
+            except socket.gaierror as cause:
+                raise httpx.ConnectError("dns", request=request) from cause
+
+        transport["respond"] = respond
+        assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) is None
 
     def test_a_refused_connection_is_not_no_such_issuer(self, transport):
         async def respond(request):
