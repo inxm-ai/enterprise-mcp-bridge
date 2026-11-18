@@ -12,6 +12,7 @@ itself, httpx answers from an in-memory transport.
 
 import asyncio
 import logging
+import socket
 import time
 from contextlib import asynccontextmanager
 
@@ -105,6 +106,11 @@ class FakeKeyServer:
 
     def take_down(self, issuer):
         self.key_sets[f"{issuer}/protocol/openid-connect/certs"] = None
+
+    def remove(self, issuer):
+        self.key_sets[f"{issuer}/protocol/openid-connect/certs"] = (
+            trusted_issuers.KeyLookupFailure.NO_SUCH_ISSUER
+        )
 
     def hold(self, issuer):
         self.held[f"{issuer}/protocol/openid-connect/certs"] = anyio.Event()
@@ -289,6 +295,26 @@ class TestKeyRotation:
         key_server.publish(TENANT_ISSUER, _public_jwk(ROTATED_KEY, ROTATED_KEY_ID))
         clock.now += trusted_issuers.KEY_SET_LIFESPAN_SECONDS + 1
         assert _status(_token()) == 401
+
+
+class TestIssuerThatDoesNotExistIs401:
+    """A made-up tenant under a trusted domain is refused, not an outage."""
+
+    def test_no_such_issuer_is_401_not_503(self, trusted_issuers_on, key_server):
+        key_server.remove(TENANT_ISSUER)
+        assert _status(_token()) == 401
+
+    def test_it_is_remembered_like_other_failures(
+        self, trusted_issuers_on, key_server, clock
+    ):
+        key_server.remove(TENANT_ISSUER)
+        assert _status(_token()) == 401
+        assert _status(_token()) == 401
+        assert key_server.requested == [TENANT_KEYS_URL]
+        clock.now += FAILURE_SECONDS + 1
+        key_server.publish(TENANT_ISSUER, _public_jwk(SIGNING_KEY, KEY_ID))
+        asyncio.run(ensure_caller_in_required_groups(_token()))
+        assert key_server.requested == [TENANT_KEYS_URL, TENANT_KEYS_URL]
 
 
 class TestIssuerTroubleIs503:
@@ -539,6 +565,39 @@ class TestKeyFetch:
     def test_unusable_answers_are_none(self, transport, response):
         async def respond(_request):
             return response
+
+        transport["respond"] = respond
+        assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) is None
+
+    def test_404_means_no_such_issuer(self, transport):
+        async def respond(_request):
+            return httpx.Response(404)
+
+        transport["respond"] = respond
+        fetched = asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL))
+        assert fetched is trusted_issuers.KeyLookupFailure.NO_SUCH_ISSUER
+
+    @pytest.mark.parametrize(
+        "dns_error, expected",
+        [
+            (socket.EAI_NONAME, trusted_issuers.KeyLookupFailure.NO_SUCH_ISSUER),
+            # A resolver that is down is temporary: "try again", not "no".
+            (socket.EAI_AGAIN, None),
+        ],
+    )
+    def test_dns_answers(self, transport, dns_error, expected):
+        async def respond(request):
+            try:
+                raise socket.gaierror(dns_error, "dns")
+            except socket.gaierror as cause:
+                raise httpx.ConnectError("dns", request=request) from cause
+
+        transport["respond"] = respond
+        assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) == expected
+
+    def test_a_refused_connection_is_not_no_such_issuer(self, transport):
+        async def respond(request):
+            raise httpx.ConnectError("refused", request=request)
 
         transport["respond"] = respond
         assert asyncio.run(trusted_issuers._fetch_key_set(TENANT_KEYS_URL)) is None

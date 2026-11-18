@@ -16,7 +16,11 @@ Every request must carry a token that passes, in this order:
    issuer. A key the fresh set still lacks is 401.
 3. If the keys can't be fetched, the answer is 503, not 401: the issuer is
    down or slow, so the caller should hear "try again", not "not allowed".
-   The failure is remembered for TRUSTED_ISSUER_KEY_FAILURE_SECONDS, so
+   An issuer that doesn't exist is 401 instead: its host name isn't in DNS,
+   or its key address answers 404. No such tenant can have signed the
+   token, so "try again" would be wrong, and a made-up tenant name under a
+   trusted domain must not look like an outage on our side.
+   Either failure is remembered for TRUSTED_ISSUER_KEY_FAILURE_SECONDS, so
    tokens naming unreachable issuers can't flood DNS or the issuer with
    lookups, and stale keys are never used.
 
@@ -41,6 +45,7 @@ user's identity.
 
 import logging
 import re
+import socket
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,6 +79,16 @@ DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 
 UNAUTHORIZED = 401
 UNAVAILABLE = 503
+# The key address's answer when the issuer has no such realm.
+NOT_FOUND = 404
+# getaddrinfo's "no such name" and "name has no address"; other DNS errors,
+# such as a resolver that is down, are temporary and stay 503.
+# EAI_NODATA isn't defined on every platform.
+NO_SUCH_HOST_ERRORS = frozenset(
+    code
+    for code in (socket.EAI_NONAME, getattr(socket, "EAI_NODATA", None))
+    if code is not None
+)
 REFUSED_DETAIL = "Access token failed verification"
 UNAVAILABLE_DETAIL = "Sign-in is temporarily unavailable"
 
@@ -82,6 +97,7 @@ _monotonic = time.monotonic
 
 class KeyLookupFailure(Enum):
     UNAVAILABLE = "keys could not be fetched"
+    NO_SUCH_ISSUER = "issuer does not exist"
     UNKNOWN_KEY = "signing key not in the issuer's key set"
     BUSY = "too many new issuers at once"
 
@@ -101,7 +117,7 @@ class _Fetch:
 
 
 _key_sets: dict[str, _CachedKeySet] = {}
-_failed_at: dict[str, float] = {}
+_failed_at: dict[str, tuple[float, KeyLookupFailure]] = {}
 _fetches: dict[str, _Fetch] = {}
 _new_issuer_slots: Optional[anyio.Semaphore] = None
 
@@ -126,8 +142,24 @@ def cached_issuer_count() -> int:
     return len(_key_sets) + len(_failed_at)
 
 
-async def _fetch_key_set(url: str) -> Optional[Mapping[str, Any]]:
-    """The issuer's published key set, or None if it can't be fetched.
+def _host_does_not_exist(error: BaseException) -> bool:
+    """Whether a failed fetch came from DNS saying the host doesn't exist."""
+    seen: set[int] = set()
+    cause: Optional[BaseException] = error
+    # The chain is followed by identity, so a chain that loops back ends.
+    while cause is not None and id(cause) not in seen:
+        if isinstance(cause, socket.gaierror) and cause.errno in NO_SUCH_HOST_ERRORS:
+            return True
+        seen.add(id(cause))
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
+async def _fetch_key_set(
+    url: str,
+) -> Union[Mapping[str, Any], KeyLookupFailure, None]:
+    """The issuer's published key set; NO_SUCH_ISSUER if the issuer doesn't
+    exist (no such host, or 404); None if it can't be fetched otherwise.
 
     KEY_FETCH_TIMEOUT_SECONDS bounds the whole fetch, not each read, so an
     issuer that trickles its answer can't hold a request longer. Redirects
@@ -139,8 +171,12 @@ async def _fetch_key_set(url: str) -> Optional[Mapping[str, Any]]:
                 timeout=KEY_FETCH_TIMEOUT_SECONDS, follow_redirects=True
             ) as client:
                 response = await client.get(url)
+        if response.status_code == NOT_FOUND:
+            return KeyLookupFailure.NO_SUCH_ISSUER
         response.raise_for_status()
         body = response.json()
+    except httpx.ConnectError as error:
+        return KeyLookupFailure.NO_SUCH_ISSUER if _host_does_not_exist(error) else None
     except (httpx.HTTPError, TimeoutError, ValueError):
         return None
     return body if isinstance(body, dict) else None
@@ -157,16 +193,23 @@ def _key_with_id(key_set: jwt.PyJWKSet, kid: str) -> Optional[jwt.PyJWK]:
     return next((key for key in key_set.keys if key.key_id == kid), None)
 
 
-async def _fresh_key_set(issuer: str, now: float) -> Optional[jwt.PyJWKSet]:
+async def _fresh_key_set(
+    issuer: str, now: float
+) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
     published = await _fetch_key_set(f"{issuer}{KEYS_PATH}")
-    try:
-        key_set = jwt.PyJWKSet.from_dict(published) if published else None
-    except jwt.PyJWKSetError:
-        key_set = None
+    failure = KeyLookupFailure.UNAVAILABLE
+    key_set = None
+    if isinstance(published, KeyLookupFailure):
+        failure = published
+    elif published:
+        try:
+            key_set = jwt.PyJWKSet.from_dict(published)
+        except jwt.PyJWKSetError:
+            key_set = None
     if key_set is None:
         _key_sets.pop(issuer, None)
-        _remember(_failed_at, issuer, now)
-        return None
+        _remember(_failed_at, issuer, (now, failure))
+        return failure
     _failed_at.pop(issuer, None)
     _remember(_key_sets, issuer, _CachedKeySet(key_set=key_set, fetched_at=now))
     return key_set
@@ -194,7 +237,7 @@ async def _shared_fresh_key_set(
     _fetches[issuer] = fetch
     try:
         if issuer in _key_sets:
-            fetch.outcome = await _fresh_key_set_or_unavailable(issuer, now)
+            fetch.outcome = await _fresh_key_set(issuer, now)
         else:
             fetch.outcome = await _new_issuer_key_set(issuer, now)
     finally:
@@ -216,26 +259,18 @@ async def _new_issuer_key_set(
     if not admitted:
         return KeyLookupFailure.BUSY
     try:
-        return await _fresh_key_set_or_unavailable(issuer, now)
+        return await _fresh_key_set(issuer, now)
     finally:
         slots.release()
 
 
-async def _fresh_key_set_or_unavailable(
-    issuer: str, now: float
-) -> Union[jwt.PyJWKSet, KeyLookupFailure]:
-    key_set = await _fresh_key_set(issuer, now)
-    return KeyLookupFailure.UNAVAILABLE if key_set is None else key_set
-
-
 async def _signing_key(issuer: str, kid: str) -> Union[jwt.PyJWK, KeyLookupFailure]:
     now = _monotonic()
-    failed_at = _failed_at.get(issuer)
-    if (
-        failed_at is not None
-        and now - failed_at < app_vars.TRUSTED_ISSUER_KEY_FAILURE_SECONDS
-    ):
-        return KeyLookupFailure.UNAVAILABLE
+    failed = _failed_at.get(issuer)
+    if failed is not None:
+        failed_at, failure = failed
+        if now - failed_at < app_vars.TRUSTED_ISSUER_KEY_FAILURE_SECONDS:
+            return failure
 
     cached = _key_sets.get(issuer)
     if cached is not None and now - cached.fetched_at < KEY_SET_LIFESPAN_SECONDS:
