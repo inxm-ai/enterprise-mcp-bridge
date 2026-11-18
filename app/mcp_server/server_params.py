@@ -8,6 +8,7 @@ from app.oauth.user_info import get_data_access_manager
 from app.utils import token_fingerprint
 from app.isolation import enabled_globally, isolate, uid_for
 from app.multi_server import (
+    current_auth_provider,
     current_command,
     current_env,
     current_forward_access_token,
@@ -16,7 +17,7 @@ from app.multi_server import (
     current_server,
     current_keycloak_provider_alias,
 )
-from app.vars import KEYCLOAK_PROVIDER_ALIAS
+from app.vars import AUTH_PROVIDER, KEYCLOAK_PROVIDER_ALIAS
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -46,26 +47,11 @@ def defined_env(
     if oauth_env_var and not anon:
         if not access_token:
             raise ValueError("access_token required when OAUTH_ENV is set")
-        logger.info(f"Using OAUTH_ENV: {oauth_env_var} for token retrieval")
-
-        # If using cookie source, we might want to skip the token retriever if it's just a pass-through
-        # But TokenRetrieverFactory defaults to KeycloakTokenRetriever which tries to exchange.
-        # If the user wants to pass the cookie AS IS, they should probably not use the Keycloak retriever
-        # or we should detect if it's a cookie and maybe skip retrieval?
-        # However, the user might want to exchange the cookie for a token?
-        # The user's error suggests they want to pass the cookie value directly to the MCP.
-
-        # Check if we should skip retrieval based on configuration or token format?
-        # For now, let's assume if it's a cookie source, we might want to try retrieval,
-        # but if it fails or if we want to bypass, we need a way.
-
-        # Actually, the user's issue is likely that KeycloakTokenRetriever fails or returns something unexpected
-        # because it expects a Keycloak token to exchange, but gets an _oauth2_proxy cookie value.
-
-        # If the user hasn't configured KEYCLOAK_PROVIDER_ALIAS, KeycloakTokenRetriever returns the token as is.
-        # Let's check if that's the case.
-
-        provider_alias = current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
+        # The Keycloak/no-alias configuration intentionally forwards the
+        # caller's token or cookie. Other providers require their own credential.
+        allow_passthrough = current_auth_provider(AUTH_PROVIDER) == "keycloak" and not (
+            current_keycloak_provider_alias(KEYCLOAK_PROVIDER_ALIAS)
+        )
         retriever = TokenRetrieverFactory().get()
         logger.info(
             "Retrieving token for %s using TokenRetriever",
@@ -88,7 +74,7 @@ def defined_env(
             # caller's own platform token is a credential for the wrong
             # service and must never be handed to it, e.g. when the person
             # has not linked the account.
-            if provider_alias:
+            if not allow_passthrough:
                 logger.warning(
                     "Provider token for %s could not be retrieved; "
                     "not falling back to the caller's token.",
@@ -102,11 +88,9 @@ def defined_env(
             )
             token_result = {"access_token": access_token}
 
-        if not token_result or "access_token" not in token_result:
-            if provider_alias:
-                raise ValueError(
-                    "no provider token for this server; the person has to connect the account"
-                )
+        if not token_result or not token_result.get("access_token"):
+            if not allow_passthrough:
+                raise ValueError("no provider credential was returned for this server")
             token_result = {"access_token": access_token}
 
         logger.info(

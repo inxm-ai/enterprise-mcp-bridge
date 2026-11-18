@@ -302,3 +302,27 @@ def test_a_server_without_a_provider_still_gets_the_value_as_it_came(monkeypatch
     env = server_params.defined_env({"OAUTH_ENV": "COOKIE_VALUE"}, "cookie-value")
     env = env[0] if isinstance(env, tuple) else env
     assert env["COOKIE_VALUE"] == "cookie-value"
+
+
+@pytest.mark.parametrize("provider", ["user-api-key", "token-exchange"])
+@pytest.mark.parametrize("result", [{"error": "missing"}, {"access_token": ""}, None])
+def test_a_non_keycloak_provider_never_falls_back_to_the_caller_token(
+    monkeypatch, provider, result
+):
+    class Retriever:
+        def retrieve_token(self, token):
+            if result is None:
+                raise RuntimeError("provider unavailable")
+            return result
+
+    monkeypatch.setattr(
+        server_params, "current_auth_provider", lambda default: provider
+    )
+    monkeypatch.setattr(server_params, "current_keycloak_provider_alias", lambda _: "")
+    monkeypatch.setattr(
+        server_params.TokenRetrieverFactory, "get", lambda _: Retriever()
+    )
+    env = {"OAUTH_ENV": "VENDOR_TOKEN"}
+    with pytest.raises(RuntimeError if result is None else ValueError):
+        server_params.defined_env(env, "platform-token")
+    assert env == {"OAUTH_ENV": "VENDOR_TOKEN"}

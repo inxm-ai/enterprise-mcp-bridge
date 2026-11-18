@@ -22,18 +22,17 @@ from app.session.session import MCPLocalSessionTask
 from app.session.upstream_auth import (
     UpstreamAuthRequiredError,
     parse_www_authenticate,
-    sanitize_text,
 )
 from app.utils.exception_logging import find_exception_in_exception_groups
 
 MEIGEN_CHALLENGE = (
     'Bearer resource_metadata="https://www.meigen.ai/.well-known/'
-    'oauth-protected-resource/api/mcp", error_description="Connect your MeiGen '
-    'account with OAuth", scope="meigen:generate meigen:read"'
+    'oauth-protected-resource/api/mcp", error="authorization_required", '
+    'error_description="access_token=abc123", scope="opaque-scope"'
 )
 MEIGEN_BODY = {
     "error": "authorization_required",
-    "message": "Connect your MeiGen account with OAuth.",
+    "message": "Unexpected token xyz456",
 }
 
 
@@ -149,13 +148,16 @@ async def test_a_401_challenge_on_tools_call_is_a_typed_auth_error():
     assert detail["upstream_status"] == 401
     assert detail["phase"] == "execution"
     assert detail["upstream_error"] == "authorization_required"
-    assert detail["upstream_message"] == "Connect your MeiGen account with OAuth"
-    assert detail["required_scopes"] == ["meigen:generate", "meigen:read"]
     assert "connect your account (sign in)" in detail["message"]
-    assert "Connect your MeiGen account with OAuth" in detail["message"]
-    # Never the challenge's URLs or the body wholesale.
-    assert "resource_metadata" not in json.dumps(detail)
-    assert "well-known" not in json.dumps(detail)
+    # Untrusted challenge and body values must not leak into the response.
+    for value in (
+        "abc123",
+        "xyz456",
+        "opaque-scope",
+        "resource_metadata",
+        "well-known",
+    ):
+        assert value not in json.dumps(detail)
 
 
 @pytest.mark.asyncio
@@ -171,7 +173,6 @@ async def test_an_insufficient_scope_403_stays_a_403():
     converted = _http(raised.value)
     assert converted.status_code == 403
     assert converted.detail["upstream_error"] == "insufficient_scope"
-    assert converted.detail["required_scopes"] == ["files:write"]
     assert "lacks access" in converted.detail["message"]
 
 
@@ -188,7 +189,7 @@ async def test_a_jsonrpc_error_body_on_a_401_is_still_an_auth_error():
     assert raised.value.code == -32001
     converted = _http(raised.value)
     assert converted.status_code == 401
-    assert converted.detail["upstream_message"] == "Missing bearer token"
+    assert "Missing bearer token" not in json.dumps(converted.detail)
 
 
 @pytest.mark.asyncio
@@ -324,7 +325,7 @@ async def test_the_legacy_sse_transport_does_not_hang_on_a_refused_call():
             await asyncio.wait_for(_call(url), 10)
 
     assert _http(raised.value).status_code == 401
-    assert raised.value.challenge.scopes == ["meigen:generate", "meigen:read"]
+    assert raised.value.challenge.error == "authorization_required"
 
 
 @pytest.mark.asyncio
@@ -350,7 +351,7 @@ async def test_the_rest_route_answers_a_typed_401_with_a_connection_code(monkeyp
     detail = response.json()["detail"]
     assert detail["error"] == "upstream_auth_required"
     assert detail["upstream_status"] == 401
-    assert "Connect your MeiGen account with OAuth" in detail["message"]
+    assert "connect your account (sign in)" in detail["message"]
     assert "www-authenticate" not in {name.lower() for name in response.headers}
 
 
@@ -365,14 +366,3 @@ def test_challenge_parsing_is_bounded_and_handles_quotes():
     }
     assert parse_www_authenticate("Bearer " + "a=b, " * 2000) == {}
     assert parse_www_authenticate(None) == {}
-
-
-def test_sanitized_text_is_short_single_line_and_has_no_credentials():
-    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"
-    text = sanitize_text(f"bad\ntoken {jwt} or Bearer abcdef123456789 " + "x" * 500)
-    assert "\n" not in text
-    assert jwt not in text
-    assert "abcdef123456789" not in text
-    assert len(text) <= 200
-    assert sanitize_text(None) is None
-    assert sanitize_text("   ") is None
