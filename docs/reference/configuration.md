@@ -420,9 +420,11 @@ With `AUTH_PROVIDER=keycloak`, a `KEYCLOAK_PROVIDER_ALIAS` (or per-server
 `keycloak_provider_alias`) that the broker's public `GET /v1/catalog` lists
 (`google`, `microsoft-365`, ...) gets its token from the broker instead of
 Keycloak: `POST /v1/providers/<alias>/access-token` with the caller's own
-token. The broker refreshes the grant itself. 404 is "not connected" and 409
-"sign in again" (both `upstream_auth_required`, never a platform sign-out);
-an unreachable broker is 503. The catalog is cached for a minute and the last
+token. The broker refreshes the grant itself. 404 is "not connected"
+(`upstream_auth_required`) and 409 "sign in to the provider again"
+(`provider_token_expired`); neither is a platform sign-out. An unreachable or
+failing broker is 503 with `Retry-After`, never a shared credential; so is a
+broker whose catalog was never readable (the alias can't be placed). The catalog is cached for a minute and the last
 one is kept while the broker can't answer. Every other alias keeps Keycloak.
 
 #### AUTH_PROVIDER=user-api-key (INXM-specific integration)

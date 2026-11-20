@@ -954,3 +954,35 @@ def test_a_proxy_from_settings_from_is_validated(monkeypatch):
             )
     finally:
         multi_server.reset_server(token)
+
+
+def test_an_unavailable_token_service_is_503_never_a_shared_credential(monkeypatch):
+    """Keycloak mode with a provider served by INXM's OAuth broker: a broker
+    outage must not fall back to MCP_REMOTE_BEARER_TOKEN or the caller's
+    token; it is 503 with Retry-After, like the ambient-identity providers."""
+    from fastapi import HTTPException
+
+    class DownRetriever:
+        def retrieve_token(self, token):
+            raise client_strategy.TokenServiceUnavailableError("broker down")
+
+    class DownFactory:
+        def get(self):
+            return DownRetriever()
+
+    monkeypatch.setattr(client_strategy, "TokenRetrieverFactory", DownFactory)
+    monkeypatch.setattr(client_strategy, "AUTH_PROVIDER", "keycloak")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SERVER", "https://remote.example")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_SCOPE", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_REDIRECT_URI", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_ID", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_CLIENT_SECRET", "")
+    monkeypatch.setattr(client_strategy, "MCP_REMOTE_BEARER_TOKEN", "static-token")
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "")
+
+    with pytest.raises(HTTPException) as raised:
+        client_strategy.build_mcp_client_strategy(
+            access_token="user-jwt", requested_group=None
+        )
+    assert raised.value.status_code == 503
+    assert raised.value.headers["Retry-After"]
