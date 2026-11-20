@@ -997,9 +997,9 @@ def _dry_run_app(monkeypatch, global_effect_tools):
 
     calls = {"list_tools": [], "real": [], "dry_run": []}
     tools = [
-        {"name": "list_zones", "inputSchema": {"type": "object"}},
-        {"name": "delete_zone", "inputSchema": {"type": "object"}},
-        {"name": "create_page", "inputSchema": {"type": "object"}},
+        {"name": "list_zones", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}},
+        {"name": "delete_zone", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": False}},
+        {"name": "create_page", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": False}},
         {
             "name": "purge_preview",
             "inputSchema": {"type": "object"},
@@ -1106,17 +1106,16 @@ def test_dry_run_uses_per_server_effect_tools(monkeypatch, stream):
             (cloudflare, "create_page", "dry-run"),
             (cloudflare, "purge_preview", "real"),  # readOnlyHint=True
             (cloudflare, "get_and_reset", "dry-run"),  # readOnlyHint=False
-            (cloudflare, "unknown_tool", "dry-run"),
             (notion, "create_page", "dry-run"),
             (notion, "purge_preview", "real"),
             (notion, "delete_zone", "dry-run"),
             (passthrough, "create_page", "dry-run"),
-            # The server's globs replace the global ones, and no auto.
-            (passthrough, "delete_zone", "real"),
-            (passthrough, "get_and_reset", "real"),
+            # An explicit write annotation still protects an unmatched tool.
+            (passthrough, "delete_zone", "dry-run"),
+            (passthrough, "get_and_reset", "dry-run"),
             (inherit, "delete_zone", "dry-run"),
-            (inherit, "create_page", "real"),
-            (inherit, "get_and_reset", "real"),
+            (inherit, "create_page", "dry-run"),
+            (inherit, "get_and_reset", "dry-run"),
         ]
         for base_path, tool_name, expected in expectations:
             assert outcome(base_path, tool_name) == expected, (base_path, tool_name)

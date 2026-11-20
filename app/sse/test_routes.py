@@ -286,7 +286,10 @@ class TestSSEStreamDryRun:
         with patch("app.sse.routes.mcp_session_context") as mock_context:
             mock_delegate = AsyncMock()
             mock_delegate.list_tools = AsyncMock(
-                return_value=[{"name": tool_name, "inputSchema": {}}]
+                return_value=[{"name": tool_name, "inputSchema": {}, **(
+                    {"annotations": {"readOnlyHint": True}}
+                    if tool_name == "list_interaction_requests" else {}
+                )}]
             )
             mock_delegate.call_tool_with_progress = AsyncMock(
                 return_value=MockRunToolsResult("real")
@@ -317,6 +320,14 @@ class TestSSEStreamDryRun:
         assert dry_run_calls == [("create_interaction_request", {"title": "x"})]
         assert [e["type"] for e in events] == ["result"]
         assert events[0]["data"]["structuredContent"] == {"result": "dry-run"}
+        assert events[0]["data"]["_meta"]["inxm/simulated"] is True
+
+    def test_unknown_effect_is_rejected_without_dispatch(self, client, dry_run_calls):
+        events, call_tool = self._stream(client, "get_and_reset", {"X-Inxm-Dry-Run": "true"})
+        call_tool.assert_not_called()
+        assert dry_run_calls == []
+        assert [event["type"] for event in events] == ["error"]
+        assert "tool effect is unknown" in events[0]["data"]["message"]
 
     def test_a_simulated_answer_is_marked_and_a_read_can_be_simulated(
         self, client, dry_run_calls
