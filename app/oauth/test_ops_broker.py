@@ -118,6 +118,32 @@ def test_tokens_come_from_the_broker_with_the_callers_token(broker):
 
 
 @pytest.mark.parametrize(
+    "catalog",
+    [
+        FakeResponse(200, {"items": []}),
+        FakeResponse(200, {"providers": "google"}),
+        FakeResponse(200, ValueError("not json")),
+        FakeResponse(502),
+        requests.ConnectionError("down"),
+    ],
+)
+def test_an_unreadable_catalog_is_never_taken_for_an_empty_one(broker, catalog):
+    # Never read: the alias can't be placed, so 503 instead of Keycloak.
+    broker.catalog = catalog
+    with pytest.raises(TokenServiceUnavailableError):
+        ops_broker.serves("google")
+    with pytest.raises(TokenServiceUnavailableError):
+        KeyCloakTokenRetriever("google").retrieve_token(CALLER)
+
+
+def test_a_malformed_catalog_keeps_the_last_good_one(broker, monkeypatch):
+    assert ops_broker.serves("google")
+    monkeypatch.setattr(ops_broker, "_fetched_at", 0.0)
+    broker.catalog = FakeResponse(200, {"providers": None})
+    assert ops_broker.serves("google")
+
+
+@pytest.mark.parametrize(
     "answer, error",
     [
         (FakeResponse(404), ProviderNotConnectedError),
@@ -127,6 +153,9 @@ def test_tokens_come_from_the_broker_with_the_callers_token(broker):
         (FakeResponse(429), TokenServiceUnavailableError),
         (FakeResponse(200, ValueError("not json")), TokenServiceUnavailableError),
         (FakeResponse(200, {"token_type": "Bearer"}), TokenServiceUnavailableError),
+        (FakeResponse(200, {"access_token": {}}), TokenServiceUnavailableError),
+        (FakeResponse(200, {"access_token": ""}), TokenServiceUnavailableError),
+        (FakeResponse(200, ["access_token"]), TokenServiceUnavailableError),
         (requests.ConnectionError("down"), TokenServiceUnavailableError),
     ],
 )

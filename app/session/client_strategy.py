@@ -401,6 +401,14 @@ class RemoteMCPClientStrategy(MCPClientStrategy):
                     )
             except UserLoggedOutException:
                 raise
+            except TokenServiceUnavailableError:
+                # The token service (e.g. INXM's OAuth broker) is down: "try
+                # again", never a shared credential in the caller's place.
+                raise HTTPException(
+                    status_code=503,
+                    detail="Sign-in for this MCP server is temporarily unavailable; retry shortly.",
+                    headers={"Retry-After": TOKEN_SERVICE_RETRY_AFTER_SECONDS},
+                )
             except Exception as exc:  # pragma: no cover - safety net
                 log_exception_with_details(logger, "[RemoteMCP]", exc)
 

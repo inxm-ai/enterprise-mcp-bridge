@@ -25,6 +25,8 @@ import requests
 logger = logging.getLogger("uvicorn.error")
 
 CATALOG_TTL_SECONDS = 60.0
+# How soon to ask again while no catalog was ever read.
+RETRY_SECONDS = 10.0
 TIMEOUT_SECONDS = 5.0
 
 _lock = threading.Lock()
@@ -52,13 +54,17 @@ def _reset_catalog() -> None:
 
 
 def _names(url: str) -> Optional[Set[str]]:
+    """The catalog's provider names, or None when it can't be read."""
     try:
         response = requests.get(f"{url}/v1/catalog", timeout=TIMEOUT_SECONDS)
         if response.status_code != 200:
             raise ValueError(f"HTTP {response.status_code}")
+        providers = response.json().get("providers")
+        if not isinstance(providers, list):
+            raise ValueError("catalog without a providers list")
         return {
             entry["name"]
-            for entry in response.json().get("providers", [])
+            for entry in providers
             if isinstance(entry, dict) and isinstance(entry.get("name"), str)
         }
     except Exception as exc:  # noqa: BLE001 - any failure keeps the last catalog
@@ -71,19 +77,28 @@ def serves(provider_alias: str) -> bool:
 
     The catalog is cached for a minute; when the broker can't answer, the
     last one stays (so a short outage doesn't send the alias to Keycloak).
+    While no catalog was ever read, nobody can tell: that raises
+    TokenServiceUnavailableError (503) rather than guess, and the next
+    request asks again after RETRY_SECONDS.
     """
+    from app.oauth.token_exchange import TokenServiceUnavailableError
+
     global _catalog, _fetched_at
     url = broker_url()
     if not url or not provider_alias:
         return False
     with _lock:
-        fresh = time.monotonic() - _fetched_at < CATALOG_TTL_SECONDS
-        if _catalog is None or not fresh:
+        ttl = CATALOG_TTL_SECONDS if _catalog is not None else RETRY_SECONDS
+        if _fetched_at == 0.0 or time.monotonic() - _fetched_at >= ttl:
             names = _names(url)
             if names is not None:
                 _catalog = names
             _fetched_at = time.monotonic()
-        return provider_alias in (_catalog or set())
+        if _catalog is None:
+            raise TokenServiceUnavailableError(
+                "INXM's OAuth broker catalog is unavailable"
+            )
+        return provider_alias in _catalog
 
 
 def access_token(provider_alias: str, platform_token: str) -> Dict[str, Any]:
@@ -126,12 +141,13 @@ def access_token(provider_alias: str, platform_token: str) -> Dict[str, Any]:
         body = response.json()
     except ValueError as exc:
         raise TokenServiceUnavailableError("Invalid OAuth broker response") from exc
-    if not isinstance(body, dict) or not body.get("access_token"):
+    token = body.get("access_token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
         raise TokenServiceUnavailableError("The OAuth broker returned no token")
     logger.info("[OpsAuthBroker] Retrieved the %s token", provider_alias)
     return {
         "success": True,
-        "access_token": body["access_token"],
+        "access_token": token,
         "token_type": body.get("token_type") or "Bearer",
         "expires_in": body.get("expires_in"),
     }
