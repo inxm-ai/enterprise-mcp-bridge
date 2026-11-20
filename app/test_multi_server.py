@@ -997,9 +997,21 @@ def _dry_run_app(monkeypatch, global_effect_tools):
 
     calls = {"list_tools": [], "real": [], "dry_run": []}
     tools = [
-        {"name": "list_zones", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}},
-        {"name": "delete_zone", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": False}},
-        {"name": "create_page", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": False}},
+        {
+            "name": "list_zones",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "name": "delete_zone",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "name": "create_page",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": False},
+        },
         {
             "name": "purge_preview",
             "inputSchema": {"type": "object"},
