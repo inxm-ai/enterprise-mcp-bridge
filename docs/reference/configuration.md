@@ -410,6 +410,21 @@ MCP_REMOTE_AUTH_HEADER_NAME="esb-subscription-key"
 MCP_REMOTE_AUTH_HEADER_VALUE_TEMPLATE="{token}"
 ```
 
+#### OPS_AUTH_BROKER_URL (INXM hosted)
+
+INXM's central OAuth broker ([ops-auth-broker](https://github.com/inxm-ai/ops-auth-broker)),
+its `BASE_URL` + `API_BASE_PATH`, https only (e.g. `https://ops.inxm.cloud/api/auth-broker`).
+app-mcp-manager sets it on every bridge of a hosted platform; empty is off.
+
+With `AUTH_PROVIDER=keycloak`, a `KEYCLOAK_PROVIDER_ALIAS` (or per-server
+`keycloak_provider_alias`) that the broker's public `GET /v1/catalog` lists
+(`google`, `microsoft-365`, ...) gets its token from the broker instead of
+Keycloak: `POST /v1/providers/<alias>/access-token` with the caller's own
+token. The broker refreshes the grant itself. 404 is "not connected" and 409
+"sign in again" (both `upstream_auth_required`, never a platform sign-out);
+an unreachable broker is 503. The catalog is cached for a minute and the last
+one is kept while the broker can't answer. Every other alias keeps Keycloak.
+
 #### AUTH_PROVIDER=user-api-key (INXM-specific integration)
 
 > **Note:** this provider integrates with INXM's `app-auth-tokens` service

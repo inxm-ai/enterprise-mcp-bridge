@@ -584,6 +584,11 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     "access_token": keycloak_token,
                     "token_type": "Bearer",
                 }
+            # Hosted: the provider's grants are at INXM's OAuth broker.
+            from app.oauth import ops_broker
+
+            if ops_broker.serves(self.provider_alias):
+                return ops_broker.access_token(self.provider_alias, keycloak_token)
             provider_tokens = self._get_stored_provider_token(keycloak_token)
             if not provider_tokens:
                 self.logger.info(
@@ -626,7 +631,11 @@ class KeyCloakTokenRetriever(TokenRetriever):
                 "token_type": provider_tokens.get("token_type", "Bearer"),
                 "expires_in": provider_tokens.get("expires_in"),
             }
-        except (ProviderTokenExpiredError, ProviderNotConnectedError):
+        except (
+            ProviderTokenExpiredError,
+            ProviderNotConnectedError,
+            TokenServiceUnavailableError,
+        ):
             raise
         except Exception as e:
             self.logger.error(f"Token retrieval failed: {str(e)}")
@@ -837,6 +846,11 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     "No KEYCLOAK_PROVIDER_ALIAS configured; returning original Keycloak token on force refresh"
                 )
                 return {"success": True, "access_token": keycloak_token}
+            # The OAuth broker refreshes its grants itself: ask it again.
+            from app.oauth import ops_broker
+
+            if ops_broker.serves(self.provider_alias):
+                return ops_broker.access_token(self.provider_alias, keycloak_token)
             current_tokens = self._get_stored_provider_token(keycloak_token)
             if current_tokens and current_tokens.get("refresh_token"):
                 new_token = self._refresh_provider_token(current_tokens, keycloak_token)
