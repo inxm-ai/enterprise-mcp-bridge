@@ -286,10 +286,17 @@ class TestSSEStreamDryRun:
         with patch("app.sse.routes.mcp_session_context") as mock_context:
             mock_delegate = AsyncMock()
             mock_delegate.list_tools = AsyncMock(
-                return_value=[{"name": tool_name, "inputSchema": {}, **(
-                    {"annotations": {"readOnlyHint": True}}
-                    if tool_name == "list_interaction_requests" else {}
-                )}]
+                return_value=[
+                    {
+                        "name": tool_name,
+                        "inputSchema": {},
+                        **(
+                            {"annotations": {"readOnlyHint": True}}
+                            if tool_name == "list_interaction_requests"
+                            else {}
+                        ),
+                    }
+                ]
             )
             mock_delegate.call_tool_with_progress = AsyncMock(
                 return_value=MockRunToolsResult("real")
@@ -323,7 +330,9 @@ class TestSSEStreamDryRun:
         assert events[0]["data"]["_meta"]["inxm/simulated"] is True
 
     def test_unknown_effect_is_rejected_without_dispatch(self, client, dry_run_calls):
-        events, call_tool = self._stream(client, "get_and_reset", {"X-Inxm-Dry-Run": "true"})
+        events, call_tool = self._stream(
+            client, "get_and_reset", {"X-Inxm-Dry-Run": "true"}
+        )
         call_tool.assert_not_called()
         assert dry_run_calls == []
         assert [event["type"] for event in events] == ["error"]
