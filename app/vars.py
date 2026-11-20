@@ -200,6 +200,10 @@ OTLP_HEADERS = os.getenv("OTLP_HEADERS", "")
 AUTH_BASE_URL = os.getenv("AUTH_BASE_URL", "")
 AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "keycloak").lower()
 KEYCLOAK_PROVIDER_ALIAS = os.getenv("KEYCLOAK_PROVIDER_ALIAS", "")
+# Hosted: INXM's central OAuth broker (BASE_URL + API_BASE_PATH, https). A
+# provider alias its public catalog lists gets its token there instead of
+# from Keycloak (app/oauth/ops_broker.py); app-mcp-manager sets it.
+OPS_AUTH_BROKER_URL = os.getenv("OPS_AUTH_BROKER_URL", "")
 KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "inxm")
 KEYCLOAK_PROVIDER_REFRESH_MODE = os.getenv(
     "KEYCLOAK_PROVIDER_REFRESH_MODE", "oidc"
