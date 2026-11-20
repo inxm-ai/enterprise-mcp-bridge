@@ -80,6 +80,16 @@ def _annotation_verdict(tool_def: Any) -> Optional[bool]:
     return None
 
 
+def dry_run_effect(tool_name: str, tool_def: Any, patterns: list[str]) -> Optional[bool]:
+    """Require explicit effect evidence; name heuristics cannot authorize a real read."""
+    if is_effect_tool(tool_name, None, [p for p in patterns if not _is_auto_entry(p)]):
+        return True
+    annotations = _annotations(tool_def)
+    if read(annotations, "destructive_hint", "destructiveHint") is True:
+        return True
+    return _annotation_verdict(tool_def)
+
+
 def _strip_namespace(tool_name: str) -> str:
     return _NAMESPACE_SEPARATOR_RE.split(tool_name)[-1]
 

@@ -8,7 +8,7 @@ mcp = MCPServer("mcp-EXAMPLE-server")
 # Two simple demo examples
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def add(a: int, b: int) -> int:
     """Add two numbers"""
     return a + b

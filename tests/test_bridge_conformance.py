@@ -143,13 +143,20 @@ def test_child_tool_exception_maps_to_tool_execution_error(bridge):
     assert response.status_code == HTTP_TOOL_EXECUTION_ERROR, response.text
 
 
-def test_dry_run_header_is_inert_for_non_effect_tools(bridge):
+def test_dry_run_executes_an_explicitly_read_only_tool(bridge):
     _require_effect_tools_gate()
     response = bridge.post(
         "/tools/add", headers={"X-Inxm-Dry-Run": "true"}, json={"a": 2, "b": 3}
     )
     assert response.status_code == HTTP_OK, response.text
     assert response.json()["structuredContent"]["result"] == 5
+
+
+def test_dry_run_refuses_a_tool_without_effect_evidence(bridge):
+    _require_effect_tools_gate()
+    response = bridge.post("/tools/hello", headers={"X-Inxm-Dry-Run": "true"}, json={})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "Dry run unsupported: tool effect is unknown"
 
 
 def test_dry_run_never_executes_the_effect_tool(bridge):
