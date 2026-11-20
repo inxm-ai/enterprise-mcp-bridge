@@ -14,7 +14,7 @@ def add(a: int, b: int) -> int:
     return a + b
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def hello() -> str:
     """Write hello"""
     return "Hello"
