@@ -127,13 +127,78 @@ def test_tokens_come_from_the_broker_with_the_callers_token(broker):
         requests.ConnectionError("down"),
     ],
 )
-def test_an_unreadable_catalog_is_never_taken_for_an_empty_one(broker, catalog):
-    # Never read: the alias can't be placed, so 503 instead of Keycloak.
+def test_an_unreadable_catalog_is_never_taken_for_an_empty_one(
+    broker, catalog, monkeypatch
+):
+    # Never read: nobody can tell whose alias it is.
     broker.catalog = catalog
+    assert ops_broker.serves("google") is None
+    # Keycloak holds no token for it either: it may be the broker's, so
+    # "try again" (503), never "not connected".
+    retriever = KeyCloakTokenRetriever("google")
+
+    def not_linked(_token):
+        raise ProviderNotConnectedError("google")
+
+    monkeypatch.setattr(retriever, "_get_stored_provider_token", not_linked)
     with pytest.raises(TokenServiceUnavailableError):
-        ops_broker.serves("google")
+        retriever.retrieve_token(CALLER)
+    assert broker.posts == []
+
+
+def test_a_keycloak_provider_works_while_the_catalog_is_unreadable(broker, monkeypatch):
+    # qa CF03 2026-11-23: the broker answered 404 and every Dropbox call was
+    # 503, though Dropbox is a Keycloak identity provider.
+    broker.catalog = FakeResponse(404)
+    retriever = KeyCloakTokenRetriever("dropbox")
+    monkeypatch.setattr(
+        retriever,
+        "_get_stored_provider_token",
+        lambda _token: {"access_token": "dropbox-token", "token_type": "Bearer"},
+    )
+    monkeypatch.setattr(retriever, "_token_needs_refresh", lambda _tokens: False)
+    result = retriever.retrieve_token(CALLER)
+    assert result["success"] is True
+    assert result["access_token"] == "dropbox-token"
+    assert broker.posts == []
+
+
+def test_an_expired_keycloak_link_stays_expired_while_the_catalog_is_unreadable(
+    broker, monkeypatch
+):
+    broker.catalog = FakeResponse(404)
+    retriever = KeyCloakTokenRetriever("dropbox")
+
+    def expired(_token):
+        raise ProviderTokenExpiredError("dropbox")
+
+    monkeypatch.setattr(retriever, "_get_stored_provider_token", expired)
+    with pytest.raises(ProviderTokenExpiredError):
+        retriever.retrieve_token(CALLER)
+
+
+@pytest.mark.parametrize(
+    "keycloak",
+    [
+        UserLoggedOutException("401"),
+        RuntimeError("HTTP 500"),
+        lambda: {},
+    ],
+)
+def test_any_other_keycloak_failure_is_try_again_while_the_catalog_is_unreadable(
+    broker, monkeypatch, keycloak
+):
+    broker.catalog = FakeResponse(404)
+    retriever = KeyCloakTokenRetriever("google")
+
+    def answer(_token):
+        if isinstance(keycloak, Exception):
+            raise keycloak
+        return keycloak()
+
+    monkeypatch.setattr(retriever, "_get_stored_provider_token", answer)
     with pytest.raises(TokenServiceUnavailableError):
-        KeyCloakTokenRetriever("google").retrieve_token(CALLER)
+        retriever.retrieve_token(CALLER)
 
 
 def test_a_malformed_catalog_keeps_the_last_good_one(broker, monkeypatch):

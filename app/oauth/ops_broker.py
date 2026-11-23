@@ -12,6 +12,11 @@ broker's public catalog lists that name, the token comes from the broker:
 The broker refreshes the grant itself; refresh tokens never leave it. 404 is
 "not connected", 409 "sign in to the provider again". An unreachable broker
 or a server error is 503, never a sign-out.
+
+A provider the broker doesn't hold (a Keycloak identity provider such as
+Dropbox) never depends on the broker: while its catalog can't be read, the
+alias is tried at Keycloak first, and only an alias Keycloak can't serve
+either answers 503 (it may be one of the broker's).
 """
 
 import logging
@@ -72,17 +77,15 @@ def _names(url: str) -> Optional[Set[str]]:
         return None
 
 
-def serves(provider_alias: str) -> bool:
+def serves(provider_alias: str) -> Optional[bool]:
     """Whether the broker holds ``provider_alias``'s grants.
 
     The catalog is cached for a minute; when the broker can't answer, the
     last one stays (so a short outage doesn't send the alias to Keycloak).
-    While no catalog was ever read, nobody can tell: that raises
-    TokenServiceUnavailableError (503) rather than guess, and the next
-    request asks again after RETRY_SECONDS.
+    While no catalog was ever read, nobody can tell: that is ``None``, and
+    the caller tries Keycloak before it says "temporarily unavailable". The
+    next call asks the broker again after RETRY_SECONDS.
     """
-    from app.oauth.token_exchange import TokenServiceUnavailableError
-
     global _catalog, _fetched_at
     url = broker_url()
     if not url or not provider_alias:
@@ -95,9 +98,7 @@ def serves(provider_alias: str) -> bool:
                 _catalog = names
             _fetched_at = time.monotonic()
         if _catalog is None:
-            raise TokenServiceUnavailableError(
-                "INXM's OAuth broker catalog is unavailable"
-            )
+            return None
         return provider_alias in _catalog
 
 

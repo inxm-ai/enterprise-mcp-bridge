@@ -584,53 +584,15 @@ class KeyCloakTokenRetriever(TokenRetriever):
                     "access_token": keycloak_token,
                     "token_type": "Bearer",
                 }
-            # Hosted: the provider's grants are at INXM's OAuth broker.
+            # Hosted: the provider's grants may be at INXM's OAuth broker.
             from app.oauth import ops_broker
 
-            if ops_broker.serves(self.provider_alias):
+            held = ops_broker.serves(self.provider_alias)
+            if held:
                 return ops_broker.access_token(self.provider_alias, keycloak_token)
-            provider_tokens = self._get_stored_provider_token(keycloak_token)
-            if not provider_tokens:
-                self.logger.info(
-                    f"Failed to retrieve {self.provider_alias} token from Keycloak"
-                )
-                return {
-                    "success": False,
-                    "error": f"Failed to retrieve {self.provider_alias} token from Keycloak",
-                }
-            self.logger.info(
-                "[Keycloak] Stored provider access token: %s",
-                token_fingerprint(provider_tokens.get("access_token")),
-            )
-            if LOG_TOKEN_VALUES:
-                self.logger.warning(
-                    "LOG_TOKEN_VALUES is ignored because credentials must not be logged"
-                )
-            # Check if token needs refresh
-            if self._token_needs_refresh(provider_tokens):
-                try:
-                    provider_tokens = self._refresh_provider_token(
-                        provider_tokens, keycloak_token
-                    )
-                except Exception as exc:
-                    self.logger.warning(
-                        "Renewing the %s token failed: %s", self.provider_alias, exc
-                    )
-                    usable = self._usable_after_failed_refresh(
-                        provider_tokens, keycloak_token
-                    )
-                    if usable is None:
-                        raise ProviderTokenExpiredError(self.provider_alias) from exc
-                    provider_tokens = usable
-            self.logger.info(
-                f"Successfully retrieved {self.provider_alias} token from Keycloak"
-            )
-            return {
-                "success": True,
-                "access_token": provider_tokens.get("access_token"),
-                "token_type": provider_tokens.get("token_type", "Bearer"),
-                "expires_in": provider_tokens.get("expires_in"),
-            }
+            if held is None:
+                return self._keycloak_while_broker_unknown(keycloak_token)
+            return self._keycloak_token(keycloak_token)
         except (
             ProviderTokenExpiredError,
             ProviderNotConnectedError,
@@ -642,6 +604,77 @@ class KeyCloakTokenRetriever(TokenRetriever):
             raise UserLoggedOutException(
                 "Token retrieval failed, user probably logged out. Please log in again."
             )
+
+    def _keycloak_while_broker_unknown(self, keycloak_token: str) -> Dict[str, Any]:
+        """The alias at Keycloak while the broker's catalog can't be read.
+
+        A Keycloak identity provider (Dropbox, say) must not depend on the
+        broker, so Keycloak is asked first. Only when it holds no usable
+        token may the alias be the broker's, and then it's "try again"
+        (503), never "not connected" or a sign-out. An expired Keycloak
+        link is Keycloak's own answer and stays one.
+        """
+        self.logger.info(
+            "OAuth broker catalog unknown; trying %s at Keycloak", self.provider_alias
+        )
+        try:
+            result = self._keycloak_token(keycloak_token)
+        except ProviderTokenExpiredError:
+            raise
+        except Exception as exc:
+            raise TokenServiceUnavailableError(
+                "INXM's OAuth broker catalog is unavailable"
+            ) from exc
+        if not result.get("success"):
+            raise TokenServiceUnavailableError(
+                "INXM's OAuth broker catalog is unavailable"
+            )
+        return result
+
+    def _keycloak_token(self, keycloak_token: str) -> Dict[str, Any]:
+        """The provider token Keycloak stores for the caller, renewed if due."""
+        provider_tokens = self._get_stored_provider_token(keycloak_token)
+        if not provider_tokens:
+            self.logger.info(
+                f"Failed to retrieve {self.provider_alias} token from Keycloak"
+            )
+            return {
+                "success": False,
+                "error": f"Failed to retrieve {self.provider_alias} token from Keycloak",
+            }
+        self.logger.info(
+            "[Keycloak] Stored provider access token: %s",
+            token_fingerprint(provider_tokens.get("access_token")),
+        )
+        if LOG_TOKEN_VALUES:
+            self.logger.warning(
+                "LOG_TOKEN_VALUES is ignored because credentials must not be logged"
+            )
+        # Check if token needs refresh
+        if self._token_needs_refresh(provider_tokens):
+            try:
+                provider_tokens = self._refresh_provider_token(
+                    provider_tokens, keycloak_token
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Renewing the %s token failed: %s", self.provider_alias, exc
+                )
+                usable = self._usable_after_failed_refresh(
+                    provider_tokens, keycloak_token
+                )
+                if usable is None:
+                    raise ProviderTokenExpiredError(self.provider_alias) from exc
+                provider_tokens = usable
+        self.logger.info(
+            f"Successfully retrieved {self.provider_alias} token from Keycloak"
+        )
+        return {
+            "success": True,
+            "access_token": provider_tokens.get("access_token"),
+            "token_type": provider_tokens.get("token_type", "Bearer"),
+            "expires_in": provider_tokens.get("expires_in"),
+        }
 
     def _extract_keycloak_token(self, headers: Dict[str, str]) -> str:
         """Extract Keycloak token from request headers"""
